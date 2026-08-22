@@ -20,6 +20,25 @@ const CRYPTO_REGIME_FILE = require('path').join(__dirname, '../../../.agents/cry
 
 const app  = express();
 app.use(express.json());
+
+// ── Dashboard build token (2026-08-22) ──────────────────────────────────────
+// The dashboard is a single inline SPA: a tab loaded before a johnbot restart
+// keeps running the OLD client JS against the NEW API (08-22: a pre-restart
+// tab kept PUTting the retired `min_corr_cum_sharpe` key and rendered the
+// server's "retired" 400 under the old Sharpe-floor sliders). The token is
+// this file's mtime at process start — it changes exactly when the served
+// page changes. Every /api/* response carries it; the page polls
+// /api/dashboard-build and compares against the token it was served with,
+// and reloads itself on mismatch (banner + 8s countdown).
+const DASHBOARD_BUILD = (() => {
+  try { return String(Math.round(require('fs').statSync(__filename).mtimeMs)); }
+  catch (_) { return String(Date.now()); }
+})();
+app.use((req, res, next) => {
+  if (req.path && req.path.startsWith('/api/')) res.setHeader('X-Dashboard-Build', DASHBOARD_BUILD);
+  next();
+});
+app.get('/api/dashboard-build', (req, res) => res.json({ build: DASHBOARD_BUILD }));
 const PORT = process.env.DASHBOARD_PORT || 3000;
 
 // SSE clients
@@ -714,21 +733,47 @@ app.put('/api/config/risk-toggles', async (req, res) => {
 // GET mirrors that exact fallback so slider and assigner can never disagree.
 // LIVE since 2026-07-13 (OPENCLAW_ACTIVATION_ASSIGNER=1): the Mon 00:00 ET
 // weekly_live_sharpe.js run applies this threshold to
-// strategy_regime_params.eligible before the weights rebuild. This dashboard
-// endpoint itself still only (a) sets the threshold and (b) previews via
-// --dry-run — the server MUST NEVER invoke the assigner without --dry-run;
-// see the hard-coded argv + guard in POST /api/activation/dry-run below.
+// strategy_regime_params.eligible before the weights rebuild. Since
+// 2026-08-22 the daily compute chain's FIRST step (`activation` →
+// src/execution/activation_apply.py) does the same whenever a slider row is
+// newer than the `strategy_activation_last_applied` marker the assigner
+// stamps — so a slider moved today is applied (eligibility + weights) at
+// the next daily compute (15:00 ET same-day lane), not next Monday. This
+// dashboard endpoint itself still only (a) sets the threshold and (b)
+// previews via --dry-run — the server MUST NEVER invoke the assigner without
+// --dry-run; see the hard-coded argv + guard in POST /api/activation/dry-run
+// below. The GETs report `pending` / `last_applied` from the marker so the
+// card can say whether the saved value is live yet.
 const ACTIVATION_MIN_SHARPE_MIN     = 0.0;
 const ACTIVATION_MIN_SHARPE_MAX     = 3.0;
 const ACTIVATION_MIN_SHARPE_DEFAULT = 0.5;   // mirrors the assigner's fail-safe
 const ACTIVATION_DRY_RUN_TIMEOUT_MS = 120_000;
+
+// Marker written by activation_assigner.stamp_last_applied after every clean
+// non-dry-run --all (weekly, Sunday finale, daily activation step). pending =
+// the slider row is newer than the marker (server-clock updated_at on both
+// sides — the same comparison activation_apply.py makes), or no marker yet.
+async function _activationApplyState(sliderUpdatedAt) {
+  const out = { last_applied: null, applied_at: null, pending: null };
+  try {
+    const r = await dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'strategy_activation_last_applied'");
+    const row = r.rows[0];
+    if (!row) { out.pending = true; return out; }
+    try { out.last_applied = JSON.parse(row.value); } catch (_) { out.last_applied = { raw: row.value }; }
+    out.applied_at = row.updated_at;
+    out.pending = sliderUpdatedAt ? (new Date(sliderUpdatedAt) > new Date(row.updated_at)) : false;
+  } catch (_) { /* advisory only — the sliders must still load */ }
+  return out;
+}
 
 app.get('/api/config/activation-min-sharpe', async (req, res) => {
   try {
     const r = await dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'strategy_activation_min_sharpe'");
     const row = r.rows[0];
     const raw = row ? parseFloat(row.value) : NaN;
+    const applyState = await _activationApplyState(row ? row.updated_at : null);
     res.json({
+      ...applyState,
       value:      isFinite(raw)
                     ? Math.max(ACTIVATION_MIN_SHARPE_MIN, Math.min(raw, ACTIVATION_MIN_SHARPE_MAX))
                     : ACTIVATION_MIN_SHARPE_DEFAULT,
@@ -750,8 +795,8 @@ app.put('/api/config/activation-min-sharpe', async (req, res) => {
     // when absent, so first write creates it with a description).
     await dbQuery(`
       INSERT INTO pipeline_config (key, value, description, updated_at)
-      VALUES ('strategy_activation_min_sharpe', $1, 'Activation min-Sharpe slider: extra per-regime sharpe floor on top of the qualification gate (>0 sharpe, class-DD sleeve, >=100 trades). 0 = trade in exactly the qualifying regimes. Range [0.0, 3.0]; assigner fail-safe default 0.5. LIVE weekly enforcement via activation_assigner (Mon 00:00 ET, OPENCLAW_ACTIVATION_ASSIGNER=1). Adjustable via dashboard.', NOW())
-      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+      VALUES ('strategy_activation_min_sharpe', $1, 'Activation min-Sharpe slider: extra per-regime sharpe floor on top of the qualification gate (>0 sharpe, class-DD sleeve, >=100 trades). 0 = trade in exactly the qualifying regimes. Range [0.0, 3.0]; assigner fail-safe default 0.5. Applied by activation_assigner at the next daily compute (daily-cycle activation step, 15:00 ET same-day lane) and by the weekly Mon 00:00 ET refresh (OPENCLAW_ACTIVATION_ASSIGNER=1). Adjustable via dashboard.', NOW())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, description = EXCLUDED.description, updated_at = NOW()
     `, [String(v)]);
     res.json({ value: v });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -781,7 +826,9 @@ app.get('/api/config/activation-min-trades', async (req, res) => {
     // Mirror the assigner's resolution exactly so slider and assigner can never
     // disagree: unset/malformed/negative -> the class gate.
     const usable = Number.isInteger(raw) && raw >= ACTIVATION_MIN_TRADES_MIN;
+    const applyState = await _activationApplyState(row ? row.updated_at : null);
     res.json({
+      ...applyState,
       value:      usable ? Math.min(raw, ACTIVATION_MIN_TRADES_MAX) : ACTIVATION_MIN_TRADES_DEFAULT,
       min:        ACTIVATION_MIN_TRADES_MIN, max: ACTIVATION_MIN_TRADES_MAX,
       default:    ACTIVATION_MIN_TRADES_DEFAULT,
@@ -3168,6 +3215,7 @@ function getDashboardHtml() {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>OpenClaw</title>
+<script>window.__DASHBOARD_BUILD__ = ${JSON.stringify(DASHBOARD_BUILD)};</script>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦞</text></svg>">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js" integrity="sha384-FcQlsUOd0TJjROrBxhJdUhXTUgNJQxTMcxZe6nHbaEfFL1zjQ+bq/uRoBQxb0KMo" crossorigin="anonymous"></script>
 <style>
@@ -4723,8 +4771,10 @@ body.rs-chat-locked{overflow:hidden}
          debounced PUT /api/config/activation-min-sharpe (same UX as the
          conviction gates above). Preview POSTs /api/activation/dry-run —
          the server only ever runs the assigner in dry-run mode; the LIVE
-         apply happens in the weekly Mon 00:00 ET weekly_live_sharpe.js run
-         (OPENCLAW_ACTIVATION_ASSIGNER=1, armed 2026-07-13). -->
+         apply happens in the daily compute chain's 'activation' step (first
+         step, 15:00 ET same-day lane — only when a slider moved since the
+         last apply; 2026-08-22) and in the weekly Mon 00:00 ET
+         weekly_live_sharpe.js run (OPENCLAW_ACTIVATION_ASSIGNER=1). -->
     <div class="pf-section">
       <div class="pf-section-header">
         <span>🎚️ Strategy Activation <span class="st-sub-label">per-regime floors applied on top of the qualification gate (&gt;0 Sharpe · class max-DD)</span></span>
@@ -5087,6 +5137,7 @@ async function loadMarket() {
 
   refreshPipeline();
   setInterval(refreshPipeline, 60000);
+  setInterval(_checkDashboardBuild, 60000);
   setInterval(loadMarket, 300000);
   // Intraday regime card refreshes every 60s. The detector cron is 5min,
   // so most polls see the same tick — but the "Last Tick X min ago" age
@@ -8800,6 +8851,7 @@ async function _corrSharpeGatePut(regime, value, statEl) {
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ min_acting_strategies: value }),
     });
+    _noteDashboardBuild(resp);
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       if (statEl) statEl.textContent = '✗ ' + (err.error || resp.statusText);
@@ -8818,7 +8870,8 @@ async function _corrSharpeGatePut(regime, value, statEl) {
 // Slider binds pipeline_config.strategy_activation_min_sharpe (debounced PUT,
 // same UX as the conviction gates above). The Preview button POSTs
 // /api/activation/dry-run — the server only ever shells the assigner with
-// --dry-run (the LIVE apply is the weekly Mon 00:00 ET run), and we render the
+// --dry-run (the LIVE apply is the daily-cycle 'activation' step at the next
+// compute, plus the weekly Mon 00:00 ET run), and we render the
 // parsed prior→new eligibility diff: per-regime "eligible now" is DB
 // reality, everything else is hypothetical.
 let _actSaveTimer   = null;
@@ -8855,7 +8908,7 @@ async function _loadActivationTradesCard() {
     // class gate, and saying so prevents reading the slider as an active floor
     // that was never written.
     statEl.textContent = cfg.row_exists && cfg.source === 'pipeline_config'
-      ? (cfg.updated_at ? 'last set ' + new Date(cfg.updated_at).toLocaleString() : '')
+      ? _actApplyStatus(cfg)
       : 'row not set — assigner defers to the class gate (100)';
   }
   if (_actnWired) return;
@@ -8884,8 +8937,9 @@ async function _actnPut(value, statEl) {
       const err = await resp.json().catch(() => ({}));
       if (statEl) statEl.textContent = '✗ ' + (err.error || resp.statusText);
     } else if (statEl) {
-      statEl.textContent = '✓ saved ' + value + ' · applies at the next weekly refresh (Mon 00:00 ET)';
-      setTimeout(() => { if (statEl.textContent.startsWith('✓')) statEl.textContent = ''; }, 4000);
+      statEl.textContent = '✓ saved ' + value + ' · pending — applies at the next daily compute (15:00 ET)';
+      _noteDashboardBuild(resp);
+      setTimeout(() => { if (statEl.textContent.startsWith('✓')) statEl.textContent = ''; }, 6000);
     }
   } catch (e) {
     if (statEl) statEl.textContent = '✗ ' + (e.message || 'network error');
@@ -8914,7 +8968,7 @@ async function _loadActivationCard() {
   valEl.textContent = v.toFixed(2);
   if (statEl && !statEl.textContent) {
     statEl.textContent = cfg.row_exists
-      ? (cfg.updated_at ? 'last set ' + new Date(cfg.updated_at).toLocaleString() : '')
+      ? _actApplyStatus(cfg)
       : 'row not set — assigner fail-safe default 0.50';
   }
   if (_actWired) return;   // re-loads refresh the value; listeners wire once
@@ -8945,10 +8999,11 @@ async function _actPut(value, statEl) {
       const err = await resp.json().catch(() => ({}));
       if (statEl) statEl.textContent = '✗ ' + (err.error || resp.statusText);
     } else if (statEl) {
-      statEl.textContent = '✓ saved ' + value.toFixed(2) + ' · applies at the next weekly refresh (Mon 00:00 ET)';
+      statEl.textContent = '✓ saved ' + value.toFixed(2) + ' · pending — applies at the next daily compute (15:00 ET)';
+      _noteDashboardBuild(resp);
       setTimeout(() => {
         if (statEl && statEl.textContent.indexOf('✓') === 0) statEl.textContent = '';
-      }, 5000);
+      }, 6000);
     }
   } catch (e) {
     if (statEl) statEl.textContent = '✗ ' + (e.message || 'network error');
@@ -10756,6 +10811,69 @@ function renderValueChart(rows, regimeRows) {
 }
 
 // ── Pipeline badge ────────────────────────────────────────────────────────────
+// Activation slider apply-state line (2026-08-22). "pending" comes from the
+// server's comparison of the slider row vs the assigner's last-applied marker.
+function _actApplyStatus(cfg) {
+  const setAt = cfg.updated_at ? new Date(cfg.updated_at).toLocaleString() : null;
+  const appliedAt = cfg.applied_at ? new Date(cfg.applied_at).toLocaleString() : null;
+  if (cfg.pending) {
+    return '⏳ set ' + (setAt || '—') + ' · pending — applies at the next daily compute (15:00 ET)'
+      + (appliedAt ? ' · last applied ' + appliedAt : '');
+  }
+  if (appliedAt) {
+    const la = cfg.last_applied || {};
+    const via = la.trigger ? ' via ' + la.trigger : '';
+    return '✓ applied ' + appliedAt + via + (setAt ? ' · set ' + setAt : '');
+  }
+  return setAt ? 'last set ' + setAt : '';
+}
+
+// ── Stale-tab guard (2026-08-22) ─────────────────────────────────────────────
+// The page was served with window.__DASHBOARD_BUILD__; every /api/* response
+// carries X-Dashboard-Build. A mismatch means johnbot restarted with a newer
+// server.js and THIS tab's JS is stale (it would keep posting retired keys).
+// Show a banner and reload after a short countdown.
+let _buildReloadArmed = false;
+function _noteDashboardBuild(resp) {
+  try {
+    const b = resp && resp.headers && resp.headers.get('X-Dashboard-Build');
+    if (b && window.__DASHBOARD_BUILD__ && b !== window.__DASHBOARD_BUILD__) _armBuildReload(b);
+  } catch (_) { /* never let the guard break a handler */ }
+}
+function _armBuildReload(serverBuild) {
+  if (_buildReloadArmed) return;
+  _buildReloadArmed = true;
+  let secs = 8;
+  const bar = document.createElement('div');
+  bar.id = 'stale-build-banner';
+  bar.setAttribute('role', 'alert');
+  bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10000;padding:10px 16px;'
+    + 'background:var(--yellow);color:#000;font:600 13px/1.4 system-ui,sans-serif;'
+    + 'display:flex;gap:14px;align-items:center;justify-content:center;box-shadow:0 2px 10px rgba(0,0,0,.4)';
+  const txt = document.createElement('span');
+  const btn = document.createElement('button');
+  btn.textContent = 'Reload now';
+  btn.style.cssText = 'padding:4px 10px;border:1px solid #000;border-radius:4px;background:#fff;color:#000;cursor:pointer;font-weight:600';
+  btn.onclick = () => location.reload();
+  bar.appendChild(txt); bar.appendChild(btn);
+  document.body.appendChild(bar);
+  const tick = () => {
+    txt.textContent = 'Dashboard was updated on the server (build ' + serverBuild + ') — this tab is running old code. Reloading in ' + secs + 's…';
+    if (secs <= 0) { location.reload(); return; }
+    secs -= 1;
+    setTimeout(tick, 1000);
+  };
+  tick();
+}
+async function _checkDashboardBuild() {
+  try {
+    const r = await fetch('/api/dashboard-build', { cache: 'no-store' });
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j && j.build && window.__DASHBOARD_BUILD__ && j.build !== window.__DASHBOARD_BUILD__) _armBuildReload(j.build);
+  } catch (_) { /* offline / restarting — next poll */ }
+}
+
 async function refreshPipeline() {
   const data = await fetch('/api/pipeline/status').then(r=>r.json()).catch(()=>null);
   if (!data?.coverage) return;

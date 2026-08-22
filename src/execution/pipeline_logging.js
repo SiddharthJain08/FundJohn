@@ -16,6 +16,7 @@ const notifications = require(path.resolve(__dirname, '..', 'channels', 'discord
 // surface in #trade-reports; everything else goes to #pipeline-feed.
 const STEP_FAILURE_CHANNEL = {
   'collect':                'data-alerts',
+  'activation':             'data-alerts',
   'sentiment':              'data-alerts',
   'signals':                'data-alerts',
   'ic_gate':                'trade-reports',
@@ -33,6 +34,7 @@ const STEP_FAILURE_CHANNEL = {
 // Ported from pipeline_orchestrator.py:743-758.
 const STEP_AGENTS = {
   'collect':                'botjohn',
+  'activation':             'botjohn',
   'sentiment':              'botjohn',
   'signals':                'botjohn',
   'ic_gate':                'tradebot',

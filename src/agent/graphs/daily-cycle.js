@@ -20,7 +20,14 @@ const pipelineLog    = require('../../execution/pipeline_logging');
 const { makeStepNode } = require('./daily_cycle_node');
 const { postAbortAlert } = require('./daily_cycle_helpers');
 
+// `activation` (2026-08-22) runs FIRST: it re-derives strategy_regime_params
+// .eligible + strategy_weights_by_regime from the dashboard Strategy
+// Activation sliders when a slider moved since the last apply, so a slider
+// change takes effect at the NEXT DAILY CYCLE (not the Mon 00:00 ET weekly
+// refresh). No-op when nothing changed. Never aborts the chain (see
+// daily_cycle_node.js non-abort set).
 const STEPS_IN_ORDER = [
+  'activation',
   'collect', 'sentiment', 'signals', 'option_hedge', 'ic_gate', 'handoff',
   'trade', 'alpaca', 'reconcile', 'stop_reattach', 'report',
   'pyportfolioopt_shadow', 'health',
@@ -32,6 +39,7 @@ const STEPS_IN_ORDER = [
 // src/execution/. Identity-mapped steps (signals → engine? no — signals → engine,
 // see below) are listed explicitly for clarity.
 const STEP_SCRIPTS = {
+  'activation':             'activation_apply',
   'collect':                'run_collector_once',
   'sentiment':              'run_sentiment_step',
   'signals':                'engine',

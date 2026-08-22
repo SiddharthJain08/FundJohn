@@ -5,6 +5,7 @@ style of tests/test_eligibility_manager_db.py (upsert-pattern assertions)
 and tests/test_bt_sharpe_clamp.py (pipeline_config fail-safe assertions)."""
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -398,3 +399,32 @@ class TestApplyOneWrites(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# ── Last-applied marker (2026-08-22 daily-cycle activation step) ────────────
+class TestStampLastApplied(unittest.TestCase):
+    def test_upserts_marker_and_commits(self):
+        conn = FakeConn([None])
+        ok = aa.stamp_last_applied(conn, 1.0, 100, 3, 7, trigger='daily_cycle')
+        self.assertTrue(ok)
+        self.assertTrue(conn.committed)
+        sql, params = conn.executed[-1]
+        self.assertIn('INSERT INTO pipeline_config', sql)
+        self.assertIn('ON CONFLICT (key) DO UPDATE', sql)
+        self.assertEqual(params[0], aa.LAST_APPLIED_KEY)
+        payload = json.loads(params[1])
+        self.assertEqual(payload['threshold'], 1.0)
+        self.assertEqual(payload['min_trades'], 100)
+        self.assertEqual(payload['activated_cells'], 3)
+        self.assertEqual(payload['deactivated_cells'], 7)
+        self.assertEqual(payload['trigger'], 'daily_cycle')
+
+    def test_failure_is_nonfatal_and_rolls_back(self):
+        class BoomConn(FakeConn):
+            def cursor(self, cursor_factory=None):
+                raise RuntimeError('db down')
+        conn = BoomConn()
+        ok = aa.stamp_last_applied(conn, 0.5, None, 0, 0)
+        self.assertFalse(ok)
+        self.assertTrue(conn.rolled_back)
+        self.assertFalse(conn.committed)

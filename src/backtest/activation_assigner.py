@@ -48,7 +48,7 @@ determined for all 4 canonical regimes, never left implicit-by-omission.
 
 CLI:
   python3 -m backtest.activation_assigner --strategy-id S_xxx [--dry-run] [--min-sharpe X] [--notify]
-  python3 -m backtest.activation_assigner --all [--dry-run] [--min-sharpe X] [--notify]
+  python3 -m backtest.activation_assigner --all [--dry-run] [--min-sharpe X] [--notify] [--trigger LABEL]
 
 --dry-run computes the full prior->new diff and prints it but performs NO
 database writes whatsoever (the write helper is never called).
@@ -88,6 +88,57 @@ DEFAULT_MIN_SHARPE = 0.5
 CONFIG_KEY_MIN_TRADES = 'strategy_activation_min_trades'
 
 ACTOR = 'activation_assigner'
+
+# Last-applied marker (2026-08-22). Stamped by every NON-dry-run `--all` run
+# that finished with zero per-strategy errors, so the daily compute chain's
+# `activation` step (src/execution/activation_apply.py) can tell whether a
+# dashboard slider (min-Sharpe / min-trades) moved since eligibility was last
+# derived — if it did, the step re-runs this assigner + a weights rebuild
+# BEFORE `signals`, so a slider change always takes effect at the next daily
+# cycle instead of waiting for the Mon 00:00 ET weekly refresh. The weekly and
+# Sunday-finale runs stamp it too, so a slider already applied by them is not
+# re-applied the same day. pipeline_config.updated_at (server clock) is the
+# comparison timestamp; the JSON value is for humans + the dashboard.
+LAST_APPLIED_KEY = 'strategy_activation_last_applied'
+
+
+def stamp_last_applied(conn, threshold: float, min_trades, activated: int,
+                       deactivated: int, trigger: str = 'manual') -> bool:
+    """Upsert the last-applied marker. Non-fatal: returns False (and logs)
+    on any failure — a marker miss only costs one redundant (idempotent)
+    re-apply at the next daily cycle, never a trading day."""
+    payload = json.dumps({
+        'threshold': threshold,
+        'min_trades': min_trades,
+        'activated_cells': int(activated),
+        'deactivated_cells': int(deactivated),
+        'trigger': trigger,
+        'actor': ACTOR,
+    }, sort_keys=True)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO pipeline_config (key, value, description, updated_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (key) DO UPDATE
+               SET value = EXCLUDED.value, updated_at = NOW()
+            """,
+            (LAST_APPLIED_KEY, payload,
+             'Stamped by activation_assigner after each non-dry-run --all apply '
+             '(weekly Mon 00:00 ET, Sunday finale, or the daily-cycle activation '
+             'step). updated_at = when eligibility was last derived; the daily '
+             'activation step re-applies when a slider row is newer than this.'))
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:  # pragma: no cover - defensive
+        _log(f'WARNING: could not stamp {LAST_APPLIED_KEY}: {e}')
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
 
 
 def _load_instrument_classes() -> dict:
@@ -437,6 +488,9 @@ def main() -> int:
     ap.add_argument('--notify', action='store_true',
                     help="Post the newly-dormant + net-change summary to "
                          "#botjohn-log (default off so tests/dry-runs stay silent)")
+    ap.add_argument('--trigger', default='manual',
+                    help='Label recorded in the last-applied marker '
+                         '(weekly_cron | sunday_auto_approval | daily_cycle | manual)')
     args = ap.parse_args()
 
     uri = os.environ.get('POSTGRES_URI') or os.environ.get('DATABASE_URL')
@@ -533,6 +587,14 @@ def main() -> int:
 
     if args.notify:
         _notify_botjohn_log(summary, newly_dormant, args.dry_run)
+
+    # Marker: only a clean, complete, non-dry-run apply counts as "applied".
+    # A run with per-strategy errors leaves the old marker so the next daily
+    # cycle retries; a --strategy-id run never represents the whole fleet.
+    if args.all and not args.dry_run and n_errors == 0:
+        if stamp_last_applied(conn, threshold, eff_min_trades, activated_cells,
+                              deactivated_cells, trigger=args.trigger):
+            _log(f'stamped {LAST_APPLIED_KEY} (trigger={args.trigger})')
 
     conn.close()
     return 1 if n_errors else 0

@@ -61,7 +61,7 @@ test('webhook failure is non-fatal — logs warning, does not throw', async () =
 test('STEP_FAILURE_CHANNEL and STEP_AGENTS maps are exported and complete', () => {
   const { mod } = makeStubbedLogger();
   const expectedSteps = [
-    'collect', 'sentiment', 'signals', 'ic_gate', 'handoff',
+    'activation', 'collect', 'sentiment', 'signals', 'ic_gate', 'handoff',
     'trade', 'alpaca', 'reconcile', 'report',
     'pyportfolioopt_shadow', 'health',
   ];

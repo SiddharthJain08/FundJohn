@@ -156,7 +156,12 @@ function makeStepNode(STEP, scriptName) {
     // news ingest blew the 600s step budget (rc=124) and aborted the 16:15
     // EOD compute before `signals` — recovered by hand. The Discord failure
     // alert + stderr persistence above still fire; only the abort is skipped.
-    if (STEP === 'sentiment') {
+    // `activation` (2026-08-22) gets the same exemption: it only re-applies
+    // the dashboard activation sliders ahead of `signals`; a failed re-apply
+    // leaves last week's eligibility in place (still a valid book) and must
+    // never cost the day's COMPUTED set — under OPENCLAW_STRICT_EXIT_CODES=1
+    // (live) every other step's rc=1 aborts, so this exemption is load-bearing.
+    if (STEP === 'sentiment' || STEP === 'activation') {
       completion.status = 'warn';
       await pipelineLog.feedEnd(STEP, 'warn', state.runDate, durationMs);
       return { completedSteps: [...(state.completedSteps || []), completion] };

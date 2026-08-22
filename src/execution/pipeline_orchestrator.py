@@ -58,6 +58,7 @@ def _build_steps() -> list[tuple[str, str]]:
     value preserves the legacy 10-step pipeline byte-for-byte.
     """
     base: list[tuple[str, str]] = [
+        ('activation',           'activation_apply'),          # dashboard activation sliders → eligibility + weights (only when a slider moved; never aborts in the JS graph)
         ('collect',              'run_collector_once'),        # one cycle of collector.js
         ('signals',              'engine'),                    # zero-LLM strategy executor
         ('ic_gate',              'ic_gate_runner'),            # IC approval gate (DEFAULT-OFF; gated on OPENCLAW_IC_GATE=1; fail-open)
@@ -95,6 +96,7 @@ NOTIFY_WEBHOOK = os.environ.get('ORCHESTRATOR_NOTIFY_WEBHOOK', '')
 # #data-alerts; trade-pipeline step failures surface in #trade-reports.
 # Phase boundaries (▶️/✅/❌) continue to go to #pipeline-feed for every step.
 STEP_FAILURE_CHANNEL = {
+    'activation':  'data-alerts',
     'collect':     'data-alerts',
     'sentiment':   'data-alerts',
     'signals':     'data-alerts',

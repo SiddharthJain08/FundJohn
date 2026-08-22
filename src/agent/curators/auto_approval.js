@@ -250,7 +250,7 @@ function runFinale({ log, dryRun, trigger }) {
   const env = { ...process.env, PYTHONPATH: 'src' };
   log('finale: activation_assigner --all (qualification gate + slider) …');
   const a = spawnSync('/bin/bash',
-    ['-c', 'nice -n 19 python3 -m backtest.activation_assigner --all --notify'],
+    ['-c', 'nice -n 19 python3 -m backtest.activation_assigner --all --notify --trigger=sunday_auto_approval'],
     { cwd: OPENCLAW_DIR, env, encoding: 'utf8', timeout: 15 * 60_000 });
   log(`finale: assigner exit=${a.status} ${(a.stdout || '').split('\n').filter(l => /summary/.test(l)).join(' ')}`);
   log('finale: ONE strategy_weights --rebuild …');

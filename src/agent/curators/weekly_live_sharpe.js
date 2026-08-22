@@ -61,7 +61,7 @@ async function postDiscord(content) {
   if (process.env.OPENCLAW_ACTIVATION_ASSIGNER === '1') {
     console.log('refreshing strategy-regime activation eligibility…');
     try {
-      execSync(`cd ${ROOT} && PYTHONPATH=src python3 -m backtest.activation_assigner --all --notify`,
+      execSync(`cd ${ROOT} && PYTHONPATH=src python3 -m backtest.activation_assigner --all --notify --trigger=weekly_cron`,
         { stdio: 'inherit', env: loadEnv() });
     } catch (e) {
       console.error('activation_assigner refresh failed (non-fatal):', e.message);

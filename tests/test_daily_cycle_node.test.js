@@ -142,3 +142,26 @@ test('subprocess timeout → throw with timedOut:true preserved in completion re
     (err) => { assert.equal(err.rc, 124); return true; }
   );
 });
+
+// `activation` (2026-08-22): re-applies the dashboard activation sliders ahead
+// of `signals`. A failed re-apply must NEVER abort the chain — last week's
+// eligibility is still a valid book, an empty COMPUTED set is not. Same
+// exemption as `sentiment`; the alert still fires.
+test('activation rc=1 in STRICT mode → warn + notifyFailure, NO throw (chain continues)', async () => {
+  const { makeStepNode, logCalls } = makeStubbedFactory({ rc: 1, stderrTail: 'assigner failed' });
+  const node = makeStepNode('activation', 'activation_apply');
+  const out = await node({ ...BASE_STATE, env: { OPENCLAW_STRICT_EXIT_CODES: '1' } });
+  assert.equal(out.completedSteps.length, 1);
+  assert.equal(out.completedSteps[0].status, 'warn');
+  assert.ok(logCalls.some(([fn]) => fn === 'notifyFailure'));
+  assert.equal(logCalls.at(-1)[0], 'feedEnd');
+  assert.equal(logCalls.at(-1)[1][1], 'warn');
+});
+
+test('activation rc=2 (hard fail) → still warn, NO throw', async () => {
+  const { makeStepNode, logCalls } = makeStubbedFactory({ rc: 2, stderrTail: 'spawn explode' });
+  const node = makeStepNode('activation', 'activation_apply');
+  const out = await node({ ...BASE_STATE, env: { OPENCLAW_STRICT_EXIT_CODES: '1' } });
+  assert.equal(out.completedSteps[0].status, 'warn');
+  assert.ok(logCalls.some(([fn]) => fn === 'notifyFailure'));
+});
