@@ -106,7 +106,46 @@ python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "$@"
   const args = ['order', 'submit', '--symbol', 'AAPL', '--side', 'buy',
                 '--qty', '10', '--type', 'market', '--time-in-force', 'day',
                 '--client-order-id', 'TEST_ABC123'];
-  const r = await runAlpaca(args);
+  const r = await runAlpaca(args, { timeout: 10_000 });
   assert.equal(r.ok, true);
+  // Every call carries the CLI's global --quiet + --timeout (sec = ms/1000 - 1)
+  // appended AFTER the caller's argv — the caller's flags are untouched.
+  assert.deepEqual(r.payload, [...args, '--quiet', '--timeout', '9']);
+});
+
+test('runAlpaca does not duplicate --quiet/--timeout the caller already passed', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'echo2-alpaca-'));
+  const bin = path.join(dir, 'alpaca');
+  fs.writeFileSync(bin, `#!/bin/bash
+python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "$@"
+`);
+  fs.chmodSync(bin, 0o755);
+  const { runAlpaca, cliGlobalFlags } = loadHelper(bin);
+  const args = ['order', 'list', '-q', '--timeout', '3'];
+  const r = await runAlpaca(args);
   assert.deepEqual(r.payload, args);
+  assert.deepEqual(cliGlobalFlags(['clock'], 30_000), ['--quiet', '--timeout', '29']);
+  assert.deepEqual(cliGlobalFlags(['clock'], 500), ['--quiet', '--timeout', '1']);
+});
+
+test('runAlpaca surfaces exit code 2 as auth_error (never retry; fix credentials)', async () => {
+  const errJson = { code: 40110000, status: 401, error: 'unauthorized', hint: 'check keys' };
+  // v0.0.10+ pretty-prints the stderr document across lines — parse as a whole.
+  // (bash printf would mangle the newlines, so this fake is a python one-liner.)
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-alpaca-'));
+  const bin = path.join(dir, 'alpaca');
+  const b64 = Buffer.from(JSON.stringify(errJson, null, 2)).toString('base64');
+  fs.writeFileSync(bin, `#!/bin/bash
+python3 -c "import sys,base64; sys.stderr.write(base64.b64decode('${b64}').decode()); sys.exit(2)"
+`);
+  fs.chmodSync(bin, 0o755);
+  const { runAlpaca } = loadHelper(bin);
+  const r = await runAlpaca(['account', 'get']);
+  assert.equal(r.ok, false);
+  assert.equal(r.exit_code, 2);
+  assert.equal(r.auth_error, true);
+  assert.equal(r.error.status, 401);
+  const bin1 = makeFakeCli('', JSON.stringify({ status: 404, error: 'nope' }), 1);
+  const r1 = await loadHelper(bin1).runAlpaca(['order', 'get', '--order-id', 'x']);
+  assert.equal(r1.auth_error, false);
 });

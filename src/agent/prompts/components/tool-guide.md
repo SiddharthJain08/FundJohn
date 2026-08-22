@@ -29,8 +29,10 @@ When you need data from MCP providers, write Python — do NOT call HTTP yoursel
 from tools.fmp import get_financial_statements, get_key_metrics, get_profile, get_ratios, get_historical_prices  # P2: fundamentals + macro + historical prices
 from tools.sec_edgar import get_filing, search_filings, get_submissions, get_company_facts  # canonical: insider / Form 4 / filings
 from tools.tavily import search  # news/web
-# Alpaca AAT Plus is P1 for equity quotes, options chain, news, screener, corp-actions.
-# Access via alpaca CLI subprocess (alpaca_cli.js) — not a Python MCP import module.
+from tools.alpaca import get_bars, get_snapshots, get_latest_trades, get_news, get_option_chain, get_corporate_actions, get_screener_movers, get_screener_most_actives, get_positions, get_open_orders, get_account, get_clock, get_calendar  # P1: quotes/OHLCV, options chain, news, screener, corp-actions, broker state (READ-ONLY — no order functions)
+# tools.alpaca wraps the alpaca CLI (/root/go/bin/alpaca) with --quiet/--timeout, multi-symbol
+# batching, next_page_token pagination and the per-cycle cache. Raises AlpacaAuthError (rc=2,
+# never retry) / AlpacaCLIError(status, code, error, hint). Execution stays in alpaca_executor.py.
 
 # Always use _call_mcp() — it handles rate limiting automatically
 prices = get_prices(ticker="AAPL", from_date="2024-01-01", to_date="2024-12-31")
@@ -41,12 +43,12 @@ data = get_financial_statements(ticker="AAPL", period="quarterly", limit=4)
 
 | Data Type | P1 | P2 |
 |-----------|----|----|
-| Prices / OHLCV | alpaca CLI (AAT Plus) | fmp (get_historical_prices) |
-| Options chain | alpaca CLI (AAT Plus) | — |
-| News | alpaca CLI (AAT Plus) | tavily |
-| Screener / movers | alpaca CLI | — |
-| Corporate actions | alpaca CLI | — |
-| Broker state (orders/positions/fills) | alpaca CLI | — |
+| Prices / OHLCV | tools.alpaca get_bars / get_snapshots (AAT Plus) | fmp (get_historical_prices) |
+| Options chain | tools.alpaca get_option_chain (AAT Plus) | — |
+| News | tools.alpaca get_news (AAT Plus) | tavily |
+| Screener / movers | tools.alpaca get_screener_movers / get_screener_most_actives | — |
+| Corporate actions | tools.alpaca get_corporate_actions | — |
+| Broker state (orders/positions/account) | tools.alpaca get_positions / get_open_orders / get_account (read-only) | — |
 | Fundamentals / ratios | fmp | — |
 | Sector performance | fmp | — |
 | Macro (GDP, CPI, rates) | fmp | — |

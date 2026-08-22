@@ -90,3 +90,29 @@ def test_leg_without_symbol_inherits_parent(monkeypatch):
     monkeypatch.setattr(subprocess, 'run', _fake_run(_POSITIONS, orders))
     status, msg = broker._live_positions_have_stops()
     assert status is Status.PASS, msg
+
+
+def test_order_list_is_capped_at_500_and_keyset_paginated(monkeypatch):
+    """`order list` returns 50 rows by DEFAULT and caps --limit at 500. The
+    check must ask for 500 and page with --after-order-id until a short page,
+    otherwise a 200+-order breadth book reads as mostly naked (08-12 incident)."""
+    page1 = [{'symbol': f'T{i}', 'type': 'limit', 'qty': '1', 'status': 'new', 'id': f'o{i}'}
+             for i in range(500)]
+    page2 = [{'symbol': 'ODD', 'type': 'stop', 'stop_price': '17.19', 'qty': '170',
+              'status': 'new', 'id': 'o500'},
+             {'symbol': 'SNDK', 'type': 'stop', 'stop_price': '1367.84', 'qty': '1',
+              'status': 'new', 'id': 'o501'}]
+    seen = []
+    def run(args, capture_output=True, text=True, timeout=15):
+        if 'position' in args:
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps(_POSITIONS), stderr='')
+        seen.append(list(args))
+        page = page2 if '--after-order-id' in args else page1
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(page), stderr='')
+    monkeypatch.setattr(subprocess, 'run', run)
+    status, msg = broker._live_positions_have_stops()
+    assert status is Status.PASS, msg          # stops live on page 2
+    assert len(seen) == 2
+    assert seen[0][seen[0].index('--limit') + 1] == '500'
+    assert '--nested' in seen[0] and seen[0][seen[0].index('--direction') + 1] == 'asc'
+    assert seen[1][seen[1].index('--after-order-id') + 1] == 'o499'

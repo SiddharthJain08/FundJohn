@@ -20,10 +20,30 @@ const { spawn } = require('child_process');
 
 const ALPACA_CLI = process.env.ALPACA_CLI_BIN || '/root/go/bin/alpaca';
 
+/**
+ * Global flags appended to every invocation (github.com/alpacahq/cli):
+ *   --quiet    keeps stderr a pure JSON error document — without it the CLI
+ *              prefixes "Rate limited, retrying in …" lines that break
+ *              JSON.parse(stderr) and hide `error.status` from callers.
+ *   --timeout  bounds the CLI's own HTTP timeout (default 30s) to just under
+ *              our subprocess timeout, so a slow broker yields a structured
+ *              error instead of a SIGKILL with empty stderr.
+ * Callers that already pass either flag keep their value.
+ */
+function cliGlobalFlags(args, timeoutMs) {
+  const flags = [];
+  if (!args.includes('--quiet') && !args.includes('-q')) flags.push('--quiet');
+  if (!args.includes('--timeout')) {
+    flags.push('--timeout', String(Math.max(1, Math.floor(timeoutMs / 1000) - 1)));
+  }
+  return flags;
+}
+
 function runAlpaca(args, { timeout = 30_000, env } = {}) {
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
+    args = [...args, ...cliGlobalFlags(args, timeout)];
     const proc = spawn(ALPACA_CLI, args, {
       env: env || process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -60,6 +80,9 @@ function runAlpaca(args, { timeout = 30_000, env } = {}) {
       resolve({
         ok: code === 0,
         exit_code: code,
+        // CLI contract: 0 = success, 1 = API/general error, 2 = auth error.
+        // rc=2 means credentials are missing/invalid — never retry, surface it.
+        auth_error: code === 2,
         stdout, stderr,
         payload,
         error: errJson,
@@ -68,4 +91,4 @@ function runAlpaca(args, { timeout = 30_000, env } = {}) {
   });
 }
 
-module.exports = { runAlpaca, ALPACA_CLI };
+module.exports = { runAlpaca, cliGlobalFlags, ALPACA_CLI };

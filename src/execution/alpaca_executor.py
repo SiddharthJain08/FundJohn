@@ -93,6 +93,20 @@ _broker_positions_loaded: bool = False
 # Alpaca CLI binary. Override with ALPACA_CLI_BIN env var if installed elsewhere.
 ALPACA_CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
 
+def _cli_flags(args, timeout):
+    """Global flags appended to every CLI call (github.com/alpacahq/cli):
+    --quiet keeps stderr a pure JSON error document (no hints / rate-limit
+    chatter ahead of it), and --timeout bounds the CLI's own HTTP timeout
+    (default 30s) to just under our subprocess timeout so a slow broker
+    returns a structured error instead of a SIGKILL with empty stderr."""
+    flags = []
+    if '--quiet' not in args and '-q' not in args:
+        flags.append('--quiet')
+    if '--timeout' not in args:
+        flags += ['--timeout', str(max(1, int(timeout) - 1))]
+    return flags
+
+
 
 def _load_broker_positions() -> None:
     """One-shot loader for the broker-positions cache. Called from main()."""
@@ -1391,7 +1405,7 @@ def _poll_crypto_fill(order_id: str, timeout: float = 10.0,
     import time as _time
     deadline = _time.monotonic() + timeout
     while _time.monotonic() < deadline:
-        ok, payload, _err = _run_alpaca_cli(['order', 'get', order_id], timeout=5)
+        ok, payload, _err = _run_alpaca_cli(['order', 'get', '--order-id', order_id], timeout=5)
         if ok and isinstance(payload, dict):
             status = str(payload.get('status') or '').lower()
             try:
@@ -1404,7 +1418,7 @@ def _poll_crypto_fill(order_id: str, timeout: float = 10.0,
                 return fq if fq > 0 else 0.0   # partial-then-canceled still protectable
         _time.sleep(poll_interval)
     # Timed out — return whatever last filled qty we saw (0.0 if none).
-    ok, payload, _err = _run_alpaca_cli(['order', 'get', order_id], timeout=5)
+    ok, payload, _err = _run_alpaca_cli(['order', 'get', '--order-id', order_id], timeout=5)
     if ok and isinstance(payload, dict):
         try:
             return float(payload.get('filled_qty') or 0.0)
@@ -1625,7 +1639,7 @@ def _run_alpaca_cli(args, timeout=30):
     `"code": <numeric>`). Exit code is 0 on success, non-zero on error.
     """
     proc = subprocess.run(
-        [ALPACA_CLI, *args],
+        [ALPACA_CLI, *args, *_cli_flags(args, timeout)],
         capture_output=True, text=True, timeout=timeout, check=False,
     )
     if proc.returncode == 0:
@@ -1635,6 +1649,7 @@ def _run_alpaca_cli(args, timeout=30):
             return True, proc.stdout, None
     err = {
         'exit_code': proc.returncode,
+        'auth_error': proc.returncode == 2,
         'raw_stderr': proc.stderr,
         'status': None,
         'error': proc.stderr.strip(),
@@ -1804,7 +1819,7 @@ def _wait_for_fill(order_id: str, timeout: float = 15.0, poll_interval: float = 
     deadline = _time.monotonic() + timeout
     while _time.monotonic() < deadline:
         proc = subprocess.run(
-            [ALPACA_CLI, 'order', 'get', order_id],
+            [ALPACA_CLI, 'order', 'get', '--order-id', order_id, '--quiet'],
             capture_output=True, text=True, timeout=5, check=False,
         )
         if proc.returncode == 0:

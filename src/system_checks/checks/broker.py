@@ -87,14 +87,30 @@ def _live_positions_have_stops():
     # naked (2026-07-21 maintenance false-alarmed "12/13 naked" on a book
     # where 11/12 carried full OCOs; same trap as the 07-16 "3 stops vs 9"
     # dashboard incident).
-    or_ = subprocess.run([cli, 'order', 'list', '--status', 'open', '--nested'],
-                         capture_output=True, text=True, timeout=15)
-    if or_.returncode != 0:
-        return Status.FAIL, f'order list failed: {or_.stderr.strip()[:200]}'
-    try:
-        orders = json.loads(or_.stdout) or []
-    except json.JSONDecodeError:
-        return Status.FAIL, 'order list stdout not JSON'
+    # --limit is load-bearing too: `order list` returns 50 rows by DEFAULT and
+    # caps --limit at 500 (2026-08-12: a 183-order book truncated to 50 rows
+    # read ~140 OCO-protected positions as naked). Keyset-paginate with
+    # --after-order-id in --direction asc until a short page, mirroring
+    # stop_reattach._fetch_open_orders, so the check stays honest on any book.
+    orders, cursor = [], None
+    for _page in range(40):
+        args = [cli, 'order', 'list', '--status', 'open', '--nested',
+                '--limit', '500', '--direction', 'asc', '--quiet']
+        if cursor:
+            args += ['--after-order-id', cursor]
+        or_ = subprocess.run(args, capture_output=True, text=True, timeout=15)
+        if or_.returncode != 0:
+            return Status.FAIL, f'order list failed: {or_.stderr.strip()[:200]}'
+        try:
+            page = json.loads(or_.stdout) or []
+        except json.JSONDecodeError:
+            return Status.FAIL, 'order list stdout not JSON'
+        orders.extend(page)
+        if len(page) < 500:
+            break
+        cursor = page[-1].get('id')
+        if not cursor:
+            break
     _DEAD = {'canceled', 'filled', 'expired', 'rejected', 'replaced',
              'done_for_day', 'stopped'}
 

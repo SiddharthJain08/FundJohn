@@ -69,6 +69,20 @@ for _p in (str(ROOT), str(ROOT / 'src')):
         sys.path.insert(0, _p)
 ALPACA_CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
 
+def _cli_flags(args, timeout):
+    """Global flags appended to every CLI call (github.com/alpacahq/cli):
+    --quiet keeps stderr a pure JSON error document (no hints / rate-limit
+    chatter ahead of it), and --timeout bounds the CLI's own HTTP timeout
+    (default 30s) to just under our subprocess timeout so a slow broker
+    returns a structured error instead of a SIGKILL with empty stderr."""
+    flags = []
+    if '--quiet' not in args and '-q' not in args:
+        flags.append('--quiet')
+    if '--timeout' not in args:
+        flags += ['--timeout', str(max(1, int(timeout) - 1))]
+    return flags
+
+
 
 def log(msg: str) -> None:
     ts = datetime.now().strftime('%H:%M:%S')
@@ -179,7 +193,7 @@ def _run_cli(args, timeout=15):
     for attempt, backoff in enumerate((*_RATE_LIMIT_BACKOFF, None)):
         try:
             proc = subprocess.run(
-                [ALPACA_CLI, *args],
+                [ALPACA_CLI, *args, *_cli_flags(args, timeout)],
                 capture_output=True, text=True, timeout=timeout, check=False,
             )
         except subprocess.TimeoutExpired:
@@ -198,7 +212,7 @@ def _run_cli(args, timeout=15):
                 return True, json.loads(proc.stdout), None
             except json.JSONDecodeError:
                 return True, proc.stdout, None
-        err = {'exit_code': proc.returncode, 'raw_stderr': proc.stderr,
+        err = {'exit_code': proc.returncode, 'auth_error': proc.returncode == 2, 'raw_stderr': proc.stderr,
                'error': proc.stderr.strip()}
         try:
             ej = json.loads(proc.stderr)

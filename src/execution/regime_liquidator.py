@@ -62,6 +62,20 @@ logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
 ALPACA_CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
+
+def _cli_flags(args, timeout):
+    """Global flags appended to every CLI call (github.com/alpacahq/cli):
+    --quiet keeps stderr a pure JSON error document (no hints / rate-limit
+    chatter ahead of it), and --timeout bounds the CLI's own HTTP timeout
+    (default 30s) to just under our subprocess timeout so a slow broker
+    returns a structured error instead of a SIGKILL with empty stderr."""
+    flags = []
+    if '--quiet' not in args and '-q' not in args:
+        flags.append('--quiet')
+    if '--timeout' not in args:
+        flags += ['--timeout', str(max(1, int(timeout) - 1))]
+    return flags
+
 REGIME_LATEST_FILE = ROOT / '.agents' / 'market-state' / 'regime_latest.json'
 COID_PREFIX = 'AX'
 SENTINEL_TTL = 86400  # 24h
@@ -78,7 +92,7 @@ def _is_live() -> bool:
 def _run_cli(args, timeout=30):
     """Mirror of alpaca_replace_stop._run_cli for consistent error shapes."""
     proc = subprocess.run(
-        [ALPACA_CLI, *args],
+        [ALPACA_CLI, *args, *_cli_flags(args, timeout)],
         capture_output=True, text=True, timeout=timeout, check=False,
     )
     if proc.returncode == 0:
@@ -86,7 +100,7 @@ def _run_cli(args, timeout=30):
             return True, json.loads(proc.stdout), None
         except json.JSONDecodeError:
             return True, proc.stdout, None
-    err = {'exit_code': proc.returncode, 'raw_stderr': proc.stderr,
+    err = {'exit_code': proc.returncode, 'auth_error': proc.returncode == 2, 'raw_stderr': proc.stderr,
            'status': None, 'error': proc.stderr.strip()}
     try:
         ej = json.loads(proc.stderr)
@@ -884,6 +898,12 @@ def _submit_extended_hours_close(order: dict) -> dict:
             f'_pick_limit_price returned None for {symbol} — '
             'no usable quote or trade available (halted/quoteless?)'
         )
+    # --client-order-id on EVERY unattended submit (alpacahq/cli automation
+    # contract): the broker rejects a duplicate coid with 422, so a retry after
+    # an ambiguous failure (timeout / dropped connection) cannot double-close.
+    # This was the one `order submit` in the tree without one.
+    coid = order.get('client_order_id') or (
+        f"rl_ext_{symbol.replace('/', '')}_{side}_{int(time.time())}")
     cmd = [
         'order', 'submit',
         '--symbol', symbol,
@@ -893,6 +913,7 @@ def _submit_extended_hours_close(order: dict) -> dict:
         '--extended-hours',
         '--qty', str(order['qty']),
         '--limit-price', f'{limit_px:.2f}',
+        '--client-order-id', coid,
     ]
     ok, payload, err = _run_cli(cmd, timeout=15)
     if not ok:
@@ -902,6 +923,7 @@ def _submit_extended_hours_close(order: dict) -> dict:
         'filled_qty': float((payload.get('filled_qty', 0) or 0) if isinstance(payload, dict) else 0),
         'avg_fill_price': float((payload.get('filled_avg_price', 0) or 0) if isinstance(payload, dict) else 0),
         'order_id': (payload.get('id') if isinstance(payload, dict) else None),
+        'client_order_id': coid,
     }
 
 

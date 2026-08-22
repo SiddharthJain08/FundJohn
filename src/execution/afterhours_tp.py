@@ -136,9 +136,26 @@ def reconcile_afterhours(dry_run: bool) -> dict:
         return {'tp_canceled': 0, 'stops_resized': 0}
     from execution.stop_reattach import fetch_positions
     stats = {'tp_canceled': 0, 'stops_resized': 0}
-    ok, orders, _ = _cli(['order', 'list', '--status', 'open'])
-    if not ok:
-        return stats
+    # `order list` returns 50 rows by DEFAULT (cap 500). An unbounded read on a
+    # 200+-order breadth book silently dropped the ahtp_* TPs and oversized
+    # stops past row 50 — they were never cancelled/resized. Keyset-paginate
+    # (--after-order-id, --direction asc) until a short page, as
+    # stop_reattach._fetch_open_orders does.
+    orders, cursor = [], None
+    for _page in range(40):
+        args = ['order', 'list', '--status', 'open', '--limit', '500', '--direction', 'asc']
+        if cursor:
+            args += ['--after-order-id', cursor]
+        ok, page, _ = _cli(args, timeout=30)
+        if not ok:
+            return stats
+        page = page or []
+        orders.extend(page)
+        if len(page) < 500:
+            break
+        cursor = page[-1].get('id')
+        if not cursor:
+            break
     pos_qty = {p['symbol']: abs(float(p.get('qty') or 0))
                for p in (fetch_positions() or [])}
     for o in (orders or []):
