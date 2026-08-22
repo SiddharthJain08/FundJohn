@@ -19,10 +19,11 @@ const { query } = require('../database/postgres');
 const BATCH_ELIGIBLE_TYPES = new Set(['research']);
 const BATCH_NEVER_TYPES    = new Set();
 
-// Standard vs batch pricing per million tokens (Sonnet 4.6)
+// Standard vs batch pricing per million tokens (Sonnet 5, 2026-08-22; was
+// Sonnet 4.6 at 3.0/15.0). Batch = 50% of standard.
 const PRICING = {
-  standard: { input: 3.0, output: 15.0 },
-  batch:    { input: 1.5, output:  7.5 },
+  standard: { input: 2.0, output: 10.0 },
+  batch:    { input: 1.0, output:  5.0 },
 };
 
 function apiRequest(method, path, body = null) {
@@ -70,7 +71,7 @@ async function submit(requests) {
   const batchRequests = requests.map(r => ({
     custom_id: r.customId,
     params: {
-      model:      r.model || 'claude-sonnet-4-6',
+      model:      r.model || 'claude-sonnet-5',
       max_tokens: r.maxTokens || 2000,
       messages:   r.messages,
     },

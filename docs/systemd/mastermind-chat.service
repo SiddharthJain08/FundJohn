@@ -26,7 +26,7 @@ Environment="PATH=/usr/local/bin:/usr/bin:/bin"
 # Service config
 Environment="MASTERMIND_CHAT_PORT=7871"
 Environment="MASTERMIND_CHAT_BIND=127.0.0.1"
-Environment="MASTERMIND_CHAT_MODEL=claude-opus-4-7[1m]"
+Environment="MASTERMIND_CHAT_MODEL=claude-opus-5[1m]"
 Environment="MASTERMIND_CHAT_MAX_BUDGET=5.00"
 Environment="MASTERMIND_CHAT_CWD=/root/openclaw/workspaces/mastermind-chat"
 

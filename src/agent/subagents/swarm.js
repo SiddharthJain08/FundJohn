@@ -85,7 +85,7 @@ async function init({ type, ticker, workspace, threadId, prompt, notify, mode, f
   const startTime    = Date.now();
 
   return new Promise((resolve, reject) => {
-    const model     = typeDef.model       || 'claude-sonnet-4-6';
+    const model     = typeDef.model       || 'claude-sonnet-5';
     const effort    = typeDef.effortLevel || 'medium';
     const maxBudget = typeDef.maxBudgetUsd ?? null;
 
@@ -207,7 +207,7 @@ async function init({ type, ticker, workspace, threadId, prompt, notify, mode, f
  * Batch API execution path — 50% cheaper, no tool calls, scheduled runs only.
  */
 async function _initBatch({ subagentId, type, ticker, workspace, threadId, prompt, notify, typeDef }) {
-  const model     = typeDef.model || 'claude-sonnet-4-6';
+  const model     = typeDef.model || 'claude-sonnet-5';
   const maxTokens = typeDef.maxTokens || 2000;
   const startTime = Date.now();
 

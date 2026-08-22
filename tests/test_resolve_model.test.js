@@ -108,7 +108,7 @@ test('flag-off resolves through real SUBAGENT_MODELS — mastermind gets 1M Opus
   _setConfigForTests({ subagentTypes: null, subagentModels: null });
   assert.equal(
     resolveModel('mastermind', 'comprehensive-review', 'memo_writer'),
-    'claude-opus-4-7[1m]'
+    'claude-opus-5[1m]'
   );
 });
 

@@ -12,7 +12,7 @@
 
 const { spawn } = require('child_process');
 
-const DEFAULT_MODEL = process.env.CURATOR_OPUS_MODEL || 'claude-opus-4-7[1m]';
+const DEFAULT_MODEL = process.env.CURATOR_OPUS_MODEL || 'claude-opus-5[1m]';
 const CLAUDE_BIN    = process.env.CLAUDE_BIN || '/usr/local/bin/claude-bin';
 
 /**

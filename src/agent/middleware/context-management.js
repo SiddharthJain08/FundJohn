@@ -31,7 +31,7 @@ function estimateMessagesTokens(messages) {
  */
 async function contextManagement(state, next) {
   const { messages, model, workspace, threadId, lastTokenCount } = state;
-  const contextLimit = getContextLimit(model || 'claude-sonnet-4-6');
+  const contextLimit = getContextLimit(model || 'claude-sonnet-5');
 
   // Use last known token count if available, else estimate
   const tokenCount = lastTokenCount || estimateMessagesTokens(messages);

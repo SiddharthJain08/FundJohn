@@ -24,7 +24,7 @@ const AGENTS = {
   botjohn: {
     displayName: '🦞 BotJohn',
     emoji:       '🦞',
-    model:       'claude-sonnet-4-6',
+    model:       'claude-sonnet-5',
     description: 'Portfolio Manager & Orchestrator',
     channelKeys: [
       'general', 'botjohn-log', 'ic-approvals',
@@ -40,20 +40,20 @@ const AGENTS = {
     ],
   },
   // ResearchDesk persona retired 2026-05-02. Replaced by mastermind below
-  // (Opus 4.7) which now owns both #research-feed and #strategy-memos.
+  // (Opus 5 since 2026-08-22; Opus 4.7 before) which now owns both #research-feed and #strategy-memos.
   // The on-demand /research diligence flow that ResearchDesk fronted has
   // also been removed — see commit history for the deletion sweep.
   mastermind: {
     displayName: '🧠 MastermindJohn',
     emoji:       '🧠',
-    model:       'claude-opus-4-7',
+    model:       'claude-opus-5',
     description: 'Research curator & strategy reviewer',
     channelKeys: ['research-feed', 'strategy-memos'],
   },
   tradedesk: {
     displayName: '📈 TradeDesk',
     emoji:       '📈',
-    model:       'claude-sonnet-4-6',
+    model:       'claude-sonnet-5',
     description: 'Trade Execution & Risk',
     channelKeys: ['trade-signals', 'trade-reports', 'position-recommendations'],
   },

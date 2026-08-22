@@ -46,11 +46,11 @@ Model wiring: `src/agent/config/models.js` + `src/agent/config/subagent-types.js
 
 | Agent | Model | Surface |
 |---|---|---|
-| BotJohn | claude-sonnet-4-6 | Orchestrator/PM — Discord bot, maintenance runs (`src/agent/run_maintenance.js`) |
-| TradeJohn | claude-sonnet-4-6 | Per-ticker confirmer inside `regime_blended_sizer_live.py` — approve/veto/scale, LOW_VOL/TRANSITIONING only, fail-open, budget-capped |
-| PaperHunter | claude-sonnet-4-6 | Per-paper extraction with 4 rejection gates (`src/agent/graphs/paperhunter.js` fan-out) |
-| StrategyCoder | claude-sonnet-4-6 | Strategy implementation + registration |
-| MastermindJohn | claude-opus-4-7 (1M) | Weekend research modes (`src/agent/curators/run_mastermind.js`), code review, interactive chat service |
+| BotJohn | claude-sonnet-5 | Orchestrator/PM — Discord bot, maintenance runs (`src/agent/run_maintenance.js`) |
+| TradeJohn | claude-sonnet-5 | Per-ticker confirmer inside `regime_blended_sizer_live.py` — approve/veto/scale, LOW_VOL/TRANSITIONING only, fail-open, budget-capped |
+| PaperHunter | claude-sonnet-5 | Per-paper extraction with 4 rejection gates (`src/agent/graphs/paperhunter.js` fan-out) |
+| StrategyCoder | claude-sonnet-5 | Strategy implementation + registration |
+| MastermindJohn | claude-opus-5 (1M) | Weekend research modes (`src/agent/curators/run_mastermind.js`), code review, interactive chat service |
 
 ResearchJohn was retired 2026-05-02 (`corpus-curator` remains an alias for
 mastermind). LLM spend is dollar-budgeted (`src/budget/`, Redis `budget:mode`

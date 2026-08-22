@@ -144,7 +144,7 @@ class MastermindCurator {
       const { rows } = await this._query(
         `INSERT INTO curator_runs (model, input_count, status)
          VALUES ($1, $2, 'running') RETURNING run_id`,
-        ['claude-opus-4-7', papers.length]
+        ['claude-opus-5', papers.length]
       );
       runId = rows[0].run_id;
       log(`curator_run ${runId.slice(0, 8)} started.`);

@@ -3,12 +3,12 @@
 const MODELS = {
   orchestrator: {
     provider: 'anthropic',
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     description: 'BotJohn — orchestrator, portfolio manager',
   },
   primary: {
     provider: 'anthropic',
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     description: 'Default — TradeJohn',
   },
   fast: {
@@ -18,12 +18,12 @@ const MODELS = {
   },
   opus1m: {
     provider: 'anthropic',
-    model: 'claude-opus-4-7[1m]',
-    description: 'Opus 4.7 (1M context) — corpus curation at scale.',
+    model: 'claude-opus-5[1m]',
+    description: 'Opus 5 (1M context) — corpus curation at scale. (Opus 4.7[1m] until 2026-08-22.)',
   },
   failover: {
     provider: 'anthropic',
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     description: 'Failover if primary unavailable',
   },
 };
@@ -42,7 +42,16 @@ const SUBAGENT_MODELS = {
 const FLASH_MODEL = MODELS.fast;
 
 // Context window limits per model
+// Claude 5 family (2026-08-22 upgrade): bare ids are treated as 200k for
+// compaction purposes (conservative — claude-bin's `[1m]` suffix is what
+// explicitly opts a session into the 1M window); the `[1m]` variants are 1M.
 const CONTEXT_LIMITS = {
+  'claude-fable-5':            200_000,
+  'claude-fable-5[1m]':        1_000_000,
+  'claude-opus-5':             200_000,
+  'claude-opus-5[1m]':         1_000_000,  // Mastermind / corpus-curator since 2026-08-22
+  'claude-sonnet-5':           200_000,
+  'claude-sonnet-5[1m]':       1_000_000,
   'claude-opus-4-6':           200_000,
   'claude-opus-4-7':           200_000,
   'claude-opus-4-7[1m]':       1_000_000,  // 1M context variant — used by Mastermind

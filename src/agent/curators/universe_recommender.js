@@ -448,7 +448,7 @@ async function run({ dryRun = false, strategyId = null, weekEnding = null,
     return { error: e.message, processed: 0 };
   }
   const promptTemplateSha256 = _templateSha(templateText);
-  const modelId = process.env.CURATOR_OPUS_MODEL || 'claude-opus-4-7[1m]';
+  const modelId = process.env.CURATOR_OPUS_MODEL || 'claude-opus-5[1m]';
 
   // Determine strategy list
   let strategies;

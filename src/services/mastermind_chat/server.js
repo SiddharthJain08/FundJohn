@@ -38,7 +38,7 @@ const BIND = process.env.MASTERMIND_CHAT_BIND || '127.0.0.1';
 const SESSION_CWD = process.env.MASTERMIND_CHAT_CWD
   || '/root/openclaw/workspaces/mastermind-chat';
 
-const MODEL = process.env.MASTERMIND_CHAT_MODEL || 'claude-opus-4-7[1m]';
+const MODEL = process.env.MASTERMIND_CHAT_MODEL || 'claude-opus-5[1m]';
 const MAX_BUDGET_USD = process.env.MASTERMIND_CHAT_MAX_BUDGET || '5.00';
 const CLAUDE_BIN = process.env.CLAUDE_BIN || '/usr/local/bin/claude-bin';
 const SNAPSHOT_PY = path.join(__dirname, 'snapshot.py');

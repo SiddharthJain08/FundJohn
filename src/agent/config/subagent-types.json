@@ -126,10 +126,10 @@
       "maxBudgetUsd": 8.0,
       "modes": ["RESEARCH", "STRATEGY_STACK"],
       "model_tiers": {
-        "judge":       "claude-opus-4-7[1m]",
-        "synthesizer": "claude-opus-4-7[1m]",
-        "debator":     "claude-sonnet-4-6",
-        "extractor":   "claude-sonnet-4-6"
+        "judge":       "claude-opus-5[1m]",
+        "synthesizer": "claude-opus-5[1m]",
+        "debator":     "claude-sonnet-5",
+        "extractor":   "claude-sonnet-5"
       },
       "model_modes": {
         "comprehensive-review": {
@@ -147,7 +147,7 @@
         }
       },
       "skills": ["fundjohn:obsidian-link"],
-      "description": "MastermindJohn — Opus 4.7 (1M ctx). Two modes: (1) corpus — judges research_corpus papers in batches of ~100 against pipeline gate criteria; (2) strategy-stack — weekly review of live+monitoring strategies, produces sizing memo + position recommendations."
+      "description": "MastermindJohn — Opus 5 (1M ctx; Opus 4.7 until 2026-08-22). Two modes: (1) corpus — judges research_corpus papers in batches of ~100 against pipeline gate criteria; (2) strategy-stack — weekly review of live+monitoring strategies, produces sizing memo + position recommendations."
     },
     "corpus-curator": {
       "promptFile": "src/agent/prompts/subagents/mastermind.md",

@@ -42,7 +42,7 @@ ${parsed.rule_comment}
 ${parsed.code.slice(0, 6000)}`;
 
 async function extractSpec(parsed, { runner = runOneShot } = {}) {
-  const out = await runner({ prompt: EXTRACTOR_PROMPT(parsed), model: 'claude-sonnet-4-6',
+  const out = await runner({ prompt: EXTRACTOR_PROMPT(parsed), model: 'claude-sonnet-5',
     allowedTools: [], disallowedTools: ['Write','Edit','Bash','WebSearch','WebFetch'], timeoutMs: 240000 });
   if (out.error) throw new Error(`extractor failed: ${out.error}`);
   const spec = parseJsonBlock(out.text) || {};

@@ -28,18 +28,28 @@ const SPEED_FILE   = path.join(SESSION_DIR, 'speed');
 
 // ── Token cost estimates (USD per million tokens) ──────────────────────────
 const TOKEN_COSTS = {
-  'claude-haiku-4-5-20251001': { input: 0.80,  output: 4.00  },
-  'claude-haiku-4-5':          { input: 0.80,  output: 4.00  },
+  // Claude 5 family (published list prices, 2026-08-22)
+  'claude-fable-5':            { input: 10.00, output: 50.00 },
+  'claude-opus-5':             { input: 5.00,  output: 25.00 },
+  'claude-opus-5[1m]':         { input: 5.00,  output: 25.00 },
+  'claude-sonnet-5':           { input: 2.00,  output: 10.00 },
+  'claude-sonnet-5[1m]':       { input: 2.00,  output: 10.00 },
+  'claude-haiku-4-5-20251001': { input: 1.00,  output: 5.00  },
+  'claude-haiku-4-5':          { input: 1.00,  output: 5.00  },
+  // Legacy
   'claude-sonnet-4-6':         { input: 3.00,  output: 15.00 },
   'claude-sonnet-4-5':         { input: 3.00,  output: 15.00 },
-  'claude-opus-4-6':           { input: 15.00, output: 75.00 },
-  'default':                   { input: 3.00,  output: 15.00 },
+  'claude-opus-4-7':           { input: 5.00,  output: 25.00 },
+  'claude-opus-4-6':           { input: 5.00,  output: 25.00 },
+  'default':                   { input: 2.00,  output: 10.00 },
 };
 
 // Rate limits (tokens per minute) — used for throttle delay calculations
 const RATE_LIMITS_TPM = {
   'claude-haiku-4-5-20251001': 200000,
   'claude-haiku-4-5':          200000,
+  'claude-sonnet-5':            40000,
+  'claude-opus-5':              40000,
   'claude-sonnet-4-6':          40000,
   'claude-sonnet-4-5':          40000,
   'default':                    40000,

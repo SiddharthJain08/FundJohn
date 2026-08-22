@@ -858,7 +858,7 @@ function runClaudeBin(prompt, { timeoutMs } = {}) {
       '--dangerously-skip-permissions',
       '-p', prompt,
       '--output-format', 'json',
-      '--model', 'claude-sonnet-4-6',
+      '--model', 'claude-sonnet-5',
       '--effort', 'high',
     ];
     const child = spawn(CLAUDE_BIN, args, {

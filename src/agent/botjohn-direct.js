@@ -74,7 +74,7 @@ function runClaudeBin(prompt, { cycleId } = {}) {
       '--dangerously-skip-permissions',
       '-p', prompt,
       '--output-format', 'json',
-      '--model', 'claude-sonnet-4-6',
+      '--model', 'claude-sonnet-5',
       '--effort', 'medium',
     ];
 
