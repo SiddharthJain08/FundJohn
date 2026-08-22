@@ -229,14 +229,28 @@ def _build_args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
+
+def _batched(per_symbol):
+    """Adapt a per-(symbol, year) fake to the batch API the driver now calls:
+    fetch_many_ticker_year(symbols, year) -> {symbol: DataFrame | Exception}."""
+    def _fake(symbols, year):
+        out = {}
+        for sym in symbols:
+            try:
+                out[sym] = per_symbol(sym, year)
+            except Exception as e:  # noqa: BLE001 — mirrors the real fallback contract
+                out[sym] = e
+        return out
+    return _fake
+
 def test_dry_run_writes_audit_no_master(pg_conn, redis_clean, tmp_path, monkeypatch):
     client, tid = redis_clean
     ticker = f'T{tid}'
     fake_master = tmp_path / 'prices.parquet'
     monkeypatch.setattr(bf, 'MASTER_PRICES', fake_master)
     monkeypatch.setattr(
-        'src.pipeline.backfillers.universe_prices.fetch_ticker_year',
-        lambda symbol, year: _make_valid_full_year_df(symbol=symbol, year=year),
+        'src.pipeline.backfillers.universe_prices.fetch_many_ticker_year',
+        _batched(lambda symbol, year: _make_valid_full_year_df(symbol=symbol, year=year)),
     )
 
     args = _build_args(tickers=ticker, years='2024', dry_run=True)
@@ -270,8 +284,8 @@ def test_promote_then_idempotent(pg_conn, redis_clean, tmp_path, monkeypatch):
     fake_master = tmp_path / 'prices.parquet'
     monkeypatch.setattr(bf, 'MASTER_PRICES', fake_master)
     monkeypatch.setattr(
-        'src.pipeline.backfillers.universe_prices.fetch_ticker_year',
-        lambda symbol, year: _make_valid_full_year_df(symbol=symbol, year=year),
+        'src.pipeline.backfillers.universe_prices.fetch_many_ticker_year',
+        _batched(lambda symbol, year: _make_valid_full_year_df(symbol=symbol, year=year)),
     )
 
     args = _build_args(tickers=ticker, years='2024', dry_run=False)
@@ -312,8 +326,8 @@ def test_bad_data_quarantines(pg_conn, redis_clean, tmp_path, monkeypatch):
         return df
 
     monkeypatch.setattr(
-        'src.pipeline.backfillers.universe_prices.fetch_ticker_year',
-        bad_fetch,
+        'src.pipeline.backfillers.universe_prices.fetch_many_ticker_year',
+        _batched(bad_fetch),
     )
 
     args = _build_args(tickers=ticker, years='2024', dry_run=False)
@@ -364,8 +378,8 @@ def test_overlap_refused_v1(pg_conn, redis_clean, tmp_path, monkeypatch):
 
     monkeypatch.setattr(bf, 'MASTER_PRICES', fake_master)
     monkeypatch.setattr(
-        'src.pipeline.backfillers.universe_prices.fetch_ticker_year',
-        lambda symbol, year: _make_valid_full_year_df(symbol=symbol, year=year),
+        'src.pipeline.backfillers.universe_prices.fetch_many_ticker_year',
+        _batched(lambda symbol, year: _make_valid_full_year_df(symbol=symbol, year=year)),
     )
 
     args = _build_args(tickers=ticker, years='2024', dry_run=False)
@@ -469,3 +483,87 @@ class TestApiSymbolDashToDot:
         monkeypatch.setattr(up.subprocess, 'run', fake_run)
         up.fetch_ticker_year('DELL', 2021)
         assert captured['symbol'] == 'DELL'
+
+
+# ── batch fetch (2026-08-22: multi-bars) ───────────────────────────────────
+
+def test_fetch_many_ticker_year_maps_multibars_to_schema_frames(monkeypatch):
+    from src.pipeline.backfillers import universe_prices as up
+    seen = {}
+    def fake_multi(symbols, start, end, **kw):
+        seen.update(symbols=list(symbols), start=start, end=end, kw=kw)
+        return {'AAPL': [{'t': '2024-01-02T05:00:00Z', 'o': 1, 'h': 2, 'l': 0.5, 'c': 1.5, 'v': 10, 'vw': 1.2, 'n': 3}],
+                'BRK.B': [], 'GHOST': []}
+    monkeypatch.setattr(up, 'fetch_multi_bars', fake_multi)
+    out = up.fetch_many_ticker_year(['AAPL', 'BRK-B', 'GHOST'], 2024)
+    assert seen['symbols'] == ['AAPL', 'BRK.B', 'GHOST']
+    assert seen['start'] == '2024-01-01' and seen['end'] == '2024-12-31'
+    assert seen['kw']['timeframe'] == '1Day' and seen['kw']['adjustment'] == 'split' and seen['kw']['bars_per_day'] == 1
+    assert set(out) == {'AAPL', 'BRK-B', 'GHOST'}
+    df = out['AAPL']
+    assert list(df.columns) == up.SCHEMA and len(df) == 1
+    assert df.iloc[0]['date'] == '2024-01-02' and df.iloc[0]['ticker'] == 'AAPL' and df.iloc[0]['close'] == 1.5
+    assert len(out['BRK-B']) == 0 and list(out['BRK-B'].columns) == up.SCHEMA
+    assert len(out['GHOST']) == 0
+
+
+def test_fetch_many_ticker_year_caps_current_year_at_yesterday(monkeypatch):
+    from src.pipeline.backfillers import universe_prices as up
+    from datetime import date, timedelta
+    seen = {}
+    monkeypatch.setattr(up, 'fetch_multi_bars', lambda symbols, start, end, **kw: seen.update(start=start, end=end) or {s: [] for s in symbols})
+    year = date.today().year
+    up.fetch_many_ticker_year(['AAPL'], year)
+    assert seen['start'] == f'{year}-01-01'
+    assert seen['end'] == min(f'{year}-12-31', (date.today() - timedelta(days=1)).isoformat())
+    assert up.fetch_many_ticker_year(['AAPL'], year + 1)['AAPL'].empty, 'future year → empty, no call'
+
+
+def test_fetch_many_ticker_year_falls_back_per_symbol_on_chunk_failure(monkeypatch):
+    from src.pipeline.backfillers import universe_prices as up
+    from src.pipeline.alpaca_multibars import MultiBarsError
+    def boom(symbols, start, end, **kw):
+        raise MultiBarsError('bad gateway', status=502)
+    monkeypatch.setattr(up, 'fetch_multi_bars', boom)
+    calls = []
+    def per_symbol(symbol, year):
+        calls.append(symbol)
+        if symbol == 'MSFT':
+            raise RuntimeError('alpaca bars rc=1 for MSFT/2024: still bad')
+        return _make_valid_full_year_df(symbol=symbol, year=year)
+    monkeypatch.setattr(up, 'fetch_ticker_year', per_symbol)
+    out = up.fetch_many_ticker_year(['AAPL', 'MSFT'], 2024)
+    assert calls == ['AAPL', 'MSFT']
+    assert len(out['AAPL']) == 252
+    assert isinstance(out['MSFT'], Exception) and 'still bad' in str(out['MSFT'])
+
+
+def test_fetch_many_ticker_year_routes_malformed_symbols_per_symbol(monkeypatch):
+    from src.pipeline.backfillers import universe_prices as up
+    seen = {}
+    monkeypatch.setattr(up, 'fetch_multi_bars', lambda symbols, start, end, **kw: seen.setdefault('symbols', list(symbols)) and {s: [] for s in symbols})
+    monkeypatch.setattr(up, 'fetch_ticker_year', lambda symbol, year: (_ for _ in ()).throw(RuntimeError(f'rc=1 invalid symbol: {symbol}')))
+    out = up.fetch_many_ticker_year(['AAPL', '^GSPC'], 2024)
+    assert seen['symbols'] == ['AAPL'], '^GSPC must never poison the batch'
+    assert isinstance(out['^GSPC'], Exception)
+
+
+def test_run_prices_batches_symbols_per_year(pg_conn, redis_clean, tmp_path, monkeypatch):
+    """Two tickers, one year → ONE fetch_many_ticker_year call (year-major batching)."""
+    client, tid = redis_clean
+    t1, t2 = f'B{tid}', f'C{tid}'
+    monkeypatch.setattr(bf, 'MASTER_PRICES', tmp_path / 'prices.parquet')
+    calls = []
+    def fake(symbols, year):
+        calls.append((list(symbols), year))
+        return {s: _make_valid_full_year_df(symbol=s, year=year) for s in symbols}
+    monkeypatch.setattr('src.pipeline.backfillers.universe_prices.fetch_many_ticker_year', fake)
+    args = _build_args(tickers=f'{t1},{t2}', years='2024', dry_run=True)
+    try:
+        bf._run_prices(args, pg_conn)
+        assert calls == [([t1, t2], 2024)]
+        with pg_conn.cursor() as cur:
+            cur.execute("SELECT chunk_key, status FROM backfill_audit WHERE chunk_key IN (%s, %s)", (f'{t1}:2024', f'{t2}:2024'))
+            assert sorted(cur.fetchall()) == [(f'{t1}:2024', 'validated'), (f'{t2}:2024', 'validated')]
+    finally:
+        _cleanup_audit_pg(pg_conn, t1); _cleanup_audit_pg(pg_conn, t2)

@@ -50,7 +50,7 @@ import subprocess
 logger = logging.getLogger(__name__)
 
 CLI = os.environ.get("ALPACA_CLI_BIN", "/root/go/bin/alpaca")
-_CHUNK = 50
+_CHUNK = 150  # 2026-08-22: 50 → 150 (matches collector.runIntradaySnapshotPrices); ~100 → ~35 calls on the 15:00 hot path
 _TIMEOUT = 40
 # Bound on invalid-symbol evictions per chunk before giving up on it.
 _MAX_INVALID_RETRIES = 8

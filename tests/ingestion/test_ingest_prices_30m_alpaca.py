@@ -1,4 +1,5 @@
 import pandas as pd
+from ingestion import ingest_prices_30m_alpaca as ing
 from ingestion.ingest_prices_30m_alpaca import _bars_to_df, _merge_append, COLUMNS
 
 def _bar(t, vw=100.0, h=101.0, l=99.0, o=100.0, c=100.5, v=1000, n=50):
@@ -38,3 +39,45 @@ def test_merge_append_never_shrinks_existing_tickers():
     assert set(existing['ticker']) <= set(merged['ticker'])   # no existing ticker dropped
     assert (merged['ticker'] == 'TSLA').sum() == 2            # TSLA rows intact
     assert len(merged) >= len(existing)
+
+
+# ── batched fetch (2026-08-22: one multi-bars request for the universe) ──────
+
+def test_fetch_many_uses_one_multibars_call_for_the_universe(monkeypatch):
+    seen = {}
+    def fake_multi(symbols, start, end, **kw):
+        seen.update(symbols=list(symbols), start=start, end=end, kw=kw)
+        return {'AAPL': [_bar('2026-05-28T13:30:00Z'), _bar('2026-05-28T14:00:00Z')], 'BRK.B': [_bar('2026-05-28T13:30:00Z')], 'GHOST': []}
+    monkeypatch.setattr(ing, 'fetch_multi_bars', fake_multi)
+    df = ing.fetch_many(['AAPL', 'BRK-B', 'GHOST'], '2026-05-27', '2026-05-28')
+    assert seen['symbols'] == ['AAPL', 'BRK.B', 'GHOST']
+    assert seen['kw']['timeframe'] == '30Min' and seen['kw']['adjustment'] == 'raw' and seen['kw']['bars_per_day'] == 13
+    assert list(df.columns) == COLUMNS
+    assert (df['ticker'] == 'AAPL').sum() == 2 and (df['ticker'] == 'BRK-B').sum() == 1, 'rows keyed by the universe ticker'
+    assert 'GHOST' not in set(df['ticker'])
+
+
+def test_fetch_many_skips_malformed_symbols_with_warning(monkeypatch, caplog):
+    monkeypatch.setattr(ing, 'fetch_multi_bars', lambda symbols, start, end, **kw: {s: [] for s in symbols})
+    df = ing.fetch_many(['AAPL', '^GSPC'], '2026-05-27', '2026-05-28')
+    assert len(df) == 0 and list(df.columns) == COLUMNS
+
+
+def test_fetch_ticker_is_a_thin_wrapper_over_fetch_many(monkeypatch):
+    monkeypatch.setattr(ing, 'fetch_many', lambda tickers, start, end: _bars_to_df([_bar('2026-05-28T13:30:00Z')], tickers[0]))
+    df = ing.fetch_ticker('ORCL', '2026-05-27', '2026-05-28')
+    assert len(df) == 1 and df.iloc[0]['ticker'] == 'ORCL'
+
+
+def test_backfill_fetches_the_universe_in_one_call(tmp_path, monkeypatch):
+    out = tmp_path / 'prices_30m.parquet'
+    existing = _bars_to_df([_bar('2026-05-27T13:30:00Z')], 'TSLA')
+    existing.to_parquet(out, index=False)
+    calls = []
+    def fake_many(tickers, start, end):
+        calls.append(list(tickers))
+        return pd.concat([_bars_to_df([_bar('2026-05-28T13:30:00Z')], t) for t in tickers], ignore_index=True)
+    monkeypatch.setattr(ing, 'fetch_many', fake_many)
+    before, after = ing.backfill(['TSLA', 'ORCL'], '2026-05-28', '2026-05-28', out_path=str(out))
+    assert calls == [['TSLA', 'ORCL']], 'one batched fetch, not one per ticker'
+    assert (before, after) == (1, 3)

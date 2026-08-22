@@ -17,11 +17,18 @@ import os
 import sys
 import time
 import argparse
+import logging
 import pandas as pd
-import requests
+import requests  # noqa: F401 — kept for callers that imported it from here
+
+try:  # src/ on sys.path (ingestion.*) …
+    from pipeline.alpaca_multibars import MultiBarsError, fetch_multi_bars, partition_symbols
+except ImportError:  # … or ROOT on sys.path
+    from src.pipeline.alpaca_multibars import MultiBarsError, fetch_multi_bars, partition_symbols
+
+logger = logging.getLogger(__name__)
 
 DATA_PARQUET = '/root/openclaw/data/master/prices_30m.parquet'
-_BARS_URL = 'https://data.alpaca.markets/v2/stocks/bars'
 COLUMNS = ['date', 'datetime', 'ticker', 'open', 'high', 'low', 'close', 'volume', 'vwap', 'transactions']
 _RENAME = {'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume', 'vw': 'vwap', 'n': 'transactions'}
 
@@ -71,25 +78,30 @@ def _merge_append(existing, new):
     return combined.sort_values(['ticker', 'datetime']).reset_index(drop=True)
 
 
+def fetch_many(tickers, start, end):
+    """Network: 30-minute bars for MANY tickers through `alpaca data multi-bars`
+    (2026-08-22 — was one direct-HTTP request per ticker, no retry). One request
+    covers ~200 symbols × 3 days; a --rebuild year chunks at ~2 symbols per
+    request (13 bars/day). Returns one _bars_to_df-shaped frame for all tickers,
+    keyed by the universe ticker (BRK-B), RTH-filtered. Malformed symbols
+    (index/futures/forex forms) are skipped with a warning. Raises
+    MultiBarsError on a chunk failure — the caller's run fails loudly, exactly
+    as raise_for_status() did."""
+    batchable, malformed = partition_symbols(tickers)
+    for t in malformed:
+        logger.warning('prices_30m: skipping non-stock symbol %s', t)
+    if not batchable:
+        return pd.DataFrame(columns=COLUMNS)
+    got = fetch_multi_bars(list(batchable.keys()), start, end,
+                           timeframe='30Min', adjustment='raw', bars_per_day=13)
+    frames = [_bars_to_df(got.get(api, []), ticker) for api, ticker in batchable.items()]
+    frames = [f for f in frames if len(f)]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=COLUMNS)
+
+
 def fetch_ticker(ticker, start, end):
-    """Network: paginated Alpaca v2 30-min bars for one ticker → _bars_to_df output."""
-    headers = {'APCA-API-KEY-ID': _env('ALPACA_API_KEY'),
-               'APCA-API-SECRET-KEY': _env('ALPACA_SECRET_KEY')}
-    all_bars, page_token = [], None
-    while True:
-        params = {'symbols': ticker, 'timeframe': '30Min', 'start': start, 'end': end,
-                  'feed': 'sip', 'limit': 10000, 'sort': 'asc'}
-        if page_token:
-            params['page_token'] = page_token
-        r = requests.get(_BARS_URL, headers=headers, params=params, timeout=30)
-        r.raise_for_status()
-        js = r.json()
-        all_bars.extend((js.get('bars') or {}).get(ticker, []))
-        page_token = js.get('next_page_token')
-        if not page_token:
-            break
-        time.sleep(0.2)
-    return _bars_to_df(all_bars, ticker)
+    """Single-ticker convenience wrapper over fetch_many (kept for callers/tests)."""
+    return fetch_many([ticker], start, end)
 
 
 def backfill(tickers, start, end, out_path=DATA_PARQUET):
@@ -99,12 +111,10 @@ def backfill(tickers, start, end, out_path=DATA_PARQUET):
     existing = pd.read_parquet(out_path) if os.path.exists(out_path) else pd.DataFrame(columns=COLUMNS)
     before = len(existing)
     before_tickers = set(existing['ticker'].dropna().unique()) if before else set()
-    frames = []
+    new = fetch_many(list(tickers), start, end)
+    counts = new.groupby('ticker').size() if len(new) else {}
     for t in tickers:
-        df = fetch_ticker(t, start, end)
-        print(f"  [{t}] {len(df)} RTH 30m bars", file=sys.stderr)
-        frames.append(df)
-    new = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=COLUMNS)
+        print(f"  [{t}] {int(counts.get(t, 0)) if len(new) else 0} RTH 30m bars", file=sys.stderr)
     merged = _merge_append(existing, new)
     after_tickers = set(merged['ticker'].dropna().unique())
     missing = before_tickers - after_tickers

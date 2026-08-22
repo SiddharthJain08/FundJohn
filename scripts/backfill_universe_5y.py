@@ -426,6 +426,132 @@ def _promote_chunk(
     return len(df)
 
 
+def _process_price_chunk(args, pg, rclient, up, symbol, year, df, counters):
+    """Audit/validate/overlap/promote ONE (symbol, year) chunk. `df` is the
+    fetched DataFrame or the Exception raised fetching it. Body unchanged from
+    the pre-batch per-(symbol, year) loop (2026-08-22) — only the fetch moved
+    out to the year-major batch in _run_prices."""
+    source_tag = args.source_tag
+    allow_overwrite = (os.environ.get('OPENCLAW_BACKFILL_ALLOW_OVERWRITE') == '1')
+    chunk_key = f'{symbol}:{year}'
+    redis_key = f'backfill:5y:prices:{chunk_key}'
+    audit_id = _audit_start(pg, 'prices', chunk_key, source_tag)
+    if isinstance(df, Exception):
+        err = f'fetch failed: {df}'
+        sys.stderr.write(f'  [error] {chunk_key}: {err}\n')
+        _audit_finish(pg, audit_id, status='failed', err=err)
+        _notify_discord(f'[backfill prices] FAILED {chunk_key}: {err}')
+        return
+
+    ok, err = up.validate(df, symbol, year)
+    if not ok:
+        sys.stderr.write(
+            f'  [quarantine] {chunk_key}: {err}\n'
+        )
+        _quarantine_chunk(
+            pg, 'prices.parquet', symbol, year, source_tag, err or 'unknown',
+        )
+        _audit_finish(pg, audit_id, status='quarantined', err=err)
+        rclient.set(redis_key, 'quarantined')
+        _notify_discord(
+            f'[backfill prices] QUARANTINED {chunk_key}: {err}'
+        )
+        counters['quarantined'] += 1
+        return
+
+    chunk_sha = up.sha256(df)
+
+    if args.dry_run:
+        print(f'[dry-run] {chunk_key}: {len(df)} rows valid')
+        _audit_finish(
+            pg, audit_id, status='validated',
+            rows=len(df), sha=chunk_sha,
+        )
+        return
+
+    # PROMOTE — overlap policy gate.
+    existing_dates = _existing_dates_for(MASTER_PRICES, symbol, year)
+    df_new = df[~df['date'].isin(existing_dates)]
+    had_overlap = (len(df_new) < len(df))
+
+    if had_overlap and source_tag == CANONICAL_SOURCE_TAG and not allow_overwrite:
+        reason = (
+            f'overlap with existing {len(df) - len(df_new)} rows '
+            f'under v1 source_tag; refusing to overwrite'
+        )
+        sys.stderr.write(f'  [quarantine] {chunk_key}: {reason}\n')
+        _quarantine_chunk(
+            pg, 'prices.parquet', symbol, year, source_tag, reason,
+        )
+        _audit_finish(pg, audit_id, status='quarantined', err=reason)
+        rclient.set(redis_key, 'quarantined')
+        _notify_discord(
+            f'[backfill prices] QUARANTINED {chunk_key}: {reason}'
+        )
+        counters['quarantined'] += 1
+        return
+
+    if df_new.empty and not (had_overlap and allow_overwrite):
+        # Already-promoted — Redis-status restore case. When the
+        # overwrite gate is ACTIVE, a fully-overlapping chunk must
+        # fall through to the replace branch below — this early-out
+        # used to fire first, so the supersede-recovery flow could
+        # never replace a chunk whose dates all already existed
+        # (2026-07-03 split-recovery bug: 'no new rows' on every
+        # UVIX chunk while the 20x discontinuity stayed in place).
+        print(f'  [{chunk_key}] no new rows; marking promoted')
+        _audit_finish(
+            pg, audit_id, status='promoted',
+            rows=0, sha=chunk_sha,
+        )
+        rclient.set(redis_key, 'promoted')
+        counters['promoted'] += 1
+        return
+
+    # If overlap was allowed (v2 + env gate), drop the overlapping rows
+    # from the existing master AND write df (which includes the
+    # corrected rows). Otherwise just append df_new.
+    if had_overlap and allow_overwrite:
+        import pandas as pd
+        existing_full = pd.read_parquet(MASTER_PRICES)
+        year_start = f'{year}-01-01'
+        year_end = f'{year}-12-31'
+        drop_mask = (
+            (existing_full['ticker'] == symbol)
+            & (existing_full['date'] >= year_start)
+            & (existing_full['date'] <= year_end)
+            & (existing_full['date'].isin(df['date']))
+        )
+        kept = existing_full[~drop_mask]
+        df_stamped = df.copy()
+        df_stamped['source'] = source_tag
+        # Match dtype of volume to existing
+        if 'volume' in kept.columns and 'volume' in df_stamped.columns:
+            try:
+                df_stamped['volume'] = df_stamped['volume'].astype(
+                    kept['volume'].dtype
+                )
+            except Exception:
+                pass
+        merged = pd.concat([kept, df_stamped], ignore_index=True)
+        MASTER_PRICES.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_to_parquet(merged, MASTER_PRICES)
+        rows_written = len(df_stamped)
+    else:
+        rows_written = _promote_chunk(
+            df_new, symbol, year, source_tag, MASTER_PRICES,
+        )
+
+    _audit_finish(
+        pg, audit_id, status='promoted',
+        rows=rows_written, sha=chunk_sha,
+    )
+    rclient.set(redis_key, 'promoted')
+    _invalidate_cache('prices.parquet')
+    print(f'  [{chunk_key}] promoted {rows_written} rows')
+    counters['promoted'] += 1
+
+
 def _run_prices(args: argparse.Namespace, pg) -> None:
     """Daily-bar 5y backfill — stage→validate→promote per (ticker, year) chunk.
 
@@ -456,16 +582,20 @@ def _run_prices(args: argparse.Namespace, pg) -> None:
         f'source_tag={source_tag} dry_run={args.dry_run}'
     )
 
-    promoted_total = 0
-    quarantined_total = 0
+    counters = {'promoted': 0, 'quarantined': 0}
     skipped_total = 0
 
-    for symbol in universe:
-        for year in years:
+    # 2026-08-22: year-major batches — one `alpaca data multi-bars` request
+    # per ~31 symbols instead of one CLI process per (symbol, year). Eligibility
+    # (Redis promoted/quarantined state) is unchanged; only the fetch is batched.
+    # Bounded batch so a 5 000-ticker run never holds more than ~200 year-frames.
+    BATCH = 200
+    for year in years:
+        eligible = []
+        for symbol in universe:
             chunk_key = f'{symbol}:{year}'
             redis_key = f'backfill:5y:prices:{chunk_key}'
             current_status = rclient.get(redis_key)
-
             if args.resume and current_status == 'promoted':
                 skipped_total += 1
                 continue
@@ -475,124 +605,15 @@ def _run_prices(args: argparse.Namespace, pg) -> None:
             ):
                 skipped_total += 1
                 continue
-
-            audit_id = _audit_start(pg, 'prices', chunk_key, source_tag)
-            try:
-                df = up.fetch_ticker_year(symbol, year)
-            except Exception as e:
-                err = f'fetch failed: {e}'
-                sys.stderr.write(f'  [error] {chunk_key}: {err}\n')
-                _audit_finish(pg, audit_id, status='failed', err=err)
-                _notify_discord(f'[backfill prices] FAILED {chunk_key}: {err}')
-                continue
-
-            ok, err = up.validate(df, symbol, year)
-            if not ok:
-                sys.stderr.write(
-                    f'  [quarantine] {chunk_key}: {err}\n'
-                )
-                _quarantine_chunk(
-                    pg, 'prices.parquet', symbol, year, source_tag, err or 'unknown',
-                )
-                _audit_finish(pg, audit_id, status='quarantined', err=err)
-                rclient.set(redis_key, 'quarantined')
-                _notify_discord(
-                    f'[backfill prices] QUARANTINED {chunk_key}: {err}'
-                )
-                quarantined_total += 1
-                continue
-
-            chunk_sha = up.sha256(df)
-
-            if args.dry_run:
-                print(f'[dry-run] {chunk_key}: {len(df)} rows valid')
-                _audit_finish(
-                    pg, audit_id, status='validated',
-                    rows=len(df), sha=chunk_sha,
-                )
-                continue
-
-            # PROMOTE — overlap policy gate.
-            existing_dates = _existing_dates_for(MASTER_PRICES, symbol, year)
-            df_new = df[~df['date'].isin(existing_dates)]
-            had_overlap = (len(df_new) < len(df))
-
-            if had_overlap and source_tag == CANONICAL_SOURCE_TAG and not allow_overwrite:
-                reason = (
-                    f'overlap with existing {len(df) - len(df_new)} rows '
-                    f'under v1 source_tag; refusing to overwrite'
-                )
-                sys.stderr.write(f'  [quarantine] {chunk_key}: {reason}\n')
-                _quarantine_chunk(
-                    pg, 'prices.parquet', symbol, year, source_tag, reason,
-                )
-                _audit_finish(pg, audit_id, status='quarantined', err=reason)
-                rclient.set(redis_key, 'quarantined')
-                _notify_discord(
-                    f'[backfill prices] QUARANTINED {chunk_key}: {reason}'
-                )
-                quarantined_total += 1
-                continue
-
-            if df_new.empty and not (had_overlap and allow_overwrite):
-                # Already-promoted — Redis-status restore case. When the
-                # overwrite gate is ACTIVE, a fully-overlapping chunk must
-                # fall through to the replace branch below — this early-out
-                # used to fire first, so the supersede-recovery flow could
-                # never replace a chunk whose dates all already existed
-                # (2026-07-03 split-recovery bug: 'no new rows' on every
-                # UVIX chunk while the 20x discontinuity stayed in place).
-                print(f'  [{chunk_key}] no new rows; marking promoted')
-                _audit_finish(
-                    pg, audit_id, status='promoted',
-                    rows=0, sha=chunk_sha,
-                )
-                rclient.set(redis_key, 'promoted')
-                promoted_total += 1
-                continue
-
-            # If overlap was allowed (v2 + env gate), drop the overlapping rows
-            # from the existing master AND write df (which includes the
-            # corrected rows). Otherwise just append df_new.
-            if had_overlap and allow_overwrite:
-                import pandas as pd
-                existing_full = pd.read_parquet(MASTER_PRICES)
-                year_start = f'{year}-01-01'
-                year_end = f'{year}-12-31'
-                drop_mask = (
-                    (existing_full['ticker'] == symbol)
-                    & (existing_full['date'] >= year_start)
-                    & (existing_full['date'] <= year_end)
-                    & (existing_full['date'].isin(df['date']))
-                )
-                kept = existing_full[~drop_mask]
-                df_stamped = df.copy()
-                df_stamped['source'] = source_tag
-                # Match dtype of volume to existing
-                if 'volume' in kept.columns and 'volume' in df_stamped.columns:
-                    try:
-                        df_stamped['volume'] = df_stamped['volume'].astype(
-                            kept['volume'].dtype
-                        )
-                    except Exception:
-                        pass
-                merged = pd.concat([kept, df_stamped], ignore_index=True)
-                MASTER_PRICES.parent.mkdir(parents=True, exist_ok=True)
-                _atomic_to_parquet(merged, MASTER_PRICES)
-                rows_written = len(df_stamped)
-            else:
-                rows_written = _promote_chunk(
-                    df_new, symbol, year, source_tag, MASTER_PRICES,
-                )
-
-            _audit_finish(
-                pg, audit_id, status='promoted',
-                rows=rows_written, sha=chunk_sha,
-            )
-            rclient.set(redis_key, 'promoted')
-            _invalidate_cache('prices.parquet')
-            print(f'  [{chunk_key}] promoted {rows_written} rows')
-            promoted_total += 1
+            eligible.append(symbol)
+        for i in range(0, len(eligible), BATCH):
+            batch = eligible[i:i + BATCH]
+            results = up.fetch_many_ticker_year(batch, year)
+            for symbol in batch:
+                df = results.get(symbol, RuntimeError('no result returned for symbol'))
+                _process_price_chunk(args, pg, rclient, up, symbol, year, df, counters)
+    promoted_total = counters['promoted']
+    quarantined_total = counters['quarantined']
 
     print(
         f'[prices] DONE promoted={promoted_total} '

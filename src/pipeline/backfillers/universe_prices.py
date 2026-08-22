@@ -35,9 +35,14 @@ import json
 import os
 import subprocess
 from datetime import date
-from typing import Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple, Union
 
 import pandas as pd
+
+try:  # imported as src.pipeline.backfillers.universe_prices (ROOT on sys.path) …
+    from src.pipeline.alpaca_multibars import MultiBarsError, fetch_multi_bars, partition_symbols
+except ImportError:  # … or with src/ on sys.path
+    from pipeline.alpaca_multibars import MultiBarsError, fetch_multi_bars, partition_symbols
 
 
 ALPACA_BIN = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
@@ -135,6 +140,67 @@ def fetch_ticker_year(symbol: str, year: int) -> pd.DataFrame:
         return pd.DataFrame(columns=SCHEMA)
     df = pd.DataFrame(rows, columns=SCHEMA)
     return df
+
+
+def _year_window(year: int) -> Tuple[str, str]:
+    """[Jan 1, min(Dec 31, YESTERDAY utc)] — same in-progress-bar guard as
+    fetch_ticker_year (SP-7 hardening 2026-06-04)."""
+    from datetime import date as _date, timedelta as _timedelta
+    yesterday = (_date.today() - _timedelta(days=1)).isoformat()
+    return f'{year}-01-01', min(f'{year}-12-31', yesterday)
+
+
+def _bars_to_frame(symbol: str, bars: list) -> pd.DataFrame:
+    rows = [{
+        'ticker': symbol,
+        'date': (b.get('t') or '')[:10],
+        'open': b.get('o'), 'high': b.get('h'), 'low': b.get('l'), 'close': b.get('c'),
+        'volume': b.get('v'), 'vwap': b.get('vw'), 'transactions': b.get('n'),
+        'source': None,
+    } for b in (bars or [])]
+    return pd.DataFrame(rows, columns=SCHEMA) if rows else pd.DataFrame(columns=SCHEMA)
+
+
+def fetch_many_ticker_year(symbols: Iterable[str], year: int) -> Dict[str, Union[pd.DataFrame, Exception]]:
+    """Batched twin of fetch_ticker_year (2026-08-22): one `alpaca data
+    multi-bars` request per ~31 symbols (a full daily year ≈ 8000 points)
+    instead of one CLI process per (symbol, year).
+
+    Returns {symbol: DataFrame | Exception} for EVERY requested symbol so the
+    driver keeps its per-(symbol, year) audit/validate/promote flow:
+      - DataFrame (possibly empty → validate() quarantines, as before)
+      - Exception when the symbol could not be fetched ("fetch failed" row)
+    Malformed symbols (index/futures/forex forms) and any chunk that fails for
+    a non-symbol reason fall back to fetch_ticker_year per symbol.
+    """
+    symbols = list(symbols)
+    out: Dict[str, Union[pd.DataFrame, Exception]] = {}
+    start, end = _year_window(year)
+    if start > end:
+        return {s: pd.DataFrame(columns=SCHEMA) for s in symbols}
+
+    batchable, malformed = partition_symbols(symbols)   # api → universe symbol
+
+    def _per_symbol(sym: str) -> None:
+        try:
+            out[sym] = fetch_ticker_year(sym, year)
+        except Exception as e:  # noqa: BLE001 — surfaced per chunk_key by the driver
+            out[sym] = e
+
+    if batchable:
+        try:
+            got = fetch_multi_bars(list(batchable.keys()), start, end,
+                                   timeframe='1Day', adjustment='split', bars_per_day=1)
+            for api, sym in batchable.items():
+                out[sym] = _bars_to_frame(sym, got.get(api, []))
+        except MultiBarsError as e:
+            import sys as _sys
+            _sys.stderr.write(f'  [warn] multi-bars {year} chunk failed ({e}); falling back per symbol\n')
+            for sym in batchable.values():
+                _per_symbol(sym)
+    for sym in malformed:
+        _per_symbol(sym)
+    return out
 
 
 def validate(df: pd.DataFrame, symbol: str, year: int) -> Tuple[bool, Optional[str]]:
