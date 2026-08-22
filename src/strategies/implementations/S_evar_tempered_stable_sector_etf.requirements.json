@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_evar_tempered_stable_sector_etf",
+  "required": ["prices"],
+  "optional": []
+}

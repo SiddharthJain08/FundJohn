@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-08-15T18:52:32.498Z",
+  "updated_at": "2026-08-22T22:52:30.791Z",
   "strategies": {
     "S_transitioning_overbought_revert": {
       "state": "deprecated",
@@ -2069,8 +2069,8 @@
       "instrument_class": "equity"
     },
     "S_ivol_mispricing_asymmetry": {
-      "state": "live",
-      "state_since": "2026-07-13T12:52:57.492Z",
+      "state": "candidate",
+      "state_since": "2026-08-15T18:59:39.704129+00:00",
       "metadata": {
         "canonical_file": "s_ivol_mispricing_asymmetry.py",
         "class": "IvolMispricingAsymmetry",
@@ -2155,13 +2155,21 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.704129+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
     },
     "S_conditional_coskewness_factor": {
-      "state": "live",
-      "state_since": "2026-07-13T12:52:55.793Z",
+      "state": "candidate",
+      "state_since": "2026-08-15T18:59:39.722660+00:00",
       "metadata": {
         "canonical_file": "S_conditional_coskewness_factor.py",
         "class": "ConditionalCoskewnessFactor",
@@ -2187,6 +2195,14 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.722660+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -2228,12 +2244,15 @@
     },
     "S_sparse_cca_mean_revert": {
       "state": "live",
-      "state_since": "2026-07-13T03:47:55.899Z",
+      "state_since": "2026-08-22T22:27:23.148Z",
       "metadata": {
         "canonical_file": "S_sparse_cca_mean_revert.py",
         "class": "SparseCCAMeanRevert",
         "description": "Sparse portfolios formed by maximizing mean reversion via sparse CCA exhibit negative autocorrelation; trade long/short on spread z-score.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
+        "eligible_regimes": [
+          "LOW_VOL"
+        ]
       },
       "history": [
         {
@@ -2247,6 +2266,28 @@
             "eligible_regimes_after": [
               "LOW_VOL"
             ]
+          }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.743435+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-08-22T22:27:23.148Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": null,
+            "eligible_regimes_after": [
+              "LOW_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
           }
         }
       ],
@@ -2424,8 +2465,8 @@
       "instrument_class": "equity"
     },
     "S_expected_idiosyncratic_skewness": {
-      "state": "live",
-      "state_since": "2026-07-13T12:52:56.608Z",
+      "state": "candidate",
+      "state_since": "2026-08-15T18:59:39.757892+00:00",
       "metadata": {
         "canonical_file": "S_expected_idiosyncratic_skewness.py",
         "class": "ExpectedIdiosyncraticSkewness",
@@ -2449,6 +2490,14 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.757892+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -2575,8 +2624,8 @@
       "instrument_class": "equity"
     },
     "S_bayes_stein_shrinkage_mvo": {
-      "state": "live",
-      "state_since": "2026-07-13T12:52:55.221Z",
+      "state": "candidate",
+      "state_since": "2026-08-15T18:59:39.771741+00:00",
       "metadata": {
         "canonical_file": "S_bayes_stein_shrinkage_mvo.py",
         "class": "BayesSteinShrinkageMVO",
@@ -2600,13 +2649,21 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.771741+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
     },
     "S_empirical_bayes_shrinkage_mv": {
-      "state": "live",
-      "state_since": "2026-07-13T12:52:55.954Z",
+      "state": "candidate",
+      "state_since": "2026-08-15T18:59:39.785429+00:00",
       "metadata": {
         "canonical_file": "S_empirical_bayes_shrinkage_mv.py",
         "class": "EmpiricalBayesShrinkageMV",
@@ -2630,13 +2687,21 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.785429+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
     },
     "S_mvgarch_nig_crra_portfolio": {
-      "state": "live",
-      "state_since": "2026-07-13T12:52:57.589Z",
+      "state": "candidate",
+      "state_since": "2026-08-15T18:59:39.798361+00:00",
       "metadata": {
         "canonical_file": "S_mvgarch_nig_crra_portfolio.py",
         "class": "MvGarchNigCrraPortfolio",
@@ -2660,6 +2725,14 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.798361+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -3280,13 +3353,14 @@
     },
     "S_investor_attention_market_timing": {
       "state": "live",
-      "state_since": "2026-07-13T12:52:56.776Z",
+      "state_since": "2026-08-22T22:27:23.097Z",
       "metadata": {
         "canonical_file": "S_investor_attention_market_timing.py",
         "class": "InvestorAttentionMarketTiming",
         "description": "A PLS-composite investor attention index built from price/volume/volatility proxies predicts the equity risk premium in- and out-of-sample by capturing the reversal of temporary attention-driven price pressure, especially in high-variance stocks.",
         "eligible_regimes": [
-          "LOW_VOL"
+          "LOW_VOL",
+          "TRANSITIONING"
         ],
         "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
@@ -3340,6 +3414,31 @@
             "eligible_regimes_before": null,
             "eligible_regimes_after": [
               "LOW_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.813617+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-08-22T22:27:23.097Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "TRANSITIONING"
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
@@ -3442,13 +3541,12 @@
     },
     "S_ast_trend_following_effect_in_stocks": {
       "state": "live",
-      "state_since": "2026-07-13T20:51:56.749Z",
+      "state_since": "2026-08-22T22:27:22.963Z",
       "metadata": {
         "canonical_file": "S_ast_trend_following_effect_in_stocks.py",
         "class": "AstTrendFollowingEffectInStocks",
         "description": "Stocks hitting all-time-high closes exhibit momentum continuation; enter on ATH breakout and trail a 10-period ATR stop to ride the trend.",
         "eligible_regimes": [
-          "HIGH_VOL",
           "CRISIS"
         ],
         "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
@@ -3467,6 +3565,31 @@
             ],
             "eligible_regimes_after": [
               "HIGH_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.829255+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-08-22T22:27:22.963Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "HIGH_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
               "CRISIS"
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
@@ -4205,8 +4328,8 @@
       "instrument_class": "etp"
     },
     "S_ast_rebalancing_premium_in_cryptocurrencies": {
-      "state": "live",
-      "state_since": "2026-07-13T12:52:55.118Z",
+      "state": "candidate",
+      "state_since": "2026-08-15T18:59:39.844666+00:00",
       "metadata": {
         "canonical_file": "S_ast_rebalancing_premium_in_cryptocurrencies.py",
         "class": "RebalancingPremiumInCryptocurrencies",
@@ -4233,6 +4356,14 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.844666+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
         }
       ],
       "instrument_class": "crypto"
@@ -4698,8 +4829,8 @@
       "instrument_class": "equity"
     },
     "S_ast_momentum_factor_effect_in_stocks": {
-      "state": "live",
-      "state_since": "2026-07-13T03:48:58.609Z",
+      "state": "candidate",
+      "state_since": "2026-08-15T18:59:39.856816+00:00",
       "metadata": {
         "canonical_file": "S_ast_momentum_factor_effect_in_stocks.py",
         "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
@@ -4719,13 +4850,21 @@
               "CRISIS"
             ]
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.856816+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
     },
     "S_ast_momentum_and_reversal_combined_with_volatility_effect_in_stocks": {
-      "state": "live",
-      "state_since": "2026-07-13T12:52:54.983Z",
+      "state": "candidate",
+      "state_since": "2026-08-15T18:59:39.872980+00:00",
       "metadata": {
         "canonical_file": "S_ast_momentum_and_reversal_combined_with_volatility_effect_in_stocks.py",
         "class": "AstMomentumAndReversalCombinedWithVolatilityEffectInStocks",
@@ -4751,6 +4890,14 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.872980+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -4891,8 +5038,8 @@
       "instrument_class": "equity"
     },
     "S_vwap_closing_pressure": {
-      "state": "live",
-      "state_since": "2026-07-13T12:52:59.090Z",
+      "state": "candidate",
+      "state_since": "2026-08-15T18:59:39.889354+00:00",
       "metadata": {
         "canonical_file": "S_vwap_closing_pressure.py",
         "class": "VwapClosingPressure",
@@ -4920,6 +5067,14 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.889354+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -5098,8 +5253,8 @@
       "instrument_class": "equity"
     },
     "S_pre_earnings_vol_runup": {
-      "state": "live",
-      "state_since": "2026-07-13T03:10:39.384Z",
+      "state": "candidate",
+      "state_since": "2026-08-15T18:59:39.908510+00:00",
       "metadata": {
         "canonical_file": "S_pre_earnings_vol_runup.py",
         "class": "PreEarningsVolRunup",
@@ -5124,6 +5279,14 @@
               "LOW_VOL"
             ]
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.908510+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -5201,8 +5364,8 @@
       "instrument_class": "equity"
     },
     "S_factor_momentum_rotation": {
-      "state": "live",
-      "state_since": "2026-07-13T12:52:56.638Z",
+      "state": "candidate",
+      "state_since": "2026-08-15T18:59:39.926192+00:00",
       "metadata": {
         "canonical_file": "S_factor_momentum_rotation.py",
         "class": "FactorMomentumRotation",
@@ -5233,6 +5396,14 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:39.926192+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -5878,17 +6049,6 @@
       ],
       "instrument_class": "etp"
     },
-    "S_spectral_trend_ewma_vol_target": {
-      "state": "candidate",
-      "state_since": "2026-07-26T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_spectral_trend_ewma_vol_target.py",
-        "class": "SpectralTrendEWMAVolTarget",
-        "description": "Vol-normalized EWMA trend signal with vol-targeted position sizing (Sepp & Lucic 2026)"
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
     "S_robust_min_variance_hedge": {
       "state": "live",
       "state_since": "2026-08-01T18:37:30.635Z",
@@ -6151,12 +6311,14 @@
       "instrument_class": "equity"
     },
     "S_lstm_sector_embedding_reversal_momentum": {
-      "state": "staging",
-      "state_since": "2026-08-09T00:08:47.073Z",
+      "state": "candidate",
+      "state_since": "2026-08-22T22:46:18.278284+00:00",
       "metadata": {
         "canonical_file": "S_lstm_sector_embedding_reversal_momentum.py",
         "class": "LSTMSectorEmbeddingReversalMomentum",
-        "description": "Sector-aware LSTM with learnable embeddings and macro-financial covariates exploits cross-sectional heterogeneity — combining short-term reversal (60-day lagged returns) with industry momentum (sector embedding Δc correlated with realized median sector return) — to predict daily "
+        "description": "Sector-aware LSTM with learnable embeddings and macro-financial covariates exploits cross-sectional heterogeneity — combining short-term reversal (60-day lagged returns) with industry momentum (sector embedding Δc correlated with realized median sector return) — to predict daily ",
+        "universe_filter_ref": "src.strategies.universe_default:sp500",
+        "universe_filter_source": "paperhunter_inferred"
       },
       "history": [
         {
@@ -6189,17 +6351,32 @@
             },
             "candidate_id": "eac8eb40-34c8-4db0-94f3-f9d79b6fee30"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-08-22T22:46:18.278284+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe -3.54, DD 98.6%, trades 83943",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
     },
     "S_vol_indicators_sp500_drawdown_timing": {
-      "state": "staging",
-      "state_since": "2026-08-09T00:08:47.073Z",
+      "state": "live",
+      "state_since": "2026-08-15T18:59:38.275Z",
       "metadata": {
         "canonical_file": "S_vol_indicators_sp500_drawdown_timing.py",
         "class": "VolIndicatorsSP500DrawdownTiming",
-        "description": "Two volatility indicators—one validated for forecasting realized volatility and one for timing VX futures—carry incremental predictive information about future S&P 500 drawdowns, enabling a tactical long/flat allocation that sidesteps the worst equity declines."
+        "description": "Two volatility indicators—one validated for forecasting realized volatility and one for timing VX futures—carry incremental predictive information about future S&P 500 drawdowns, enabling a tactical long/flat allocation that sidesteps the worst equity declines.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL"
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
+        "universe_filter_source": "fused_approval_default"
       },
       "history": [
         {
@@ -6229,6 +6406,34 @@
               ]
             },
             "candidate_id": "be4c485a-634c-4e6b-a3be-7cb14cf58123"
+          }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-08-15T18:59:35.160130+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 0.77, DD 18.1%, trades 1655",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-08-15T18:59:38.275Z",
+          "actor": "system:auto-promotion",
+          "reason": "auto-promotion after fused staging approval (per-regime qualification gate)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING",
+              "HIGH_VOL"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "TRANSITIONING",
+              "HIGH_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
           }
         }
       ],
@@ -6287,6 +6492,124 @@
         }
       ],
       "instrument_class": "equity"
+    },
+    "S_btc_halving_clock_cycle_timing": {
+      "state": "live",
+      "state_since": "2026-08-22T22:27:23.019Z",
+      "metadata": {
+        "canonical_file": "S_btc_halving_clock_cycle_timing.py",
+        "class": "BtcHalvingClockCycleTiming",
+        "description": "Calendar LONG/FLAT on BTC-USD anchored to halving epochs; top-cluster p~5e-6 across 4 epochs (Molnar 2026).",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "HIGH_VOL"
+        ]
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-08-22T22:27:23.019Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING",
+              "HIGH_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "HIGH_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        }
+      ],
+      "instrument_class": "crypto"
+    },
+    "S_evar_tempered_stable_sector_etf": {
+      "state": "live",
+      "state_since": "2026-08-22T22:27:23.061Z",
+      "metadata": {
+        "canonical_file": "S_evar_tempered_stable_sector_etf.py",
+        "class": "EvarTemperedStableSectorEtf",
+        "description": "Monthly minimum-EVaR long-only allocation across 11 US sector SPDRs; empirical Chernoff-bound EVaR objective proxies the tempered-stable Levy MGF from Choi 2026.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-08-22T22:27:23.061Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING",
+              "HIGH_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "TRANSITIONING",
+              "HIGH_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "S_inflation_compass_sector_rotation": {
+      "state": "staging",
+      "state_since": "2026-08-22T22:27:22.820Z",
+      "metadata": {
+        "canonical_file": "S_inflation_compass_sector_rotation.py",
+        "class": "InflationCompassSectorRotation",
+        "description": "Monthly sector-ETF rotation (XLE/XLK/XLU/IEF) driven by a dual growth-inflation compass — SP500 trend vs SMA(200) for the growth axis and a sector-implied cyclical/defensive spread for the inflation axis (T5YIE not in macro.parquet; strategy is self-sufficient on prices only)"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-08-22T22:27:22.820Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-01-04→2026-08-21, providers polygon/yahoo/alpha_vantage)",
+                "macro: reachable but not backfilled (providers yfinance)",
+                "returns: backfilled (2016-01-04→2026-08-21, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "macro"
+              ],
+              "provider_route": [
+                {
+                  "provider": "yfinance",
+                  "column": "macro",
+                  "data_type": "macro",
+                  "gap_from": "2025-04-05",
+                  "gap_to": "2026-08-22"
+                }
+              ]
+            },
+            "candidate_id": "37eb3499-7a6d-4043-922e-71fbe911a65f"
+          }
+        }
+      ],
+      "instrument_class": "etp"
     }
   },
   "decommissioned": {

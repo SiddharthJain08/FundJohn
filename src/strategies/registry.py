@@ -366,6 +366,12 @@ _IMPL_MAP = {
     'S_lstm_sector_embedding_sp500': ('strategies.implementations.S_lstm_sector_embedding_sp500', 'LSTMSectorEmbeddingSP500'),
     # QuantSeeker 2026: HAR-RV + VIX timing composite predicts S&P 500 drawdowns → LONG/FLAT SPY
     'S_vol_indicators_sp500_drawdown_timing': ('strategies.implementations.S_vol_indicators_sp500_drawdown_timing', 'VolIndicatorsSP500DrawdownTiming'),
+    # Molnar 2026: halving-clock cycle timing — calendar LONG/FLAT on BTC-USD (top-cluster p~5e-6)
+    'S_btc_halving_clock_cycle_timing': ('strategies.implementations.S_btc_halving_clock_cycle_timing', 'BtcHalvingClockCycleTiming'),
+    # Choi 2026: minimum-EVaR long-only monthly rotation across 11 US sector SPDR ETFs
+    'S_evar_tempered_stable_sector_etf': ('strategies.implementations.S_evar_tempered_stable_sector_etf', 'EvarTemperedStableSectorEtf'),
+    # Varadi / Allocate Smartly 2026: monthly growth x inflation macro-quadrant sector rotation (XLE/XLK/XLU/IEF)
+    'S_inflation_compass_sector_rotation': ('strategies.implementations.S_inflation_compass_sector_rotation', 'InflationCompassSectorRotation'),
 }
 
 
