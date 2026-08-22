@@ -654,6 +654,16 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
   // SP-1: equity OHLCV source is Alpaca P1 (yfinance removed; Task 15 wires the bars API)
   const usePolygonOHLCV = false;
 
+  // 2026-08-22: the daily fill is batched through `alpaca data multi-bars`
+  // (one request per ~200 tickers sharing a gap range) instead of one CLI
+  // process per ticker (~5 180 × ~65 ms of pure TLS/process overhead ≈ 6 min
+  // per day). OPENCLAW_PRICES_MULTI_BARS=0 restores the per-ticker loop below
+  // verbatim. Both paths share gap detection, per-ticker logRun/coverage
+  // semantics and the 1000-ticker mid-flush.
+  const useMultiBars = process.env.OPENCLAW_PRICES_MULTI_BARS !== '0';
+  if (useMultiBars) {
+    ({ skipped, totalCalls } = await _runHistoricalPricesBatched(tickers, fromDate, toDate));
+  } else {
   for (let i = 0; i < tickers.length; i++) {
     const ticker = tickers[i];
     if (_paused) { notify('⏸️ Paused — waiting...'); while (_paused) await sleep(1000); }
@@ -709,6 +719,7 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
       }
     }
   }
+  } // end per-ticker path (OPENCLAW_PRICES_MULTI_BARS=0)
 
   // Final flush — picks up any rows written since the last mid-flush.
   try {
@@ -807,6 +818,230 @@ async function fillPricesAlpaca(ticker, fromDate, toDate) {
   }
 
   return written;
+}
+
+// ── Batched equity price fill — `alpaca data multi-bars` (2026-08-22) ─────────
+// Live contract of the endpoint (probed on the CLI, see
+// docs/reference/alpaca-cli-integration.md §5/§8):
+//   * well-formed symbols Alpaca doesn't know are silently ABSENT from `bars`
+//     (rc=0) — that ticker simply gets 0 rows, exactly like the per-ticker
+//     "null bars" case, and coverage stays honest (flushPrices derives it
+//     from durable rows);
+//   * a MALFORMED symbol (`BRK-B`, `^GSPC`, `ES=F`, `BTC-USD`) fails the WHOLE
+//     request with rc=1 `invalid symbol: X` — so symbols are pre-filtered by
+//     Alpaca's stock grammar and routed to the per-ticker path (which already
+//     warns + skips them), and if one still slips through the named symbol is
+//     dropped and the chunk retried;
+//   * `--limit 10000` counts data points across ALL symbols, so the chunk
+//     size shrinks with the gap range (200 for a 1-day gap, ~3 for a 10-year
+//     new-ticker backfill) to keep each request ≈ one page;
+//   * any other chunk failure (5xx, timeout) falls back to the per-ticker
+//     path for that chunk only, so a transient error degrades to today's
+//     behaviour instead of losing 200 tickers.
+
+const MULTI_BARS_MAX_SYMBOLS = 200;    // URL-length headroom; 200×1 day = 42 KB, 0.3 s
+const MULTI_BARS_TARGET_POINTS = 8000; // keep a request under the 10 000-point page
+const MULTI_BARS_MAX_PAGES = 200;
+
+function _isAlpacaStockSymbol(apiSymbol) {
+  return /^[A-Z][A-Z0-9]*(\.[A-Z]+)?$/.test(apiSymbol || '');
+}
+
+// Group gap items by identical (from,to) so one request never widens a
+// ticker's range (a re-fetch of known rows is wasted quota; a narrower one is
+// a coverage hole). Insertion order is preserved.
+function _groupGapItems(items) {
+  const groups = new Map();
+  for (const it of items) {
+    const key = `${it.from}|${it.to}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(it);
+  }
+  return groups;
+}
+
+function _multiBarsChunkSize(fromDate, toDate) {
+  const days = Math.round((Date.parse(toDate) - Date.parse(fromDate)) / 86_400_000);
+  if (!Number.isFinite(days) || days < 0) return 1;
+  const tradingDays = Math.max(1, Math.round(days * 5 / 7) + 1);
+  return Math.max(1, Math.min(MULTI_BARS_MAX_SYMBOLS, Math.floor(MULTI_BARS_TARGET_POINTS / tradingDays)));
+}
+
+// One multi-bars chunk: pages through next_page_token, fans `bars[api]` back
+// to store.upsertPrices keyed by the UNIVERSE ticker. Returns
+// { written: Map<api, rows>, calls, error } — `error` set means the caller
+// should fall back to the per-ticker path for this chunk.
+async function _fetchMultiBarsChunk(chunk, fromDate, toDate) {
+  const byApi = new Map(chunk.map((c) => [c.api, c.ticker]));
+  let symbols = chunk.map((c) => c.api);
+  const written = new Map();
+  let calls = 0;
+  let pageToken = null;
+  let pages = 0;
+  let invalidDrops = 0;
+
+  while (symbols.length) {
+    const args = [
+      'data', 'multi-bars',
+      '--symbols',    symbols.join(','),
+      '--start',      fromDate,
+      '--end',        toDate,
+      '--timeframe',  '1Day',
+      '--adjustment', 'split',
+      '--feed',       'sip',
+      '--limit',      '10000',
+    ];
+    if (pageToken) args.push('--page-token', pageToken);
+    const r = await runAlpaca(args, { timeout: 60_000 });
+    calls++;
+
+    if (!r.ok) {
+      const errMsg = r.error?.error || r.stderr?.slice(0, 200) || `exit ${r.exit_code}`;
+      const m = /invalid symbol:\s*([^\s,"]+)/i.exec(errMsg);
+      // Validation rejects happen before any page is served; drop the named
+      // symbol (warn + 0 rows, same as the per-ticker invalid-symbol branch)
+      // and retry the chunk. Bounded so a pathological chunk can't loop.
+      if (m && pages === 0 && invalidDrops < 3 && symbols.includes(m[1])) {
+        const bad = m[1];
+        console.warn(`[collector] multi-bars: skip non-stock symbol ${byApi.get(bad) || bad}${byApi.get(bad) && byApi.get(bad) !== bad ? `→${bad}` : ''} (${errMsg})`);
+        written.set(bad, 0);
+        symbols = symbols.filter((x) => x !== bad);
+        invalidDrops++;
+        continue;
+      }
+      return { written, calls, error: new Error(`alpaca data multi-bars (${fromDate}→${toDate}, ${symbols.length} symbols): ${errMsg}`) };
+    }
+
+    const bars = r.payload?.bars || {};
+    for (const [api, rows] of Object.entries(bars)) {
+      const ticker = byApi.get(api);
+      if (!ticker || !Array.isArray(rows) || rows.length === 0) continue;
+      const n = await store.upsertPrices(ticker, rows, 'alpaca');
+      written.set(api, (written.get(api) || 0) + n);
+    }
+
+    pageToken = r.payload?.next_page_token || null;
+    pages++;
+    if (!pageToken) break;
+    if (pages >= MULTI_BARS_MAX_PAGES) {
+      console.warn(`[collector] multi-bars: ${fromDate}→${toDate} chunk hit ${MULTI_BARS_MAX_PAGES}-page cap, stopping early`);
+      break;
+    }
+  }
+  return { written, calls, error: null };
+}
+
+/**
+ * Fill price gaps for many tickers with as few CLI invocations as possible.
+ * items: [{ticker, from, to}] — one per gap. onTicker(ticker, written, err)
+ * fires once per ITEM as soon as its rows are buffered (err !== null only
+ * on the per-ticker fallback path, mirroring fillPricesAlpaca's throw).
+ * Returns { calls }.
+ */
+async function fillPricesAlpacaBatch(items, { onTicker = async () => {} } = {}) {
+  let calls = 0;
+  const perTicker = async (ticker, fromDate, toDate) => {
+    calls++;
+    try {
+      const w = await fillPricesAlpaca(ticker, fromDate, toDate);
+      await onTicker(ticker, w, null);
+    } catch (err) {
+      await onTicker(ticker, 0, err);
+    }
+  };
+
+  for (const [, group] of _groupGapItems(items)) {
+    const { from: fromDate, to: toDate } = group[0];
+    const batchable = [];
+    const stragglers = [];
+    for (const it of group) {
+      // Same share-class bridge as fillPricesAlpaca (BRK-B → BRK.B); rows stay
+      // keyed by the universe ticker.
+      const api = it.ticker.replace('-', '.');
+      if (_isAlpacaStockSymbol(api)) batchable.push({ ticker: it.ticker, api });
+      else stragglers.push(it.ticker);
+    }
+
+    const size = _multiBarsChunkSize(fromDate, toDate);
+    for (let i = 0; i < batchable.length; i += size) {
+      const chunk = batchable.slice(i, i + size);
+      const r = await _fetchMultiBarsChunk(chunk, fromDate, toDate);
+      calls += r.calls;
+      if (r.error) {
+        console.warn(`[collector] multi-bars chunk failed — falling back to per-ticker for ${chunk.length} tickers: ${r.error.message}`);
+        for (const it of chunk) await perTicker(it.ticker, fromDate, toDate);
+        continue;
+      }
+      for (const it of chunk) await onTicker(it.ticker, r.written.get(it.api) || 0, null);
+    }
+    // Malformed symbols (index/futures/crypto/forex forms) after the batch:
+    // the per-ticker path already warns + skips them on the 400.
+    for (const ticker of stragglers) await perTicker(ticker, fromDate, toDate);
+  }
+  return { calls };
+}
+
+// runHistoricalPrices body for the batched path: gap detection for every
+// ticker first (local DB/parquet work), then one batched fill with the same
+// per-ticker logRun / progress / mid-flush bookkeeping as the per-ticker loop.
+async function _runHistoricalPricesBatched(tickers, fromDate, toDate) {
+  let skipped = 0;
+  let done = 0;
+  const items = [];
+  const pending = new Map(); // ticker → { remaining, written, err, gaps, t0 }
+
+  for (const ticker of tickers) {
+    if (_paused) { notify('⏸️ Paused — waiting...'); while (_paused) await sleep(1000); }
+    const gaps = await store.getGaps(ticker, 'prices', fromDate, toDate);
+    if (gaps.length === 0) {
+      skipped++;
+      done++;
+      tickProgress('📊 Prices', done, tickers.length, ticker, 0);
+      continue;
+    }
+    pending.set(ticker, { remaining: gaps.length, written: 0, err: null, gaps: gaps.length, t0: Date.now() });
+    for (const gap of gaps) items.push({ ticker, from: gap.from, to: gap.to });
+  }
+  notify(`📊 Historical prices: ${pending.size} tickers with gaps → ${items.length} ranges via multi-bars`);
+
+  let completedSinceFlush = 0;
+  const finalize = async (ticker) => {
+    const p = pending.get(ticker);
+    pending.delete(ticker);
+    done++;
+    const ms = Date.now() - p.t0;
+    if (p.err) {
+      _stats.errors++;
+      await store.logRun(ticker, 'prices', 'error', 0, p.err.message, ms, 1);
+      notify(`⚠️ ${ticker} prices error: ${p.err.message}`);
+    }
+    _stats.prices += p.written;
+    tickProgress('📊 Prices', done, tickers.length, ticker, p.written);
+    if (p.written > 0) {
+      await store.logRun(ticker, 'prices', 'success', p.written, null, ms, p.gaps);
+    }
+    // Same bound as the per-ticker loop: flush every 1000 completed tickers so
+    // the in-memory buffer can't grow to an OOM-sized blob on big universes.
+    if (++completedSinceFlush % 1000 === 0) {
+      try {
+        const mid = await store.flushPrices();
+        if (mid && mid.flushed) console.log(`[collector] Prices mid-flush @ticker ${done}: ${mid.flushed} rows → prices.parquet`);
+      } catch (e) {
+        console.error(`[collector] Prices mid-flush FAILED (non-fatal): ${e.message}`);
+      }
+    }
+  };
+
+  const { calls } = await fillPricesAlpacaBatch(items, {
+    onTicker: async (ticker, written, err) => {
+      const p = pending.get(ticker);
+      if (!p) return;
+      p.written += written;
+      if (err && !p.err) p.err = err;
+      if (--p.remaining <= 0) await finalize(ticker);
+    },
+  });
+  return { skipped, totalCalls: calls };
 }
 
 // ── Crypto bars (SP-1 Task 15a) — `alpaca data crypto bars` ──────────────────
@@ -2371,4 +2606,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions };

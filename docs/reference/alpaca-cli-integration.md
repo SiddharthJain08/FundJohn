@@ -205,15 +205,11 @@ alpaca data crypto bars --symbols BTC/USD --timeframe 1Hour … · alpaca data c
 
 ## 8. Optimisation backlog (measured, not yet done)
 
-1. **Daily price fill is one process per ticker** (`collector.js fillPricesAlpaca`
-   → `data bars --symbol`, ~5 180 tickers × ~70 ms ≈ 6 min of pure call
-   overhead, plus `backfillers/universe_prices.py`). Group tickers by identical
-   gap range (the daily case is one 1-day gap for nearly all) and fetch with
-   `data multi-bars --symbols <200> --limit 10000` → ~30 calls. Keep the
-   per-ticker `upsertPrices`/`logRun`/coverage semantics by fanning the
-   `bars[symbol]` map back out. Needs the 400 "invalid symbol" per-ticker skip
-   preserved (a bad symbol in a batch must not poison the chunk — Alpaca
-   silently omits unknown symbols from `bars`, so treat absence as the skip).
+1. ~~Daily price fill one process per ticker~~ **DONE 2026-08-22** —
+   `collector.fillPricesAlpacaBatch` (multi-bars, grouped by gap range,
+   chunked ≤200 / ≤8000 points, page-token loop, per-chunk fallback to the
+   per-ticker path). Measured 2.9 ms/ticker vs 80.6 ms/ticker. Kill switch
+   `OPENCLAW_PRICES_MULTI_BARS=0`. Still per-ticker: `backfillers/universe_prices.py`.
 2. **Executor early-abort on `auth_error`** in the main submission loop.
 3. **`doctor.py` `_run_alpaca_cli`** — hard-coded 10 s, no stderr parse, no `--quiet`.
 4. **Options chain** default `--limit 100` in `alpaca_options.js` /
