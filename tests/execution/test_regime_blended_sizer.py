@@ -131,10 +131,13 @@ def _open_by_ticker_cap(orders):
             and o['strategy_id'] not in ('__close_orphan__', '__flip_close__')}
 
 
-def _run_intraday_path(monkeypatch, weights_rows, signals_rows, broker=None):
+def _run_intraday_path(monkeypatch, weights_rows, signals_rows, broker=None,
+                       sim=None, params=None):
     """Drive size_positions through the non-EOD sharpe_cadence path with
     OPENCLAW_INTRADAY_REDEPLOY=1.  All external surfaces (weights DB,
-    active-window DB, λ DB, broker, confirmer) are stubbed.
+    active-window DB, λ DB, broker, confirmer) are stubbed. `sim` (optional)
+    stubs the strategy-similarity matrix so S_adj is deterministic instead of
+    reading the live DB; `params` overrides _cap_params().
 
     Key difference from test_sizer_per_ticker_cap._run_eod:
     - OPENCLAW_INTRADAY_REDEPLOY=1 (not OPENCLAW_EOD_RECONCILE)
@@ -161,6 +164,11 @@ def _run_intraday_path(monkeypatch, weights_rows, signals_rows, broker=None):
     # this helper at all.
     monkeypatch.setattr(_sizer, '_recent_active_counts',
                         lambda lookback=10: [len(signals_rows)] * lookback)
+    if sim is not None:
+        import execution.strategy_similarity as _ss
+        monkeypatch.setattr(_ss, 'load_groups',
+                            lambda regime: {'block_map': {}, 'fold_map': {},
+                                            'rep_map': {}, 'matrix': sim})
 
     with _mock.patch('execution.strategy_weights.load_current',
                      return_value=list(weights_rows)):
@@ -171,7 +179,8 @@ def _run_intraday_path(monkeypatch, weights_rows, signals_rows, broker=None):
             account_state=_cap_account(),
             regime={'state': 'LOW_VOL'},
             run_date=date(2026, 6, 4), strategy_state={},
-            regime_params=_cap_params(), confirmer=lambda proposals: {},
+            regime_params=(params if params is not None else _cap_params()),
+            confirmer=lambda proposals: {},
         )
 
 
@@ -241,22 +250,38 @@ class TestIntradayRedeployConvictionCap:
         path → target = full λ×NAV = $200k instead of $90k).
 
         W3 C4 note: the signal-set-health gate (floor=10) is active on the
-        intraday path. Nine dummy signals with sharpe=0.5 pad len(active) to
-        10 so the gate passes; they are filtered by the cum_sharpe gate (3.0)
-        and never produce orders. The _recent_active_counts stub in
-        _run_intraday_path returns [10]*10 → baseline=10, threshold=10 ≤
-        len(active)=10 → gate passes. STX is the sole surviving ticker."""
+        intraday path. Nine dummy signals (sharpe=0.5, one strategy each) pad
+        len(active) to 11 so the gate passes. They are then dropped by the
+        per-regime ACTING-STRATEGY conviction gate (2026-08-22:
+        min_acting_strategies=2 — each dummy has a single contributor), so
+        STX is the sole surviving ticker. STX carries TWO perfectly-correlated
+        (rho=1) sharpe-3.5 contributors: S_adj = 3.5 exactly (no double
+        count), so the expected cap is unchanged from the single-contributor
+        era. The similarity matrix is stubbed — before 2026-08-22 this test
+        silently depended on the live DB's S_adj floor to gate the dummies."""
         dummy_sids = [f'S_dummy_{i}' for i in range(9)]
         dummy_weights = [_weights_row_cap(sid, eff_sharpe=0.5) for sid in dummy_sids]
         dummy_signals = [_carried_cap(sid, f'DUMMY{i:02d}') for i, sid in enumerate(dummy_sids)]
+        sim = {'S1': {'S1': 1.0, 'S1b': 1.0}, 'S1b': {'S1b': 1.0, 'S1': 1.0}}
         orders = _run_intraday_path(
             monkeypatch,
-            weights_rows=[_weights_row_cap('S1', eff_sharpe=3.5)] + dummy_weights,
-            signals_rows=[_carried_cap('S1', 'STX')] + dummy_signals,
+            weights_rows=[_weights_row_cap('S1', eff_sharpe=3.5),
+                          _weights_row_cap('S1b', eff_sharpe=3.5)] + dummy_weights,
+            signals_rows=[_carried_cap('S1', 'STX'), _carried_cap('S1b', 'STX')] + dummy_signals,
+            sim=sim, params={**_cap_params(), 'min_acting_strategies': 2},
         )
         opens = _open_by_ticker_cap(orders)
         assert 'STX' in opens, f'expected STX open order, got {orders}'
-        expected_cap = _sizer.PER_TICKER_CAP_SHARPE_FRAC * (3.5 + 1.0) * _CAP_LAM * _CAP_NAV  # 90_000
+        assert not any(t.startswith('DUMMY') for t in opens), \
+            f'single-strategy dummies must be dropped by min_acting_strategies=2, got {sorted(opens)}'
+        assert opens['STX']['acting_strategies'] == 2
+        # S_adj of two rho=1 equal contributors is 3.5 up to the tangency PSD
+        # ridge on the singular matrix (~+0.1) — pin "no double count", not
+        # the exact ridge, and derive the cap from the S_adj the sizer stamped.
+        s_adj = abs(opens['STX']['corr_cum_sharpe'])
+        assert 3.4 <= s_adj <= 3.7, f'S_adj must not double-count rho=1 contributors; got {s_adj}'
+        expected_cap = _sizer.PER_TICKER_CAP_SHARPE_FRAC * (s_adj + 1.0) * _CAP_LAM * _CAP_NAV  # ≈ 90_000
+        assert expected_cap < _CAP_LAM * _CAP_NAV, 'fixture must leave the uncapped λ·NAV target above the cap'
         assert abs(opens['STX']['target_usd'] - expected_cap) < 1e-6, (
             f'intraday survivor must be capped at {expected_cap}; '
             f'got {opens["STX"]["target_usd"]}'

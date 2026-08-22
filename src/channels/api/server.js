@@ -901,7 +901,7 @@ app.get('/api/config/regime-sizing', async (req, res) => {
       dbQuery("SELECT value FROM pipeline_config WHERE key = 'asset_corr_cap_enabled'"),
       dbQuery("SELECT key, value FROM pipeline_config WHERE key IN ('asset_corr_cap_pct', 'net_exposure_cap_enabled', 'max_net_frac')"),
       dbQuery(`SELECT regime_state, liquidity_param, position_circuit_breaker_pct,
-                      min_corr_cum_sharpe, updated_at
+                      min_acting_strategies, updated_at
                FROM regime_sizer_params
                ORDER BY CASE regime_state
                           WHEN 'LOW_VOL' THEN 1
@@ -950,11 +950,13 @@ app.get('/api/config/regime-sizing', async (req, res) => {
         state:                          r.regime_state,
         liquidity_param:                parseFloat(r.liquidity_param),
         position_circuit_breaker_pct:   parseFloat(r.position_circuit_breaker_pct),
-        // Per-regime floor for the correlation-adjusted cumulative-Sharpe
-        // conviction gate (migration 140), bound [0.0, 10.0] by table CHECK.
-        // This is the sole live conviction gate (drives ticker selection AND
-        // sizing weight); read fresh each sizer cycle (no restart needed).
-        min_corr_cum_sharpe:            r.min_corr_cum_sharpe != null ? parseFloat(r.min_corr_cum_sharpe) : 1.0,
+        // Per-regime conviction gate (2026-08-22, migration 147): the minimum
+        // number of DISTINCT strategies acting on a ticker in its net direction
+        // for the sizer to take the position. Integer [1, 10] by table CHECK;
+        // 1 = open (every contributor-backed ticker passes). Replaced the
+        // S_adj floor (min_corr_cum_sharpe — retired, unread). Read fresh each
+        // sizer cycle (no restart needed).
+        min_acting_strategies:          r.min_acting_strategies != null ? parseInt(r.min_acting_strategies, 10) : 1,
         updated_at:                     r.updated_at,
       })),
     });
@@ -987,13 +989,17 @@ app.put('/api/config/regime-sizing/:regime', async (req, res) => {
     }
     updates.position_circuit_breaker_pct = v;
   }
-  if (body.min_corr_cum_sharpe !== undefined) {
-    const v = parseFloat(body.min_corr_cum_sharpe);
-    // Range matches regime_sizer_params_min_corr_cum_sharpe_check (migration 140).
-    if (!isFinite(v) || v < 0.0 || v > 10.0) {
-      return res.status(400).json({ error: 'min_corr_cum_sharpe must be a number in [0.0, 10.0]' });
+  if (body.min_acting_strategies !== undefined) {
+    const v = Number(body.min_acting_strategies);
+    // Integer range matches regime_sizer_params_min_acting_strategies_check (migration 147).
+    if (!Number.isInteger(v) || v < 1 || v > 10) {
+      return res.status(400).json({ error: 'min_acting_strategies must be an integer in [1, 10] (minimum distinct strategies acting in the net direction; 1 = open)' });
     }
-    updates.min_corr_cum_sharpe = v;
+    updates.min_acting_strategies = v;
+  }
+  if (body.min_corr_cum_sharpe !== undefined) {
+    // Retired 2026-08-22: the S_adj floor was replaced by min_acting_strategies.
+    return res.status(400).json({ error: 'min_corr_cum_sharpe is retired — set min_acting_strategies (integer 1..10) instead' });
   }
   if (Object.keys(updates).length === 0) {
     return res.status(400).json({ error: 'no valid fields to update' });
@@ -3691,13 +3697,14 @@ body.rs-chat-locked{overflow:hidden}
 .pm-gate-outcome.buildable,.pm-gate-outcome.error{color:var(--yellow)}
 .pm-json{background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:8px 10px;font-family:'SF Mono',monospace;font-size:10px;max-height:260px;overflow:auto;color:var(--text);white-space:pre-wrap}
 #strategies-inner{max-width:1400px;margin:0 auto;padding:20px;display:flex;flex-direction:column;gap:12px}
-/* Per-regime conviction-gate sliders on the Strategies page. Mirrors the
-   Portfolio-page leverage slider's visual language but stacked into a
-   4-card grid so each regime gets its own slider. Gradient anchors:
-   yellow at value 1 (loose, frequent trades) → green at value 3
-   (the operator-approved default) → blue at value ~6.5 (tightening)
-   → purple at value 10 (extreme conviction filter). The hue progression
-   reads as "broader → focused" rather than "safe → dangerous". */
+/* Per-regime conviction-gate sliders on the Strategies page — minimum
+   number of distinct strategies acting on a ticker in its net direction
+   (2026-08-22; integer 1..10). Mirrors the Portfolio-page leverage slider's
+   visual language but stacked into a 4-card grid so each regime gets its
+   own slider. Gradient anchors: yellow at 1 (open — any single strategy
+   acts) → green at 3 → blue at ~6.5 (tightening) → purple at 10 (only
+   ten-strategy consensus trades). The hue progression reads as
+   "broader → focused" rather than "safe → dangerous". */
 .st-sharpe-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;padding:10px 4px 4px}
 .st-sharpe-card{background:rgba(15,20,28,0.5);border:1px solid var(--border2);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:8px}
 .st-sharpe-card.current-regime{border-color:var(--blue);box-shadow:0 0 0 1px rgba(88,166,255,0.35),0 4px 14px rgba(88,166,255,0.08)}
@@ -4699,12 +4706,12 @@ body.rs-chat-locked{overflow:hidden}
     </div>
 
     <!-- Per-regime conviction-gate sliders. Each card binds to
-         regime_sizer_params.min_corr_cum_sharpe (migration 140) via debounced
-         PUT to /api/config/regime-sizing/:regime. Range 0..10 enforced both by
-         slider attr and DB CHECK constraint. -->
+         regime_sizer_params.min_acting_strategies (migration 147) via debounced
+         PUT to /api/config/regime-sizing/:regime. Integer range 1..10 enforced
+         both by slider attr and DB CHECK constraint. 1 = today's open gate. -->
     <div class="pf-section">
       <div class="pf-section-header">
-        <span>🎯 Conviction Gates <span class="st-sub-label">corr-adjusted cumulative Sharpe per regime (High: fewer trades + greater empirical conviction)</span></span>
+        <span>🎯 Conviction Gates <span class="st-sub-label">minimum strategies acting on a position in the same direction, per regime (1 = any single strategy trades; higher = only multi-strategy consensus trades)</span></span>
       </div>
       <div class="st-sharpe-grid" id="st-sharpe-gates">
         <div class="st-sharpe-card-empty">Loading conviction gates…</div>
@@ -7738,17 +7745,26 @@ function _buildAlphaBarsHtml(group) {
     const netLabel = contribUnit === 'sizing' ? 'net sizing' : 'net contrib';
     badge = \`<span class="ab-badge">\${netLabel} = <span class="\${netCls}">\${netTxt}</span></span>\`;
   }
+  // Acting strategies (2026-08-22 conviction gate): distinct strategies whose
+  // sizing contribution points the way the position nets. This is the count
+  // the sizer compares against the regime's min_acting_strategies slider.
+  if (contribUnit === 'sizing' && net != null && isFinite(net) && net !== 0) {
+    const side = net > 0 ? 'LONG' : 'SHORT';
+    const acting = new Set(contributions.filter(c => c.direction === side).map(c => c.strategy_id)).size;
+    badge += \` <span class="ab-badge" title="distinct strategies acting \${side} on \${escapeHtml(group.ticker)} at the last sizing — the per-regime Conviction Gate (Strategies page) requires at least N of these">acting = \${acting}</span>\`;
+  }
   // Conviction the position was last sized at = |S_adj|, the MAGNITUDE of the
   // correlation-adjusted cumulative Sharpe. S_adj itself is signed by trade
-  // direction (long +, short −), but the conviction gate compares |S_adj|
-  // against the per-regime floor, and the row is already visibly long/short —
-  // so a signed value here only reads as a spurious "negative Sharpe". Show the
+  // direction (long +, short −) and the row is already visibly long/short, so
+  // a signed value here only reads as a spurious "negative Sharpe". Show the
   // magnitude, and label it "conviction" so it is never mistaken for a raw
-  // Sharpe ratio. (Kept in this expanded per-position view only; the main
-  // heatmap/treemap tiles no longer carry it — declutter, 2026-07-17.)
+  // Sharpe ratio. S_adj SIZES the position (and its (|S|+1) cap); ticker
+  // selection is the acting-strategy gate above. (Kept in this expanded
+  // per-position view only; the main heatmap/treemap tiles no longer carry
+  // it — declutter, 2026-07-17.)
   if (group.corr_cum_sharpe != null && isFinite(group.corr_cum_sharpe)) {
     const conv = Math.abs(group.corr_cum_sharpe);
-    badge += \` <span class="ab-badge" title="conviction |S_adj| — magnitude of the correlation-adjusted cumulative Sharpe the position was last sized at; the sizer gates this against the per-regime floor">conviction |S_adj| = \${conv.toFixed(2)}</span>\`;
+    badge += \` <span class="ab-badge" title="conviction |S_adj| — magnitude of the correlation-adjusted cumulative Sharpe the position was last sized at; drives the sizing weight and the per-ticker (|S|+1) cap">conviction |S_adj| = \${conv.toFixed(2)}</span>\`;
   } else if (isOpen) {
     // Render the gap rather than dropping the badge. The sizer stamps S_adj
     // only on cycles that emit orders, so a silently absent badge is
@@ -8739,8 +8755,8 @@ async function _loadSharpeGates() {
     return;
   }
   host.innerHTML = regimes.map(r => {
-    const vc = (r.min_corr_cum_sharpe != null && isFinite(r.min_corr_cum_sharpe))
-      ? Number(r.min_corr_cum_sharpe) : 1.0;
+    const vc = (r.min_acting_strategies != null && isFinite(r.min_acting_strategies))
+      ? Math.max(1, Math.min(10, Math.round(Number(r.min_acting_strategies)))) : 1;
     const tag = r.state === current ? '<span class="st-sharpe-card-tag">CURRENT</span>' : '';
     const klass = 'st-sharpe-card' + (r.state === current ? ' current-regime' : '');
     return \`<div class="\${klass}" data-regime="\${r.state}">
@@ -8748,28 +8764,28 @@ async function _loadSharpeGates() {
         <span class="st-sharpe-card-regime">\${r.state}</span>
         \${tag}
       </div>
-      <div class="st-sharpe-card-value" id="st-cg-val-\${r.state}">\${vc.toFixed(2)}</div>
+      <div class="st-sharpe-card-value" id="st-cg-val-\${r.state}" title="minimum distinct strategies acting in the net direction">\${vc} <span class="st-sub-label">acting</span></div>
       <input type="range" class="st-sharpe-card-slider" id="st-cg-slider-\${r.state}"
-             min="0" max="10" step="0.05" value="\${vc}" data-regime="\${r.state}" />
-      <div class="st-sharpe-card-range"><span>0.0</span><span>10.0</span></div>
+             min="1" max="10" step="1" value="\${vc}" data-regime="\${r.state}" />
+      <div class="st-sharpe-card-range"><span>1 · any</span><span>10 · consensus</span></div>
       <div class="st-sharpe-card-status" id="st-cg-status-\${r.state}"></div>
     </div>\`;
   }).join('');
-  // Wire each corr-adjusted cum-sharpe slider — live label update on input,
-  // debounced PUT (min_corr_cum_sharpe) on change. 300ms is short enough to
-  // feel responsive without firing on every pixel of drag.
+  // Wire each acting-strategy slider — live label update on input, debounced
+  // PUT (min_acting_strategies) on change. 300ms is short enough to feel
+  // responsive without firing on every pixel of drag.
   for (const r of regimes) {
     const cslider = document.getElementById('st-cg-slider-' + r.state);
     const cvalEl  = document.getElementById('st-cg-val-' + r.state);
     const cstatEl = document.getElementById('st-cg-status-' + r.state);
     if (!cslider || !cvalEl) continue;
     cslider.addEventListener('input', () => {
-      cvalEl.textContent = parseFloat(cslider.value).toFixed(2);
+      cvalEl.innerHTML = parseInt(cslider.value, 10) + ' <span class="st-sub-label">acting</span>';
     });
     cslider.addEventListener('change', () => {
       if (_sharpeGateDebounce['corr_' + r.state]) clearTimeout(_sharpeGateDebounce['corr_' + r.state]);
       _sharpeGateDebounce['corr_' + r.state] = setTimeout(
-        () => _corrSharpeGatePut(r.state, parseFloat(cslider.value), cstatEl), 300);
+        () => _corrSharpeGatePut(r.state, parseInt(cslider.value, 10), cstatEl), 300);
     });
   }
 }
@@ -8782,13 +8798,13 @@ async function _corrSharpeGatePut(regime, value, statEl) {
     const resp = await fetch('/api/config/regime-sizing/' + encodeURIComponent(regime), {
       method:  'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ min_corr_cum_sharpe: value }),
+      body:    JSON.stringify({ min_acting_strategies: value }),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       if (statEl) statEl.textContent = '✗ ' + (err.error || resp.statusText);
     } else if (statEl) {
-      statEl.textContent = '✓ saved · next cycle picks up ' + value.toFixed(2);
+      statEl.textContent = '✓ saved · next cycle requires ≥' + value + ' acting strateg' + (value === 1 ? 'y' : 'ies');
       setTimeout(() => { if (statEl) statEl.textContent = ''; }, 4000);
     }
   } catch (e) {

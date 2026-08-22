@@ -55,7 +55,7 @@ SIGNAL_SET_MIN_FRAC = 0.30
 
 # OPENCLAW_FLATTEN_ON_ZERO_CONVICTION (default-OFF operator kill-switch).
 # When '1', a HEALTHY carried set (len(active) >= SIGNAL_SET_MIN_FLOOR) that is
-# FULLY rejected by the corr-conviction gate triggers a FLATTEN of the whole
+# FULLY rejected by the acting-strategy conviction gate triggers a FLATTEN of the whole
 # broker book (orphan_close every held position) instead of silently HOLDing —
 # see the `if not ticker_w:` branch in _sharpe_cadence_path and
 # _maybe_flatten_zero_conviction. Fires on BOTH daily signal-target lanes (the
@@ -240,35 +240,73 @@ def _load_lambda(default: float = 2.0) -> float:
         return default
 
 
-def _resolve_min_corr_cum_sharpe(params: dict | None, default: float = 1.0) -> float:
-    """Per-regime floor for the correlation-adjusted cumulative-Sharpe gate —
-    the sole live conviction gate. Reads regime_sizer_params.min_corr_cum_sharpe,
-    bound [0.0, 10.0] (migration 140), falling back to
-    pipeline_config['min_corr_cum_sharpe'], then `default`. Set per regime from
-    the dashboard Conviction Gates card; read fresh each sizer cycle.
+MIN_ACTING_STRATEGIES_LO = 1
+MIN_ACTING_STRATEGIES_HI = 10
 
-    NOTE the scale differs from the retired legacy min_cumulative_sharpe floor:
-    this quantity is cadence-normalized AND diversification-deflated, so values
-    are smaller — calibrate from the #botjohn-log rec_floor, not the old scale.
+
+def _resolve_min_acting_strategies(params: dict | None, default: int = 1) -> int:
+    """Per-regime conviction gate — the MINIMUM NUMBER OF DISTINCT STRATEGIES
+    acting on a ticker in its net direction (operator directive 2026-08-22;
+    replaces the corr-adjusted cumulative-Sharpe floor, whose
+    regime_sizer_params.min_corr_cum_sharpe column is now unread). Reads
+    regime_sizer_params.min_acting_strategies, bound [1, 10] (migration 147),
+    falling back to pipeline_config['min_acting_strategies'], then `default`.
+    Set per regime from the dashboard Conviction Gates card; read fresh each
+    sizer cycle. 1 = every ticker with a contributor passes (the gate is
+    skipped entirely); 10 = only tickers ten strategies agree on.
     """
+    def _clamp(v) -> int:
+        return max(MIN_ACTING_STRATEGIES_LO, min(MIN_ACTING_STRATEGIES_HI, int(float(v))))
     if isinstance(params, dict):
-        v = params.get('min_corr_cum_sharpe')
+        v = params.get('min_acting_strategies')
         if v is not None:
             try:
-                return max(0.0, min(10.0, float(v)))
+                return _clamp(v)
             except (TypeError, ValueError):
                 pass
     try:
         import psycopg2
         with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
             with c.cursor() as cur:
-                cur.execute("SELECT value FROM pipeline_config WHERE key = 'min_corr_cum_sharpe'")
+                cur.execute("SELECT value FROM pipeline_config WHERE key = 'min_acting_strategies'")
                 row = cur.fetchone()
                 if row is not None:
-                    return max(0.0, min(10.0, float(row[0])))
+                    return _clamp(row[0])
     except Exception:
         pass
     return default
+
+
+def _net_signs(gate_net_sharpe: dict, fallback_w: dict) -> dict[str, int]:
+    """Per-ticker net direction (+1/−1/0) the position will be taken in: the
+    sign of S_adj, falling back to the naive Σ eff_weight×direction when S_adj
+    is exactly zero or absent (a ticker in neither map is 0 → gated)."""
+    out: dict[str, int] = {}
+    for tkr in set(gate_net_sharpe) | set(fallback_w):
+        v = gate_net_sharpe.get(tkr) or 0.0
+        if v == 0.0:
+            v = fallback_w.get(tkr) or 0.0
+        out[tkr] = 1 if v > 0 else (-1 if v < 0 else 0)
+    return out
+
+
+def _acting_counts(ticker_meta: dict, net_sign: dict) -> dict[str, int]:
+    """Number of DISTINCT strategies acting on each ticker in its net direction.
+
+    Cadence-window aggregation can carry several rows of one strategy for the
+    same ticker — they are ONE acting strategy. Opposing-side contributors do
+    not count (they are still netted in S_adj, which sizes the position).
+    Synthetic markers (`__close_orphan__` …) never count. A ticker with no net
+    direction counts 0."""
+    out: dict[str, int] = {}
+    for tkr, meta in ticker_meta.items():
+        sgn = net_sign.get(tkr, 0)
+        if sgn == 0:
+            out[tkr] = 0
+            continue
+        out[tkr] = len({sid for sid, d in zip(meta.get('strategies', []), meta.get('directions', []))
+                        if d == sgn and sid and not str(sid).startswith('__')})
+    return out
 
 
 def _load_trade_factor_anchor(default: int = None) -> int:
@@ -433,7 +471,7 @@ def _post_flatten_alert(regime_state, active_count: int, broker: dict) -> None:
     try:
         gross = sum(abs(float(v)) for v in broker.values())
         line = ('\U0001F6A8 ZERO-CONVICTION FLATTEN [%s]: carried set of %d signal(s) '
-                'fully rejected by the corr-conviction floor -> flattening %d '
+                'fully rejected by the acting-strategy conviction gate -> flattening %d '
                 'position(s), $%s gross liquidated.'
                 % (regime_state, active_count, len(broker), '{:,.0f}'.format(gross)))
         logger.warning(line)
@@ -1246,7 +1284,8 @@ def _maybe_flatten_zero_conviction(active, regime_state, ticker_meta, nav, confi
     """FLATTEN-on-genuine-zero-conviction (both daily signal-target lanes).
 
     Called from the post-conviction-gate empty check (`if not ticker_w:`) when a
-    HEALTHY carried set has been FULLY rejected by the corr-conviction gate.
+    HEALTHY carried set has been FULLY rejected by the acting-strategy conviction gate
+    (min_acting_strategies, 2026-08-22; formerly the S_adj floor).
 
     Returns a list of orphan_close orders for EVERY held broker position when ALL of
     the gate conditions below hold; returns None (→ caller keeps the historical
@@ -1290,8 +1329,8 @@ def _maybe_flatten_zero_conviction(active, regime_state, ticker_meta, nav, confi
                     'nothing to flatten', len(active))
         return None
     logger.warning('regime_blended_sizer.sharpe_cadence: ZERO-CONVICTION FLATTEN — '
-                   'healthy carried set (%d signal(s)) fully rejected by the corr '
-                   'floor in %s; flattening %d broker position(s)',
+                   'healthy carried set (%d signal(s)) fully rejected by the acting-'
+                   'strategy gate in %s; flattening %d broker position(s)',
                    len(active), regime_state, len(broker))
     _post_flatten_alert(regime_state, len(active), broker)
     _warn_options_dropped_no_equity_scale(opt_active, 'zero-conviction flatten')
@@ -1377,10 +1416,6 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     lam_global   = _load_lambda()   # ONE λ for every lane (operator ruling 2026-08-12)
     liq_regime   = float(params.get('liquidity_param', 1.0)) if params else 1.0
     lam = lam_global * max(0.0, min(1.0, liq_regime))
-    # Equity conviction-gate floor: the per-regime corr floor (min_corr_cum_sharpe),
-    # assigned in the corr gate block below. Pre-seeded to 0.0 (permissive) only as a
-    # safe placeholder — always overwritten before the gate-drop.
-    equity_gate_floor = 0.0
 
     # Signal loading: EOD mode loads the APPROVED carried set (SP-6 Phase A),
     # now aggregated across each strategy's CADENCE WINDOW rather than
@@ -1454,7 +1489,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                     'contributor(s) out of the equity book', len(opt_active))
 
     # Strategy similarity matrix — loaded unconditionally because the
-    # corr-adjusted conviction gate always needs it; also consumed by the
+    # corr-adjusted S_adj sizing always needs it; also consumed by the
     # FOLD / ORTHO_SHADOW / BRACKET_STACK features when their flags are on.
     # A load failure degrades the corr gate to sparse-default correlations
     # (treat pairs as ~independent), never crashes the sizer.
@@ -1526,14 +1561,14 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         _warn_options_dropped_no_equity_scale(opt_active, 'no eligible equity signals after weight filter')
         return []
 
-    # Conviction gate quantity: the correlation-adjusted cumulative Sharpe
-    # (closed-form Sharpe-weighted combination Sharpe, S_adj). This is the SOLE
-    # conviction gate — one quantity drives BOTH ticker selection (the
-    # equity_gate_floor drop below) AND the sizing weight (ticker_w is rebuilt
-    # from S_adj).
+    # Sizing quantity: the correlation-adjusted cumulative Sharpe (closed-form
+    # Sharpe-weighted combination Sharpe, S_adj). S_adj drives the sizing weight
+    # (ticker_w is rebuilt from it) and the per-ticker (|S|+1) cap. Ticker
+    # SELECTION is the acting-strategy gate below (2026-08-22) — S_adj no longer
+    # gates anything.
     _sim = (_ortho_groups or {}).get('matrix') or {}
     # Trade-count-scale the weights fed to the corr calc (DEFAULT-ON). Scoped here
-    # so only the corr gate+sizing see the √(ln n) factor; FOLD/bracket stay raw.
+    # so only the corr sizing sees the √(ln n) factor; FOLD/bracket stay raw.
     # Folding f into the weight vector makes the existing quadratic form correct
     # with NO special-casing: num = Σ f²w²d, q = Σ fᵢfⱼwᵢwⱼdᵢdⱼρ — i.e. (f∘w) in
     # the same form. A missing bt_n → factor 1.0 (neutral), never 0.
@@ -1547,23 +1582,33 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                 _n_tf, len(_twf), _trade_factor_anchor)
     gate_net_sharpe, _size_adj, _nb_g, _nb_s = _corr_adjusted_maps(
         ticker_meta, _cw_gate, _cw_size, _sim)
-    # Equity conviction gate reads the per-regime corr floor (scale matches S_adj).
-    equity_gate_floor = _resolve_min_corr_cum_sharpe(params)
-    # Live diagnostics: |S_adj| distribution, names clearing the current corr floor,
-    # a count-preserving rec_floor to calibrate against, per-ticker cap binding, and
-    # direction flips of the corr sizing vs the naive pre-replacement ticker_w.
-    # Logged AND best-effort posted to #botjohn-log (daily lane only).
+    # Conviction gate (2026-08-22): per-regime MINIMUM ACTING-STRATEGY COUNT.
+    # A ticker is taken only when at least `min_acting` DISTINCT strategies
+    # act on it in its net direction. Replaces the S_adj floor
+    # (min_corr_cum_sharpe), which is no longer read anywhere in the sizer.
+    min_acting = _resolve_min_acting_strategies(params)
+    acting_n = _acting_counts(ticker_meta, _net_signs(gate_net_sharpe, dict(ticker_w)))
+    # Live diagnostics: |S_adj| distribution, acting-count distribution and the
+    # names clearing the current minimum, per-ticker cap binding, and direction
+    # flips of the corr sizing vs the naive pre-replacement ticker_w. The legacy
+    # floor argument is pinned to 0.0 (every ticker is a "live keep" for the
+    # S_adj stats; selection is reported through acting_keep). Logged AND
+    # best-effort posted to #botjohn-log (daily lane only).
     try:
         _m = _corr_cumsharpe_shadow_metrics(
             gate_net_sharpe, _size_adj, gate_net_sharpe, dict(ticker_w),
-            equity_gate_floor, lam, nav, _nb_g, _nb_s, lam_cap=lam_global)
-        _line = ('corr_cumsharpe.live[%s]: dist=%s live_keep=%d would_keep=%d '
-                 'rec_floor=%.4f cap_binds=%d gross_after_cap=%.3f sign_flips=%s '
-                 'backstop=%s top_dollar_moves=%s' % (
+            0.0, lam, nav, _nb_g, _nb_s, lam_cap=lam_global)
+        _adist = {}
+        for _c in acting_n.values():
+            _adist[_c] = _adist.get(_c, 0) + 1
+        _akeep = sum(1 for _c in acting_n.values() if _c >= min_acting)
+        _line = ('corr_cumsharpe.live[%s]: dist=%s acting_min=%d acting_dist=%s '
+                 'acting_keep=%d/%d rec_floor=%.4f cap_binds=%d gross_after_cap=%.3f '
+                 'sign_flips=%s backstop=%s top_dollar_moves=%s' % (
                      regime_state, {k: round(v, 4) for k, v in _m['dist'].items()},
-                     _m['live_keep'], _m['would_keep'], _m['rec_floor'],
-                     _m['cap_binds'], _m['gross_after_cap_frac'], _m['sign_flips'],
-                     _m['backstop_fires'], _m['top_dollar_moves']))
+                     min_acting, dict(sorted(_adist.items())), _akeep, len(acting_n),
+                     _m['rec_floor'], _m['cap_binds'], _m['gross_after_cap_frac'],
+                     _m['sign_flips'], _m['backstop_fires'], _m['top_dollar_moves']))
         logger.info(_line)
         # Post once per daily cycle only (skip the every-5-min intraday redeploy lane
         # to avoid #botjohn-log spam); the post self-expires via pipeline_config.
@@ -1571,30 +1616,32 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             _post_corr_cumsharpe_log(_line)
     except Exception as e:
         logger.warning('corr_cumsharpe.live diag failed (%s)', e)
-    # One quantity drives BOTH gate and sizing: rebuild ticker_w from S_adj.
+    # Sizing: rebuild ticker_w from S_adj.
     ticker_w = defaultdict(float, _size_adj)
-    logger.info('corr_cumsharpe: gate+sizing rebuilt from S_adj for %d tickers '
+    logger.info('corr_cumsharpe: sizing rebuilt from S_adj for %d tickers '
                 '(non-PSD backstop fires gate=%d size=%d)',
                 len(gate_net_sharpe), _nb_g, _nb_s)
 
-    # Conviction gate: drop tickers whose signed corr-adjusted net Sharpe falls
-    # below the per-regime floor (min_corr_cum_sharpe, migration 140). This is
-    # the operator's primary conviction filter — kills single-strategy bets AND
-    # near-cancellation tickers in one rule.
-    if equity_gate_floor > 0:
+    # Acting-strategy gate: drop tickers fewer than `min_acting` distinct
+    # strategies act on in the net direction. At the floor setting (1) the
+    # block is skipped — every ticker with a contributor already has ≥1 acting
+    # strategy, so the book is byte-identical to the pre-gate behaviour.
+    if min_acting > MIN_ACTING_STRATEGIES_LO:
         gated_out = [tkr for tkr in list(ticker_w.keys())
-                     if abs(gate_net_sharpe.get(tkr, 0.0)) < equity_gate_floor]
+                     if acting_n.get(tkr, 0) < min_acting]
         for tkr in gated_out:
             ticker_w.pop(tkr, None)
             ticker_meta.pop(tkr, None)
         if gated_out:
-            logger.info('regime_blended_sizer.sharpe_cadence: dropped %d tickers below gate_floor=%.4f (kept=%d)',
-                        len(gated_out), equity_gate_floor, len(ticker_w))
+            logger.info('regime_blended_sizer.sharpe_cadence: dropped %d tickers below '
+                        'min_acting_strategies=%d (kept=%d): %s',
+                        len(gated_out), min_acting, len(ticker_w), sorted(gated_out)[:20])
 
     if not ticker_w:
-        logger.info('regime_blended_sizer.sharpe_cadence: no tickers cleared cum_sharpe gate')
-        # FLATTEN-ON-ZERO-CONVICTION (EOD lane only, default-OFF kill-switch). A
-        # HEALTHY carried set that is FULLY rejected by the corr-conviction floor
+        logger.info('regime_blended_sizer.sharpe_cadence: no tickers cleared the '
+                    'acting-strategy gate (min_acting_strategies=%d)', min_acting)
+        # FLATTEN-ON-ZERO-CONVICTION (daily lanes only, default-OFF kill-switch). A
+        # HEALTHY carried set that is FULLY rejected by the acting-strategy gate
         # means the book has no conviction behind it — go flat rather than silently
         # HOLD the inherited positions. (2026-07 incident: ~14% gross was held for 3
         # days because this early-return fired BEFORE the delta/orphan-close tail.)
@@ -1609,7 +1656,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             opt_active)
         if _flatten_orders is not None:
             return _flatten_orders
-        _warn_options_dropped_no_equity_scale(opt_active, 'no equity tickers cleared cum_sharpe gate')
+        _warn_options_dropped_no_equity_scale(opt_active, 'no equity tickers cleared the acting-strategy gate')
         return []
 
     gross = sum(abs(w) for w in ticker_w.values())
@@ -2295,6 +2342,12 @@ def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_gr
             # cycle_contributing_strategies for the dashboard position tiles
             # (2026-07-14). None for closes of tickers outside today's targets.
             'corr_cum_sharpe':         (gate_net_sharpe or {}).get(tkr),
+            # Distinct strategies acting in the emitted direction — the quantity
+            # the per-regime conviction gate compares against
+            # min_acting_strategies (2026-08-22). None for closes.
+            'acting_strategies':       (None if kind in ('orphan_close', 'flip_close')
+                                        else _acting_counts({tkr: ticker_meta[tkr]},
+                                                            {tkr: dir_sign}).get(tkr)),
             'flip_action':             kind if kind in ('flip_close', 'flip_open') else None,
             'action':                  _derive_action(kind, out_current, out_target, dir_sign),
         }

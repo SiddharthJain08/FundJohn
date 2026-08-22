@@ -5,7 +5,7 @@ regime_blended_sizer._sharpe_cadence_path (the `if not ticker_w:` post-convictio
 empty check) + _maybe_flatten_zero_conviction.
 
 The intended behavior: when a HEALTHY carried set (len(active) >= SIGNAL_SET_MIN_FLOOR)
-is FULLY rejected by the corr-conviction gate AND the operator has armed the default-OFF
+is FULLY rejected by the acting-strategy conviction gate AND the operator has armed the default-OFF
 kill-switch OPENCLAW_FLATTEN_ON_ZERO_CONVICTION, the sizer FLATTENS the whole broker book
 (orphan_close every held position) instead of silently HOLDing. Fires on BOTH daily
 signal-target lanes — legacy T+1 EOD-register AND same-day (2026-08-07 fix: the
@@ -65,9 +65,13 @@ def _account(equity=NAV):
             'long_market_value': 0, 'cash': equity}
 
 
-def _params(min_corr_cum_sharpe):
+def _params(min_acting_strategies):
+    # 2026-08-22: the conviction gate is the per-regime MINIMUM ACTING-STRATEGY
+    # COUNT (net direction). Every fixture ticker below is single-strategy, so
+    # min_acting_strategies=5 gates EVERYTHING and 1 gates nothing — the same
+    # two roles the retired S_adj floor (5.0 / 0.5) played in these tests.
     return {'liquidity_param': 1.0, 'position_circuit_breaker_pct': 0.02,
-            'min_corr_cum_sharpe': min_corr_cum_sharpe}
+            'min_acting_strategies': min_acting_strategies}
 
 
 def _weights_row(sid, daily_weight=1.0):
@@ -89,7 +93,7 @@ def _healthy_set(n=10, weight=1.0):
     return weights, carried
 
 
-def _run(monkeypatch, *, weights_rows, carried_rows, broker, min_corr_cum_sharpe,
+def _run(monkeypatch, *, weights_rows, carried_rows, broker, min_acting_strategies,
          eod=True, intraday=False, sameday=False, flatten_flag=None, confirmer=None):
     """Drive size_positions with everything external stubbed. Returns (orders, alerts)
     where `alerts` is the list of _post_flatten_alert (regime, active_count, broker)
@@ -152,7 +156,7 @@ def _run(monkeypatch, *, weights_rows, carried_rows, broker, min_corr_cum_sharpe
         orders = _sizer.size_positions(
             signals=passed_in, account_state=_account(), regime={'state': 'LOW_VOL'},
             run_date=date(2026, 7, 6), strategy_state={},
-            regime_params=_params(min_corr_cum_sharpe),
+            regime_params=_params(min_acting_strategies),
             confirmer=confirmer or (lambda proposals: {}))
     return orders, alerts
 
@@ -171,7 +175,7 @@ def test_a_eod_flag_on_healthy_all_gated_flattens_every_position(monkeypatch):
     weights, carried = _healthy_set(n=10)          # 10 healthy signals
     broker = {'HELDA': 8_000.0, 'HELDB': -5_000.0, 'HELDC': 12_500.0}
     orders, alerts = _run(monkeypatch, weights_rows=weights, carried_rows=carried,
-                          broker=broker, min_corr_cum_sharpe=5.0,  # >> S_adj=1.0 → all gated
+                          broker=broker, min_acting_strategies=5,  # > 1 contributor → all gated
                           eod=True, intraday=False, flatten_flag='1')
 
     assert orders, 'flatten must emit orders (gross<=0 trap must be bypassed), got []'
@@ -198,7 +202,7 @@ def test_b_eod_flag_on_empty_carried_returns_empty_no_flatten(monkeypatch):
     # the flatten branch is never reached (data-absence, not conviction-rejection).
     orders, alerts = _run(monkeypatch, weights_rows=[_weights_row('S0')],
                           carried_rows=[], broker={'HELDA': 8_000.0},
-                          min_corr_cum_sharpe=5.0, eod=True, flatten_flag='1')
+                          min_acting_strategies=5, eod=True, flatten_flag='1')
     assert orders == [], 'empty carried set must return [] (Case B), got %r' % orders
     assert alerts == [], 'flatten must NOT fire on an empty carried set'
 
@@ -212,7 +216,7 @@ def test_c_eod_flag_on_thin_set_all_gated_holds(monkeypatch):
     weights, carried = _healthy_set(n=3)           # thin: 3 < 10
     orders, alerts = _run(monkeypatch, weights_rows=weights, carried_rows=carried,
                           broker={'HELDA': 8_000.0, 'HELDB': -5_000.0},
-                          min_corr_cum_sharpe=5.0, eod=True, flatten_flag='1')
+                          min_acting_strategies=5, eod=True, flatten_flag='1')
     assert orders == [], 'thin gated set must HOLD (return []), got %r' % orders
     assert alerts == [], 'flatten must NOT fire on a thin carried set'
 
@@ -225,7 +229,7 @@ def test_d1_intraday_eod_unset_all_gated_holds(monkeypatch):
     # Spec-literal: OPENCLAW_INTRADAY_REDEPLOY=1, OPENCLAW_EOD_RECONCILE unset.
     weights, carried = _healthy_set(n=10)
     orders, alerts = _run(monkeypatch, weights_rows=weights, carried_rows=carried,
-                          broker={'HELDA': 8_000.0}, min_corr_cum_sharpe=5.0,
+                          broker={'HELDA': 8_000.0}, min_acting_strategies=5,
                           eod=False, intraday=True, flatten_flag='1')
     assert orders == [], 'intraday redeploy must never flatten, got %r' % orders
     assert alerts == [], 'flatten must NOT fire on an intraday redeploy'
@@ -239,7 +243,7 @@ def test_d2_intraday_with_eod_inherited_all_gated_holds(monkeypatch):
     weights, carried = _healthy_set(n=10)
     orders, alerts = _run(monkeypatch, weights_rows=weights, carried_rows=carried,
                           broker={'HELDA': 8_000.0, 'HELDB': -3_000.0},
-                          min_corr_cum_sharpe=5.0,
+                          min_acting_strategies=5,
                           eod=True, intraday=True, flatten_flag='1')
     assert orders == [], (
         'intraday redeploy with EOD_RECONCILE inherited must NOT flatten — an '
@@ -257,13 +261,13 @@ def test_e_flag_off_default_eod_all_gated_is_inert(monkeypatch):
     # flatten_flag=None → the kill-switch env var is UNSET (default-OFF).
     orders, alerts = _run(monkeypatch, weights_rows=weights, carried_rows=carried,
                           broker={'HELDA': 8_000.0, 'HELDB': -5_000.0},
-                          min_corr_cum_sharpe=5.0, eod=True, flatten_flag=None)
+                          min_acting_strategies=5, eod=True, flatten_flag=None)
     assert orders == [], 'flag OFF must be inert (historical HOLD), got %r' % orders
     assert alerts == [], 'flatten must NOT fire while the kill-switch is OFF'
 
     # Also explicitly OFF ('0') must be inert.
     orders0, alerts0 = _run(monkeypatch, weights_rows=weights, carried_rows=carried,
-                            broker={'HELDA': 8_000.0}, min_corr_cum_sharpe=5.0,
+                            broker={'HELDA': 8_000.0}, min_acting_strategies=5,
                             eod=True, flatten_flag='0')
     assert orders0 == [] and alerts0 == []
 
@@ -274,14 +278,14 @@ def test_e_flag_off_default_eod_all_gated_is_inert(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _normal_run(monkeypatch, flatten_flag):
-    # Two single-strategy tickers clear the low floor (S_adj=3.0 >= 0.5); the broker
+    # Two single-strategy tickers clear the open gate (min_acting=1); the broker
     # holds T0 (a resize delta) and ORPH (an orphan → close). Exercises the full
     # emission tail (delta + open + orphan_close).
     weights = [_weights_row('S0', 3.0), _weights_row('S1', 3.0)]
     carried = [_carried('S0', 'T0'), _carried('S1', 'T1')]
     broker = {'T0': 5_000.0, 'ORPH': 4_000.0}
     return _run(monkeypatch, weights_rows=weights, carried_rows=carried,
-                broker=broker, min_corr_cum_sharpe=0.5, eod=True, flatten_flag=flatten_flag)
+                broker=broker, min_acting_strategies=1, eod=True, flatten_flag=flatten_flag)
 
 
 def test_g_normal_path_byte_identical_flag_on_vs_off(monkeypatch):
@@ -313,7 +317,7 @@ def test_h_sameday_lane_flag_on_healthy_all_gated_flattens(monkeypatch):
     weights, carried = _healthy_set(n=10)
     broker = {'CBK': 7_038.0, 'JAN': 10_896.0, 'STRC': 11_053.0}
     orders, alerts = _run(monkeypatch, weights_rows=weights, carried_rows=carried,
-                          broker=broker, min_corr_cum_sharpe=5.0,
+                          broker=broker, min_acting_strategies=5,
                           eod=False, sameday=True, intraday=False, flatten_flag='1')
 
     assert orders, ('same-day lane must flatten on genuine zero conviction — the '
@@ -336,7 +340,7 @@ def test_i_sameday_lane_intraday_redeploy_never_flattens(monkeypatch):
     weights, carried = _healthy_set(n=10)
     orders, alerts = _run(monkeypatch, weights_rows=weights, carried_rows=carried,
                           broker={'HELDA': 8_000.0, 'HELDB': -3_000.0},
-                          min_corr_cum_sharpe=5.0,
+                          min_acting_strategies=5,
                           eod=False, sameday=True, intraday=True, flatten_flag='1')
     assert orders == [], ('same-day + INTRADAY_REDEPLOY=1 must NOT flatten, got %r'
                           % orders)
@@ -350,7 +354,7 @@ def test_i_sameday_lane_intraday_redeploy_never_flattens(monkeypatch):
 def test_j_sameday_lane_flag_off_is_inert(monkeypatch):
     weights, carried = _healthy_set(n=10)
     orders, alerts = _run(monkeypatch, weights_rows=weights, carried_rows=carried,
-                          broker={'HELDA': 8_000.0}, min_corr_cum_sharpe=5.0,
+                          broker={'HELDA': 8_000.0}, min_acting_strategies=5,
                           eod=False, sameday=True, flatten_flag='0')
     assert orders == [] and alerts == []
 
@@ -374,7 +378,7 @@ def test_k_flatten_of_attributed_positions_uses_reserved_sid(monkeypatch):
     # ticker_meta will carry real strategies for them.
     broker = {'T0': 8_000.0, 'T1': -5_000.0, 'T2': 12_500.0}
     orders, alerts = _run(monkeypatch, weights_rows=weights, carried_rows=carried,
-                          broker=broker, min_corr_cum_sharpe=5.0,
+                          broker=broker, min_acting_strategies=5,
                           eod=False, sameday=True, intraday=False, flatten_flag='1')
 
     assert orders, 'flatten must emit orders for attributed positions, got []'

@@ -118,7 +118,9 @@ python3 scripts/run_universe_ladder.py seed --arm
   suppressed via OPENCLAW_B3_HOOK_SUPPRESS for OOM headroom)
 - manual adopt still works via ✅ reaction or :7870 buttons; each manual
   adoption fires a DETACHED B3 refresh → proposals appear next to the
-  Conviction Gates sliders on :3000
+  Conviction Gates sliders on :3000 (since 2026-08-22 those sliders set
+  `min_acting_strategies`, the per-regime minimum count of same-direction
+  acting strategies — integer 1..10 — not an S_adj floor)
   (Apply/✗ buttons; [1,10] clamp enforced in propose_values + the apply
   endpoint; the APPLIED value also hits regime_sizer_params' own DB CHECK —
   the proposals table itself has no CHECK by design)

@@ -639,16 +639,31 @@ def _recent_contribs(regime_state: str, days: int) -> dict[str, list[tuple]]:
     return contribs
 
 
-def _live_floor(regime_state: str) -> float:
+def _live_min_acting(regime_state: str) -> int:
+    """Per-regime conviction gate = minimum distinct acting strategies in the
+    net direction (regime_sizer_params.min_acting_strategies, 2026-08-22;
+    replaced the S_adj floor min_corr_cum_sharpe, which is no longer read)."""
     conn = _db()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT min_corr_cum_sharpe FROM regime_sizer_params WHERE regime_state=%s",
+            cur.execute("SELECT min_acting_strategies FROM regime_sizer_params WHERE regime_state=%s",
                         (regime_state,))
             row = cur.fetchone()
-            return float(row[0]) if row and row[0] is not None else 1.0
+            return max(1, min(10, int(row[0]))) if row and row[0] is not None else 1
     finally:
         conn.close()
+
+
+def _keep_under_gate(sadj: dict, contribs: dict, min_acting: int) -> set:
+    """Tickers the sizer would TAKE under the acting-strategy gate, given the
+    S_adj map (net direction) and the (sid, dir) contributors. Mirrors
+    regime_blended_sizer: count distinct same-direction strategies, keep when
+    >= min_acting."""
+    from execution.regime_blended_sizer import _acting_counts, _net_signs
+    meta = {t: {'strategies': [sid for sid, _ in rows], 'directions': [d for _, d in rows]}
+            for t, rows in contribs.items()}
+    counts = _acting_counts(meta, _net_signs(sadj, {}))
+    return {t for t, n in counts.items() if t in sadj and n >= min_acting}
 
 
 def _sadj_under(matrix: dict, contribs: dict, gate_w: dict) -> dict[str, float]:
@@ -718,11 +733,11 @@ def shadow_report(window_days: int = DEFAULT_WINDOW_DAYS, sadj_days: int = 7) ->
         # (4) S_adj recompute over the recent signal window under both matrices.
         gate_w = _gate_weight_map(regime)
         contribs = _recent_contribs(regime, sadj_days)
-        floor = _live_floor(regime)
+        min_acting = _live_min_acting(regime)
         sadj_live = _sadj_under(live_matrix, contribs, gate_w)
         sadj_bt = _sadj_under(bt_matrix, contribs, gate_w)
-        keep_live = {t for t, v in sadj_live.items() if abs(v) >= floor}
-        keep_bt = {t for t, v in sadj_bt.items() if abs(v) >= floor}
+        keep_live = _keep_under_gate(sadj_live, contribs, min_acting)
+        keep_bt = _keep_under_gate(sadj_bt, contribs, min_acting)
         mags_bt = sorted(abs(v) for v in sadj_bt.values())
 
         # §3.4(3) look-ahead sentinels: extreme backtest pairs.
@@ -751,7 +766,7 @@ def shadow_report(window_days: int = DEFAULT_WINDOW_DAYS, sadj_days: int = 7) ->
                 'zero_intersection_pairs': sum(1 for x in inter_sizes if x == 0),
             },
             'sadj': {
-                'floor': floor,
+                'min_acting_strategies': min_acting,
                 'tickers': len(sadj_live),
                 'keep_live_matrix': len(keep_live),
                 'keep_backtest_matrix': len(keep_bt),
@@ -760,11 +775,12 @@ def shadow_report(window_days: int = DEFAULT_WINDOW_DAYS, sadj_days: int = 7) ->
                             'p50': _pct_list(mags_bt, 0.5),
                             'p90': _pct_list(mags_bt, 0.9),
                             'max': (mags_bt[-1] if mags_bt else 0.0)},
-                # floor calibration: kept-ticker count at candidate floors under
-                # the BACKTEST matrix — the operator sets sliders from this curve.
+                # gate calibration: kept-ticker count at each candidate
+                # min_acting_strategies (1..10) under the BACKTEST matrix — the
+                # operator sets the Conviction Gate sliders from this curve.
                 'keep_curve_backtest_matrix': {
-                    f'{f/100:.2f}': sum(1 for v in mags_bt if v >= f / 100)
-                    for f in range(60, 261, 10)},
+                    str(n): len(_keep_under_gate(sadj_bt, contribs, n))
+                    for n in range(1, 11)},
             },
             'hot_pairs_gt_0.9': hot_pairs[:15],
         }
