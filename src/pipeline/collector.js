@@ -430,6 +430,18 @@ function _inCycleOptionsEnabled(env = process.env) {
   return String(env.OPENCLAW_COLLECT_OPTIONS_INCYCLE || '') === '1';
 }
 
+// D4 (2026-08-23): the per-symbol insider walk (/insider-trading/search, one
+// call per ticker) is a WEEKLY reconciliation; the daily feed is the global
+// /insider-trading/latest stream (src/ingestion/ingest_insider_stream.py).
+// `fresh` = tickers with a pipeline_runs insider check (success/empty/skipped)
+// inside the refresh window — data_coverage date ranges can't express
+// "checked recently", which is why the old 7-day skip never fired.
+function _insiderWalkScope(tickers, fresh, cap) {
+  const due = tickers.filter(t => !fresh.has(t));
+  const capped = _capScope(due, cap);
+  return { tickers: capped.tickers, skippedFresh: tickers.length - due.length, deferred: capped.deferred };
+}
+
 // Per-cycle scope cap: a freshness-driven scope can be the whole universe the
 // first time the freshness check actually works; cap it so one cycle never
 // spends the full daily FMP quota. 0 / negative = no cap.
@@ -1941,18 +1953,41 @@ async function runMarketPricesNonEquity(tickers, historyDays = 3650) {
 // alpaca_news.py dual-writes ticker_sentiment_daily.alpaca_news_* + market_news
 // from one fetch. runNewsCollection (below) is now a 30-day prune-only phase.
 
+// Daily global Form-4 stream → master (D4). A handful of /latest pages cover
+// every new filing market-wide; failure is non-fatal (the walk below still
+// runs) but is surfaced, because "provider refused" must not read as "quiet day".
+async function runInsiderStreamMerge() {
+  return _runIngestPhase(
+    '📋', 'Insider stream → master (/insider-trading/latest)',
+    ['src/ingestion/ingest_insider_stream.py'],
+    'insider_stream', 10 * 60_000,
+  );
+}
+
 async function runInsiderTransactions(tickers = null) {
   if (!tickers) tickers = await getActiveTickers();
   const today = new Date().toISOString().slice(0, 10);
-  notify(`📋 Insider: collecting Form 4 data for ${tickers.length} tickers via FMP`);
 
   const cfg = await store.getConfig().catch(() => ({}));
   const FMP_INTERVAL = parseInt(cfg.fmp_interval_ms || '2000', 10);
   const FMP_PER_DAY  = parseInt(cfg.fmp_req_per_day || '250',  10);
+  const REFRESH_DAYS = parseInt(cfg.fmp_insider_refresh_days || '7', 10);
+  const WALK_CAP     = parseInt(cfg.fmp_insider_max_per_cycle || '2000', 10);
+
+  // 1. Daily feed: the global stream, one merge for all symbols.
+  await runInsiderStreamMerge();
+
+  // 2. Weekly reconciliation: per-symbol search only for names not checked
+  //    within REFRESH_DAYS, oldest-first is implicit (alphabetical rotation
+  //    via the cap), capped so a cycle never re-walks the universe.
+  const fresh = await store.getRecentlyChecked('insider', REFRESH_DAYS).catch(() => new Set());
+  const scope = _insiderWalkScope(tickers, fresh, WALK_CAP);
+  notify(`📋 Insider walk: ${scope.tickers.length} of ${tickers.length} tickers via FMP search (${scope.skippedFresh} checked <${REFRESH_DAYS}d, ${scope.deferred} deferred by cap ${WALK_CAP})`);
+  tickers = scope.tickers;
 
   const { query: dbQuery } = require('../database/postgres');
   let inserted = 0;
-  let skipped  = 0;
+  let skipped  = scope.skippedFresh;
   let quotaExhausted = false;
 
   for (let i = 0; i < tickers.length; i++) {
@@ -1963,11 +1998,6 @@ async function runInsiderTransactions(tickers = null) {
       if (!quotaExhausted) { quotaExhausted = true; notify(`⚠️ FMP daily quota (${FMP_PER_DAY}) reached — insider phase stopping`); }
       continue;
     }
-
-    // Insider filings change infrequently — skip if fetched within 7 days
-    const sevenDaysAgo = new Date(Date.now() - 7 * 86400_000).toISOString().slice(0, 10);
-    const gaps = await store.getGaps(ticker, 'insider', sevenDaysAgo, today).catch(() => [null]);
-    if (gaps.length === 0) { skipped++; continue; }
 
     const start = Date.now();
     let data = null;
@@ -1984,7 +2014,7 @@ async function runInsiderTransactions(tickers = null) {
       }
       // 404 = no insider data for this ticker (ETFs, small caps) — not a real error
       if (err.message.includes('404')) {
-        await store.updateCoverage(ticker, 'insider', today, today, 0);
+        await store.logRun(ticker, 'insider', 'empty', 0, 'HTTP 404', Date.now() - start, 1);
         continue;
       }
       _stats.errors++;
@@ -1993,7 +2023,7 @@ async function runInsiderTransactions(tickers = null) {
     }
 
     if (!Array.isArray(data) || !data.length) {
-      await store.updateCoverage(ticker, 'insider', today, today, 0);
+      await store.logRun(ticker, 'insider', 'empty', 0, null, Date.now() - start, 1);
       continue;
     }
 
@@ -2689,4 +2719,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions, _httpError, _classifyFmpError, _capScope, _inCycleOptionsEnabled };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions, _httpError, _classifyFmpError, _capScope, _inCycleOptionsEnabled, _insiderWalkScope, runInsiderStreamMerge };

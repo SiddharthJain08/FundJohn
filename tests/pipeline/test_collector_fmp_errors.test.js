@@ -65,3 +65,19 @@ test('_inCycleOptionsEnabled is off by default and on only for OPENCLAW_COLLECT_
   assert.equal(collector._inCycleOptionsEnabled({ OPENCLAW_COLLECT_OPTIONS_INCYCLE: 'true' }), false);
   assert.equal(collector._inCycleOptionsEnabled({ OPENCLAW_COLLECT_OPTIONS_INCYCLE: '1' }), true);
 });
+
+// ── D4: insider per-symbol walk is a weekly reconciliation, not a daily sweep ──
+test('_insiderWalkScope drops tickers checked recently, caps the rest, counts both', () => {
+  const fresh = new Set(['B', 'D']);
+  const r = collector._insiderWalkScope(['A', 'B', 'C', 'D', 'E'], fresh, 2);
+  assert.deepEqual(r.tickers, ['A', 'C']);
+  assert.equal(r.skippedFresh, 2);
+  assert.equal(r.deferred, 1);
+});
+
+test('_insiderWalkScope with no cap and nothing fresh returns everything', () => {
+  const r = collector._insiderWalkScope(['A', 'B'], new Set(), 0);
+  assert.deepEqual(r.tickers, ['A', 'B']);
+  assert.equal(r.skippedFresh, 0);
+  assert.equal(r.deferred, 0);
+});

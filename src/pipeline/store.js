@@ -463,6 +463,22 @@ async function getGapSummary({ priceTickers, optionsTickers, fundTickers, fromDa
 
 // ── Pipeline Logging ──────────────────────────────────────────────────────────
 
+// Tickers with a pipeline_runs check (success / empty / skipped) for
+// `runType` within the last `days`. This is the "fetched recently" signal
+// data_coverage cannot express: coverage is a DATE RANGE that refuses
+// zero-row writes, so names with no data (ETFs) or gated names never got a
+// row, and yesterday's date_to never satisfies requested_to = today.
+async function getRecentlyChecked(runType, days) {
+  const res = await query(
+    `SELECT DISTINCT ticker FROM pipeline_runs
+     WHERE run_type = $1 AND status IN ('success', 'empty', 'skipped')
+       AND ticker IS NOT NULL
+       AND created_at >= NOW() - ($2 || ' days')::interval`,
+    [runType, String(parseInt(days, 10) || 7)]
+  );
+  return new Set(res.rows.map(r => r.ticker));
+}
+
 async function logRun(ticker, runType, status, records = 0, errorMsg = null, durationMs = 0, apiCalls = 0) {
   await query(
     `INSERT INTO pipeline_runs (ticker, run_type, status, records_written, error_message, duration_ms, api_calls_used)
@@ -671,7 +687,7 @@ module.exports = {
   upsertPrices, upsertOptions, upsertFundamentals,
   bufferInsider,
   flushPrices, flushOptions, flushFundamentals, flushInsider, flushMacro,
-  getGaps, updateCoverage, getAllCoverage, getGapSummary,
+  getGaps, updateCoverage, getAllCoverage, getGapSummary, getRecentlyChecked,
   logRun, getCoverageStats, getTodayApiStats, getDataFreshness,
   startCycle, completeCycle, getCycleHistory,
   upsertNews, getNews,
