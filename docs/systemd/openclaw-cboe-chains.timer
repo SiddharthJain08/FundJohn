@@ -1,0 +1,15 @@
+[Unit]
+Description=Run CBOE option-chain capture Mon-Fri 17:00 America/New_York
+
+[Timer]
+# CBOE's delayed feed is 15 min behind; by 17:00 ET it holds the 16:00 close
+# for every underlying. Starts after the 16:30 ET openclaw-options-archive
+# (4.8 GB peak, ~17 min) has finished so the two never share the 8 GB box.
+# The capture is a SNAPSHOT — a missed session cannot be backfilled — so
+# Persistent=true: a late boot still runs the day.
+OnCalendar=Mon..Fri *-*-* 17:00:00 America/New_York
+Persistent=true
+Unit=openclaw-cboe-chains.service
+
+[Install]
+WantedBy=timers.target

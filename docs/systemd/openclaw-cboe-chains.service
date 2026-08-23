@@ -1,0 +1,23 @@
+[Unit]
+Description=CBOE delayed option-chain capture (cdn.cboe.com -> cboe_chains/date=*.parquet + cboe_chain_aggregates.parquet)
+After=network-online.target
+Wants=network-online.target
+OnFailure=openclaw-failure-notify@%n.service
+
+[Service]
+Type=oneshot
+# User=root: matches every other data/master/*.parquet writer (all root:root).
+User=root
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+Environment=PYTHONPATH=/root/openclaw/src
+ExecStart=/usr/bin/python3 /root/openclaw/src/ingestion/ingest_cboe_chains.py
+StandardOutput=append:/var/log/openclaw-cboe-chains.log
+StandardError=append:/var/log/openclaw-cboe-chains.log
+Nice=19
+# 556 underlyings at 2 workers / 0.4 s pace with 429 backoff ≈ 13 min; 1.2 GB peak.
+TimeoutStartSec=2400
+MemoryMax=2500M
+
+[Install]
+WantedBy=multi-user.target
