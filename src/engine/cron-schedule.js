@@ -829,11 +829,11 @@ function start(swarm, generateId, notifyDiscord) {
         }
     }, { timezone: 'America/New_York' });
 
-    // Sunday 08:00 ET — weekly memory synthesis + universe sync
+    // Sunday 08:00 ET — weekly memory synthesis
     // (Reaper removed 2026-04-28 per CLAUDE.md NEVER-DELETE-DATA invariant —
     // orphan-column detection no longer feeds data_deprecation_queue.)
     cron.schedule('0 8 * * 0', async () => {
-        log('Weekly maintenance starting — signatures, universe sync');
+        log('Weekly maintenance starting — signatures, backtest sweep');
 
         // Refresh data_ledger materialized view
         await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY data_ledger').catch((e) =>
@@ -849,15 +849,11 @@ function start(swarm, generateId, notifyDiscord) {
             log(`strategy_signatures regeneration error: ${e.message}`);
         }
 
-        // Sync full ticker universe from FMP into universe_config
-        // (sync_universe_to_db is FMP-only; Polygon was removed in SP-1)
-        log('Universe sync starting (FMP)...');
-        try {
-            const syncOut = runPython('src/ingestion/run_universe_sync.py');
-            log(`Universe sync complete: ${syncOut.slice(0, 200)}`);
-        } catch (e) {
-            log(`Universe sync error: ${e.message.slice(0, 200)}`);
-        }
+        // FMP universe sync (src/ingestion/run_universe_sync.py) RETIRED
+        // 2026-08-23: /api/v3/available-traded/list is 403 "Legacy Endpoint"
+        // for this key, so it logged added=0 deactivated=0 total=0 every week.
+        // Universe authority = src/universe/ resolver over
+        // alpaca_tradable_universe (openclaw-tradable-universe-refresh.timer).
 
         // strategist-ideator + arXiv discovery moved into Saturday brain
         // Phase 6.5 + Phase 2 respectively. Both now run once per week from

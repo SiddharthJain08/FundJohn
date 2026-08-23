@@ -64,8 +64,11 @@ def get_price_target(ticker: str) -> dict:
     return data[0] if isinstance(data, list) and data else data
 
 def get_earnings_calendar(ticker: str, limit: int = 4) -> list:
+    # /stable/earnings = per-symbol report dates with epsActual/epsEstimated/
+    # revenueActual/revenueEstimated (the old "surprises" path is 404 on
+    # /stable/ — 2026-08-23).
     limit = min(limit, 4)
-    return _get("earnings-surprises", {"symbol": ticker, "limit": limit})
+    return _get("earnings", {"symbol": ticker, "limit": limit})
 
 def get_quote(ticker: str) -> dict:
     data = _get("quote", {"symbol": ticker})

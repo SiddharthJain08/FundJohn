@@ -55,34 +55,57 @@ def run(coro):
 # ---------------------------------------------------------------------------
 
 def test_fetch_fmp_earnings():
-    """Mock FMP /earnings-surprises via aioresponses, assert earnings_surprise_pct computed."""
+    """FMP /api/v3 is retired (403 "Legacy Endpoint" on this key since
+    2025-08-31; /stable/earnings-surprises does not exist). The v3 fetchers
+    must raise BEFORE any HTTP rather than 403 silently into None."""
     symbol  = 'AAPL'
     api_key = 'testkey'
-    url     = f'{pipeline_mod.FMP_BASE}/earnings-surprises/{symbol}'
-
-    # actual = 1.50, estimate = 1.20  →  surprise = (1.50-1.20)/1.20 * 100 = 25%
-    payload = [
-        {
-            'date':               '2024-01-25',
-            'symbol':             'AAPL',
-            'actualEarningResult': 1.50,
-            'estimatedEarning':    1.20,
-        }
-    ]
 
     async def _run():
         pipeline_mod._fmp_semaphore = asyncio.Semaphore(pipeline_mod.FMP_CONCURRENCY)
-        with aioresponses() as m:
-            # aioresponses matches the full URL including query string
-            m.get(f'{url}?apikey={api_key}', payload=payload, status=200)
+        with aioresponses() as m:   # no routes registered: any HTTP would error differently
             async with aiohttp.ClientSession() as session:
                 return await pipeline_mod.fetch_fmp_earnings(session, symbol, api_key)
 
-    result = asyncio.run(_run())
+    with pytest.raises(RuntimeError, match=r'/api/v3 retired.*stable'):
+        asyncio.run(_run())
 
-    assert result is not None, 'Expected dict, got None'
-    assert 'earnings_surprise_pct' in result
-    assert result['earnings_surprise_pct'] == pytest.approx(25.0, rel=1e-3)
+
+@pytest.mark.parametrize('fn, args', [
+    ('fetch_fmp_insider',  ('AAPL', 'k')),
+    ('fetch_fmp_prices',   ('AAPL', 'k')),
+    ('fetch_fmp_universe', ('k',)),
+])
+def test_other_v3_fetchers_raise_retired(fn, args):
+    async def _run():
+        pipeline_mod._fmp_semaphore = asyncio.Semaphore(pipeline_mod.FMP_CONCURRENCY)
+        async with aiohttp.ClientSession() as session:
+            return await getattr(pipeline_mod, fn)(session, *args)
+    with pytest.raises(RuntimeError, match=r'/api/v3 retired'):
+        asyncio.run(_run())
+
+
+def test_fetch_fmp_earnings_calendar_raises_retired():
+    async def _run():
+        async with aiohttp.ClientSession() as session:
+            return await pipeline_mod.fetch_fmp_earnings_calendar(session, 'k', '2026-01-01', '2026-01-31')
+    with pytest.raises(RuntimeError, match=r'/api/v3 retired'):
+        asyncio.run(_run())
+
+
+def test_sync_universe_to_db_is_retired_noop(monkeypatch):
+    """No network, no DB: the resolver + openclaw-tradable-universe-refresh own
+    the universe now. Returns the old shape (run_universe_sync.py prints it)
+    plus retired=True, and never touches universe_config."""
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://must-not-be-used')
+    import psycopg2
+    def _boom(*a, **k):
+        raise AssertionError('sync_universe_to_db must not open a DB connection')
+    monkeypatch.setattr(psycopg2, 'connect', _boom)
+    result = asyncio.run(pipeline_mod.sync_universe_to_db(fmp_key='k'))
+    assert result['retired'] is True
+    assert (result['added'], result['deactivated'], result['total']) == (0, 0, 0)
+    assert 'error' not in result
 
 
 # ---------------------------------------------------------------------------

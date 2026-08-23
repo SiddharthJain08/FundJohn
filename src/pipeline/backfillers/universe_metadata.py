@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -93,13 +93,15 @@ def _sp500_membership_on(d: date) -> set[str]:
 
 # ── Market cap (historical) ───────────────────────────────────────────────────
 def _market_cap_for(symbol: str, on: date) -> Optional[float]:
-    """Historical market cap via FMP.
+    """Historical market cap via FMP /stable/historical-market-capitalization.
 
-    PROBE RESULT 2026-05-22: this endpoint returns 403 on the Starter tier.
-    We keep the call here so when the operator upgrades the FMP plan (or wires
-    a shares-out backfill), this path lights up automatically. Until then we
-    silently return None so build_month_snapshot still produces structurally
-    valid rows.
+    Ported 2026-08-23 from /api/v3/historical-market-capitalization/{sym},
+    which returns 403 "Legacy Endpoint" for this key (the 2026-05-22 probe's
+    "403 on the Starter tier" was this, not a plan limit). Stable payload:
+    [{"symbol", "date", "marketCap"}]; from/to honoured; [] on a non-trading
+    date — so we ask for the trailing week and take the latest row on/before
+    `on` (month-end snapshots often fall on a weekend). Returns None on any
+    failure so build_month_snapshot still produces structurally valid rows.
     """
     # Short-circuit: if FMP_API_KEY is missing we definitely can't call it.
     api_key = os.environ.get('FMP_API_KEY')
@@ -111,23 +113,30 @@ def _market_cap_for(symbol: str, on: date) -> Optional[float]:
     except ImportError:
         return None
 
-    url = (
-        f'https://financialmodelingprep.com/api/v3/'
-        f'historical-market-capitalization/{symbol}'
-    )
+    url = 'https://financialmodelingprep.com/stable/historical-market-capitalization'
     try:
         r = requests.get(
             url,
-            params={'from': on.isoformat(), 'to': on.isoformat(), 'apikey': api_key},
+            params={
+                'symbol': symbol,
+                'from': (on - timedelta(days=7)).isoformat(),
+                'to': on.isoformat(),
+                'apikey': api_key,
+            },
             timeout=10,
         )
         time.sleep(_FMP_SLEEP_S)  # soft-throttle under Starter cap
         if r.status_code != 200:
             return None
         payload = r.json()
-        if not payload:
+        if not isinstance(payload, list) or not payload:
             return None
-        mc = payload[0].get('marketCap')
+        iso = on.isoformat()
+        rows = [p for p in payload if isinstance(p, dict) and str(p.get('date', ''))[:10] <= iso]
+        if not rows:
+            return None
+        best = max(rows, key=lambda p: str(p.get('date', ''))[:10])
+        mc = best.get('marketCap')
         try:
             mc_f = float(mc) if mc is not None else None
         except (TypeError, ValueError):

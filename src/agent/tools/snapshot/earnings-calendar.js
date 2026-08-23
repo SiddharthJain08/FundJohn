@@ -13,7 +13,9 @@ async function get(ticker) {
   const apiKey = process.env.FMP_API_KEY;
   if (!apiKey) throw new Error('FMP_API_KEY not set');
 
-  const url = `${FMP_BASE}/earnings-surprises?symbol=${ticker}&apikey=${apiKey}`;
+  // /stable/earnings carries date + epsActual/epsEstimated/revenue* per
+  // symbol; /stable/earnings-surprises does not exist (404, 2026-08-23).
+  const url = `${FMP_BASE}/earnings?symbol=${ticker}&limit=20&apikey=${apiKey}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`FMP earnings calendar returned ${res.status}`);
 

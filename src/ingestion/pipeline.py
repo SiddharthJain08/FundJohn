@@ -11,6 +11,31 @@ Layer 2 — Transform: normalize raw API responses into MasterBar,
 Layer 3 — Cache: data/cache/{symbol}/{date}.json, TTL 23h.
 
 Schedule: daily 16:20 America/New_York via APScheduler.
+
+DEPRECATION (2026-08-23) — FMP /api/v3 is DEAD for this key.
+  Every FMP path in this module was built on https://financialmodelingprep.com/api/v3,
+  which returns 403 "Legacy Endpoint" for keys issued after 2025-08-31; only
+  /stable/ works (memory: reference_fmp_v3_api_dead). The fetchers used to
+  log "HTTP 403" and return None, i.e. silently-empty MasterBars.
+  Reachability audit (grep callers, 2026-08-23):
+    * run_pipeline / _process_symbol / fetch_fmp_{earnings,insider,prices}:
+      ZERO live callers — only re-exported by src/ingestion/__init__.py and
+      exercised by tests/ingestion/test_ingestion.py. scripts/run_pipeline.py
+      runs src/execution/pipeline_orchestrator.py, not this.
+    * fetch_fmp_earnings_calendar: ZERO callers (its docstring's "called
+      daily by pipeline_orchestrator" was never true — earnings.parquet is
+      fed by src/ingestion/ingest_earnings_master.py via yfinance).
+    * fetch_fmp_universe / sync_universe_to_db: the Sunday 08:00 ET cron in
+      src/engine/cron-schedule.js called it weekly and it reported
+      added=0 deactivated=0 total=0 every week (journal 08-16). RETIRED:
+      src/universe/ resolver is the sole universe authority and
+      src/maintenance/refresh_tradable_universe.py (openclaw-tradable-universe-
+      refresh.timer) populates alpaca_tradable_universe from `alpaca asset list`.
+  The v3 fetchers now raise RuntimeError('FMP /api/v3 retired …') BEFORE any
+  HTTP instead of 403-ing into None; sync_universe_to_db is a logged no-op.
+  Live equivalents: /stable/earnings?symbol= (actual vs estimate),
+  /stable/profile?symbol=, /stable/historical-price-eod/full?symbol=,
+  /stable/insider-trading/search?symbol= — see src/agent/tools/mcp/fmp.js.
 """
 
 import asyncio
@@ -36,8 +61,16 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 CACHE_DIR = ROOT / 'data' / 'cache'
 CACHE_TTL_SECONDS = 23 * 3600  # 23 hours
 
-FMP_BASE     = 'https://financialmodelingprep.com/api/v3'
+FMP_BASE     = 'https://financialmodelingprep.com/api/v3'   # DEAD — see module docstring
+FMP_STABLE   = 'https://financialmodelingprep.com/stable'
 POLYGON_BASE = 'https://api.polygon.io'
+
+
+def _fmp_v3_retired(endpoint: str, stable_equivalent: str) -> RuntimeError:
+    return RuntimeError(
+        f'FMP /api/v3 retired — {FMP_BASE}/{endpoint} returns 403 "Legacy Endpoint" '
+        f'for this key; use {FMP_STABLE}/{stable_equivalent} (see module docstring)'
+    )
 
 FMP_CONCURRENCY     = 5   # semaphore slots for FMP (300 req/min → safe at 5 parallel)
 POLYGON_CONCURRENCY = 10  # Polygon standard tier: no hard per-minute cap
@@ -248,27 +281,7 @@ async def fetch_fmp_earnings(
     GET /earnings-surprises/{symbol}
     Returns {'earnings_surprise_pct': float} from the most recent quarter, or None.
     """
-    url = f'{FMP_BASE}/earnings-surprises/{symbol}'
-    async with _get_fmp_sem():
-        try:
-            async with session.get(url, params={'apikey': api_key}, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    logger.warning('FMP earnings %s: HTTP %s', symbol, resp.status)
-                    return None
-                data = await resp.json(content_type=None)
-                if not isinstance(data, list) or not data:
-                    return None
-                latest = data[0]
-                actual   = _safe_float(latest.get('actualEarningResult'))
-                estimate = _safe_float(latest.get('estimatedEarning'))
-                if estimate is None or estimate == 0:
-                    pct = None
-                else:
-                    pct = round((actual - estimate) / abs(estimate) * 100, 4) if actual is not None else None
-                return {'earnings_surprise_pct': pct}
-        except Exception as e:
-            logger.warning('FMP earnings %s error: %s', symbol, e)
-            return None
+    raise _fmp_v3_retired(f'earnings-surprises/{symbol}', f'earnings?symbol={symbol}')
 
 
 async def fetch_fmp_insider(
@@ -282,40 +295,7 @@ async def fetch_fmp_insider(
     Returns {'insider_buy_flag': bool, 'insider_sell_flag': bool}.
     Looks at transactions within the last lookback_days calendar days.
     """
-    url = f'{FMP_BASE}/insider-trading'
-    cutoff = datetime.utcnow() - timedelta(days=lookback_days)
-    async with _get_fmp_sem():
-        try:
-            async with session.get(
-                url,
-                params={'symbol': symbol, 'apikey': api_key, 'limit': 50},
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning('FMP insider %s: HTTP %s', symbol, resp.status)
-                    return None
-                data = await resp.json(content_type=None)
-                if not isinstance(data, list):
-                    return None
-
-                buy_flag = sell_flag = False
-                for txn in data:
-                    try:
-                        txn_date = datetime.strptime(str(txn.get('transactionDate', ''))[:10], '%Y-%m-%d')
-                    except ValueError:
-                        continue
-                    if txn_date < cutoff:
-                        continue
-                    txn_type = (txn.get('transactionType') or '').upper()
-                    if 'BUY' in txn_type or 'PURCHASE' in txn_type:
-                        buy_flag = True
-                    elif 'SALE' in txn_type or 'SELL' in txn_type:
-                        sell_flag = True
-
-                return {'insider_buy_flag': buy_flag, 'insider_sell_flag': sell_flag}
-        except Exception as e:
-            logger.warning('FMP insider %s error: %s', symbol, e)
-            return None
+    raise _fmp_v3_retired('insider-trading', f'insider-trading/search?symbol={symbol}')
 
 
 async def fetch_fmp_prices(
@@ -329,37 +309,8 @@ async def fetch_fmp_prices(
     Returns list of [{date, open, high, low, close, volume}] sorted oldest-first.
     lookback controls how many calendar days of history to request.
     """
-    url = f'{FMP_BASE}/historical-price-full/{symbol}'
-    from_date = (datetime.utcnow() - timedelta(days=lookback)).strftime('%Y-%m-%d')
-    async with _get_fmp_sem():
-        try:
-            async with session.get(
-                url,
-                params={'from': from_date, 'apikey': api_key},
-                timeout=aiohttp.ClientTimeout(total=20),
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning('FMP prices %s: HTTP %s', symbol, resp.status)
-                    return None
-                data = await resp.json(content_type=None)
-                historical = data.get('historical') if isinstance(data, dict) else None
-                if not historical:
-                    return None
-                # API returns newest-first; reverse to oldest-first
-                bars = []
-                for h in reversed(historical):
-                    bars.append({
-                        'date':   h.get('date'),
-                        'open':   _safe_float(h.get('open')),
-                        'high':   _safe_float(h.get('high')),
-                        'low':    _safe_float(h.get('low')),
-                        'close':  _safe_float(h.get('close')),
-                        'volume': _safe_float(h.get('volume')),
-                    })
-                return bars
-        except Exception as e:
-            logger.warning('FMP prices %s error: %s', symbol, e)
-            return None
+    raise _fmp_v3_retired(f'historical-price-full/{symbol}',
+                          f'historical-price-eod/full?symbol={symbol}')
 
 
 async def _fetch_polygon_options_results(
@@ -553,20 +504,10 @@ async def fetch_fmp_earnings_calendar(
     Fetch upcoming earnings calendar from FMP for a date window.
     GET /earning_calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
     Returns list of dicts: {symbol, date, eps, epsEstimated, revenue, revenueEstimated}
-    Called daily by pipeline_orchestrator to keep earnings.parquet current.
+    NEVER had a caller (see master_freshness.py) — earnings.parquet is fed by
+    src/ingestion/ingest_earnings_master.py. Retired with /api/v3.
     """
-    url = f'{FMP_BASE}/earning_calendar'
-    params = {"from": from_date, "to": to_date, "apikey": fmp_key}
-    async with _fmp_semaphore:
-        try:
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data if isinstance(data, list) else []
-                logger.warning("FMP earning_calendar HTTP %s", resp.status)
-        except Exception as e:
-            logger.warning("FMP earning_calendar error: %s", e)
-    return []
+    raise _fmp_v3_retired('earning_calendar', f'earnings-calendar?from={from_date}&to={to_date}')
 
 async def run_pipeline(
     symbols:     List[str],
@@ -632,37 +573,13 @@ async def fetch_fmp_universe(
     """
     GET /v3/available-traded/list — all tradeable US stocks from FMP.
     Returns [{ticker, name, exchange}].
+
+    RETIRED 2026-08-23 (403 Legacy Endpoint). The universe is owned by the
+    resolver + alpaca_tradable_universe; no FMP-specific field from this
+    list (name / exchangeShortName / type) has a consumer that the Alpaca
+    asset list does not already serve.
     """
-    url = f'{FMP_BASE}/available-traded/list'
-    async with _get_fmp_sem():
-        try:
-            async with session.get(
-                url,
-                params={'apikey': api_key},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning('FMP universe: HTTP %s', resp.status)
-                    return []
-                data = await resp.json(content_type=None)
-                if not isinstance(data, list):
-                    return []
-                results = []
-                for row in data:
-                    exch = (row.get('exchangeShortName') or '').upper()
-                    typ  = (row.get('type') or '').lower()
-                    if typ == 'stock' and exch in {'NASDAQ', 'NYSE', 'AMEX'}:
-                        results.append({
-                            'ticker':   row.get('symbol', '').upper(),
-                            'name':     row.get('name', ''),
-                            'exchange': exch,
-                            'source':   'fmp',
-                        })
-                logger.info('FMP universe: %d tradeable US stocks', len(results))
-                return results
-        except Exception as e:
-            logger.warning('FMP universe error: %s', e)
-            return []
+    raise _fmp_v3_retired('available-traded/list', 'company-screener')
 
 
 async def sync_universe_to_db(
@@ -672,80 +589,22 @@ async def sync_universe_to_db(
     Fetch FMP stock list and upsert into universe_config.
     Deactivates tickers no longer present in FMP.
     Returns {'added': int, 'deactivated': int, 'total': int}.
+
+    RETIRED 2026-08-23 — logged no-op, same return shape plus retired=True.
+    fetch_fmp_universe has been 403-ing since the key lost /api/v3, so this
+    reported added=0 deactivated=0 total=0 every Sunday and aborted before
+    the upsert; universe_config has not been touched by this path since
+    then and is NOT touched now (append-only: deactivation is a flag, and
+    nothing here flips it). Universe authority: src/universe/ resolver over
+    alpaca_tradable_universe (openclaw-tradable-universe-refresh.timer).
     """
-    import psycopg2
-    from psycopg2.extras import execute_values
+    logger.warning(
+        'sync_universe_to_db: RETIRED — FMP /api/v3/available-traded/list is dead '
+        '(403 Legacy Endpoint); universe_config untouched. The resolver + '
+        'alpaca_tradable_universe own the universe.'
+    )
+    return {'added': 0, 'deactivated': 0, 'total': 0, 'retired': True}
 
-    fmp_key = fmp_key or os.environ.get('FMP_API_KEY', '')
-
-    global _fmp_semaphore
-    _fmp_semaphore = asyncio.Semaphore(FMP_CONCURRENCY)
-
-    connector = aiohttp.TCPConnector(limit=20)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        fmp_rows = await fetch_fmp_universe(session, fmp_key)
-
-    merged: Dict[str, Dict] = {}
-    for row in fmp_rows:
-        t = row['ticker']
-        merged[t] = {'ticker': t, 'name': row['name'], 'exchange': row['exchange'],
-                     'has_fundamentals': True, 'category': 'equity', 'active': True}
-
-    if not merged:
-        logger.warning('sync_universe_to_db: no tickers fetched — aborting upsert')
-        return {'added': 0, 'deactivated': 0, 'total': 0}
-
-    postgres_uri = os.environ.get('POSTGRES_URI', '')
-    if not postgres_uri:
-        logger.warning('sync_universe_to_db: POSTGRES_URI not set')
-        return {'added': 0, 'deactivated': 0, 'total': len(merged)}
-
-    active_tickers = list(merged.keys())
-    rows = [
-        (
-            r['ticker'], r['name'], r['exchange'],
-            r.get('has_fundamentals', False), r.get('category', 'equity'),
-        )
-        for r in merged.values()
-    ]
-
-    conn = psycopg2.connect(postgres_uri)
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                execute_values(
-                    cur,
-                    """
-                    INSERT INTO universe_config
-                        (ticker, name, exchange, has_fundamentals, category, active)
-                    VALUES %s
-                    ON CONFLICT (ticker) DO UPDATE SET
-                        name=EXCLUDED.name,
-                        exchange=EXCLUDED.exchange,
-                        has_fundamentals=EXCLUDED.has_fundamentals,
-                        active=TRUE
-                    """,
-                    rows,
-                )
-                # Deactivate tickers not in fresh list (preserve existing non-equity entries)
-                cur.execute(
-                    """
-                    UPDATE universe_config
-                    SET active = FALSE
-                    WHERE category = 'equity'
-                      AND ticker NOT IN %s
-                    """,
-                    (tuple(active_tickers),),
-                )
-                deactivated = cur.rowcount
-        conn.close()
-    except Exception as e:
-        conn.close()
-        logger.error('sync_universe_to_db DB error: %s', e)
-        return {'added': 0, 'deactivated': 0, 'total': len(merged), 'error': str(e)}
-
-    logger.info('Universe sync complete: %d active equities, %d deactivated', len(merged), deactivated)
-    return {'added': len(merged), 'deactivated': deactivated, 'total': len(merged)}
 
 
 # ---------------------------------------------------------------------------
