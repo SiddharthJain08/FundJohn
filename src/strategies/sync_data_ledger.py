@@ -32,6 +32,10 @@ PARQUET_MAP = {
     'iv_history':        'iv_history',
     'earnings_calendar': 'earnings_calendar',
     'intraday_features': 'intraday_features',  # 5-min HMM regime features (Stage 2)
+    # 2026-08-23 free streams (docs/reference/free-data-streams.md)
+    'short_interest':           'short_interest',           # FINRA biweekly consolidated SI
+    'earnings_calendar_nasdaq': 'earnings_calendar_nasdaq', # Nasdaq keyless calendar (timing cross-check)
+    'cboe_chain_aggregates':    'cboe_chain_aggregates',    # CBOE chain OI/IV/PCR/GEX per underlying-day
 }
 
 # Derived columns computable from prices — inherit prices coverage
@@ -57,85 +61,81 @@ DERIVED_FROM_OPTIONS_AGGREGATES = [
 # Provider mapping. AlphaVantage was removed 2026-04-28 — macro now sources
 # from yfinance (matches the actual ingestion path in
 # src/ingestion/fetch_vol_indices.py, which writes 'source': 'yfinance').
+# Provider of record per master (labels corrected 2026-08-23 — several still
+# said 'polygon' three months after the SP-1 cutover to Alpaca).
 PROVIDERS = {
-    'prices':            'polygon',
-    'options_eod':       'polygon',     # Alpaca CLI alpha-preview returns 0 greeks; polygon stays primary
-    'macro':             'yfinance',
+    'prices':            'alpaca',      # SIP daily bars via alpaca CLI multi-bars (SP-1, 2026-05-22)
+    'options_eod':       'alpaca',      # openclaw-options-archive (Alpaca chain snapshots; no OI)
+    'macro':             'yfinance+fred+nyfed',  # VIX family (yfinance) + rates/credit/FX (FRED keyless, NY Fed)
     'financials':        'fmp',
-    'earnings':          'yfinance',  # FMP /earnings-surprises returns 404; retargeted 2026-04-30
-    'insider':           'sec_edgar',
+    'earnings':          'fmp',         # /stable/earnings-calendar primary since 2026-08-23; yfinance fallback
+    'insider':           'fmp',         # /stable/insider-trading/{latest,search}; EDGAR Form 4 for audit
     'prices_30m':        'alpaca',
     'vol_indices':       'yfinance',    # FMP/Polygon return 403/NOT_AUTHORIZED on indices
-    'iv_history':        'polygon',     # derived from polygon-sourced options_eod
-    'earnings_calendar': 'yfinance',    # FMP earning_calendar bulk endpoint returns 403
+    'iv_history':        'alpaca',      # derived from Alpaca-sourced options_eod
+    'earnings_calendar': 'yfinance',    # forward calendar; the MASTER earnings.parquet is FMP-fed
     'returns':           'computed',
     'log_returns':       'computed',
     'realized_vol':      'computed',
-    'intraday_features': 'polygon+alpaca',     # synthetic VIX from option chain + intraday equity bars
+    'intraday_features': 'alpaca',      # synthetic VIX from SPY chain + intraday equity bars
     'unusual_options_flow': 'derived_from_options_aggregates',  # pc_ratio > 1.5 heuristic
+    'short_interest':           'finra',
+    'earnings_calendar_nasdaq': 'nasdaq',
+    'cboe_chain_aggregates':    'cboe',
 }
 
 
 def _stats(parquet_path: Path) -> dict:
     """Return {min_date, max_date, row_count, ticker_count} for a parquet file.
 
-    Column-pushdown: reads ONLY the date + ticker columns (row_count comes from
-    file metadata, zero data load). Runs at every johnbot boot — a full
-    pd.read_parquet of the two heavy master parquets peaks at ~1.5 GB (prices,
-    8.3M×10) / ~2.9 GB (options_eod, 6.7M×27); projecting to just the 2 stat
-    columns cuts the boot peak to ~1.1 GB. Same pattern as the 2026-06-24
-    EOD-OOM fix (engine.py pyarrow column/date pushdown, c4210eb). Output is
-    byte-identical to a full read — unread columns can't affect date/ticker
-    coverage. Regression: tests/test_sync_data_ledger_pushdown.py.
+    Streams the aggregates through DuckDB — nothing is materialised in pandas.
+    History: the 2026-06-26 column-pushdown read (date + ticker columns only)
+    was sized for a 6.7M-row options_eod; by 2026-08-23 the file was 48M rows
+    and that read peaked at 5.3 GB RSS — OOM-killed at boot and, run ad hoc,
+    took a co-tenant edgar_shares job with it. DuckDB's min/max/count(DISTINCT)
+    run in bounded memory regardless of row count. Semantics are identical
+    to the original full-read oracle (tests/strategies/
+    test_sync_data_ledger_pushdown.py): dates coerced (unparseable → NULL),
+    only historical dates (<= today) count, tickers = distinct non-null.
     """
     try:
         import pyarrow.parquet as pq
-        import pandas as pd
         pf = pq.ParquetFile(parquet_path)
-        schema_names = list(pf.schema_arrow.names)
-        row_count = pf.metadata.num_rows
-    except Exception as e:
+        schema_names = set(pf.schema_arrow.names)
+        row_count = int(pf.metadata.num_rows)
+    except Exception as e:  # noqa: BLE001
         return {'min_date': None, 'max_date': None, 'row_count': 0, 'ticker_count': 0, 'error': str(e)}
-
     if row_count == 0:
         return {'min_date': None, 'max_date': None, 'row_count': 0, 'ticker_count': 0}
 
-    # Find date column. ts_utc is added for intraday-cadence parquets
-    # (intraday_features.parquet); same coverage semantics as the daily
-    # ones — we just truncate the timestamp to a date for ledger stats.
-    date_col = next((c for c in ['date', 'Date', 'timestamp', 'Timestamp', 'ts_utc']
+    date_col = next((c for c in ['date', 'Date', 'timestamp', 'Timestamp', 'ts_utc',
+                                 'settlement_date', 'report_date']
                       if c in schema_names), None)
-    # Distinct-ticker column.
-    ticker_col = next((c for c in ['ticker', 'Ticker', 'symbol', 'Symbol']
+    ticker_col = next((c for c in ['ticker', 'Ticker', 'symbol', 'Symbol', 'underlying']
                         if c in schema_names), None)
 
-    # Read ONLY the columns the stats need (pushdown), then apply the exact same
-    # pandas logic a full read would have. Project list is de-duped + order-safe.
-    read_cols = [c for c in (date_col, ticker_col) if c]
-    df = None
-    if read_cols:
-        try:
-            df = pq.read_table(parquet_path, columns=read_cols).to_pandas()
-        except Exception as e:
-            return {'min_date': None, 'max_date': None, 'row_count': row_count,
-                    'ticker_count': 0, 'error': str(e)}
-
     min_date = max_date = None
-    if date_col is not None and df is not None:
-        try:
-            dates = pd.to_datetime(df[date_col], errors='coerce').dropna()
-            if not dates.empty:
-                # Only count historical dates (not future)
-                today = pd.Timestamp.today().normalize()
-                hist = dates[dates <= today]
-                if not hist.empty:
-                    min_date = hist.min().date().isoformat()
-                    max_date = hist.max().date().isoformat()
-        except Exception:
-            pass
-
-    # Count distinct tickers
-    ticker_count = int(df[ticker_col].nunique()) if (ticker_col is not None and df is not None) else 0
+    ticker_count = 0
+    try:
+        import duckdb
+        from datetime import date as _date
+        con = duckdb.connect()
+        con.execute("SET threads TO 1")
+        con.execute("SET memory_limit = '512MB'")
+        src = f"read_parquet('{str(parquet_path).replace(chr(39), chr(39) * 2)}')"
+        if date_col is not None:
+            q = (f"SELECT min(d), max(d) FROM (SELECT TRY_CAST(\"{date_col}\" AS TIMESTAMP) AS d FROM {src}) "
+                 f"WHERE d IS NOT NULL AND d <= TIMESTAMP '{_date.today().isoformat()} 23:59:59'")
+            lo, hi = con.execute(q).fetchone()
+            if lo is not None:
+                min_date = lo.date().isoformat()
+                max_date = hi.date().isoformat()
+        if ticker_col is not None:
+            ticker_count = int(con.execute(f'SELECT count(DISTINCT "{ticker_col}") FROM {src}').fetchone()[0])
+        con.close()
+    except Exception as e:  # noqa: BLE001
+        return {'min_date': min_date, 'max_date': max_date, 'row_count': row_count,
+                'ticker_count': ticker_count, 'error': str(e)}
 
     return {
         'min_date':     min_date,
