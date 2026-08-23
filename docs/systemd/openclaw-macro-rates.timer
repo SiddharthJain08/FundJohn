@@ -1,0 +1,14 @@
+[Unit]
+Description=Run macro/rates ingest Mon-Fri 17:45 America/New_York
+
+[Timer]
+# After openclaw-vol-indices (17:30 ET) so the two macro.parquet writers never
+# overlap, and long before the next day's 15:00 ET compute reads aux['macro'].
+# FRED posts most daily series by late afternoon ET; NY Fed rates are same-day.
+# ~25 small HTTP calls — the Persistent=true catch-up run on enable is cheap.
+OnCalendar=Mon..Fri *-*-* 17:45:00 America/New_York
+Persistent=true
+Unit=openclaw-macro-rates.service
+
+[Install]
+WantedBy=timers.target

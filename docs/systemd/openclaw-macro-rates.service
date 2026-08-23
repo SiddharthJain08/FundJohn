@@ -1,0 +1,21 @@
+[Unit]
+Description=Macro/rates ingest (FRED keyless CSV + NY Fed reference rates -> macro.parquet)
+After=network-online.target
+Wants=network-online.target
+OnFailure=openclaw-failure-notify@%n.service
+
+[Service]
+Type=oneshot
+# User=root: matches every other data/master/*.parquet writer (all root:root).
+User=root
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+Environment=PYTHONPATH=/root/openclaw/src
+ExecStart=/usr/bin/python3 /root/openclaw/src/ingestion/ingest_macro_rates.py
+StandardOutput=append:/var/log/openclaw-macro-rates.log
+StandardError=append:/var/log/openclaw-macro-rates.log
+Nice=19
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target
