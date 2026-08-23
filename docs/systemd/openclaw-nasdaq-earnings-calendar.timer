@@ -1,0 +1,15 @@
+[Unit]
+Description=Run Nasdaq earnings calendar ingest Mon-Fri 06:40 America/New_York
+
+[Timer]
+# 06:40 ET (10:40 UTC): after the 06:05 ET aggregates refresh and before the
+# 07:15 ET edgar-8k sweep / 07:30 ET premarket scan, so the day's report
+# timing (pre/after) and consensus are on disk before the premarket gate.
+# Clear of the 15:00/15:55/16:15 ET same-day lane and the 16:30 ET options
+# archive. Persistent=true: cheap and idempotent, a catch-up run is fine.
+OnCalendar=Mon..Fri *-*-* 06:40:00 America/New_York
+Persistent=true
+Unit=openclaw-nasdaq-earnings-calendar.service
+
+[Install]
+WantedBy=timers.target

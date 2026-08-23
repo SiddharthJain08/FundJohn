@@ -1,0 +1,16 @@
+[Unit]
+Description=Run FINRA short interest ingest Mon-Fri 07:10 America/New_York
+
+[Timer]
+# 07:10 ET (11:10 UTC): before the 07:15 ET edgar-8k sweep and the 07:30 ET
+# premarket scan; clear of the 06:05 ET aggregates refresh, the 15:00/15:55/
+# 16:15 ET same-day lane and the 16:30 ET options archive. FINRA publishes
+# ~9 business days after each settlement date, so most mornings every
+# candidate is already present (skipped, no request) or 403s (unpublished).
+# Persistent=true: the job is cheap and idempotent, a catch-up run is fine.
+OnCalendar=Mon..Fri *-*-* 07:10:00 America/New_York
+Persistent=true
+Unit=openclaw-finra-short-interest.service
+
+[Install]
+WantedBy=timers.target

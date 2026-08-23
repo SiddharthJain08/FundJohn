@@ -1,0 +1,29 @@
+[Unit]
+Description=Nasdaq keyless earnings calendar ingest (api.nasdaq.com/api/calendar/earnings -> earnings_calendar_nasdaq.parquet)
+After=network-online.target
+Wants=network-online.target
+OnFailure=openclaw-failure-notify@%n.service
+
+[Service]
+Type=oneshot
+# User=root: matches every data/master/*.parquet writer (all root:root).
+User=root
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+Environment=PYTHONPATH=/root/openclaw/src
+# -3 .. +45 business days (defaults), one GET per day with browser headers and
+# a 1 s pause. Unofficial endpoint: 403/429/empty-JSON days are COUNTED
+# (days_failed) and skipped; the script only exits 1 when EVERY day failed.
+# This file is a timing/consensus cross-check for the pre-earnings strategies;
+# the MASTER earnings.parquet is fed from FMP by ingest_earnings_master.py.
+ExecStart=/usr/bin/python3 /root/openclaw/src/ingestion/ingest_nasdaq_earnings_calendar.py
+StandardOutput=append:/var/log/openclaw-nasdaq-earnings-calendar.log
+StandardError=append:/var/log/openclaw-nasdaq-earnings-calendar.log
+# Network-bound, tiny JSON per day, <200 MB RSS; yield to anything live.
+Nice=19
+# Sizing: 49 days x (~0.5 s fetch + 1 s sleep + small merge) ~= 90 s. 15 min
+# is ~10x headroom for a throttled day (30 s timeout per request).
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
