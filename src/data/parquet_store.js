@@ -82,7 +82,21 @@ function _setCached(op, args, value) {
 }
 
 
-function _runPython(op, args, timeoutMs = 30000) {
+// Per-op SIGKILL timeout. One flat 30 s used to cover every op; write_options
+// appends to a multi-GB master (2.27 GB on 2026-08-23) and needs minutes, so
+// it was killed every cycle from 08-11 (D3). Override per op with
+// PARQUET_OP_TIMEOUT_MS_<OP> (e.g. PARQUET_OP_TIMEOUT_MS_WRITE_OPTIONS).
+const _OP_TIMEOUT_DEFAULTS_MS = {
+  write_options: 20 * 60_000,
+};
+function _opTimeoutMs(op, env = process.env) {
+  const raw = env[`PARQUET_OP_TIMEOUT_MS_${String(op).toUpperCase()}`];
+  const n = parseInt(raw, 10);
+  if (Number.isFinite(n) && n > 0) return n;
+  return _OP_TIMEOUT_DEFAULTS_MS[op] || 30_000;
+}
+
+function _runPython(op, args, timeoutMs = _opTimeoutMs(op)) {
   const argsJson = JSON.stringify(args || {});
   const useFile  = argsJson.length > ARGV_LIMIT;
 
@@ -204,6 +218,7 @@ function clearCache() {
 
 
 module.exports = {
+  _opTimeoutMs,
   readParquet,
   writePrices,
   writeOptions,

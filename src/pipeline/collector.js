@@ -420,6 +420,16 @@ function _classifyFmpError(err) {
   return 'other';
 }
 
+// D3 (2026-08-23): the 16:30 ET openclaw-options-archive.timer owns the daily
+// chain (one merge-write, Redis checkpoints, and — since D3 — data_coverage).
+// The in-cycle Phase 3 used to re-fetch the same ~390k contracts ten minutes
+// earlier, then SIGKILL its own 2.27 GB flush at the 30 s parquet timeout
+// (9/9 daily logs 08-11→08-21, 2.8 GB of orphan *.tmp). It is now opt-in —
+// a manual fallback for a day the archive timer did not run.
+function _inCycleOptionsEnabled(env = process.env) {
+  return String(env.OPENCLAW_COLLECT_OPTIONS_INCYCLE || '') === '1';
+}
+
 // Per-cycle scope cap: a freshness-driven scope can be the whole universe the
 // first time the freshness check actually works; cap it so one cycle never
 // spends the full daily FMP quota. 0 / negative = no cap.
@@ -2373,9 +2383,14 @@ async function runDailyCollection() {
     await run30mPrices();
   }
 
-  // Phase 3: Options — only tickers without today's data
+  // Phase 3: Options — only tickers without today's data. Opt-in since D3:
+  // the 16:30 ET archive timer is the daily chain's owner (see
+  // _inCycleOptionsEnabled); OPENCLAW_COLLECT_OPTIONS_INCYCLE=1 re-enables
+  // the in-cycle fetch as a manual fallback.
   const optionsNeeded = gaps?.options.tickers ?? optionsTickers;
-  if (cfg.collect_options !== 'false' && optionsNeeded.length > 0) {
+  if (cfg.collect_options !== 'false' && optionsNeeded.length > 0 && !_inCycleOptionsEnabled()) {
+    notify(`⏭️  Options: in-cycle fetch disabled — openclaw-options-archive.timer (16:30 ET) owns the chain (${optionsNeeded.length} tickers pending its run; set OPENCLAW_COLLECT_OPTIONS_INCYCLE=1 to fetch here)`);
+  } else if (cfg.collect_options !== 'false' && optionsNeeded.length > 0) {
     await runOptions(optionsNeeded);
   } else if (optionsNeeded.length === 0) {
     notify('✅ Options: all current — skipped');
@@ -2674,4 +2689,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions, _httpError, _classifyFmpError, _capScope };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions, _httpError, _classifyFmpError, _capScope, _inCycleOptionsEnabled };

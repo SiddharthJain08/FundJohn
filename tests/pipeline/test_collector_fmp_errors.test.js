@@ -57,3 +57,11 @@ test('_capScope keeps the first N tickers and reports how many were deferred', (
   assert.deepEqual(all.tickers, ['A', 'B']);
   assert.equal(all.deferred, 0);
 });
+
+// ── D3: in-cycle options fetch is opt-in; the 16:30 ET archive owns the chain ──
+test('_inCycleOptionsEnabled is off by default and on only for OPENCLAW_COLLECT_OPTIONS_INCYCLE=1', () => {
+  assert.equal(collector._inCycleOptionsEnabled({}), false);
+  assert.equal(collector._inCycleOptionsEnabled({ OPENCLAW_COLLECT_OPTIONS_INCYCLE: '0' }), false);
+  assert.equal(collector._inCycleOptionsEnabled({ OPENCLAW_COLLECT_OPTIONS_INCYCLE: 'true' }), false);
+  assert.equal(collector._inCycleOptionsEnabled({ OPENCLAW_COLLECT_OPTIONS_INCYCLE: '1' }), true);
+});

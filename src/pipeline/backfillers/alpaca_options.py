@@ -316,6 +316,36 @@ def archive_ticker_chain(ticker: str, *, date: str, sink=None,
     return len(rows)
 
 
+def _coverage_rows(counts: dict, date: str) -> list[tuple]:
+    """(ticker, date, rows) for every ticker that actually landed rows.
+    Mirrors store.updateCoverage: a zero-row fetch never advances coverage."""
+    return [(t, date, int(n)) for t, n in counts.items() if n and int(n) > 0]
+
+
+def _write_coverage(rows: list[tuple]) -> int:
+    """Upsert data_coverage(options) for the archived tickers — the same SQL
+    store.updateCoverage uses, so doctor's staleness probe and the data-tier
+    filter see the archive's work. D3 (2026-08-23): the in-cycle collector
+    phase used to be the only coverage writer for options while the archive
+    was the only writer that ever landed on disk."""
+    if not rows:
+        return 0
+    import psycopg2
+    sql = """
+        INSERT INTO data_coverage (ticker, data_type, date_from, date_to, rows_stored, last_updated)
+        VALUES (%s, 'options', %s::date, %s::date, %s, NOW())
+        ON CONFLICT (ticker, data_type) DO UPDATE SET
+          date_from    = LEAST(EXCLUDED.date_from, data_coverage.date_from),
+          date_to      = GREATEST(EXCLUDED.date_to, data_coverage.date_to),
+          rows_stored  = data_coverage.rows_stored + EXCLUDED.rows_stored,
+          last_updated = NOW()
+    """
+    with psycopg2.connect(os.environ['POSTGRES_URI']) as conn, conn.cursor() as cur:
+        cur.executemany(sql, [(t, d, d, n) for t, d, n in rows])
+        conn.commit()
+    return len(rows)
+
+
 def _load_universe() -> list[str]:
     """Read the canonical S&P 500 universe from universe_config.
 
@@ -360,6 +390,7 @@ def main(date_str: str | None = None) -> int:
     # (5k names) and got SIGTERM'd mid-write (2026-06-29 corruption).
     spooled: list[pd.DataFrame] = []
     spool_lock = threading.Lock()
+    counts: dict[str, int] = {}
 
     def _spool(rows: list[dict], **_kw) -> None:
         if not rows:
@@ -381,6 +412,7 @@ def main(date_str: str | None = None) -> int:
                 written_total += n
                 completed += 1
                 done_ticks.append(t)
+                counts[t] = n
             except Exception as e:
                 log.warning('archive failed for %s: %s', t, e)
                 failed.append(t)
@@ -394,6 +426,14 @@ def main(date_str: str | None = None) -> int:
         log.error('final merge-write failed — nothing checkpointed, the day '
                   're-fetches on the next run: %s', e)
         return 1
+
+    # Coverage is observability, not data: never let a Postgres hiccup fail
+    # a run whose rows are already on disk and checkpointed.
+    try:
+        n_cov = _write_coverage(_coverage_rows(counts, date))
+        log.info('options-archive data_coverage upserted for %d ticker(s)', n_cov)
+    except Exception as e:  # noqa: BLE001
+        log.warning('options-archive data_coverage write failed (non-fatal): %s', e)
 
     log.info('options-archive done date=%s tickers=%d/%d rows=%d failed=%d',
              date, completed, len(universe), written_total, len(failed))

@@ -184,7 +184,8 @@ def test_main_single_merge_write_and_deferred_checkpoints(tmp_path, monkeypatch)
          patch.object(alpaca_options, '_redis_checkpoint_done', return_value=False), \
          patch.object(alpaca_options, '_redis_checkpoint_set',
                       side_effect=lambda t, d: checkpoints.append(t)), \
-         patch.object(alpaca_options, '_merge_write', side_effect=counting_merge):
+         patch.object(alpaca_options, '_merge_write', side_effect=counting_merge), \
+         patch.object(alpaca_options, '_write_coverage', return_value=0):
         rc = alpaca_options.main('2026-07-02')
 
     assert rc == 0
@@ -278,3 +279,62 @@ def test_load_universe_uses_canonical_sp500_table(monkeypatch):
     assert universe == ['AAPL', 'MSFT']
     assert 'universe_config' in captured['sql']
     assert 'alpaca_tradable_universe' not in captured['sql']
+
+
+def test_coverage_rows_skip_zero_row_tickers():
+    """Mirror store.updateCoverage: never advance coverage on a zero-row fetch."""
+    from src.pipeline.backfillers import alpaca_options
+    rows = alpaca_options._coverage_rows({'SPY': 120, 'QQQ': 0, 'IWM': 7}, '2026-07-02')
+    assert sorted(rows) == [('IWM', '2026-07-02', 7), ('SPY', '2026-07-02', 120)]
+
+
+def test_main_writes_data_coverage_for_done_tickers(tmp_path, monkeypatch):
+    """D3 (2026-08-23): the archive is the daily chain's owner, so it must
+    also be the data_coverage writer — doctor's staleness probe and the
+    data-tier filter read data_coverage(options), which only the (now
+    opt-in) in-cycle collector phase used to advance."""
+    from src.pipeline.backfillers import alpaca_options
+    parquet = tmp_path / 'options_eod.parquet'
+    monkeypatch.setattr(alpaca_options, 'PARQUET_PATH', parquet)
+
+    def fake_page(ticker, page_token=None):
+        return {'next_page_token': None, 'snapshots': {
+            f'{ticker}260618C00100000': SAMPLE_CHAIN_PAGE_1['snapshots']['SPY260618C00742000']}}
+
+    written = []
+    with patch.object(alpaca_options, '_fetch_chain_page', side_effect=fake_page), \
+         patch.object(alpaca_options, '_resolver_archive_universe', return_value=None), \
+         patch.object(alpaca_options, '_load_universe', return_value=['SPY', 'QQQ']), \
+         patch.object(alpaca_options, '_redis_checkpoint_done', return_value=False), \
+         patch.object(alpaca_options, '_redis_checkpoint_set', return_value=None), \
+         patch.object(alpaca_options, '_merge_write', return_value=None), \
+         patch.object(alpaca_options, '_write_coverage', side_effect=lambda rows: written.extend(rows) or len(rows)):
+        rc = alpaca_options.main('2026-07-02')
+
+    assert rc == 0
+    assert sorted(written) == [('QQQ', '2026-07-02', 1), ('SPY', '2026-07-02', 1)]
+
+
+def test_main_survives_coverage_write_failure(tmp_path, monkeypatch):
+    """Coverage is observability, not data: a Postgres hiccup must not fail
+    the archive run (the rows are already on disk and checkpointed)."""
+    from src.pipeline.backfillers import alpaca_options
+    parquet = tmp_path / 'options_eod.parquet'
+    monkeypatch.setattr(alpaca_options, 'PARQUET_PATH', parquet)
+
+    def fake_page(ticker, page_token=None):
+        return {'next_page_token': None, 'snapshots': {
+            f'{ticker}260618C00100000': SAMPLE_CHAIN_PAGE_1['snapshots']['SPY260618C00742000']}}
+
+    def boom(rows):
+        raise RuntimeError('postgres down')
+
+    with patch.object(alpaca_options, '_fetch_chain_page', side_effect=fake_page), \
+         patch.object(alpaca_options, '_resolver_archive_universe', return_value=None), \
+         patch.object(alpaca_options, '_load_universe', return_value=['SPY']), \
+         patch.object(alpaca_options, '_redis_checkpoint_done', return_value=False), \
+         patch.object(alpaca_options, '_redis_checkpoint_set', return_value=None), \
+         patch.object(alpaca_options, '_merge_write', return_value=None), \
+         patch.object(alpaca_options, '_write_coverage', side_effect=boom):
+        rc = alpaca_options.main('2026-07-02')
+    assert rc == 0
