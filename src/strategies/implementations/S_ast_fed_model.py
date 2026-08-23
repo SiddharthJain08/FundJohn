@@ -9,8 +9,14 @@ Maintains rolling history of monthly (market_return, rf_rate, YG) observations a
 If forecasted next-month excess return > 0: hold SPY. Else: hold SHY.
 
 SP500 earnings yield is approximated from SPY price with a seeded earnings growth model
-(initial EY 5% at 2016-04-11, growing 3%/yr nominal). US 10Y yield is read from ^TNX
-prices; risk-free rate is approximated as 2% fixed (FRED DGS3MO unavailable in macro DB).
+(initial EY 5% at 2016-04-11, growing 3%/yr nominal).
+
+Inputs (2026-08-23 re-point): the 10Y yield and the risk-free rate come from
+macro.parquet — aux_data['macro']['DGS10'] and ['DGS3MO'] (FRED keyless stream,
+percent units, month-end resampled, point-in-time in backtests) — with the old
+inputs kept as fallbacks: ^TNX from prices (frozen since 2026-05-21) then a
+fixed 3.5% for the bond yield; the `rf_rate_annual` parameter (2%) for rf.
+signal_params records which source was used (bond_yield_source / rf_source).
 """
 from __future__ import annotations
 
@@ -31,7 +37,29 @@ BASKET = ('SPY', 'SHY')
 # Parameters
 INITIAL_EY = 0.05          # seed SP500 earnings yield at 2016 (PE~20)
 EARNINGS_GROWTH = 0.03     # nominal annual earnings growth rate
-RF_RATE_ANNUAL = 0.02      # fixed 2% risk-free approximation (no FRED DGS3MO in macro)
+RF_RATE_ANNUAL = 0.02      # FALLBACK risk-free when macro DGS3MO is absent
+BOND_YIELD_FALLBACK = 0.035  # FALLBACK 10Y yield when macro DGS10 and ^TNX are both absent
+BOND_SERIES = 'DGS10'      # macro.parquet series (FRED, percent)
+RF_SERIES = 'DGS3MO'       # macro.parquet series (FRED, percent)
+
+
+def _monthly_from_macro(macro, name: str, index: pd.DatetimeIndex):
+    """aux_data['macro'][name] (daily, percent) → month-end-last series aligned
+    to `index` with forward-fill. None when the series is missing or empty so
+    callers can fall back. Point-in-time safety comes from the loader: in
+    backtests the series is already truncated to <= the as-of date."""
+    if not macro or name not in macro:
+        return None
+    ser = macro[name]
+    if ser is None or len(ser) == 0:
+        return None
+    ser = pd.Series(ser).dropna()
+    if ser.empty:
+        return None
+    if not isinstance(ser.index, pd.DatetimeIndex):
+        ser.index = pd.to_datetime(ser.index)
+    monthly = ser.sort_index().resample('ME').last()
+    return monthly.reindex(index, method='ffill')
 MIN_OBS = 6                # minimum monthly observations for OLS
 WARMUP_MONTHS = 12         # months before first signal
 
@@ -122,17 +150,31 @@ class AstFedModel(BaseStrategy):
         earnings_est = seed_earnings * np.exp(earnings_growth * t_years)
         sp500_ey = earnings_est / spy_monthly.values  # EY(t) = E(t) / P(t)
 
-        # 10Y bond yield: use ^TNX close (expressed as %) → divide by 100
-        if tnx_col is not None:
+        # 10Y bond yield (decimal): macro DGS10 → ^TNX close → fixed fallback.
+        macro = (aux_data or {}).get('macro') or {}
+        bond_macro = _monthly_from_macro(macro, BOND_SERIES, spy_monthly.index)
+        if bond_macro is not None and bond_macro.notna().any():
+            bond_yield_monthly = bond_macro / 100.0
+            bond_source = f'macro:{BOND_SERIES}'
+        elif tnx_col is not None:
             tnx = prices[tnx_col].dropna()
             if not isinstance(tnx.index, pd.DatetimeIndex):
                 tnx.index = pd.to_datetime(tnx.index)
             tnx_monthly = tnx.resample('ME').last()
-            # Align to spy_monthly index
             bond_yield_monthly = tnx_monthly.reindex(spy_monthly.index, method='ffill') / 100.0
+            bond_source = 'prices:^TNX'
         else:
-            # Fallback: fixed 3.5% average US 10Y yield if ^TNX missing
-            bond_yield_monthly = pd.Series(0.035, index=spy_monthly.index)
+            bond_yield_monthly = pd.Series(BOND_YIELD_FALLBACK, index=spy_monthly.index)
+            bond_source = f'fixed:{BOND_YIELD_FALLBACK}'
+
+        # Risk-free (monthly, decimal): macro DGS3MO time series → fixed parameter.
+        rf_macro = _monthly_from_macro(macro, RF_SERIES, spy_monthly.index)
+        if rf_macro is not None and rf_macro.notna().any():
+            rf_monthly_series = (rf_macro / 100.0 / 12.0).fillna(rf_monthly)
+            rf_source = f'macro:{RF_SERIES}'
+        else:
+            rf_monthly_series = pd.Series(rf_monthly, index=spy_monthly.index)
+            rf_source = f'fixed:{float(params.get("rf_rate_annual", RF_RATE_ANNUAL))}'
 
         # Yield gap: YG = ln(EY) - ln(bond_yield)
         # Guard against non-positive values
@@ -147,8 +189,8 @@ class AstFedModel(BaseStrategy):
         # Monthly market returns
         spy_rets = spy_monthly.pct_change()
 
-        # Excess returns
-        excess_rets = spy_rets - rf_monthly
+        # Excess returns (rf aligned month by month)
+        excess_rets = spy_rets - rf_monthly_series
 
         # Combine into a DataFrame and drop NaNs
         df = pd.DataFrame({
@@ -237,6 +279,10 @@ class AstFedModel(BaseStrategy):
             position_size_pct = pos_size,
             confidence        = confidence,
             signal_params     = {
+                'bond_yield_source':  bond_source,
+                'rf_source':          rf_source,
+                'bond_yield_current': round(float(bond_yield_monthly.dropna().iloc[-1]), 6) if bond_yield_monthly.notna().any() else None,
+                'rf_annual_current':  round(float(rf_monthly_series.dropna().iloc[-1]) * 12.0, 6) if rf_monthly_series.notna().any() else None,
                 'y_hat':        round(y_hat, 6),
                 'yg_current':   round(yg_current, 4),
                 'alpha':        round(alpha, 6),
