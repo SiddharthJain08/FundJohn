@@ -133,10 +133,58 @@ empty day); `--today YYYY-MM-DD` anchor for reruns. Counters:
 
 ---
 
-## CBOE
+## CBOE delayed option chains (the only free open-interest source)
 
-_(operator to add)_
+- **Endpoint:** `GET https://cdn.cboe.com/api/global/delayed_quotes/options/{SYMBOL}.json`
+  — indices are prefixed with an underscore (`_SPX`, `_VIX`, `_NDX`, `_RUT`).
+  No key. 15-minute delayed. AAPL ≈ 3,348 contracts / 1.5 MB / 130 ms; `_SPX`
+  ≈ 28k contracts / 12.5 MB.
+- **Payload:** `{timestamp, symbol, data: {current_price, iv30, iv30_change, …,
+  options: [{option, bid, bid_size, ask, ask_size, iv, open_interest, volume,
+  delta, gamma, vega, theta, rho, theo, last_trade_price, last_trade_time,
+  prev_day_close, …}]}}`. `option` is the OCC symbol (`AAPL261218C00135000`).
+- **Rate limit:** the CDN 429s bursts — 494/556 symbols failed at 4 workers /
+  50 ms; 553/556 succeed at 2 workers / 0.4 s with Retry-After backoff.
+  3 index symbols return 403 (not every `_X` is published).
+- **Session date:** `timestamp` is the feed time — Friday's chain carries a
+  Saturday/Sunday stamp. Weekend and pre-09:30 stamps roll back to the last
+  session. The capture is a SNAPSHOT: a missed session cannot be backfilled.
+- **Script / unit:** `src/ingestion/ingest_cboe_chains.py`,
+  `openclaw-cboe-chains.timer` Mon–Fri 17:00 ET (after the 16:30 options
+  archive so the two never share the box), `Persistent=true`.
+- **Stores:** `data/master/cboe_chains/date=YYYY-MM-DD.parquet` (every
+  contract, zstd, ~28 MB/day, streamed through a ParquetWriter — never an
+  append to a multi-GB master) and `data/master/cboe_chain_aggregates.parquet`
+  keyed `(date, underlying)`: `underlying_price, iv30, iv30_change,
+  n_contracts, n_expiries, call_oi, put_oi, call_volume, put_volume, pcr_oi,
+  pcr_volume, gex (Σ γ·OI·100·S²·0.01, calls +, puts −), atm_iv (nearest
+  expiry ≥ 7 DTE, strike nearest spot, call/put mean), nearest_expiry`.
+  Ledger column: `cboe_chain_aggregates`.
+- **Universe:** `universe_config` active ∧ has_options (551) + index symbols.
+- First capture 2026-08-21: 553 underlyings, 673,442 contracts, 12.6 min,
+  1.2 GB peak. Counters: `session symbols tickers_ok tickers_failed contracts
+  aggregates skipped_existing elapsed_s`.
 
-## Macro
+## Macro rates (FRED keyless + NY Fed)
 
-_(operator to add)_
+- **FRED:** `GET https://fred.stlouisfed.org/graph/fredgraph.csv?id={SERIES}`
+  returns the FULL history as `observation_date,{SERIES}` with `.` for
+  missing — no key. ⚠ Akamai tar-pits browser-like and custom User-Agents
+  until the read timeout but answers `python-requests/*` and `curl/*` in
+  ~0.1 s — keep requests' default UA. Series: DGS1MO…DGS30, DTB3, T10Y2Y,
+  T10Y3M, DFF, SOFR, BAMLH0A0HYM2 (HY OAS), BAMLC0A0CM (IG OAS), DTWEXBGS,
+  DCOILWTICO, DEXUSEU, DEXJPUS, INDPRO (`FRED_SERIES` in the script).
+- **NY Fed:** `GET https://markets.newyorkfed.org/api/rates/all/search.json?startDate=&endDate=&type=rate`
+  → `refRates[]` with `percentRate` for SOFR/EFFR/OBFR/TGCR/BGCR (same-day;
+  FRED lags a day). Stored as `NYFED_<TYPE>`.
+- **Script / unit:** `src/ingestion/ingest_macro_rates.py` (incremental by
+  default, `--full` for history), `openclaw-macro-rates.timer` Mon–Fri
+  17:45 ET (after vol-indices 17:30).
+- **Store:** rows appended to `data/master/macro.parquet` (long format
+  `date, series, value, source`) through `parquet_store.write_macro`;
+  schema unchanged, VIX rows untouched. `aux_data_loader` exposes every
+  series as `aux_data['macro'][<series>]` point-in-time. First `--full` run:
+  25 series, 223,633 rows, master 9,100 → 232,733.
+- **Not yet done:** `S_ast_fed_model` still hardcodes a 2% risk-free and
+  needs `^TNX` in prices (frozen since 05-21) — `DGS3MO` / `DGS10` are now in
+  macro; re-pointing the strategy is a proper change with its own backtest.
