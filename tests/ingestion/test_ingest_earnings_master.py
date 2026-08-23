@@ -56,6 +56,14 @@ def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(iem, 'CALENDAR_PATH', c)
     _master_df().to_parquet(m, index=False)
     _calendar_df().to_parquet(c, index=False)
+    # Pin the clock (the 14d actuals lookback is relative to today) and
+    # neutralise the FMP primary so these tests exercise the yfinance
+    # fallback path offline — FMP coverage lives in
+    # test_ingest_earnings_master_fmp.py.
+    monkeypatch.setattr(iem, '_today', lambda: TODAY)
+    monkeypatch.delenv('FMP_API_KEY', raising=False)
+    monkeypatch.setattr(iem, '_active_universe', lambda: [])
+    monkeypatch.setattr(iem, '_record_call', lambda *a, **k: None)
     return m, c
 
 
@@ -117,23 +125,34 @@ def test_main_daily_appends_and_writes(paths, monkeypatch):
 
 
 def test_main_dry_run_writes_nothing(paths, monkeypatch):
+    """--dry-run (2026-08-23 contract) runs the REAL path — fetch, merge,
+    tmp serialisation — and skips only the final os.replace."""
     m, _ = paths
     before = m.read_bytes()
     called = []
     monkeypatch.setattr(iem, '_fetch_actuals',
-                        lambda *a, **k: called.append(1))
+                        lambda tickers, throttle_s: (called.append(list(tickers)) or pd.DataFrame({
+                            'ticker': ['AAPL'], 'date': [date(2026, 8, 4)],
+                            'eps_estimated': [1.89], 'eps_actual': [2.02]})))
+    replaced = []
+    monkeypatch.setattr(iem.os, 'replace', lambda *a, **k: replaced.append(a))
     rc = iem.main(['--dry-run'])
     assert rc == 0
+    assert called == [['AAPL']], '--dry-run must exercise the real fetch path'
+    assert not replaced, '--dry-run must never os.replace the master'
     assert m.read_bytes() == before, '--dry-run must not rewrite the master'
-    assert not called, '--dry-run must not hit the network'
+    assert not Path(str(m) + '.tmp').exists(), 'tmp must be cleaned up'
 
 
 def test_shrink_aborts(paths, monkeypatch):
     """A pathological merge that loses rows must refuse to write."""
     m, _ = paths
     before = m.read_bytes()
-    monkeypatch.setattr(iem, 'apply_actuals',
-                        lambda master, actuals, today: (master.iloc[:1], 0, 0))
+    monkeypatch.setattr(iem, 'merge_rows',
+                        lambda master, rows, today: (
+                            master.iloc[:1],
+                            {'rows_new': 0, 'rows_updated': 0,
+                             'actuals_filled': 0, 'tickers_touched': set()}))
     monkeypatch.setattr(iem, '_fetch_actuals',
                         lambda *a, **k: pd.DataFrame(
                             {'ticker': ['AAPL'], 'date': [date(2026, 8, 4)],
