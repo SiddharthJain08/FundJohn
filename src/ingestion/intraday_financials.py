@@ -56,6 +56,15 @@ QUARTERS = 2          # current + prior, so a restatement of the prior lands too
 _TIMEOUT = 30
 
 
+def _record_fmp(endpoint, status, body):
+    """data_provider_health, best-effort (2026-08-23)."""
+    try:
+        from src.maintenance.provider_health import record_http
+        return record_http('fmp', endpoint, status, body)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class IntradayFinancialsError(RuntimeError):
     """Raised when the reporter calendar cannot be read at all."""
 
@@ -72,12 +81,16 @@ def reporters(as_of: pd.Timestamp, universe) -> list[str]:
     uni = {t.strip().upper() for t in universe}
     frm = (as_of - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
     to = as_of.strftime('%Y-%m-%d')
+    r = None
     try:
         r = requests.get(CALENDAR, timeout=_TIMEOUT,
                          params={'from': frm, 'to': to, 'apikey': key})
+        _record_fmp('earnings-calendar', r.status_code, getattr(r, 'text', ''))
         r.raise_for_status()
         data = r.json() or []
     except Exception as exc:  # noqa: BLE001
+        if r is None:   # transport failure — no response to classify
+            _record_fmp('earnings-calendar', None, str(exc))
         raise IntradayFinancialsError(f'earnings calendar failed: {exc}') from exc
     if not isinstance(data, list):
         raise IntradayFinancialsError(f'earnings calendar returned {type(data).__name__}')

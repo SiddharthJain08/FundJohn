@@ -56,6 +56,15 @@ FMP_QUARTER_CAP    = 30    # plan's historical limit
 MIN_BACKFILL_CALLS = 1.0
 
 
+
+def _record_fmp(endpoint, status, body):
+    """data_provider_health, best-effort (2026-08-23). Returns the classified kind."""
+    try:
+        from src.maintenance.provider_health import record_http
+        return record_http('fmp', endpoint, status, body)
+    except Exception:  # noqa: BLE001
+        return None
+
 def backfill(column_name: str, from_date: date, to_date: date) -> int:
     if column_name in FINANCIALS_COLUMNS:
         return _backfill_financials(from_date, to_date)
@@ -245,6 +254,9 @@ def _backfill_insider(from_date: date, to_date: date) -> int:
             url = (f'https://financialmodelingprep.com/stable/insider-trading/'
                    f'search?symbol={ticker}&limit={limit}&apikey={FMP_KEY}')
             r = _rq.get(url, timeout=30)
+            kind = _record_fmp('insider-trading/search', r.status_code, getattr(r, 'text', ''))
+            if kind == 'symbol_gated':
+                continue   # tier-gated SYMBOL (preferred/warrant) — not a quota event
             if r.status_code in (402, 429):
                 print(f'  [fmp] insider quota/rate-limit hit at ticker {ticker} — stopping')
                 break

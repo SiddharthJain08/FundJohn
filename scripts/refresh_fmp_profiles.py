@@ -160,6 +160,16 @@ def _http_get(url, params=None, timeout=None):
     return requests.get(url, params=params, timeout=timeout)
 
 
+def _record_fmp(endpoint, status, body):
+    """data_provider_health, best-effort (2026-08-23). Returns the classified
+    kind ('ok' | 'symbol_gated' | 'quota' | …) or None if the recorder is unavailable."""
+    try:
+        from src.maintenance.provider_health import record_http
+        return record_http('fmp', endpoint, status, body)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def fetch_profile(symbol: str, api_key: str) -> Optional[dict]:
     """One /stable/profile call. Returns the first row, None when FMP has no
     profile, raises FMPAuthError on 401/403; 429/5xx retried with backoff."""
@@ -168,6 +178,11 @@ def fetch_profile(symbol: str, api_key: str) -> Optional[dict]:
         r = _http_get(FMP_PROFILE_URL, params={'symbol': symbol, 'apikey': api_key},
                       timeout=HTTP_TIMEOUT_S)
         code = getattr(r, 'status_code', 0)
+        kind = _record_fmp('profile', code, getattr(r, 'text', ''))
+        if kind == 'symbol_gated':
+            # Tier-gated SYMBOL (preferred/warrant/unit) — no profile on this
+            # plan; a tombstone, not a plan problem (never abort the sweep).
+            return None
         if code == 200:
             data = r.json()
             if isinstance(data, list):

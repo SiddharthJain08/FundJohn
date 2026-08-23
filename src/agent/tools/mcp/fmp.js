@@ -5,12 +5,41 @@ const FMP_BASE = 'https://financialmodelingprep.com/stable';
 function generatePython(server) {
   return `# Auto-generated — FMP (Financial Modeling Prep) tool module
 # ${server.description}
-import os, json, requests
+import os, sys, json, requests
 from _rate_limiter import _acquire_token, _cycle_cache_get, _cycle_cache_set
 
 _API_KEY = os.environ.get("FMP_API_KEY", "")
 _BASE = "${FMP_BASE}"
 _PROVIDER = "fmp"
+
+# data_provider_health (2026-08-23): every call through this module is the
+# dashboard's only view of FMP health. The recorder lives in the repo
+# (src/maintenance/provider_health.py); this file runs from
+# <root>/workspaces/<ws>/tools, so put the repo root on sys.path.
+_ROOT = os.environ.get("OPENCLAW_ROOT") or os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+try:
+    from src.maintenance import provider_health as _ph
+except Exception:  # pragma: no cover — recording is best-effort
+    _ph = None
+
+
+class FmpSymbolGated(RuntimeError):
+    """402 'Special Endpoint': this SYMBOL is gated behind a higher FMP tier
+    (preferreds / warrants / units on Starter). Not a quota problem — skip the
+    symbol and keep going. Subclasses RuntimeError so legacy handlers that
+    catch the old 'free tier limit' error still work."""
+
+
+def _record(endpoint, status, body):
+    if _ph is None:
+        return "ok" if status == 200 else "error"
+    try:
+        return _ph.record_http(_PROVIDER, endpoint, status, body)
+    except Exception:
+        return "error"
+
 
 def _get(endpoint: str, params: dict = None) -> dict:
     # Cycle-cache: apikey deliberately excluded from cache key (it's a
@@ -22,9 +51,16 @@ def _get(endpoint: str, params: dict = None) -> dict:
 
     _acquire_token(_PROVIDER)
     p = {"apikey": _API_KEY, **(params or {})}
-    r = requests.get(f"{_BASE}/{endpoint}", params=p, timeout=30)
-    if r.status_code == 402:
-        raise RuntimeError(f"FMP free tier limit hit on /{endpoint} — upgrade plan or reduce limit param")
+    try:
+        r = requests.get(f"{_BASE}/{endpoint}", params=p, timeout=30)
+    except Exception as exc:
+        _record(endpoint, None, str(exc))
+        raise
+    kind = _record(endpoint, r.status_code, getattr(r, "text", ""))
+    if kind == "symbol_gated":
+        raise FmpSymbolGated(f"FMP: symbol {(params or {}).get('symbol')} is tier-gated on /{endpoint} (current subscription)")
+    if kind == "quota":
+        raise RuntimeError(f"FMP quota exhausted (402) on /{endpoint} — {getattr(r, 'text', '')[:120]}")
     r.raise_for_status()
     data = r.json()
     _cycle_cache_set("fmp:get", cache_params, data)

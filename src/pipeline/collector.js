@@ -442,6 +442,32 @@ function _insiderWalkScope(tickers, fresh, cap) {
   return { tickers: capped.tickers, skippedFresh: tickers.length - due.length, deferred: capped.deferred };
 }
 
+// One FMP call → data_provider_health outcome. Tier-gated symbols and 404s
+// are the provider answering correctly ("no data for this symbol"), so they
+// count as success; quota / 429 / transport failures are provider errors.
+function _fmpCallOutcome(err) {
+  if (!err) return { ok: true, error: null, kind: 'ok' };
+  const kind = _classifyFmpError(err);
+  if (kind === 'symbol_gated' || kind === 'not_found') return { ok: true, error: null, kind };
+  const body = String(err.body || '').trim().slice(0, 160);
+  const error = err.status != null ? `HTTP ${err.status}${body ? ': ' + body : ''}` : String(err.message || 'error');
+  return { ok: false, error, kind };
+}
+// Raw-response variant for the _httpsGetJson paths (prices/quote), which
+// hand back {ok, status, body, tierGated} instead of throwing.
+function _recordFmpRaw(endpoint, r) {
+  const err = !r ? new Error('no response')
+    : (r.tierGated ? _httpError(402, 'Special Endpoint: tier-gated symbol')
+      : (!r.ok ? new Error(r.error || 'transport error')
+        : (r.status !== 200 ? _httpError(r.status, r.body) : null)));
+  return _recordFmp(endpoint, err);
+}
+function _recordFmp(endpoint, err) {
+  const o = _fmpCallOutcome(err);
+  store.recordProviderCall('fmp', endpoint, o.ok, o.error).catch(() => null);
+  return o;
+}
+
 // Per-cycle scope cap: a freshness-driven scope can be the whole universe the
 // first time the freshness check actually works; cap it so one cycle never
 // spends the full daily FMP quota. 0 / negative = no cap.
@@ -1225,6 +1251,7 @@ async function fillPricesFmpHistorical(ticker, fromDate, toDate) {
     + `&apikey=${encodeURIComponent(_FMP_KEY)}`;
 
   const r = await _httpsGetJson(url);
+  _recordFmpRaw('historical_price_eod_full', r);
   if (r.tierGated) {
     // FMP returns "Premium Query Parameter: …" plain-text for symbols gated
     // behind a higher subscription tier (^TNX, ^GDAXI, DX-Y.NYB on Starter).
@@ -1281,6 +1308,7 @@ async function _fmpIntradayRow(ticker, dateStr) {
     + `?symbol=${encodeURIComponent(apiSymbol)}`
     + `&apikey=${encodeURIComponent(_FMP_KEY)}`;
   const r = await _httpsGetJson(url);
+  _recordFmpRaw('quote', r);
   if (r.tierGated) {
     console.warn(`[collector] _fmpIntradayRow: skip ${ticker}→${apiSymbol} (tier-gated)`);
     return null;
@@ -1674,8 +1702,10 @@ async function runFundamentals(tickers = null) {
       const url = `https://financialmodelingprep.com/stable/income-statement?symbol=${ticker}&period=quarterly&limit=4&apikey=${FMP_KEY}`;
       data = await httpGet(url);
       trackApiCall('fmp');
+      _recordFmp('income_statement', null);
       await sleep(FMP_INTERVAL);
     } catch (err) {
+      _recordFmp('income_statement', err);
       const kind = _classifyFmpError(err);
       if (kind === 'symbol_gated') {
         // Tier-gated SYMBOL (preferred/warrant/unit on Starter) — skip just this
@@ -1708,8 +1738,10 @@ async function runFundamentals(tickers = null) {
         try {
           const url = `https://financialmodelingprep.com/stable/income-statement?symbol=${ticker}&period=quarterly&limit=4&apikey=${FMP_KEY}`;
           data = await httpGet(url);
+          _recordFmp('income_statement', null);
           await sleep(FMP_INTERVAL);
         } catch (retryErr) {
+          _recordFmp('income_statement', retryErr);
           // Persistent 429 or 402 = quota exhausted — stop FMP entirely
           quotaExhausted = true;
           notify(`⚠️ FMP persistently rate-limited — stopping fundamentals for this cycle (SP-1: yfinance fallback removed)`);
@@ -1746,20 +1778,23 @@ async function runFundamentals(tickers = null) {
       const ratiosUrl = `https://financialmodelingprep.com/stable/ratios?symbol=${ticker}&period=quarterly&limit=4&apikey=${FMP_KEY}`;
       ratiosData = await httpGet(ratiosUrl);
       trackApiCall('fmp');
+      _recordFmp('ratios', null);
       await sleep(FMP_INTERVAL);
-    } catch { /* non-fatal — ratios are supplemental */ }
+    } catch (e) { _recordFmp('ratios', e); /* non-fatal — ratios are supplemental */ }
     try {
       const metricsUrl = `https://financialmodelingprep.com/stable/key-metrics?symbol=${ticker}&period=quarterly&limit=4&apikey=${FMP_KEY}`;
       metricsData = await httpGet(metricsUrl);
       trackApiCall('fmp');
+      _recordFmp('key_metrics', null);
       await sleep(FMP_INTERVAL);
-    } catch { /* non-fatal */ }
+    } catch (e) { _recordFmp('key_metrics', e); /* non-fatal */ }
     try {
       const balanceUrl = `https://financialmodelingprep.com/stable/balance-sheet-statement?symbol=${ticker}&period=quarterly&limit=4&apikey=${FMP_KEY}`;
       balanceData = await httpGet(balanceUrl);
       trackApiCall('fmp');
+      _recordFmp('balance_sheet_statement', null);
       await sleep(FMP_INTERVAL);
-    } catch { /* non-fatal */ }
+    } catch (e) { _recordFmp('balance_sheet_statement', e); /* non-fatal */ }
 
     // Per-period lookups by date
     const byDate = (arr) => {
@@ -2005,15 +2040,24 @@ async function runInsiderTransactions(tickers = null) {
       const url = `https://financialmodelingprep.com/stable/insider-trading/search?symbol=${ticker}&limit=50&apikey=${FMP_KEY}`;
       data = await httpGet(url);
       trackApiCall('fmp');
+      _recordFmp('insider_trading_search', null);
       await sleep(FMP_INTERVAL);
     } catch (err) {
-      if (err.message.includes('402') || err.message.includes('429')) {
+      _recordFmp('insider_trading_search', err);
+      const kind = _classifyFmpError(err);
+      if (kind === 'symbol_gated') {
+        // Tier-gated SYMBOL (same D1 class as fundamentals) — skip this name,
+        // record the check so the weekly scope stops re-asking, keep going.
+        await store.logRun(ticker, 'insider', 'skipped', 0, `tier-gated: ${err.body || err.message}`.slice(0, 200), Date.now() - start, 1);
+        continue;
+      }
+      if (kind === 'quota' || kind === 'rate_limited') {
         quotaExhausted = true;
         notify(`⚠️ FMP quota/rate-limit hit during insider phase — stopping`);
         continue;
       }
       // 404 = no insider data for this ticker (ETFs, small caps) — not a real error
-      if (err.message.includes('404')) {
+      if (kind === 'not_found') {
         await store.logRun(ticker, 'insider', 'empty', 0, 'HTTP 404', Date.now() - start, 1);
         continue;
       }
@@ -2719,4 +2763,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions, _httpError, _classifyFmpError, _capScope, _inCycleOptionsEnabled, _insiderWalkScope, runInsiderStreamMerge };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions, _httpError, _classifyFmpError, _capScope, _inCycleOptionsEnabled, _insiderWalkScope, runInsiderStreamMerge, _fmpCallOutcome };

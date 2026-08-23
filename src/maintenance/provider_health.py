@@ -25,6 +25,68 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 
+# ── HTTP outcome classification (2026-08-23, FMP instrumentation) ────────────
+# On the FMP Starter tier a 402 is EITHER "daily quota exhausted" (provider
+# unhealthy for us) OR "this SYMBOL is gated behind a higher tier" (preferreds,
+# warrants, units — body "Premium Query Parameter: 'Special Endpoint : This
+# value set for 'symbol' is not available under your current subscription'").
+# 404 is "no data for this symbol". Neither is a PROVIDER failure; counting
+# them as errors would make the Data Health tile cry wolf ~30× per cycle.
+_SYMBOL_GATE_MARKERS = ('special endpoint', 'not available under your current subscription',
+                        'premium query parameter')
+_PROVIDER_ERROR_KINDS = frozenset({'quota', 'rate_limited', 'error'})
+
+
+def classify_http(status: Optional[int], body: Optional[str] = None) -> str:
+    """→ 'ok' | 'symbol_gated' | 'not_found' | 'quota' | 'rate_limited' | 'error'.
+    `status=None` means the request never produced a response (timeout, DNS)."""
+    if status is None:
+        return 'error'
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return 'error'
+    if 200 <= code < 300:
+        return 'ok'
+    text = (body or '').lower()
+    if code == 402:
+        return 'symbol_gated' if any(m in text for m in _SYMBOL_GATE_MARKERS) else 'quota'
+    if code == 429:
+        return 'rate_limited'
+    if code == 404:
+        return 'not_found'
+    return 'error'
+
+
+def is_provider_error(kind: str) -> bool:
+    return kind in _PROVIDER_ERROR_KINDS
+
+
+def endpoint_tag(path: str) -> str:
+    """'https://…/stable/insider-trading/search?symbol=X' → 'insider_trading_search'.
+    Strips scheme/host, the '/stable' or '/api/vN' prefix and the query string;
+    '-' and '/' become '_' so the tag is a stable, low-cardinality PK part."""
+    import re
+    p = str(path or '')
+    p = re.sub(r'^https?://[^/]+', '', p)
+    p = p.split('?', 1)[0].strip('/')
+    p = re.sub(r'^(stable|api/v\d+)/', '', p)
+    return re.sub(r'[^A-Za-z0-9]+', '_', p).strip('_').lower()
+
+
+def record_http(provider: str, endpoint: str, status: Optional[int], body: Optional[str] = None) -> str:
+    """Classify one HTTP outcome and record it. Returns the kind so the caller
+    can branch (skip a gated symbol, stop on quota, …) without re-parsing."""
+    kind = classify_http(status, body)
+    if is_provider_error(kind):
+        msg = (body or '').strip()[:160]
+        err = f'HTTP {status}: {msg}' if status is not None else (msg or 'transport error')
+        record(provider, endpoint_tag(endpoint), success=False, error=err)
+    else:
+        record(provider, endpoint_tag(endpoint), success=True)
+    return kind
+
+
 def record(provider: str, endpoint: str, *, success: bool, error: Optional[str] = None) -> None:
     """Upsert one provider call into data_provider_health, bucketed by hour.
 

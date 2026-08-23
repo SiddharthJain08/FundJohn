@@ -463,6 +463,27 @@ async function getGapSummary({ priceTickers, optionsTickers, fundTickers, fromDa
 
 // ── Pipeline Logging ──────────────────────────────────────────────────────────
 
+// data_provider_health writer for the JS collector (2026-08-23). Mirrors
+// src/maintenance/provider_health.record (hourly buckets, upsert counters,
+// last_error kept) through the pg pool — the collector makes ~8k FMP calls a
+// cycle and a psycopg2 connect per call would be the wrong shape. Best-effort:
+// never throws, never blocks the fetch it instruments.
+async function recordProviderCall(provider, endpoint, ok, error = null) {
+  if (!provider || !endpoint) return;
+  const err = ok ? null : String(error || 'error').slice(0, 200);
+  await query(
+    `INSERT INTO data_provider_health
+       (provider, endpoint, success_count, error_count, last_error, last_error_at, window_start)
+     VALUES ($1, $2, $3, $4, $5, CASE WHEN $5::text IS NULL THEN NULL ELSE NOW() END, date_trunc('hour', NOW()))
+     ON CONFLICT (provider, endpoint, window_start) DO UPDATE SET
+       success_count = data_provider_health.success_count + EXCLUDED.success_count,
+       error_count   = data_provider_health.error_count   + EXCLUDED.error_count,
+       last_error    = COALESCE(EXCLUDED.last_error,    data_provider_health.last_error),
+       last_error_at = COALESCE(EXCLUDED.last_error_at, data_provider_health.last_error_at)`,
+    [provider, endpoint, ok ? 1 : 0, ok ? 0 : 1, err]
+  ).catch(() => null);
+}
+
 // Tickers with a pipeline_runs check (success / empty / skipped) for
 // `runType` within the last `days`. This is the "fetched recently" signal
 // data_coverage cannot express: coverage is a DATE RANGE that refuses
@@ -687,7 +708,7 @@ module.exports = {
   upsertPrices, upsertOptions, upsertFundamentals,
   bufferInsider,
   flushPrices, flushOptions, flushFundamentals, flushInsider, flushMacro,
-  getGaps, updateCoverage, getAllCoverage, getGapSummary, getRecentlyChecked,
+  getGaps, updateCoverage, getAllCoverage, getGapSummary, getRecentlyChecked, recordProviderCall,
   logRun, getCoverageStats, getTodayApiStats, getDataFreshness,
   startCycle, completeCycle, getCycleHistory,
   upsertNews, getNews,

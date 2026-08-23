@@ -55,6 +55,15 @@ RAW_COLS = ['ticker', 'date', 'transaction_date', 'insider_name', 'role',
 DEDUP_KEYS = ['ticker', 'date', 'insider_name', 'transaction_type', 'shares']
 
 
+def _record_fmp(endpoint, status, body):
+    """data_provider_health, best-effort (2026-08-23)."""
+    try:
+        from src.maintenance.provider_health import record_http
+        return record_http('fmp', endpoint, status, body)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class IntradayInsiderError(RuntimeError):
     """Raised when the filing stream cannot be read at all."""
 
@@ -117,12 +126,16 @@ def fetch_latest_filings(since: str, budget_s: float | None = None,
                            '— stream truncated at %s', budget_s, page,
                            stats['oldest_seen'])
             break
+        r = None
         try:
             r = requests.get(BASE, timeout=_TIMEOUT, params={
                 'page': page, 'limit': PAGE_LIMIT, 'apikey': key})
+            _record_fmp('insider-trading/latest', r.status_code, getattr(r, 'text', ''))
             r.raise_for_status()
             data = r.json() or []
         except Exception as exc:  # noqa: BLE001
+            if r is None:   # transport failure — no response to classify
+                _record_fmp('insider-trading/latest', None, str(exc))
             stats['http_errors'] += 1
             if page == 0:
                 raise IntradayInsiderError(f'insider stream page 0 failed: {exc}')

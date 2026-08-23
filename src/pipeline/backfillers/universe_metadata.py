@@ -70,6 +70,15 @@ _FMP_SLEEP_S = 0.05
 
 
 # ── SP500 historical membership ───────────────────────────────────────────────
+
+def _record_fmp(endpoint, status, body):
+    """data_provider_health, best-effort (2026-08-23)."""
+    try:
+        from src.maintenance.provider_health import record_http
+        return record_http('fmp', endpoint, status, body)
+    except Exception:  # noqa: BLE001
+        return None
+
 def _sp500_membership_on(d: date) -> set[str]:
     """Return the set of tickers that were SP500 members on date `d`.
 
@@ -126,6 +135,7 @@ def _market_cap_for(symbol: str, on: date) -> Optional[float]:
             timeout=10,
         )
         time.sleep(_FMP_SLEEP_S)  # soft-throttle under Starter cap
+        _record_fmp('historical-market-capitalization', r.status_code, getattr(r, 'text', ''))
         if r.status_code != 200:
             return None
         payload = r.json()

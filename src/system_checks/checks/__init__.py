@@ -23,6 +23,7 @@ from . import universe_tier_coherence  # noqa: F401
 from . import research_processing_stuck  # noqa: F401
 from . import options_eligibility_freshness  # noqa: F401
 from . import fmp_profile_freshness  # noqa: F401
+from . import fmp_provider_health  # noqa: F401
 from . import options_aux_freshness  # noqa: F401
 from . import master_freshness  # noqa: F401
 from . import acting_ingest_coverage  # noqa: F401

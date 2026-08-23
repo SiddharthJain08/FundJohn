@@ -22,6 +22,17 @@ from src.ingestion import quote_sources as _registry
 from src.ingestion.quote_monitor import Quote
 
 
+
+def _record_fmp(endpoint, status, body):
+    """data_provider_health, best-effort (2026-08-23). fetch_with_retry hides
+    the status code, so this path only distinguishes 'got a body' from
+    'retries exhausted' — transport-level health, which is what the tile needs."""
+    try:
+        from src.maintenance.provider_health import record_http
+        return record_http('fmp', endpoint, status, body)
+    except Exception:  # noqa: BLE001
+        return None
+
 class FMPQuoteSource:
     name = 'fmp'
     priority = 2  # P2 in production chain: Alpaca P1, FMP P2 (Polygon removed in Task 17)
@@ -54,6 +65,7 @@ class FMPQuoteSource:
             headers={'User-Agent': 'OpenClaw-FundJohn/1.0'},
         )
         body = fetch_with_retry(req, timeout=self.timeout, label=f'fmp-quote-{ticker}')
+        _record_fmp('quote', 200 if body is not None else None, '' if body is not None else 'fetch_with_retry exhausted')
         if body is None:
             return None
         try:
