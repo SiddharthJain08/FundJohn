@@ -392,6 +392,43 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 // shape — no error surfaced, no progress, ep_poll forever. See git log.
 const HTTP_REQUEST_DEADLINE_MS = parseInt(process.env.HTTP_REQUEST_DEADLINE_MS || '60000', 10);
 
+// Build the error httpGet throws for a non-200 response. The message keeps the
+// legacy `HTTP <status>` shape (callers string-match on it), and the status +
+// a truncated body ride along so callers can tell FMP's two 402s apart.
+function _httpError(status, body, message = null) {
+  const err = new Error(message || `HTTP ${status}`);
+  err.status = status;
+  err.body = String(body || '').slice(0, 300);
+  return err;
+}
+
+// FMP error taxonomy (D1, 2026-08-23). On the Starter tier a 402 means EITHER
+// "daily quota exhausted" OR "this SYMBOL is gated behind a higher tier"
+// (preferreds / warrants / units: body "Premium Query Parameter: 'Special
+// Endpoint : This value set for 'symbol' is not available under your current
+// subscription'"). The fundamentals phase used to read every 402 as quota and
+// stop — at ticker ~30, every day, because the gated `.PR*`/`.WS` forms sort
+// right after the first "A…" names.
+const _FMP_SYMBOL_GATE_RE = /special endpoint|not available under your current subscription|premium query parameter/i;
+function _classifyFmpError(err) {
+  const msg = String(err?.message || '');
+  const status = err?.status ?? (msg.match(/\b(4\d\d|5\d\d)\b/) || [])[1];
+  const code = status != null ? Number(status) : null;
+  if (code === 402) return _FMP_SYMBOL_GATE_RE.test(err?.body || '') ? 'symbol_gated' : 'quota';
+  if (code === 429) return 'rate_limited';
+  if (code === 404) return 'not_found';
+  return 'other';
+}
+
+// Per-cycle scope cap: a freshness-driven scope can be the whole universe the
+// first time the freshness check actually works; cap it so one cycle never
+// spends the full daily FMP quota. 0 / negative = no cap.
+function _capScope(tickers, cap) {
+  const n = Number(cap);
+  if (!Number.isFinite(n) || n <= 0 || tickers.length <= n) return { tickers, deferred: 0 };
+  return { tickers: tickers.slice(0, n), deferred: tickers.length - n };
+}
+
 async function httpGet(url, _retryCount = 0) {
   const raw = await new Promise((resolve, reject) => {
     let settled = false;
@@ -463,8 +500,8 @@ async function httpGet(url, _retryCount = 0) {
     }
   }
 
-  if (raw.status === 403) throw new Error('Forbidden (403) — check API tier');
-  if (raw.status !== 200) throw new Error(`HTTP ${raw.status}`);
+  if (raw.status === 403) throw _httpError(403, raw.body, 'Forbidden (403) — check API tier');
+  if (raw.status !== 200) throw _httpError(raw.status, raw.body);
 
   try { return JSON.parse(raw.body); }
   catch (e) { throw new Error('JSON parse error'); }
@@ -1587,6 +1624,8 @@ async function runFundamentals(tickers = null) {
   // Fundamentals are quarterly — skip if fetched within last 30 days
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400_000).toISOString().slice(0, 10);
   let skipped = 0;
+  let gated = 0;
+  let empty = 0;
   let quotaExhausted = false;
 
   for (let i = 0; i < tickers.length; i++) {
@@ -1615,7 +1654,24 @@ async function runFundamentals(tickers = null) {
       trackApiCall('fmp');
       await sleep(FMP_INTERVAL);
     } catch (err) {
-      if (err.message.includes('402')) {
+      const kind = _classifyFmpError(err);
+      if (kind === 'symbol_gated') {
+        // Tier-gated SYMBOL (preferred/warrant/unit on Starter) — skip just this
+        // name, record the check so the 30-day freshness scope stops re-asking,
+        // and keep going. This is the same posture fillPricesFmpHistorical takes.
+        gated++;
+        console.warn(`[collector] fundamentals: skip ${ticker} (tier-gated on current FMP subscription)`);
+        await store.logRun(ticker, 'fundamentals', 'skipped', 0, `tier-gated: ${err.body || err.message}`.slice(0, 200), Date.now() - start, 1);
+        tickProgress('💹 Fundamentals', i + 1, tickers.length, ticker, 0);
+        continue;
+      }
+      if (kind === 'not_found') {
+        empty++;
+        await store.logRun(ticker, 'fundamentals', 'empty', 0, 'HTTP 404', Date.now() - start, 1);
+        tickProgress('💹 Fundamentals', i + 1, tickers.length, ticker, 0);
+        continue;
+      }
+      if (kind === 'quota') {
         // Daily quota exhausted — stop making FMP calls for the rest of this cycle
         quotaExhausted = true;
         notify(`⚠️ FMP daily quota exhausted (402) after ${i} tickers — resuming tomorrow`);
@@ -1623,7 +1679,7 @@ async function runFundamentals(tickers = null) {
         tickProgress('💹 Fundamentals', i + 1, tickers.length, ticker, 0);
         continue;
       }
-      if (err.message.includes('429')) {
+      if (kind === 'rate_limited') {
         // Rate limited — back off 30s and retry once; if still 429, treat as quota exhausted
         notify(`⏳ FMP rate limited (429) — backing off 30s then retrying`);
         await sleep(30_000);
@@ -1648,6 +1704,11 @@ async function runFundamentals(tickers = null) {
     }
 
     if (!Array.isArray(data) || !data.length) {
+      // No statements (ETFs, funds, SPAC shells) — record the check so the
+      // freshness scope doesn't re-ask every cycle. updateCoverage refuses
+      // zero-row writes by design, so this lives in pipeline_runs instead.
+      empty++;
+      await store.logRun(ticker, 'fundamentals', 'empty', 0, null, Date.now() - start, 1);
       tickProgress('💹 Fundamentals', i + 1, tickers.length, ticker, 0);
       continue;
     }
@@ -1759,8 +1820,8 @@ async function runFundamentals(tickers = null) {
   }
 
   const elapsed = Math.round((Date.now() - _progress.phaseStart) / 1000);
-  notify(`✅ Fundamentals complete — ${_progress.rowsThisPhase} new records, ${skipped} skipped (fetched <30d ago) in ${elapsed}s`);
-  if (_alertPost) _alertPost(`✅ **Phase 5 complete** — ${_progress.rowsThisPhase} fundamental records added | ${skipped} skipped`);
+  notify(`✅ Fundamentals complete — ${_progress.rowsThisPhase} new records, ${skipped} skipped (fetched <30d ago), ${gated} tier-gated, ${empty} no-statement in ${elapsed}s`);
+  if (_alertPost) _alertPost(`✅ **Phase 5 complete** — ${_progress.rowsThisPhase} fundamental records added | ${skipped} skipped | ${gated} tier-gated | ${empty} no-statement`);
 }
 
 // ── Market price history — ETFs/crypto via Alpaca; indices/forex via FMP ─────
@@ -2329,8 +2390,15 @@ async function runDailyCollection() {
     await runIvHistory();
   }
 
-  // Phase 4: Fundamentals — only stale tickers, budget-aware
-  const fundNeeded = gaps?.fundamentals.tickers ?? fundamentalScope;
+  // Phase 4: Fundamentals — only stale tickers, budget-aware.
+  // D1 (2026-08-23): the scope is freshness-driven (data_coverage.last_updated
+  // OR a pipeline_runs check within fmp_fundamentals_stale_days), ordered
+  // oldest-first, and capped per cycle so the first cycle after the 402 fix
+  // doesn't try the whole universe (4 calls/ticker × 11k = the daily quota).
+  const fundCap = parseInt(cfg.fmp_fundamentals_max_per_cycle || '1500', 10);
+  const fundScoped = _capScope(gaps?.fundamentals.tickers ?? fundamentalScope, fundCap);
+  const fundNeeded = fundScoped.tickers;
+  if (fundScoped.deferred > 0) notify(`💹 Fundamentals: ${fundNeeded.length} oldest-first this cycle, ${fundScoped.deferred} deferred (cap fmp_fundamentals_max_per_cycle=${fundCap})`);
   if (cfg.collect_fundamentals !== 'false' && !budgetConstraints.skipFundamentals && fundNeeded.length > 0) {
     await runFundamentals(fundNeeded);
   } else if (budgetConstraints.skipFundamentals) {
@@ -2606,4 +2674,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions, _httpError, _classifyFmpError, _capScope };

@@ -418,13 +418,30 @@ async function getGapSummary({ priceTickers, optionsTickers, fundTickers, fromDa
     [optionsTickers, toDate]
   ).catch(() => null);
 
-  // ── Fundamentals: needs update if last_updated > N days ago ─────────────────
+  // ── Fundamentals: needs update if not CHECKED within N days ─────────────────
+  // "Checked" = data_coverage.last_updated (rows were written) OR a
+  // pipeline_runs row with status success/empty/skipped (D1, 2026-08-23:
+  // updateCoverage refuses zero-row writes by design, so ETFs / no-statement
+  // names and tier-gated symbols never got a coverage row and were re-asked
+  // every cycle). Ordered oldest-first so a per-cycle cap rotates through the
+  // universe instead of re-serving the same alphabetical head.
   const fundRes = await query(
-    `SELECT u.ticker,
-            CASE WHEN c.last_updated >= NOW() - ($2 || ' days')::interval THEN 'covered' ELSE 'needed' END AS status
+    `WITH runs AS (
+       SELECT ticker, MAX(created_at) AS last_run
+       FROM   pipeline_runs
+       WHERE  run_type = 'fundamentals'
+         AND  status IN ('success', 'empty', 'skipped')
+         AND  created_at >= NOW() - ($2 || ' days')::interval
+         AND  ticker = ANY($1::text[])
+       GROUP BY ticker)
+     SELECT u.ticker,
+            CASE WHEN c.last_updated >= NOW() - ($2 || ' days')::interval
+                   OR r.last_run IS NOT NULL
+                 THEN 'covered' ELSE 'needed' END AS status
      FROM   unnest($1::text[]) AS u(ticker)
      LEFT JOIN data_coverage c ON c.ticker = u.ticker AND c.data_type = 'fundamentals'
-     ORDER BY u.ticker`,
+     LEFT JOIN runs r ON r.ticker = u.ticker
+     ORDER BY COALESCE(GREATEST(c.last_updated, r.last_run), c.last_updated, r.last_run, '1970-01-01'::timestamptz) ASC, u.ticker`,
     [fundTickers, String(fundStaleDays)]
   ).catch(() => null);
 
