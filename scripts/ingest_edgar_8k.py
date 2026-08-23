@@ -24,6 +24,31 @@ from src.pipeline.premarket_helpers import (
 
 log = logging.getLogger(__name__)
 
+# Per-run ticker cap. Was 50 until 2026-08-23, which silently dropped ~80% of
+# a ~270-name open book on every premarket run ("truncating 271 tickers to
+# max 50"). EDGARClient throttles itself to 10 req/s (one submissions call per
+# ticker + one document fetch per NEW filing), so a 400-name book is ~40-60s
+# per run — well inside the premarket window; the unit has no RuntimeMaxSec.
+DEFAULT_MAX_TICKERS_PER_RUN = 400
+
+
+def _max_tickers_per_run() -> int:
+    return int(os.environ.get('OPENCLAW_EDGAR_8K_MAX_TICKERS_PER_RUN',
+                              str(DEFAULT_MAX_TICKERS_PER_RUN)))
+
+
+def _cap_tickers(tickers: list[str], max_n: int) -> list[str]:
+    """Truncate to max_n, WARNing with the dropped count (never silent)."""
+    if len(tickers) <= max_n:
+        return tickers
+    dropped = len(tickers) - max_n
+    log.warning(
+        'truncating %d tickers to max %d — dropped %d names this run '
+        '(raise OPENCLAW_EDGAR_8K_MAX_TICKERS_PER_RUN to cover the full book)',
+        len(tickers), max_n, dropped,
+    )
+    return tickers[:max_n]
+
 
 def _main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO)
@@ -51,10 +76,7 @@ def _main(argv: list[str] | None = None) -> int:
         log.info('no tickers to ingest; exiting')
         return 0
 
-    max_n = int(os.environ.get('OPENCLAW_EDGAR_8K_MAX_TICKERS_PER_RUN', '50'))
-    if len(tickers) > max_n:
-        log.warning('truncating %d tickers to max %d', len(tickers), max_n)
-        tickers = tickers[:max_n]
+    tickers = _cap_tickers(tickers, _max_tickers_per_run())
 
     results = asyncio.run(ingest_8k_filings(tickers, args.lookback_hours))
     total_new = sum(results.values())

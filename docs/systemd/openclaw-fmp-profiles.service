@@ -1,0 +1,37 @@
+[Unit]
+Description=Weekly FMP /stable/profile refresh (data/.cache/fmp_profile.json: sector, industry, ipoDate)
+After=network-online.target postgresql.service
+Wants=network-online.target
+OnFailure=openclaw-failure-notify@%n.service
+
+[Service]
+Type=oneshot
+# User=claudebot: data/.cache is claudebot-owned (options_eligibility.json
+# lives there, same owner) and the consumer — run_ticker_metadata_step.py
+# chained from openclaw-tradable-universe-refresh — runs as claudebot too.
+User=claudebot
+Group=claudebot
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+# data/ is root-owned, so create + chown the cache dir as root first (+ is
+# best-effort so a pre-existing dir never fails the unit) — mirrors
+# openclaw-options-eligibility.service.
+ExecStartPre=+/bin/mkdir -p /root/openclaw/data/.cache
+ExecStartPre=+/bin/chown claudebot:claudebot /root/openclaw/data/.cache
+ExecStart=/usr/bin/python3 /root/openclaw/scripts/refresh_fmp_profiles.py
+StandardOutput=journal
+StandardError=journal
+# Network-bound (one ~3 KB /stable/profile call per symbol at 0.2 s pacing),
+# <150 MB RSS; yield to anything live on the 2-core/8 GB box.
+Nice=19
+OOMScoreAdjust=800
+# Sizing (measured 2026-08-23: 20 names in 6.8 s = 0.34 s/name): the first
+# full sweep of the ~13.4k active tradable Alpaca equities is ~76 min; weekly
+# steady state only touches new listings + the >30 d cohort. 2.5 h is ~2x the
+# worst case. TimeoutStartSec is the REAL bound for a Type=oneshot unit
+# (systemd 257 ignores RuntimeMaxSec= on oneshots); the script flushes the
+# cache atomically every 500 names, so a kill here keeps what was fetched.
+TimeoutStartSec=9000
+
+[Install]
+WantedBy=multi-user.target

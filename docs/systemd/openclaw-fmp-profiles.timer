@@ -1,0 +1,18 @@
+[Unit]
+Description=Weekly FMP profile cache refresh — Sat 00:30 UTC
+
+[Timer]
+# Sat 00:30 UTC (Fri 20:30 ET): clear of every weekday actuator, of the
+# Saturday research lane (sunday-* swap timers fire Sat 12:00/18:00/22:00 UTC)
+# and of openclaw-options-eligibility (Sat 06:00 UTC). Ends (TimeoutStartSec
+# 2.5 h) before openclaw-edgar-shares takes the Sat 03:00 UTC slot. The
+# consumer (openclaw-tradable-universe-refresh -> run_ticker_metadata_step)
+# next runs Mon 13:30 UTC, so a fresh cache lands in Monday's snapshot.
+OnCalendar=Sat *-*-* 00:30:00 UTC
+# Persistent=false: a missed week just means the >30 d cohort waits a week;
+# enabling the timer must never fire a surprise 76-min sweep into a trading day.
+Persistent=false
+Unit=openclaw-fmp-profiles.service
+
+[Install]
+WantedBy=timers.target

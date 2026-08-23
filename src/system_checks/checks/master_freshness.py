@@ -55,7 +55,14 @@ _CADENCES: dict[str, tuple[str | None, int]] = {
     'earnings_calendar.parquet':  (None, 4),
     # financials max(date) is a fiscal period END; quarterly cadence.
     'financials.parquet':         ('date', 120),
-    'shares_outstanding.parquet': ('asof_date', 35),
+    # shares_outstanding: asof_date is the XBRL cover/period date and the
+    # live file carries a mis-tagged 2034-03-05 row, so max(asof_date) can
+    # never go stale — it hid an 80-day freeze (last fetched 2026-06-04,
+    # caught 2026-08-23). fetched_at is stamped on every appended row by
+    # edgar_shares.merge_append_only; the weekly openclaw-edgar-shares unit
+    # (Sat 03:00 UTC) appends fresh filings each run, so 10d = one missed
+    # week + slack.
+    'shares_outstanding.parquet': ('fetched_at', 10),
     # corporate_actions is sparse/event-driven (ex-dates arrive irregularly),
     # so freshness = mtime, not max(date). The old comment here claimed "the
     # collector touches it on run" — FALSE until 2026-08-07, when the file had

@@ -102,7 +102,8 @@ installed-but-disabled):
   `mastermind-chat`.
 - *System timers*: `openclaw-afterhours-tp-{premarket,postmarket,rth-reconcile}`,
   `openclaw-amcheck`, `openclaw-botjohn-maintenance`,
-  `openclaw-edgar-8k-{0715,0845}`, `openclaw-options-archive`,
+  `openclaw-edgar-8k-{0715,0845}`, `openclaw-edgar-shares`,
+  `openclaw-fmp-profiles`, `openclaw-options-archive`,
   `openclaw-options-eligibility`, `openclaw-phase2d-nightly`,
   `openclaw-premarket-realized-backfill`, `openclaw-premarket-scan-{0730,0900}`,
   `openclaw-refresh-universe-sizes`, `openclaw-regime-live-pnl`,

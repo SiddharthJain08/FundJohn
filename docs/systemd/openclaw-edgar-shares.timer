@@ -1,0 +1,19 @@
+[Unit]
+Description=Weekly EDGAR shares-outstanding refresh — Sat 03:00 UTC
+
+[Timer]
+# Sat 03:00 UTC (Fri 23:00 ET): clear of the Saturday research lane (the
+# sunday-* swap timers fire Sat 12:00/18:00/22:00 UTC), of
+# openclaw-options-eligibility (Sat 06:00 UTC) and of every weekday actuator;
+# downstream of nothing. openclaw-fmp-profiles runs the slot before it
+# (Sat 01:00 UTC, RuntimeMaxSec 2h). Friday's fleet-overnight run may still be
+# going (Nice=19 both sides; this job is network-bound).
+OnCalendar=Sat *-*-* 03:00:00 UTC
+# Persistent=false: a missed week is simply absorbed by the next run's
+# stalest-first ordering, and enabling the timer must never fire a surprise
+# catch-up sweep into a trading day.
+Persistent=false
+Unit=openclaw-edgar-shares.service
+
+[Install]
+WantedBy=timers.target
