@@ -313,3 +313,18 @@ signatures archive). Stays OFF until one supervised Saturday-brain run.
 - [ ] First Sunday: R1 dual-verdict log reviewed; S3 dissents visible in
       #botjohn-log; S2 remains OFF until supervised.
 - [ ] Push to origin after each batch.
+
+## Post-landing runbook (copied from the SDD ledger 2026-08-24 20:40 UTC)
+
+## TUESDAY 08-25 RUNBOOK (pre-written for post-compaction recovery)
+1. `journalctl -u x1-ledger-backfill.service --no-pager | grep -E "as_of|approved|errors_dropped" | tail -20` — expect ~156 per-week lines; sanity: fdr_pass/approved counts non-zero in later weeks; errors_dropped small.
+2. `python3 -c "import pandas as pd;d=pd.read_parquet('data/derived/pair_ledger.parquet');print(d.as_of.nunique(),'scans',d.approved.sum(),'approved rows',d[d.approved].as_of.max())"`
+3. If ledger sane, schedule first X1 backtest (single-strategy path → tearsheet auto-generated):
+   `systemd-run --on-calendar="2026-08-25 21:30:00 UTC" --unit=x1-backtest-1 --property=Nice=19 --property=MemoryMax=3000M --property=RuntimeMaxSec=14400 --property=WorkingDirectory=/root/openclaw --property=EnvironmentFile=/root/openclaw/.env --setenv=PYTHONPATH=/root/openclaw/src --setenv=OPENCLAW_BT_TEARSHEET=1 /usr/bin/python3 -m backtest.unified_backtest --strategy-file src/strategies/implementations/S_coint_pairs_sector_v2.py --universe-cap tier_liquid`
+   (verify the exact CLI flags with `python3 -m backtest.unified_backtest --help` first; PYTHONPATH=src per research-orchestrator's invocation.)
+4. Mon-evening checks owed: `SELECT run_date, method, notes FROM pyportfolioopt_shadow_runs ORDER BY run_date DESC LIMIT 4` (expect 2026-08-24 rows for 'hrp' AND 'hrp_strategy'); grep the 15:55 sizer log for `[asset_corr_lw] shadow:` — if ABSENT, the sizer subprocess did not receive OPENCLAW_ASSET_CORR_LW from johnbot's frozen env → add the same dotenv fallback the HRP runner got (asset_correlation.py mode resolver) or schedule a johnbot restart.
+5. After ≥1 shadow cycle with the `[asset_corr_lw]` line: review mean_abs_delta_rho / cluster deltas → flip .env OPENCLAW_ASSET_CORR_LW=1. Tangency LW arming waits for an lw_gamma artifact (returns density) — not this week.
+
+- R2 preflight 08-24 20:37 UTC: WALL 4.65s / RSS 544MB on production defaults (budget PASS).
+- x1-ledger-backfill timer moved to 22:05 UTC (fleet retries S_mingle_factor_graph_portfolio at 21:30 — nightly OOM, pre-existing).
+- OPERATOR DECISIONS OWED: (1) apply R1's benchmark leg in activation_assigner / eligibility_assigner / lifecycle.py:593 (today: candidate→live only); (2) arm S2 with pipeline_config.tournament_variants=2 for one supervised Saturday; (3) flip OPENCLAW_ASSET_CORR_LW=1 after reviewing the shadow log; (4) redteam_blocked / prescreen_failed statuses need sweep + resurrect-script + dashboard-chip coverage (follow-up).
