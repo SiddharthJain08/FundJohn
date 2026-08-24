@@ -124,6 +124,23 @@ function _optionUnderlyingSupported(underlying) {
   return r.status === 0;
 }
 
+/**
+ * Task R2 review fix (Minor): shape-validate factor_prescreen.py's parsed
+ * stdout before trusting it as a verdict. JSON.parse happily succeeds on
+ * `5`, `"ok"`, `null`, `[]`, or `{}` — none of which carry the boolean
+ * `pass` field the orchestrator branches on below. Without this check those
+ * shapes fell through to the final `else` (clean-pass) branch instead of
+ * being treated as the infra failure they actually are. Only an object with
+ * a boolean `pass` field counts as a real prescreen verdict; everything
+ * else (including `null`, arrays, and primitives) is not.
+ */
+function _isPrescreenShape(obj) {
+  return obj !== null
+    && typeof obj === 'object'
+    && !Array.isArray(obj)
+    && typeof obj.pass === 'boolean';
+}
+
 // Pure builder for the strategycoder subagent context. Extracted from
 // _codeStrategy so the porting hook is unit-testable without spawning a
 // subagent. Returns the EXACT ctx object _codeStrategy used to build inline,
@@ -803,7 +820,108 @@ class ResearchOrchestrator {
       });
     }
 
-    notify?.(`  ✅ ${stratId} red-team review passed — running backtest (may take 2–5 min)...`);
+    notify?.(`  ✅ ${stratId} red-team review passed — running factor prescreen...`);
+    onPhase('prescreen', 55);
+
+    // ── Phase 1.75: Cheap pre-backtest factor screen (Task R2) ────────────────
+    // Code-enforced, same as validate/redteam above: runs for every candidate
+    // that reaches this point. CONSERVATIVE BY DESIGN — hard-blocks ONLY
+    // provably degenerate output (zero signals anywhere in the sample window,
+    // or 100% constant output); everything else annotates with stats and
+    // passes. Purely a cheap filter to skip the ~900s unified_backtest run
+    // where it is provably pointless — never a quality gate. Any infra
+    // trouble (non-zero exit incl. a SIGTERM'd timeout, which resolves with
+    // code===null — hence `code !== 0` rather than `code === 1`, unparseable
+    // stdout) is logged as prescreen_infra_fail and PASSES, mirroring
+    // redteam's fail-open contract above.
+    const psPaperId = vPaperId;
+    let psResult = null;
+    let psInfraFail = false;
+    let psInfraReason = null;
+    try {
+      const { stdout, code } = await _spawnPython(
+        ['-m', 'backtest.factor_prescreen', '--strategy-file', implPath],
+        { cwd: OPENCLAW_DIR, timeoutMs: 120_000, onChild: opts.onChild,
+          env: { ...process.env, PYTHONPATH: 'src' } });
+      if (code !== 0) {
+        psInfraFail = true;
+        psInfraReason = `factor_prescreen.py exit=${code}; stdout: ${stdout.slice(-300)}`;
+      } else {
+        try {
+          // Tolerate a stray print() from a generated strategy — the JSON
+          // verdict is always the last line factor_prescreen.py emits.
+          const lastLine = stdout.trim().split('\n').pop();
+          const parsed = JSON.parse(lastLine);
+          // Shape-validate: `5`, `{}`, `"ok"`, `null`, `[]` all parse as
+          // valid JSON but are not a real {pass, reason, stats} verdict.
+          // Treat anything that isn't exactly that shape as an infra
+          // failure (same fail-open contract as an unparseable line),
+          // rather than letting it fall through to the clean-pass branch.
+          if (_isPrescreenShape(parsed)) {
+            psResult = parsed;
+          } else {
+            psInfraFail = true;
+            psInfraReason = `factor_prescreen.py stdout parsed but is not a valid prescreen result shape: ${lastLine.slice(0, 300)}`;
+          }
+        } catch (e) {
+          psInfraFail = true;
+          psInfraReason = `factor_prescreen.py unparseable stdout: ${stdout.slice(0, 300)}`;
+        }
+      }
+    } catch (e) {
+      psInfraFail = true;
+      psInfraReason = `factor_prescreen.py threw: ${e.message}`;
+    }
+
+    if (psInfraFail) {
+      await emitGateDecision({
+        paperId:      psPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'prescreen',
+        outcome:      'pass',
+        reasonCode:   'prescreen_infra_fail',
+        reasonDetail: psInfraReason,
+      });
+      notify?.(`  ⚠️ ${stratId} factor prescreen infra failure — WARN-and-pass, continuing to backtest.`);
+    } else if (psResult && psResult.pass === false) {
+      await this._query(
+        `UPDATE implementation_queue SET status = 'prescreen_failed', error_log = $1 WHERE candidate_id = $2`,
+        [psResult.reason || 'prescreen_failed', candidate_id]
+      );
+      await emitGateDecision({
+        paperId:     psPaperId,
+        candidateId: candidate_id,
+        strategyId:  stratId,
+        gateName:    'prescreen',
+        outcome:     'reject',
+        reasonCode:  psResult.reason || 'prescreen_failed',
+        metadata:    { stats: psResult.stats },
+      });
+      notify?.(`  ❌ ${stratId} blocked by factor prescreen: ${psResult.reason}`);
+      channelNotify?.(`❌ **${stratId}** blocked by factor prescreen — ${psResult.reason}`);
+      return { promoted: false, reasonCode: 'prescreen_failed', error: psResult.reason };
+    } else {
+      // psResult.reason is non-null (but pass=true) for the two soft-pass
+      // annotations — 'prescreen_skipped_aux_dependent' (Concern-1 fix) and
+      // 'zero_signals_on_fallback_universe' (Concern-2 fix) — and null for
+      // a genuine full pass. Recorded as reasonCode here (not just buried
+      // inside metadata.stats, which is null for the aux-dependent case
+      // anyway) so these annotations stay queryable/visible in
+      // paper_gate_decisions rather than being indistinguishable from a
+      // plain pass.
+      await emitGateDecision({
+        paperId:     psPaperId,
+        candidateId: candidate_id,
+        strategyId:  stratId,
+        gateName:    'prescreen',
+        outcome:     'pass',
+        reasonCode:  psResult?.reason || null,
+        metadata:    { stats: psResult?.stats || null },
+      });
+    }
+
+    notify?.(`  ✅ ${stratId} factor prescreen passed — running backtest (may take 2–5 min)...`);
     onPhase('backtest', 60);
 
     // ── Phase 2: Unified backtest convergence gate ────────────────────────────
@@ -1500,4 +1618,5 @@ module.exports = ResearchOrchestrator;
 module.exports._validateInferredFilter = _validateInferredFilter;
 module.exports._validateInferredClass = _validateInferredClass;
 module.exports._optionUnderlyingSupported = _optionUnderlyingSupported;
+module.exports._isPrescreenShape = _isPrescreenShape;
 module.exports.buildCoderContext = buildCoderContext;
