@@ -21,6 +21,7 @@ const { spawn, execSync, spawnSync } = require('child_process');
 const { spawnWithTimeout } = require('../../lib/spawn_timeout');
 const { emitGateDecision, paperIdForCandidate } = require('./gate-decisions');
 const { redteamStrategy } = require('../curators/strategy_redteam');
+const { getPromotionThreshold } = require('../../lib/promotion_service');
 
 const OPENCLAW_DIR      = process.env.OPENCLAW_DIR || path.join(__dirname, '../../..');
 const NODE_CLI          = path.join(OPENCLAW_DIR, 'src/agent/run-subagent-cli.js');
@@ -33,6 +34,36 @@ const STOP_AFTER_KEY = 'research:stop_after_promoted';   // Redis key for one-sh
 
 const IMPLEMENTATIONS_DIR = path.join(OPENCLAW_DIR, 'src/strategies/implementations');
 const MANIFEST_PATH       = path.join(OPENCLAW_DIR, 'src/strategies/manifest.json');
+
+// Task S2 (five-repo-adoptions, 2026-08-24): N-variant strategycoder tournament.
+// Safety cap beyond what the brief specifies — this box is 2-core / strictly
+// serial, so an operator fat-fingering pipeline_config.tournament_variants
+// shouldn't be able to wedge the coding loop for hours. Only ever consulted
+// from _resolveTournamentN, which itself only fires for Tier-A rows when the
+// flag is >1 — never touches the N==1/absent path.
+const MAX_TOURNAMENT_VARIANTS = 8;
+
+// Maps a per-variant gate-chain failure reasonCode to the exact
+// implementation_queue.status string the SINGLE-SHOT path (below) writes for
+// that same failure. Used only when a tournament's zero-survivor case is
+// "every variant died at a gate before backtest ever ran" — see
+// _runTournament — so the queue row is left in a real, single-shot-shaped
+// terminal state rather than an invented one.
+const QUEUE_STATUS_FOR_REASON = {
+  coding_failed:      'failed',
+  contract_violation: 'validation_failed',
+  redteam_blocked:    'redteam_blocked',
+  prescreen_failed:   'prescreen_failed',
+  backtest_error:     'backtest_failed',
+};
+
+// Task S2: insert `_tv<k>` before the file extension, e.g.
+// S_x.py -> S_x_tv2.py. Pure + exported for scripts/tournament_dryrun.js.
+function _variantPath(canonicalPath, k) {
+  const ext  = path.extname(canonicalPath);
+  const base = canonicalPath.slice(0, canonicalPath.length - ext.length);
+  return `${base}_tv${k}${ext}`;
+}
 
 /**
  * Resolve a strategy's implementation .py path. Honours `metadata.canonical_file`
@@ -150,7 +181,7 @@ function _isPrescreenShape(obj) {
 // The SP-4 option-underlying envelope guard lives here (it throws on an
 // unsupported option underlying, exactly as the inline code did → the
 // rejection propagates through _codeFromQueue's catch).
-function buildCoderContext(strategySpec) {
+function buildCoderContext(strategySpec, variantDirective = null) {
   const validInferred = _validateInferredFilter(strategySpec?.inferred_universe_filter ?? null);
   const validClass    = _validateInferredClass(strategySpec?.inferred_instrument_class ?? null);
   // SP-4 envelope guard: an option strategy must be on a Phase-0-supported
@@ -181,6 +212,14 @@ function buildCoderContext(strategySpec) {
     ctx.REFERENCE_IMPLEMENTATION = strategySpec.reference_impl;
     ctx.PORTING_GUIDE            = 'docs/strategy-coding/quantconnect-to-basestrategy.md';
     ctx.SOURCE_URL               = strategySpec.reference_url;
+  }
+  // Task S2 (N-variant tournament): append the interpretation-variant
+  // directive verbatim to `instructions` when present. Absent/null (every
+  // non-tournament call, and every N==1 call) leaves `instructions`
+  // byte-identical to before — this is the ctx half of the pure-superset
+  // guard (the other half is _resolveTournamentN gating N>1 to Tier-A rows).
+  if (variantDirective) {
+    ctx.instructions = `${ctx.instructions} ${variantDirective}`;
   }
   return ctx;
 }
@@ -218,6 +257,26 @@ class ResearchOrchestrator {
     this._redis       = null;
     this._pool        = null;
     this._sessionCost = 0;   // cumulative LLM cost for the current start() session
+
+    // Test seams (Task S2): the gate chain's four expensive steps are each
+    // indirected through an instance property that defaults to the real
+    // implementation. scripts/tournament_dryrun.js overrides these so it can
+    // exercise tournament winner-selection + file lifecycle without spawning
+    // python, an LLM, or touching Postgres. Never overridden in production —
+    // same methods, same call sites, same behavior as before this task.
+    this._validateFn  = this._runValidateStrategy.bind(this);
+    this._redteamFn   = redteamStrategy;
+    this._prescreenFn = this._runFactorPrescreen.bind(this);
+    this._backtestFn  = this._runUnifiedBacktest.bind(this);
+    // _emitDecisionFn: every emitGateDecision() call reachable from
+    // _runGateChain / _runTournament goes through this seam (defaults to the
+    // real free function). Lets scripts/tournament_dryrun.js capture and
+    // assert on decisions — in particular that every losing variant gets a
+    // gateName:'tournament', reasonCode:'tournament_loser' decision — without
+    // needing POSTGRES_URI set. emitGateDecision calls OUTSIDE the tournament
+    // path (processQueue, runHunterFanout, Phase 3's 'promotion' decision)
+    // are unchanged and still call the free function directly.
+    this._emitDecisionFn = emitGateDecision;
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -663,393 +722,76 @@ class ResearchOrchestrator {
       [candidate_id]
     );
 
-    // Skip strategycoder when a hand-coded implementation already exists at
-    // the canonical path. The fused-approval rewrite was designed for
-    // candidates where strategycoder writes the .py from scratch; running
-    // it against an existing file risks overwriting working code with a
-    // weaker LLM-rewritten version.
-    const skipCoding = fs.existsSync(implPath);
-    notify?.(`  ⚙️ Coding: ${stratId}${skipCoding ? ' (existing file — skipping strategycoder)' : '...'}`);
-    onPhase('strategycoder', 20);
     const costBeforeCoding = this._sessionCost;
-    if (skipCoding) {
-      await this._query(
-        `UPDATE implementation_queue SET status = 'done', coded_at = NOW() WHERE candidate_id = $1`,
-        [candidate_id]
-      );
+
+    // Task S2: flag-gated N-variant tournament. This is the PURE-SUPERSET
+    // GUARD — every one of these three conditions must hold for the
+    // tournament to engage; anything else (key absent, key==1, a non-Tier-A
+    // row per _resolveTournamentN, or a canonical file that already exists —
+    // e.g. a hand-coded strategy or the Sunday stale-row sweep re-checking an
+    // already-coded strategy) falls straight into the single-shot `else`
+    // branch below, which is byte-identical to the pre-Task-S2 code path.
+    const tournamentN    = await this._resolveTournamentN(candidate_id);
+    const runTournament  = tournamentN > 1 && !fs.existsSync(implPath);
+
+    let btResult, vPaperId;
+
+    if (runTournament) {
+      const outcome = await this._runTournament({
+        candidate_id, strategy_spec, stratId, N: tournamentN, notify, channelNotify, opts,
+      });
+      if (!outcome.ok) return outcome.result;
+      btResult = outcome.btResult;
+      vPaperId = outcome.vPaperId;
     } else {
-      try {
-        await this._codeStrategy(strategy_spec);
+      // ── Single-shot path — UNCHANGED from before Task S2 ──────────────────
+      // Skip strategycoder when a hand-coded implementation already exists at
+      // the canonical path. The fused-approval rewrite was designed for
+      // candidates where strategycoder writes the .py from scratch; running
+      // it against an existing file risks overwriting working code with a
+      // weaker LLM-rewritten version.
+      const skipCoding = fs.existsSync(implPath);
+      notify?.(`  ⚙️ Coding: ${stratId}${skipCoding ? ' (existing file — skipping strategycoder)' : '...'}`);
+      onPhase('strategycoder', 20);
+      if (skipCoding) {
         await this._query(
           `UPDATE implementation_queue SET status = 'done', coded_at = NOW() WHERE candidate_id = $1`,
           [candidate_id]
         );
-        notify?.(`  ✅ ${stratId} implemented — running validation...`);
-      } catch (e) {
-        await this._query(
-          `UPDATE implementation_queue SET status = 'failed' WHERE candidate_id = $1`,
-          [candidate_id]
-        );
-        notify?.(`  ⚠️ ${stratId} coding failed: ${e.message}`);
-        return { promoted: false, reasonCode: 'coding_failed', error: e.message };
-      }
-    }
-
-    // Re-resolve the path after strategycoder ran: the coder writes
-    // `${stratId}.py` (exact case) while a finisher-staged manifest may carry
-    // a LOWERCASED canonical_file — the pre-coding resolution predates the
-    // file's existence, so _resolveImplPath's case-toggle fallback couldn't
-    // fire and validation checked a stale, nonexistent lowercase path
-    // (2026-07-14: 4 staging builds quarantined as contract_violation this
-    // way despite freshly-written working code).
-    if (!skipCoding) implPath = _resolveImplPath(stratId);
-
-    // ── Phase 1: Contract validation ─────────────────────────────────────────
-    // validate_strategy.py exits 0 on valid, 1 on invalid. Use async spawn so
-    // we don't block the Node event loop (previously execSync held the loop
-    // hostage for up to 10 min during backtests, making the whole API
-    // unresponsive).
-    onPhase('validate', 40);
-    let validResult;
-    {
-      const { stdout, code } = await _spawnPython(
-        ['src/strategies/validate_strategy.py', implPath],
-        { cwd: OPENCLAW_DIR, timeoutMs: 60_000, onChild: opts.onChild });
-      try {
-        validResult = JSON.parse(stdout);
-      } catch (_) {
-        validResult = { ok: false, errors: [`validate_strategy.py exit=${code}; stdout: ${stdout.slice(0, 300)}`] };
-      }
-    }
-
-    const vPaperId = await paperIdForCandidate(candidate_id);
-    if (!validResult.ok) {
-      const errLog = (validResult.errors || []).join('\n');
-      await this._query(
-        `UPDATE implementation_queue SET status = 'validation_failed', error_log = $1 WHERE candidate_id = $2`,
-        [errLog, candidate_id]
-      );
-      await emitGateDecision({
-        paperId:      vPaperId,
-        candidateId:  candidate_id,
-        strategyId:   stratId,
-        gateName:     'validate',
-        outcome:      'reject',
-        reasonCode:   'contract_violation',
-        reasonDetail: errLog,
-        metadata:     { errors: validResult.errors || [] },
-      });
-      notify?.(`  ❌ ${stratId} validation failed: ${errLog.slice(0, 200)}`);
-      channelNotify?.(`❌ **${stratId}** failed contract validation — see implementation_queue for errors.`);
-      return { promoted: false, reasonCode: 'contract_violation', error: errLog };
-    }
-    await emitGateDecision({
-      paperId:     vPaperId,
-      candidateId: candidate_id,
-      strategyId:  stratId,
-      gateName:    'validate',
-      outcome:     'pass',
-      metadata:    { signal_count: validResult.signal_count ?? null },
-    });
-    notify?.(`  ✅ ${stratId} validation passed — running red-team review...`);
-    onPhase('redteam', 50);
-
-    // ── Phase 1.5: Mandatory LLM red-team gate (Task S1) ──────────────────────
-    // Code-enforced: runs for EVERY candidate that reaches this point, never
-    // skippable by an LLM's discretion. redteamStrategy() derives its verdict
-    // in code from structured findings (never trusts the model's own verdict
-    // field) and fails OPEN on infra trouble — see strategy_redteam.js. A
-    // block here follows the exact same DB-update / emitGateDecision /
-    // early-return pattern as the validate-failure path above. Reuses
-    // vPaperId (same candidate_id -> same paper_id lookup) rather than
-    // re-querying paperIdForCandidate a second time.
-    const rtPaperId = vPaperId;
-    let rtResult;
-    try {
-      rtResult = await redteamStrategy({
-        implPath,
-        paperContext: strategy_spec?.hypothesis_one_liner || strategy_spec?.signal_logic || null,
-      });
-    } catch (e) {
-      // redteamStrategy() already contains its own retry/infra-fail handling
-      // around the claude-bin call; this catch is a last-resort backstop so
-      // an unexpected bug here can never silently block research either.
-      console.error(`[redteam] unexpected exception auditing ${stratId}: ${e.message}`);
-      rtResult = { verdict: 'pass', findings: [], infra_fail: true };
-    }
-
-    if (rtResult.infra_fail) {
-      await emitGateDecision({
-        paperId:     rtPaperId,
-        candidateId: candidate_id,
-        strategyId:  stratId,
-        gateName:    'redteam',
-        outcome:     'pass',
-        reasonCode:  'redteam_infra_fail',
-        metadata:    { findings: rtResult.findings },
-      });
-      notify?.(`  ⚠️ ${stratId} red-team reviewer infra failure — WARN-and-pass, continuing to backtest.`);
-    } else if (rtResult.verdict === 'block') {
-      const criticalFindings = rtResult.findings.filter((f) => f.severity === 'critical');
-      const reason = criticalFindings[0]?.concern || 'red-team gate blocked (no concern text)';
-      await this._query(
-        `UPDATE implementation_queue SET status = 'redteam_blocked', error_log = $1 WHERE candidate_id = $2`,
-        [reason, candidate_id]
-      );
-      await emitGateDecision({
-        paperId:      rtPaperId,
-        candidateId:  candidate_id,
-        strategyId:   stratId,
-        gateName:     'redteam',
-        outcome:      'reject',
-        reasonCode:   'redteam_blocked',
-        reasonDetail: reason,
-        metadata:     { findings: rtResult.findings },
-      });
-      notify?.(`  ❌ ${stratId} blocked by red-team gate: ${reason.slice(0, 200)}`);
-      channelNotify?.(`❌ **${stratId}** blocked by red-team review — ${reason.slice(0, 200)}`);
-      return { promoted: false, reasonCode: 'redteam_blocked', error: reason };
-    } else {
-      await emitGateDecision({
-        paperId:     rtPaperId,
-        candidateId: candidate_id,
-        strategyId:  stratId,
-        gateName:    'redteam',
-        outcome:     'pass',
-        metadata:    { findings: rtResult.findings },
-      });
-    }
-
-    notify?.(`  ✅ ${stratId} red-team review passed — running factor prescreen...`);
-    onPhase('prescreen', 55);
-
-    // ── Phase 1.75: Cheap pre-backtest factor screen (Task R2) ────────────────
-    // Code-enforced, same as validate/redteam above: runs for every candidate
-    // that reaches this point. CONSERVATIVE BY DESIGN — hard-blocks ONLY
-    // provably degenerate output (zero signals anywhere in the sample window,
-    // or 100% constant output); everything else annotates with stats and
-    // passes. Purely a cheap filter to skip the ~900s unified_backtest run
-    // where it is provably pointless — never a quality gate. Any infra
-    // trouble (non-zero exit incl. a SIGTERM'd timeout, which resolves with
-    // code===null — hence `code !== 0` rather than `code === 1`, unparseable
-    // stdout) is logged as prescreen_infra_fail and PASSES, mirroring
-    // redteam's fail-open contract above.
-    const psPaperId = vPaperId;
-    let psResult = null;
-    let psInfraFail = false;
-    let psInfraReason = null;
-    try {
-      const { stdout, code } = await _spawnPython(
-        ['-m', 'backtest.factor_prescreen', '--strategy-file', implPath],
-        { cwd: OPENCLAW_DIR, timeoutMs: 120_000, onChild: opts.onChild,
-          env: { ...process.env, PYTHONPATH: 'src' } });
-      if (code !== 0) {
-        psInfraFail = true;
-        psInfraReason = `factor_prescreen.py exit=${code}; stdout: ${stdout.slice(-300)}`;
       } else {
         try {
-          // Tolerate a stray print() from a generated strategy — the JSON
-          // verdict is always the last line factor_prescreen.py emits.
-          const lastLine = stdout.trim().split('\n').pop();
-          const parsed = JSON.parse(lastLine);
-          // Shape-validate: `5`, `{}`, `"ok"`, `null`, `[]` all parse as
-          // valid JSON but are not a real {pass, reason, stats} verdict.
-          // Treat anything that isn't exactly that shape as an infra
-          // failure (same fail-open contract as an unparseable line),
-          // rather than letting it fall through to the clean-pass branch.
-          if (_isPrescreenShape(parsed)) {
-            psResult = parsed;
-          } else {
-            psInfraFail = true;
-            psInfraReason = `factor_prescreen.py stdout parsed but is not a valid prescreen result shape: ${lastLine.slice(0, 300)}`;
-          }
+          await this._codeStrategy(strategy_spec);
+          await this._query(
+            `UPDATE implementation_queue SET status = 'done', coded_at = NOW() WHERE candidate_id = $1`,
+            [candidate_id]
+          );
+          notify?.(`  ✅ ${stratId} implemented — running validation...`);
         } catch (e) {
-          psInfraFail = true;
-          psInfraReason = `factor_prescreen.py unparseable stdout: ${stdout.slice(0, 300)}`;
+          await this._query(
+            `UPDATE implementation_queue SET status = 'failed' WHERE candidate_id = $1`,
+            [candidate_id]
+          );
+          notify?.(`  ⚠️ ${stratId} coding failed: ${e.message}`);
+          return { promoted: false, reasonCode: 'coding_failed', error: e.message };
         }
       }
-    } catch (e) {
-      psInfraFail = true;
-      psInfraReason = `factor_prescreen.py threw: ${e.message}`;
-    }
 
-    if (psInfraFail) {
-      await emitGateDecision({
-        paperId:      psPaperId,
-        candidateId:  candidate_id,
-        strategyId:   stratId,
-        gateName:     'prescreen',
-        outcome:      'pass',
-        reasonCode:   'prescreen_infra_fail',
-        reasonDetail: psInfraReason,
+      // Re-resolve the path after strategycoder ran: the coder writes
+      // `${stratId}.py` (exact case) while a finisher-staged manifest may carry
+      // a LOWERCASED canonical_file — the pre-coding resolution predates the
+      // file's existence, so _resolveImplPath's case-toggle fallback couldn't
+      // fire and validation checked a stale, nonexistent lowercase path
+      // (2026-07-14: 4 staging builds quarantined as contract_violation this
+      // way despite freshly-written working code).
+      if (!skipCoding) implPath = _resolveImplPath(stratId);
+
+      const gate = await this._runGateChain({
+        candidate_id, stratId, implPath, strategy_spec, notify, channelNotify, opts,
       });
-      notify?.(`  ⚠️ ${stratId} factor prescreen infra failure — WARN-and-pass, continuing to backtest.`);
-    } else if (psResult && psResult.pass === false) {
-      await this._query(
-        `UPDATE implementation_queue SET status = 'prescreen_failed', error_log = $1 WHERE candidate_id = $2`,
-        [psResult.reason || 'prescreen_failed', candidate_id]
-      );
-      await emitGateDecision({
-        paperId:     psPaperId,
-        candidateId: candidate_id,
-        strategyId:  stratId,
-        gateName:    'prescreen',
-        outcome:     'reject',
-        reasonCode:  psResult.reason || 'prescreen_failed',
-        metadata:    { stats: psResult.stats },
-      });
-      notify?.(`  ❌ ${stratId} blocked by factor prescreen: ${psResult.reason}`);
-      channelNotify?.(`❌ **${stratId}** blocked by factor prescreen — ${psResult.reason}`);
-      return { promoted: false, reasonCode: 'prescreen_failed', error: psResult.reason };
-    } else {
-      // psResult.reason is non-null (but pass=true) for the two soft-pass
-      // annotations — 'prescreen_skipped_aux_dependent' (Concern-1 fix) and
-      // 'zero_signals_on_fallback_universe' (Concern-2 fix) — and null for
-      // a genuine full pass. Recorded as reasonCode here (not just buried
-      // inside metadata.stats, which is null for the aux-dependent case
-      // anyway) so these annotations stay queryable/visible in
-      // paper_gate_decisions rather than being indistinguishable from a
-      // plain pass.
-      await emitGateDecision({
-        paperId:     psPaperId,
-        candidateId: candidate_id,
-        strategyId:  stratId,
-        gateName:    'prescreen',
-        outcome:     'pass',
-        reasonCode:  psResult?.reason || null,
-        metadata:    { stats: psResult?.stats || null },
-      });
+      if (!gate.ok) return gate.result;
+      btResult = gate.btResult;
+      vPaperId = gate.vPaperId;
     }
-
-    notify?.(`  ✅ ${stratId} factor prescreen passed — running backtest (may take 2–5 min)...`);
-    onPhase('backtest', 60);
-
-    // ── Phase 2: Unified backtest convergence gate ────────────────────────────
-    // 2026-05-14 cutover: unified_backtest is the canonical single source
-    // of truth (discovery methodology, per-regime breakdown, persisted to
-    // strategy_backtest_runs + strategy_backtest_regimes + strategy_backtest_trades).
-    // After the run we invoke eligibility_assigner so the new strategy's
-    // metadata.eligible_regimes is set from data, not the author's class declaration.
-    // Heartbeat emits progress every 5s so the dashboard chip ticks visibly.
-    let btResult;
-    {
-      let hb = 60;
-      const heartbeat = setInterval(() => {
-        hb = Math.min(hb + 2, 85);
-        try { onPhase('backtest', hb); } catch (_) {}
-      }, 5_000);
-      try {
-        // --universe-cap tier_liquid (operator directive 2026-08-10): every NEW
-        // candidate's first backtest is bounded to the largest backtestable
-        // ladder tier. An uncapped 12,548-ticker run OOM-killed the Saturday
-        // finisher on 2026-08-08 (SPY-only strategy, 5.8G unit peak); the cap
-        // is also stamped into manifest metadata at registration below so
-        // every later re-backtest inherits it.
-        const { stdout, stderr, code } = await _spawnPython(
-          ['-m', 'backtest.unified_backtest', '--strategy-file', implPath,
-           '--universe-cap', 'tier_liquid'],
-          { cwd: OPENCLAW_DIR, timeoutMs: 900_000, onChild: opts.onChild,
-            env: { ...process.env, PYTHONPATH: 'src' } });
-        // unified_backtest writes log lines to stdout and the run_id at the end.
-        // It does NOT return JSON; we synthesize a minimal btResult by querying
-        // strategy_backtest_runs for the just-written row.
-        const runIdMatch = stdout.match(/run_id=([0-9a-f-]{36})/);
-        if (code !== 0 || !runIdMatch) {
-          btResult = { error: `unified_backtest exit=${code}; stdout: ${stdout.slice(-400)}; stderr: ${stderr.slice(-400)}` };
-        } else {
-          try {
-            const runRes = await this._query(
-              `SELECT total_sharpe, total_max_dd_pct, total_return_pct, total_trades,
-                      total_hit_rate, avg_holding_days, run_id
-               FROM strategy_backtest_runs WHERE run_id = $1`,
-              [runIdMatch[1]]
-            );
-            const regRes = await this._query(
-              `SELECT regime_state, sharpe, max_dd_pct, return_pct, trade_count, hit_rate
-               FROM strategy_backtest_regimes WHERE run_id = $1`,
-              [runIdMatch[1]]
-            );
-            const r = runRes.rows[0] || {};
-            const regime_breakdown = {};
-            for (const row of regRes.rows) {
-              regime_breakdown[row.regime_state] = {
-                sharpe:           row.sharpe,
-                max_dd:           row.max_dd_pct != null ? row.max_dd_pct / 100 : null,
-                total_return_pct: row.return_pct,
-                trade_count:      row.trade_count,
-                hit_rate:         row.hit_rate,
-              };
-            }
-            btResult = {
-              sharpe:            r.total_sharpe,
-              max_dd:            r.total_max_dd_pct != null ? r.total_max_dd_pct / 100 : null,
-              total_return_pct:  r.total_return_pct,
-              trade_count:       r.total_trades,
-              hit_rate:          r.total_hit_rate,
-              avg_holding_days:  r.avg_holding_days,
-              regime_breakdown,
-              run_id:            r.run_id,
-              method:            'unified_backtest_discovery',
-            };
-          } catch (e) {
-            btResult = { error: `unified_backtest succeeded but DB read failed: ${e.message}` };
-          }
-        }
-      } finally {
-        clearInterval(heartbeat);
-      }
-    }
-
-    // Auto-set eligible_regimes from the run's per-regime metrics. Best-effort;
-    // a failure here doesn't block promotion (the operator can rerun later).
-    if (btResult && !btResult.error && btResult.run_id) {
-      try {
-        await _spawnPython(
-          ['-m', 'backtest.eligibility_assigner', '--strategy-id', stratId],
-          { cwd: OPENCLAW_DIR, timeoutMs: 30_000,
-            env: { ...process.env, PYTHONPATH: 'src' } });
-      } catch (e) {
-        notify?.(`  ⚠️ ${stratId} eligibility_assigner failed (non-fatal): ${e.message?.slice(0, 200)}`);
-      }
-    }
-
-    // The only candidate→paper block is "code couldn't execute at all" —
-    // signalled by auto_backtest.py setting `error` on contract violation,
-    // import error, no strategy class, or missing prices. Metric-based
-    // gating is gone: weak Sharpe / high DD / zero trades all still promote,
-    // and the human judges from the persisted metrics in the dashboard.
-    if (btResult.error) {
-      await this._query(
-        `UPDATE implementation_queue SET status = 'backtest_failed', backtest_result = $1 WHERE candidate_id = $2`,
-        [JSON.stringify(btResult), candidate_id]
-      );
-      const summary = String(btResult.error).slice(0, 300);
-      await emitGateDecision({
-        paperId:      vPaperId,
-        candidateId:  candidate_id,
-        strategyId:   stratId,
-        gateName:     'convergence',
-        outcome:      'reject',
-        reasonCode:   'backtest_error',
-        reasonDetail: summary,
-        metadata:     { error: summary },
-      });
-      notify?.(`  ❌ ${stratId} couldn't execute: ${summary}`);
-      channelNotify?.(`❌ **${stratId}** couldn't execute — ${summary}.`);
-      return { promoted: false, reasonCode: 'backtest_error', error: summary, backtest_result: btResult };
-    }
-    await emitGateDecision({
-      paperId:     vPaperId,
-      candidateId: candidate_id,
-      strategyId:  stratId,
-      gateName:    'convergence',
-      outcome:     'pass',
-      metadata: {
-        sharpe:      btResult.sharpe      ?? null,
-        max_dd:      btResult.max_dd      ?? null,
-        trade_count: btResult.trade_count ?? null,
-      },
-    });
 
     // ── Phase 3: Auto-promote (state-aware) ─────────────────────────────────
     // Under the fused-approval lifecycle (2026-04-27), the canonical promotion
@@ -1183,6 +925,785 @@ class ResearchOrchestrator {
     } catch (_) { /* Redis unavailable — loop will continue normally */ }
 
     return { promoted: true, backtest_result: btResult, reasonCode: 'auto_backtest_promoted' };
+  }
+
+  // ── Task S2: N-variant strategycoder tournament ─────────────────────────────
+
+  /**
+   * Resolve N for this candidate: pipeline_config.tournament_variants, but
+   * ONLY for Tier-A rows (global constraint — N>1 applies ONLY to Tier-A
+   * queue rows). data_tier is written exclusively by the Saturday-brain
+   * family's Phase 5 (data_tier_filter.js, called from saturday_brain.js /
+   * saturday_brain_finisher.js / saturday_brain_recovery.js) — the daily
+   * processQueue() "READY" path and the cron-schedule.js Sunday sweep never
+   * stamp it, so this read is a hard OFF switch for every other caller
+   * regardless of the flag's value. Any error (missing table, bad value,
+   * Postgres down) fails to 1/OFF — never to "tournament", matching the
+   * pure-superset requirement.
+   */
+  async _resolveTournamentN(candidate_id) {
+    try {
+      const { rows: tierRows } = await this._query(
+        `SELECT data_tier FROM research_candidates WHERE candidate_id = $1`,
+        [candidate_id]
+      );
+      if ((tierRows[0] && tierRows[0].data_tier) !== 'A') return 1;
+
+      const { rows } = await this._query(
+        `SELECT value FROM pipeline_config WHERE key = 'tournament_variants'`
+      );
+      const raw = rows[0] ? rows[0].value : null;
+      const n = raw != null ? parseInt(raw, 10) : NaN;
+      if (!Number.isInteger(n) || n < 1) return 1;
+      return Math.min(n, MAX_TOURNAMENT_VARIANTS);
+    } catch (e) {
+      console.error(`[research-orch] tournament_variants lookup failed (defaulting to 1/OFF): ${e.message}`);
+      return 1;
+    }
+  }
+
+  /** Default `_validateFn` — extracted verbatim from the original inline Phase 1. */
+  async _runValidateStrategy(implPath, opts = {}) {
+    const { stdout, code } = await _spawnPython(
+      ['src/strategies/validate_strategy.py', implPath],
+      { cwd: OPENCLAW_DIR, timeoutMs: 60_000, onChild: opts.onChild });
+    try {
+      return JSON.parse(stdout);
+    } catch (_) {
+      return { ok: false, errors: [`validate_strategy.py exit=${code}; stdout: ${stdout.slice(0, 300)}`] };
+    }
+  }
+
+  /** Default `_prescreenFn` — extracted verbatim from the original inline Phase 1.75. */
+  async _runFactorPrescreen(implPath, opts = {}) {
+    let psResult = null, psInfraFail = false, psInfraReason = null;
+    try {
+      const { stdout, code } = await _spawnPython(
+        ['-m', 'backtest.factor_prescreen', '--strategy-file', implPath],
+        { cwd: OPENCLAW_DIR, timeoutMs: 120_000, onChild: opts.onChild,
+          env: { ...process.env, PYTHONPATH: 'src' } });
+      if (code !== 0) {
+        psInfraFail = true;
+        psInfraReason = `factor_prescreen.py exit=${code}; stdout: ${stdout.slice(-300)}`;
+      } else {
+        try {
+          const lastLine = stdout.trim().split('\n').pop();
+          const parsed = JSON.parse(lastLine);
+          if (_isPrescreenShape(parsed)) {
+            psResult = parsed;
+          } else {
+            psInfraFail = true;
+            psInfraReason = `factor_prescreen.py stdout parsed but is not a valid prescreen result shape: ${lastLine.slice(0, 300)}`;
+          }
+        } catch (e) {
+          psInfraFail = true;
+          psInfraReason = `factor_prescreen.py unparseable stdout: ${stdout.slice(0, 300)}`;
+        }
+      }
+    } catch (e) {
+      psInfraFail = true;
+      psInfraReason = `factor_prescreen.py threw: ${e.message}`;
+    }
+    return { psResult, psInfraFail, psInfraReason };
+  }
+
+  /** Default `_backtestFn` — extracted verbatim from the original inline Phase 2. */
+  async _runUnifiedBacktest(implPath, opts = {}) {
+    const onPhase = typeof opts.onPhase === 'function' ? opts.onPhase : () => {};
+    let hb = 60;
+    const heartbeat = setInterval(() => {
+      hb = Math.min(hb + 2, 85);
+      try { onPhase('backtest', hb); } catch (_) {}
+    }, 5_000);
+    try {
+      const { stdout, stderr, code } = await _spawnPython(
+        ['-m', 'backtest.unified_backtest', '--strategy-file', implPath,
+         '--universe-cap', 'tier_liquid'],
+        { cwd: OPENCLAW_DIR, timeoutMs: 900_000, onChild: opts.onChild,
+          env: { ...process.env, PYTHONPATH: 'src' } });
+      const runIdMatch = stdout.match(/run_id=([0-9a-f-]{36})/);
+      if (code !== 0 || !runIdMatch) {
+        return { error: `unified_backtest exit=${code}; stdout: ${stdout.slice(-400)}; stderr: ${stderr.slice(-400)}` };
+      }
+      try {
+        const runRes = await this._query(
+          `SELECT total_sharpe, total_max_dd_pct, total_return_pct, total_trades,
+                  total_hit_rate, avg_holding_days, run_id
+           FROM strategy_backtest_runs WHERE run_id = $1`,
+          [runIdMatch[1]]
+        );
+        const regRes = await this._query(
+          `SELECT regime_state, sharpe, max_dd_pct, return_pct, trade_count, hit_rate
+           FROM strategy_backtest_regimes WHERE run_id = $1`,
+          [runIdMatch[1]]
+        );
+        const r = runRes.rows[0] || {};
+        const regime_breakdown = {};
+        for (const row of regRes.rows) {
+          regime_breakdown[row.regime_state] = {
+            sharpe:           row.sharpe,
+            max_dd:           row.max_dd_pct != null ? row.max_dd_pct / 100 : null,
+            total_return_pct: row.return_pct,
+            trade_count:      row.trade_count,
+            hit_rate:         row.hit_rate,
+          };
+        }
+        return {
+          sharpe:            r.total_sharpe,
+          max_dd:            r.total_max_dd_pct != null ? r.total_max_dd_pct / 100 : null,
+          total_return_pct:  r.total_return_pct,
+          trade_count:       r.total_trades,
+          hit_rate:          r.total_hit_rate,
+          avg_holding_days:  r.avg_holding_days,
+          regime_breakdown,
+          run_id:            r.run_id,
+          method:            'unified_backtest_discovery',
+        };
+      } catch (e) {
+        return { error: `unified_backtest succeeded but DB read failed: ${e.message}` };
+      }
+    } finally {
+      clearInterval(heartbeat);
+    }
+  }
+
+  /** Auto-set eligible_regimes — extracted verbatim (was inline, gated on !btResult.error && run_id). */
+  async _assignEligibility(stratId, notify) {
+    try {
+      await _spawnPython(
+        ['-m', 'backtest.eligibility_assigner', '--strategy-id', stratId],
+        { cwd: OPENCLAW_DIR, timeoutMs: 30_000,
+          env: { ...process.env, PYTHONPATH: 'src' } });
+    } catch (e) {
+      notify?.(`  ⚠️ ${stratId} eligibility_assigner failed (non-fatal): ${e.message?.slice(0, 200)}`);
+    }
+  }
+
+  /**
+   * Post-review correction (registry.py mutation removed — see
+   * task-S2-report.md "Fix section"): every variant is coded under the SAME
+   * canonical strategy_id (see buildCoderContext / _codeVariant — only the
+   * FILE gets a _tv<k> suffix, post-hoc, after the coder writes it), so each
+   * of the N strategycoder invocations rewrites the same
+   * `_IMPL_MAP[stratId]` entry in registry.py per the strategy-coder
+   * prompt's Artifact 2. Whichever variant was coded LAST leaves its
+   * ClassName behind, which may not be the winner's if the winner wasn't the
+   * last one coded.
+   *
+   * `registry.py` is imported live by the trading engine and backtest
+   * workers in OTHER processes. An in-process read-modify-`writeFileSync` on
+   * it (the original version of this method) is neither atomic nor
+   * lock-guarded — `writeFileSync` truncates-then-writes, so a concurrent
+   * `import strategies.registry` in another process can observe a
+   * half-written file and fail EVERY strategy load, not just this one.
+   * `manifest_lock.js` exists specifically to prevent this class of bug for
+   * `manifest.json`; nothing equivalent covers `registry.py`, and it isn't
+   * this task's place to invent one.
+   *
+   * Instead: verify, don't mutate. `load_strategy_class()` in registry.py
+   * already fails soft on both a missing entry (`_discover_impl` fallback —
+   * import the module, use its one BaseStrategy subclass) AND a present-
+   * but-wrong entry (`getattr()` raises, caught, logged, returns None) — and
+   * `get_approved_strategies()` just skips a None. So a stale entry is a
+   * "logged and skipped" condition today, not a crash — the earlier framing
+   * of this as urgent-to-fix-in-process overstated the risk. What's left to
+   * do safely is make the outcome VISIBLE: spawn the real Python loader
+   * read-only and report whether the winner resolves under its canonical id,
+   * logging loudly (and recording in the winner's decision metadata) when it
+   * doesn't, so an operator can run the batch reconciler
+   * (`scripts/reconcile_strategy_registry.py`) rather than the tournament
+   * silently shipping an unloadable "winner".
+   */
+  async _verifyWinnerLoadable(stratId, notify) {
+    const py = [
+      `import sys; sys.path.insert(0, 'src')`,
+      `from strategies.registry import load_strategy_class`,
+      `cls = load_strategy_class(${JSON.stringify(stratId)})`,
+      `print('TOURNAMENT_LOAD_OK' if cls is not None else 'TOURNAMENT_LOAD_FAIL')`,
+    ].join('\n');
+    try {
+      const r = await _spawnPython(['-c', py], { cwd: OPENCLAW_DIR, timeoutMs: 30_000 });
+      const out = (r.stdout || '').trim();
+      if (r.code === 0 && out.includes('TOURNAMENT_LOAD_OK')) {
+        return { loadable: true };
+      }
+      if (r.code === 0 && out.includes('TOURNAMENT_LOAD_FAIL')) {
+        const msg = `[tournament] winner ${stratId} NOT loadable under canonical id — ` +
+                    `run scripts/reconcile_strategy_registry.py`;
+        console.error(msg);
+        notify?.(`  ⚠️ ${msg}`);
+        return { loadable: false };
+      }
+      // Inconclusive (unexpected exit/output — e.g. an unrelated import
+      // error in registry.py itself). This is NOT a "not loadable" verdict
+      // for THIS strategy, so don't claim one; warn and move on.
+      notify?.(`  ⚠️ [tournament] winner-loadable check for ${stratId} inconclusive ` +
+               `(exit=${r.code}, stdout=${out.slice(0, 200)}, stderr=${(r.stderr || '').slice(0, 200)}) ` +
+               `— treating as unverified, not blocking.`);
+      return { loadable: null };
+    } catch (e) {
+      notify?.(`  ⚠️ [tournament] winner-loadable check for ${stratId} threw (non-fatal): ${e.message}`);
+      return { loadable: null };
+    }
+  }
+
+  /**
+   * Zero-survivors-only cleanup: remove a manifest.json `state: 'candidate'`
+   * entry a variant's coder call left behind for `stratId`, if one exists.
+   * See the call site in _runTournament for why this is needed (the coder
+   * always writes Artifact 3 — a manifest block — for the canonical
+   * strategy_id regardless of whether that variant later fails a gate; with
+   * zero survivors we've just deleted every variant .py file, which would
+   * otherwise leave that entry pointing at a file that no longer exists).
+   * Uses the same lock-guarded manifest_lock.js primitive candidate_reaper.js
+   * uses for its own entry removal. Fail-open / best-effort — never throws,
+   * never blocks the tournament's terminal-status write.
+   */
+  async _purgeOrphanedManifestEntry(stratId, notify) {
+    try {
+      const { withManifestLock } = require('../../lib/manifest_lock');
+      let removed = false;
+      await withManifestLock(MANIFEST_PATH, (m) => {
+        const rec = m.strategies && m.strategies[stratId];
+        if (rec && rec.state === 'candidate') {
+          delete m.strategies[stratId];
+          removed = true;
+        }
+        return m;
+      }, { actor: 'system:tournament' });
+      if (removed) {
+        notify?.(`  [tournament] removed orphaned manifest.strategies['${stratId}'] entry ` +
+                 `(0 surviving variants — a coder call had already written it as a candidate placeholder)`);
+      }
+    } catch (e) {
+      notify?.(`  ⚠️ [tournament] manifest cleanup for ${stratId} failed (non-fatal): ${e.message}`);
+    }
+  }
+
+  /**
+   * Validate → redteam → prescreen → backtest, against one implementation
+   * file. Extracted from _codeFromQueue (Task S2) so a tournament variant and
+   * the single-shot path share IDENTICAL gate logic — only the file under
+   * test, the notify/channelNotify wiring, and two flags differ:
+   *   suppressQueueWrite — tournament variants share ONE implementation_queue
+   *     row across N attempts; writing an intermediate failure status for
+   *     variant k would clobber a later (or earlier, already-better) variant's
+   *     standing and could leave a misleading terminal status if variant k
+   *     turns out not to matter. The single-shot path (default false) is
+   *     unaffected — it always owns the row outright.
+   *   runEligibility — the single-shot path runs eligibility_assigner
+   *     in-place (default true), exactly where it always has. The tournament
+   *     path runs it once, after winner selection + DB re-attribution,
+   *     against the canonical strategy_id (see _runTournament) — never per
+   *     variant, which would target a soon-to-be-renamed-away file.
+   *
+   * Returns { ok: true, btResult, vPaperId } on a clean backtest execution —
+   * "clean" meaning no execution error, NOT "good enough to win"; that
+   * judgement is the single-shot Phase 3 promotion path (unconditional) or
+   * the tournament's min-trades floor (_runTournament), exactly as before.
+   * On any gate rejection, returns { ok: false, result } where `result` is
+   * the EXACT object _codeFromQueue used to `return` directly pre-Task-S2 —
+   * callers should propagate it verbatim.
+   */
+  async _runGateChain({ candidate_id, stratId, implPath, strategy_spec, notify, channelNotify, opts,
+                        suppressQueueWrite = false, runEligibility = true }) {
+    const onPhase = typeof opts.onPhase === 'function' ? opts.onPhase : () => {};
+
+    // ── Phase 1: Contract validation ─────────────────────────────────────────
+    onPhase('validate', 40);
+    const validResult = await this._validateFn(implPath, opts);
+
+    const vPaperId = await paperIdForCandidate(candidate_id);
+    if (!validResult.ok) {
+      const errLog = (validResult.errors || []).join('\n');
+      if (!suppressQueueWrite) {
+        await this._query(
+          `UPDATE implementation_queue SET status = 'validation_failed', error_log = $1 WHERE candidate_id = $2`,
+          [errLog, candidate_id]
+        );
+      }
+      await this._emitDecisionFn({
+        paperId:      vPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'validate',
+        outcome:      'reject',
+        reasonCode:   'contract_violation',
+        reasonDetail: errLog,
+        metadata:     { errors: validResult.errors || [] },
+      });
+      notify?.(`  ❌ ${stratId} validation failed: ${errLog.slice(0, 200)}`);
+      channelNotify?.(`❌ **${stratId}** failed contract validation — see implementation_queue for errors.`);
+      return { ok: false, result: { promoted: false, reasonCode: 'contract_violation', error: errLog } };
+    }
+    await this._emitDecisionFn({
+      paperId:     vPaperId,
+      candidateId: candidate_id,
+      strategyId:  stratId,
+      gateName:    'validate',
+      outcome:     'pass',
+      metadata:    { signal_count: validResult.signal_count ?? null },
+    });
+    notify?.(`  ✅ ${stratId} validation passed — running red-team review...`);
+    onPhase('redteam', 50);
+
+    // ── Phase 1.5: Mandatory LLM red-team gate (Task S1) ──────────────────────
+    let rtResult;
+    try {
+      rtResult = await this._redteamFn({
+        implPath,
+        paperContext: strategy_spec?.hypothesis_one_liner || strategy_spec?.signal_logic || null,
+      });
+    } catch (e) {
+      console.error(`[redteam] unexpected exception auditing ${stratId}: ${e.message}`);
+      rtResult = { verdict: 'pass', findings: [], infra_fail: true };
+    }
+
+    if (rtResult.infra_fail) {
+      await this._emitDecisionFn({
+        paperId:     vPaperId,
+        candidateId: candidate_id,
+        strategyId:  stratId,
+        gateName:    'redteam',
+        outcome:     'pass',
+        reasonCode:  'redteam_infra_fail',
+        metadata:    { findings: rtResult.findings },
+      });
+      notify?.(`  ⚠️ ${stratId} red-team reviewer infra failure — WARN-and-pass, continuing to backtest.`);
+    } else if (rtResult.verdict === 'block') {
+      const criticalFindings = rtResult.findings.filter((f) => f.severity === 'critical');
+      const reason = criticalFindings[0]?.concern || 'red-team gate blocked (no concern text)';
+      if (!suppressQueueWrite) {
+        await this._query(
+          `UPDATE implementation_queue SET status = 'redteam_blocked', error_log = $1 WHERE candidate_id = $2`,
+          [reason, candidate_id]
+        );
+      }
+      await this._emitDecisionFn({
+        paperId:      vPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'redteam',
+        outcome:      'reject',
+        reasonCode:   'redteam_blocked',
+        reasonDetail: reason,
+        metadata:     { findings: rtResult.findings },
+      });
+      notify?.(`  ❌ ${stratId} blocked by red-team gate: ${reason.slice(0, 200)}`);
+      channelNotify?.(`❌ **${stratId}** blocked by red-team review — ${reason.slice(0, 200)}`);
+      return { ok: false, result: { promoted: false, reasonCode: 'redteam_blocked', error: reason } };
+    } else {
+      await this._emitDecisionFn({
+        paperId:     vPaperId,
+        candidateId: candidate_id,
+        strategyId:  stratId,
+        gateName:    'redteam',
+        outcome:     'pass',
+        metadata:    { findings: rtResult.findings },
+      });
+    }
+
+    notify?.(`  ✅ ${stratId} red-team review passed — running factor prescreen...`);
+    onPhase('prescreen', 55);
+
+    // ── Phase 1.75: Cheap pre-backtest factor screen (Task R2) ────────────────
+    const { psResult, psInfraFail, psInfraReason } = await this._prescreenFn(implPath, opts);
+
+    if (psInfraFail) {
+      await this._emitDecisionFn({
+        paperId:      vPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'prescreen',
+        outcome:      'pass',
+        reasonCode:   'prescreen_infra_fail',
+        reasonDetail: psInfraReason,
+      });
+      notify?.(`  ⚠️ ${stratId} factor prescreen infra failure — WARN-and-pass, continuing to backtest.`);
+    } else if (psResult && psResult.pass === false) {
+      if (!suppressQueueWrite) {
+        await this._query(
+          `UPDATE implementation_queue SET status = 'prescreen_failed', error_log = $1 WHERE candidate_id = $2`,
+          [psResult.reason || 'prescreen_failed', candidate_id]
+        );
+      }
+      await this._emitDecisionFn({
+        paperId:     vPaperId,
+        candidateId: candidate_id,
+        strategyId:  stratId,
+        gateName:    'prescreen',
+        outcome:     'reject',
+        reasonCode:  psResult.reason || 'prescreen_failed',
+        metadata:    { stats: psResult.stats },
+      });
+      notify?.(`  ❌ ${stratId} blocked by factor prescreen: ${psResult.reason}`);
+      channelNotify?.(`❌ **${stratId}** blocked by factor prescreen — ${psResult.reason}`);
+      return { ok: false, result: { promoted: false, reasonCode: 'prescreen_failed', error: psResult.reason } };
+    } else {
+      await this._emitDecisionFn({
+        paperId:     vPaperId,
+        candidateId: candidate_id,
+        strategyId:  stratId,
+        gateName:    'prescreen',
+        outcome:     'pass',
+        reasonCode:  psResult?.reason || null,
+        metadata:    { stats: psResult?.stats || null },
+      });
+    }
+
+    notify?.(`  ✅ ${stratId} factor prescreen passed — running backtest (may take 2–5 min)...`);
+    onPhase('backtest', 60);
+
+    // ── Phase 2: Unified backtest convergence gate ────────────────────────────
+    const btResult = await this._backtestFn(implPath, opts);
+
+    // Auto-set eligible_regimes from the run's per-regime metrics. Best-effort;
+    // a failure here doesn't block promotion (the operator can rerun later).
+    // Single-shot only (runEligibility default true) — the tournament path
+    // runs this once, post-selection, against the canonical strategy_id.
+    if (runEligibility && btResult && !btResult.error && btResult.run_id) {
+      await this._assignEligibility(stratId, notify);
+    }
+
+    // The only candidate→paper block is "code couldn't execute at all" —
+    // signalled by auto_backtest.py setting `error` on contract violation,
+    // import error, no strategy class, or missing prices. Metric-based
+    // gating is gone: weak Sharpe / high DD / zero trades all still promote,
+    // and the human judges from the persisted metrics in the dashboard.
+    if (btResult.error) {
+      if (!suppressQueueWrite) {
+        await this._query(
+          `UPDATE implementation_queue SET status = 'backtest_failed', backtest_result = $1 WHERE candidate_id = $2`,
+          [JSON.stringify(btResult), candidate_id]
+        );
+      }
+      const summary = String(btResult.error).slice(0, 300);
+      await this._emitDecisionFn({
+        paperId:      vPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'convergence',
+        outcome:      'reject',
+        reasonCode:   'backtest_error',
+        reasonDetail: summary,
+        metadata:     { error: summary },
+      });
+      notify?.(`  ❌ ${stratId} couldn't execute: ${summary}`);
+      channelNotify?.(`❌ **${stratId}** couldn't execute — ${summary}.`);
+      return { ok: false, result: { promoted: false, reasonCode: 'backtest_error', error: summary, backtest_result: btResult } };
+    }
+    await this._emitDecisionFn({
+      paperId:     vPaperId,
+      candidateId: candidate_id,
+      strategyId:  stratId,
+      gateName:    'convergence',
+      outcome:     'pass',
+      metadata: {
+        sharpe:      btResult.sharpe      ?? null,
+        max_dd:      btResult.max_dd      ?? null,
+        trade_count: btResult.trade_count ?? null,
+      },
+    });
+
+    return { ok: true, btResult, vPaperId };
+  }
+
+  /**
+   * Code ONE tournament variant. Same canonical strategy_id goes to
+   * strategycoder every time (see buildCoderContext's variantDirective param)
+   * — only the interpretation-variant directive differs — so _codeStrategy's
+   * existing _registerStrategy() idempotency (ON CONFLICT (id) DO NOTHING)
+   * naturally collapses N coding calls into the same single strategy_registry
+   * row single-shot would have produced, with no separate per-variant
+   * registration path to maintain.
+   *
+   * The FILE gets the _tv<k> suffix post-hoc, once strategycoder returns:
+   * this keeps the .py's internal `id = '...'` attribute and registry.py's
+   * `_IMPL_MAP` entry canonical throughout (registry.py never sees a variant
+   * id at all), and it means every variant's coder call sees a clean
+   * canonical-path slate (skip-if-exists is checked against the VARIANT path,
+   * per the brief — a prior partial/interrupted tournament run resumes
+   * without re-coding a variant that already exists).
+   *
+   * `canonicalPath` is passed in by _runTournament (resolved ONCE, before
+   * variant 1 runs) rather than re-resolved here per variant. Every variant
+   * writes the strategy-coder skill's Artifact 3 (a manifest.json block) for
+   * the SAME canonical strategy_id, and the coder prompt itself documents a
+   * historical failure mode where `canonical_file` drifts case relative to
+   * the actual filename on disk. _resolveImplPath(stratId) reads that
+   * manifest field, so re-resolving mid-loop could hand a LATER variant a
+   * different canonicalPath than variant 1 (and than the final winner
+   * rename uses) — passing one fixed value down closes that drift class
+   * entirely, at zero cost.
+   */
+  async _codeVariant(strategy_spec, stratId, canonicalPath, k, N, notify, opts) {
+    const variantPath = _variantPath(canonicalPath, k);
+    if (fs.existsSync(variantPath)) {
+      notify?.('existing file — skipping strategycoder');
+      return { implPath: variantPath };
+    }
+    notify?.(`coding ${stratId}...`);
+    const directive =
+      `Interpretation variant ${k} of ${N}: where the paper is ambiguous (parameter values, ` +
+      `indicator construction, entry/exit details), deliberately choose a DIFFERENT defensible ` +
+      `interpretation than a colleague would; do not change what the paper is unambiguous about.`;
+    try {
+      await this._codeStrategy(strategy_spec, directive);
+    } catch (e) {
+      notify?.(`coding failed: ${e.message}`);
+      return { error: e.message, reasonCode: 'coding_failed' };
+    }
+    if (!fs.existsSync(canonicalPath)) {
+      const msg = `strategycoder produced no output file at ${canonicalPath}`;
+      notify?.(msg);
+      return { error: msg, reasonCode: 'coding_failed' };
+    }
+    fs.renameSync(canonicalPath, variantPath);
+    notify?.('coded — running gate chain...');
+    return { implPath: variantPath };
+  }
+
+  /**
+   * Run the N-variant tournament for one Tier-A queue row. See the module
+   * header comment block (top of _codeFromQueue) for the pure-superset guard
+   * that decides whether this ever gets called.
+   *
+   * Global constraint (fingerprint dedup): _isDuplicateCandidate() already
+   * runs ONCE per paper, in the CALLERS (saturday_brain_finisher.js /
+   * saturday_brain_recovery.js), before _codeFromQueue is ever invoked — so
+   * "before the fan-out" is satisfied by the existing call order; nothing
+   * here re-runs or needs to re-run it.
+   */
+  async _runTournament({ candidate_id, strategy_spec, stratId, N, notify, channelNotify, opts }) {
+    const canonicalPath   = _resolveImplPath(stratId);
+    const instrumentClass = _validateInferredClass(strategy_spec?.inferred_instrument_class ?? null);
+    const minTrades       = getPromotionThreshold(instrumentClass).min_trades;
+    // Computed once — paperIdForCandidate() depends only on candidate_id, so
+    // every tournament-level decision (winner AND every loser, whichever
+    // stage each variant died at) can share this single value instead of
+    // each variant's own (sometimes-absent, e.g. for a gate-failed variant)
+    // vPaperId.
+    const tournamentPaperId = await paperIdForCandidate(candidate_id);
+    notify?.(`  🏁 ${stratId}: tournament of ${N} variants (instrument_class=${instrumentClass}, min_trades floor=${minTrades})`);
+
+    const attempts = [];  // { k, implPath, ok, btResult, reasonCode, error, vPaperId }
+    for (let k = 1; k <= N; k++) {
+      const vNotify = (msg) => notify?.(`  [tv${k}/${N}] ${msg}`);
+      const coded = await this._codeVariant(strategy_spec, stratId, canonicalPath, k, N, vNotify, opts);
+      if (!coded.implPath) {
+        attempts.push({ k, ok: false, reasonCode: coded.reasonCode, error: coded.error });
+        continue;
+      }
+      // Tournament losers are NEVER written to the ejected-signatures archive
+      // and never tombstoned — candidate_reaper.js only ever ejects a
+      // manifest entry that survived 21 days in state==='candidate', and a
+      // loser's manifest.json block (each coder call writes one for the
+      // shared canonical strategy_id, per the strategy-coder prompt) is
+      // superseded the moment Phase 3 registers/transitions the WINNER under
+      // that same id, or purged outright by _purgeOrphanedManifestEntry if
+      // zero variants survive — recorded instead as tournament_loser gate
+      // decisions below and their files deleted.
+      const gate = await this._runGateChain({
+        candidate_id, stratId, implPath: coded.implPath, strategy_spec,
+        notify: vNotify, channelNotify: null, opts,
+        suppressQueueWrite: true, runEligibility: false,
+      });
+      if (!gate.ok) {
+        attempts.push({ k, ok: false, implPath: coded.implPath,
+                         reasonCode: gate.result.reasonCode, error: gate.result.error });
+        continue;
+      }
+      attempts.push({ k, ok: true, implPath: coded.implPath, btResult: gate.btResult, vPaperId: gate.vPaperId });
+    }
+
+    // Winner: highest primary-run Sharpe among variants whose backtest met
+    // the existing minimum-trades floor (promotion_service.js's per-class
+    // min_trades — the same field the CANDIDATE→LIVE promotion gate reads).
+    const survivors = attempts.filter(a => a.ok
+      && Number.isFinite(a.btResult?.sharpe)
+      && Number.isFinite(a.btResult?.trade_count)
+      && a.btResult.trade_count >= minTrades);
+
+    if (survivors.length === 0) {
+      for (const a of attempts) {
+        if (a.implPath) { try { fs.unlinkSync(a.implPath); } catch (_) {} }
+      }
+      // Every variant coder call writes the strategy-coder skill's Artifact 3
+      // (a manifest.json block, state:'candidate') for the same canonical
+      // strategy_id it always uses — see _codeVariant's doc comment. With
+      // zero survivors, no lifecycle.py promotion ever runs for this id, so
+      // unlike single-shot's failure paths (which never delete the .py file,
+      // keeping manifest+file consistent even on a validation_failed), this
+      // branch would otherwise leave a manifest entry claiming
+      // canonical_file='{stratId}.py' pointing at a file we just deleted.
+      // Purge it — the guard at the top of _codeFromQueue (!fs.existsSync at
+      // entry) guarantees no PRE-EXISTING real strategy could be at this id,
+      // so any 'candidate'-state entry found here is this tournament's own
+      // leftover, never a live/staging strategy.
+      await this._purgeOrphanedManifestEntry(stratId, notify);
+      const backtested = attempts.filter(a => a.ok);
+      // MINOR fix (review): every loser — whether it died at a gate or
+      // backtested cleanly but missed the floor — gets the SAME
+      // reasonCode='tournament_loser', with the actual failure reason moved
+      // into metadata. This makes `WHERE reason_code = 'tournament_loser'`
+      // return every losing variant uniformly, rather than a mix of
+      // 'tournament_loser' and raw gate reasonCodes.
+      for (const a of attempts) {
+        await this._emitDecisionFn({
+          paperId:      tournamentPaperId,
+          candidateId:  candidate_id,
+          strategyId:   stratId,
+          gateName:     'tournament',
+          outcome:      'reject',
+          reasonCode:   'tournament_loser',
+          reasonDetail: a.ok
+            ? `trade_count ${a.btResult.trade_count} < min_trades floor ${minTrades}`
+            : a.error,
+          metadata: {
+            variant: a.k,
+            sharpe: a.btResult?.sharpe ?? null,
+            trade_count: a.btResult?.trade_count ?? null,
+            gate_failure_reason: a.ok ? null : (a.reasonCode || null),
+          },
+        });
+      }
+
+      let terminalStatus, reasonCode, errorMsg;
+      if (backtested.length === 0) {
+        // Every variant died at a gate before backtest ever ran — reuse
+        // variant 1's OWN real single-shot-shaped failure (the exact status
+        // string the N==1 path would have written for that same gate), per
+        // "the queue row fails with the same status the single-shot failure
+        // path uses today."
+        const first = attempts[0];
+        reasonCode = first.reasonCode;
+        terminalStatus = QUEUE_STATUS_FOR_REASON[reasonCode] || 'failed';
+        errorMsg = first.error || 'tournament: variant 1 failed with no error detail';
+      } else {
+        // At least one variant backtested with no execution error, but NONE
+        // cleared the min-trades floor. There is no single-shot precedent
+        // for this case — single-shot never gates on trade count (see the
+        // "Metric-based gating is gone" comment above Phase 3) — so this is
+        // a NEW terminal reasonCode, documented in task-S2-report.md.
+        reasonCode = 'tournament_no_survivors';
+        terminalStatus = 'backtest_failed';
+        errorMsg = `0/${N} variants cleared the min_trades floor (${minTrades}): ` +
+          attempts.map(a => a.ok
+            ? `tv${a.k}(sharpe=${a.btResult.sharpe?.toFixed?.(2)},trades=${a.btResult.trade_count})`
+            : `tv${a.k}(${a.reasonCode})`).join(', ');
+      }
+      await this._query(
+        `UPDATE implementation_queue SET status = $1, error_log = $2 WHERE candidate_id = $3`,
+        [terminalStatus, errorMsg, candidate_id]
+      );
+      notify?.(`  ❌ tournament: 0/${N} variants survived (${reasonCode})`);
+      channelNotify?.(`❌ **${stratId}** tournament — 0/${N} variants survived (${reasonCode}).`);
+      return { ok: false, result: { promoted: false, reasonCode, error: errorMsg } };
+    }
+
+    // Ties → higher trade count.
+    survivors.sort((a, b) => {
+      const ds = b.btResult.sharpe - a.btResult.sharpe;
+      return Math.abs(ds) > 1e-9 ? ds : (b.btResult.trade_count - a.btResult.trade_count);
+    });
+    const winner = survivors[0];
+    const losers = attempts.filter(a => a !== winner);
+
+    // Winner finalization: rename to the canonical (un-suffixed) path.
+    fs.renameSync(winner.implPath, canonicalPath);
+
+    // Re-attribute the winner's backtest run to the canonical strategy_id so
+    // the promotion path's read (promotion_service.js:127-129 — "strategy_id
+    // = $1 AND primary_window = TRUE ORDER BY run_at DESC LIMIT 1", and
+    // eligibility_assigner.compute_eligible, same predicate) finds it.
+    // unified_backtest.py keys the row by Path(--strategy-file).stem, which
+    // was the suffixed variant filename at run time. Chosen over re-running
+    // the backtest: strategy_id is plain TEXT with only non-unique indexes on
+    // strategy_backtest_runs AND strategy_backtest_trades (no PK/unique
+    // constraint risk — strategy_backtest_regimes has no strategy_id column
+    // at all), the backtest is deterministic (PYTHONHASHSEED=0 — content is
+    // unchanged by a rename), and a re-run would burn a second ~900s run for
+    // numbers we already have.
+    if (winner.btResult?.run_id) {
+      try {
+        const dupe = await this._query(
+          `SELECT COUNT(*)::int AS n FROM strategy_backtest_runs
+            WHERE strategy_id = $1 AND primary_window = TRUE AND run_id <> $2`,
+          [stratId, winner.btResult.run_id]
+        );
+        if ((dupe.rows[0] && dupe.rows[0].n) > 0) {
+          notify?.(`  ⚠️ tournament: ${stratId} already had ${dupe.rows[0].n} primary_window run(s) ` +
+                   `before re-attribution — promotion path reads latest by run_at; verify manually.`);
+        }
+      } catch (_) { /* advisory only, never blocks finalization */ }
+      await this._query(`UPDATE strategy_backtest_runs SET strategy_id = $1 WHERE run_id = $2`,
+        [stratId, winner.btResult.run_id]);
+      await this._query(`UPDATE strategy_backtest_trades SET strategy_id = $1 WHERE run_id = $2`,
+        [stratId, winner.btResult.run_id]);
+    }
+
+    // Verify (never mutate) that the winner resolves under its canonical id
+    // through the REAL Python loader — see _verifyWinnerLoadable's doc for
+    // why an in-process registry.py rewrite was removed after review. Result
+    // is surfaced loudly on failure and recorded in the winner decision's
+    // metadata below; it never blocks promotion either way.
+    const loadCheck = await this._verifyWinnerLoadable(stratId, notify);
+
+    // Single eligibility_assigner run for this queue row, now that the run
+    // row is attributed to the canonical id.
+    if (winner.btResult && !winner.btResult.error && winner.btResult.run_id) {
+      await this._assignEligibility(stratId, notify);
+    }
+
+    // Losers: delete files. Never archived to strategy_signatures_ejected.json,
+    // never tombstoned — recorded only as tournament_loser gate decisions.
+    for (const l of losers) {
+      if (l.implPath) { try { fs.unlinkSync(l.implPath); } catch (_) {} }
+    }
+
+    await this._emitDecisionFn({
+      paperId:     tournamentPaperId,
+      candidateId: candidate_id,
+      strategyId:  stratId,
+      gateName:    'tournament',
+      outcome:     'pass',
+      reasonCode:  'tournament_winner',
+      metadata: {
+        winner_variant: winner.k,
+        winner_loadable: loadCheck.loadable,  // true | false | null (unverified)
+        variants: attempts.map(a => ({
+          k: a.k, ok: a.ok,
+          sharpe: a.btResult?.sharpe ?? null,
+          trade_count: a.btResult?.trade_count ?? null,
+          reasonCode: a.ok ? null : a.reasonCode,
+        })),
+      },
+    });
+    // MINOR fix (review): uniform reasonCode='tournament_loser' for every
+    // loser (gate-failed or floor-missed alike) — see the same fix in the
+    // zero-survivors branch above.
+    for (const l of losers) {
+      await this._emitDecisionFn({
+        paperId:      tournamentPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'tournament',
+        outcome:      'reject',
+        reasonCode:   'tournament_loser',
+        reasonDetail: l.ok ? null : l.error,
+        metadata: {
+          variant: l.k,
+          sharpe: l.btResult?.sharpe ?? null,
+          trade_count: l.btResult?.trade_count ?? null,
+          gate_failure_reason: l.ok ? null : (l.reasonCode || null),
+        },
+      });
+    }
+
+    notify?.(`  🏆 tournament: variant ${winner.k}/${N} wins (Sharpe ${winner.btResult.sharpe?.toFixed(2)}, ${winner.btResult.trade_count} trades) over ${losers.length} other(s)`);
+    channelNotify?.(`🏆 **${stratId}** tournament (${N} variants) — variant ${winner.k} wins, Sharpe ${winner.btResult.sharpe?.toFixed(2)}.`);
+
+    return { ok: true, btResult: winner.btResult, vPaperId: winner.vPaperId };
   }
 
   // ── DataWiringAgent ─────────────────────────────────────────────────────────
@@ -1368,13 +1889,16 @@ class ResearchOrchestrator {
     return results;
   }
 
-  async _codeStrategy(strategySpec) {
+  async _codeStrategy(strategySpec, variantDirective = null) {
     // ctx construction (validation + SP-4 option-envelope guard + porting hook)
     // extracted to the pure, unit-tested buildCoderContext. The guard still
     // throws synchronously on an unsupported option underlying, which rejects
     // this async method's promise exactly as the inline throw did → propagates
     // to _codeFromQueue's catch.
-    const ctx = buildCoderContext(strategySpec);
+    // variantDirective (Task S2): null on every call except a tournament
+    // variant's — see _codeVariant. Threaded straight through to
+    // buildCoderContext, which no-ops when it's null.
+    const ctx = buildCoderContext(strategySpec, variantDirective);
     const result = await this._runSubagent('strategycoder', strategySpec.strategy_id || 'strategy', ctx);
     await this._registerStrategy(strategySpec).catch((e) =>
       console.error('[research-orch] strategy_registry insert failed:', e.message)
@@ -1620,3 +2144,5 @@ module.exports._validateInferredClass = _validateInferredClass;
 module.exports._optionUnderlyingSupported = _optionUnderlyingSupported;
 module.exports._isPrescreenShape = _isPrescreenShape;
 module.exports.buildCoderContext = buildCoderContext;
+module.exports._variantPath = _variantPath;
+module.exports.QUEUE_STATUS_FOR_REASON = QUEUE_STATUS_FOR_REASON;
