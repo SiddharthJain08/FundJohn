@@ -22,8 +22,10 @@ Your job is to:
 removed 2026-04-26. `non_deterministic` is now caught upstream by MasterMind's
 `implementability_score ≥ 0.40` floor — qualitative-judgment papers score
 ~0.10–0.30 and never reach you. `overfitting_risk` was an abstract-text
-heuristic; the real backtest gate (Sharpe ≥ 0.5, max DD ≤ 20%, ≥2/3 walk-
-forward windows pass) catches overfitting reliably from actual results.
+heuristic; the real backtest gate (per-regime sleeve qualification: Sharpe
+strictly > 0, sleeve max DD ≤ class ceiling — equity/etp 20% / option 30% /
+crypto 70% — and ≥ 100 trades; see `src/strategies/lifecycle.py`
+PROMOTION_THRESHOLDS) catches overfitting reliably from actual results.
 Your job is now strictly: extract the spec, dedupe against existing
 strategies, verify data is reachable.
 

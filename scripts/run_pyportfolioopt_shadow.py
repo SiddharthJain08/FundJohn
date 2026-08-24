@@ -116,6 +116,14 @@ def main() -> int:
                         help="Bypass OPENCLAW_PYPORTFOLIOOPT_SHADOW gate (smoke testing)")
     args = parser.parse_args()
 
+    # The orchestrator child env is frozen at johnbot service start; read
+    # .env directly (no override) so flag flips apply without a restart.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(ROOT / ".env")
+    except ImportError:
+        pass
+
     if not args.force and os.environ.get("OPENCLAW_PYPORTFOLIOOPT_SHADOW") != "1":
         print("OPENCLAW_PYPORTFOLIOOPT_SHADOW not set; skipping.", file=sys.stderr)
         return 0
