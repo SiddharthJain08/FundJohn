@@ -14,7 +14,40 @@ inserted after the redteam stage and before backtest.
 
 CLI:
     python3 -m backtest.factor_prescreen --strategy-file <path> \
-        [--days 60] [--max-tickers 300]
+        [--days 60] [--max-tickers 300] [--lookback 300]
+
+HISTORY vs DECISION WINDOW (fix, 2026-08-24 — the S24_52wk_high_proximity
+false zero-signal): load_price_window() loads `--days` + `--lookback`
+trading days of price history (default lookback=300, env
+OPENCLAW_PRESCREEN_LOOKBACK overrides the default), but generate_signals()
+is still DRIVEN only over the last `--days` bars — the extra lookback
+exists purely so each driven call sees enough trailing history to compute
+a long-window indicator (a 52-week high, a 200-day moving average, ...),
+mirroring how unified_backtest.py's per-bar loop hands generate_signals()
+`close_wide.loc[:current_date]` (the FULL history up to that bar, not a
+`--days`-sized slice). Before this fix, load_price_window only loaded
+`--days` trading days of history total, so a >60-bar-lookback strategy saw
+a truncated panel on every one of the `--days` expanding-window calls and
+always returned [] — mis-annotated as `zero_signals_on_fallback_universe`
+(a screen artifact) rather than the load-window bug it actually was.
+`stats.history_bars` records how many total rows load_price_window
+actually returned — AT LEAST `days + lookback_used` trading days when the
+underlying data covers that far back (the calendar-day over-fetch buffer
+that compensates for weekends/holidays routinely returns a few dozen extra
+trading days on top; this function never truncates down to the exact
+requested count), fewer only when the ticker's/parquet's own history is
+shorter than requested.
+
+MIN_LOOKBACK-AWARE FLOOR (extension, 2026-08-24): a flat `--lookback`
+default doesn't cover every strategy — a repo-wide grep of
+`min_lookback = <N>` across src/strategies/implementations/ found values
+up to 1260 (well above the 300 default). run_prescreen() now reads the
+loaded strategy's own `min_lookback` class attribute (same one
+unified_backtest.py reads via `getattr(instance, 'min_lookback', 20)`) and
+raises the effective lookback to `declared_min_lookback + 10` when that
+exceeds `--lookback`, capped at `MAX_LOOKBACK_BARS` (1300). Recorded as
+`stats.lookback_used` (the value actually applied) and
+`stats.declared_min_lookback` (the raw declared value, None if unreadable).
 
 Prints ONE JSON line to stdout and exits 0 whenever the screen completes
 (whether pass=true or pass=false — a hard-fail verdict is still a completed
@@ -60,6 +93,7 @@ import importlib
 import importlib.util
 import inspect
 import json
+import os
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -76,6 +110,31 @@ PRICES_PARQUET = ROOT / 'data' / 'master' / 'prices.parquet'
 
 DEFAULT_DAYS = 60
 DEFAULT_MAX_TICKERS = 300
+DEFAULT_LOOKBACK = 300
+# min_lookback-aware floor/cap (extension, 2026-08-24): a strategy that
+# DECLARES a longer min_lookback than the --lookback default gets bumped up
+# to cover it (plus this pad, so its own `len(prices) >= min_lookback`
+# check clears with margin on every driven bar, not right at the boundary),
+# but never past this cap — 1300 bars (~5 trading years) comfortably covers
+# every min_lookback found in a repo-wide grep of
+# src/strategies/implementations/ (max observed: 1260) while keeping a
+# pathological/typo'd declaration (e.g. min_lookback=999999) from blowing
+# up the load.
+MIN_LOOKBACK_PAD = 10
+MAX_LOOKBACK_BARS = 1300
+
+
+def _default_lookback() -> int:
+    """OPENCLAW_PRESCREEN_LOOKBACK env override, else DEFAULT_LOOKBACK.
+    Invalid/unparseable values fall back to the default rather than raising —
+    this is a cheap screen, not a place to hard-fail on a bad env var."""
+    raw = os.environ.get('OPENCLAW_PRESCREEN_LOOKBACK')
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    return DEFAULT_LOOKBACK
 
 
 def _benign_regime() -> dict:
@@ -259,33 +318,73 @@ def _module_reads_aux_data(filepath: str) -> bool:
     return False
 
 
-def load_price_window(days: int, max_tickers: int) -> Tuple[pd.DataFrame, List[str], str]:
-    """Sliced pyarrow read of prices.parquet — never loads the full panel.
+def load_price_window(days: int, max_tickers: int,
+                       lookback: int = DEFAULT_LOOKBACK) -> Tuple[pd.DataFrame, List[str], str]:
+    """Sliced pyarrow read of prices.parquet — never loads the full panel,
+    and (history/decision-window fix, 2026-08-24) never materializes the
+    FULL ticker universe over the longer `days + lookback` window either —
+    see the two-pass note below, added after the naive single-pass version
+    of this fix nearly doubled RSS (544MB -> ~1GB on the real S24 CLI run)
+    by reading every ticker in prices.parquet across the larger window
+    before ranking. This box is 2-core/8GB with no swap (see
+    reference_vps_two_core_cpu memory) — a "cheap screen" doubling its
+    footprint is exactly the kind of regression that class of incident
+    describes.
 
-    1. Finds the latest date in the parquet from ROW-GROUP STATISTICS ONLY
-       (parquet column min/max metadata — no row data is read) so the
-       cutoff date can be computed without touching a single row.
-    2. Reads a predicate-pushed slice (date >= cutoff) of only the columns
-       needed (ticker, date, close, volume); pyarrow prunes row groups
-       entirely outside the filter range.
-    3. Ranks tickers by mean dollar volume (close * volume) over the slice
-       and keeps the top `max_tickers`.
+    TWO PASSES, each predicate-pushed and column-pruned:
+      1. RANK pass — reads ticker/close/volume for ALL tickers, but only
+         over the RECENT `days` window (the pre-lookback-fix window size,
+         unchanged) — never `days + lookback`. Ranks by mean dollar volume
+         (close * volume) entirely in Arrow (pc.multiply +
+         Table.group_by().aggregate()) and keeps only the top `max_tickers`
+         ticker strings; nothing here is converted to pandas except the
+         final small ranked-ticker list. This preserves the ORIGINAL
+         ranking contract (liquidity computed over the recent `days`
+         window, not diluted by a year of lookback history) as a side
+         effect of being the cheap pass.
+      2. HISTORY pass — reads ticker/date/close/volume for the
+         `days + lookback` window, with the ticker filter from pass 1
+         PUSHED DOWN into the dataset predicate
+         (`ds.field('ticker').isin(universe)`) so pyarrow never
+         materializes rows for tickers outside the kept universe. This is
+         the only pass that gets `.to_pandas()`'d, and it's bounded by
+         `max_tickers x (days + lookback)` rows, not
+         `all_tickers x (days + lookback)`.
+
+    Both passes find the latest date in the parquet from ROW-GROUP
+    STATISTICS ONLY (parquet column min/max metadata — no row data read)
+    so the cutoff dates can be computed without touching a single row.
+
+    HISTORY vs DECISION WINDOW: `days` is the number of DECISION bars
+    run_prescreen() will actually drive generate_signals() over (unchanged
+    from before this fix); `lookback` is EXTRA leading history loaded so
+    each of those decision bars sees a realistic amount of trailing history
+    (mirrors unified_backtest.py's per-bar close_wide.loc[:current_date],
+    which always exposes full history, not a `days`-sized slice) — a
+    long-lookback strategy (e.g. a 52-week-high indicator) needs history
+    older than the decision window itself to compute anything. The HISTORY
+    pass loads `days + lookback` trading days total; run_prescreen() is
+    responsible for slicing the last `days` rows back out as the driven
+    decision bars.
 
     Returns (close_wide, universe, universe_source): close_wide is a
     date-ascending x ticker close-price panel covering enough calendar days
-    to have >= `days` trading days of history for the kept universe;
-    universe is the ranked ticker list (most liquid first... order doesn't
-    matter downstream); universe_source is always the literal string
-    'fallback' here — there is no DB-free, trivially reusable way for this
-    isolated, subprocess-only screen to resolve a strategy's OWN declared
-    universe (the SP-2 universe_filter_ref predicate mechanism needs a live
-    metadata table + an as_of-aware resolver, which is exactly the DB
-    dependency this screen is designed to avoid). Kept as an explicit
-    return value (not hardcoded at the call site) so a future, genuinely
-    trivial declared-universe resolution path can flip it to 'declared'
-    without any caller changes — see compute_stats()'s zero_signals
-    handling, which branches on this value.
+    to have >= `days + lookback` trading days of history for the kept
+    universe; universe is the ranked ticker list (most liquid first, per
+    the RECENT `days` window... order doesn't matter downstream);
+    universe_source is always the literal string 'fallback' here — there is
+    no DB-free, trivially reusable way for this isolated, subprocess-only
+    screen to resolve a strategy's OWN declared universe (the SP-2
+    universe_filter_ref predicate mechanism needs a live metadata table +
+    an as_of-aware resolver, which is exactly the DB dependency this screen
+    is designed to avoid). Kept as an explicit return value (not hardcoded
+    at the call site) so a future, genuinely trivial declared-universe
+    resolution path can flip it to 'declared' without any caller changes —
+    see compute_stats()'s zero_signals handling, which branches on this
+    value.
     """
+    import pyarrow as pa
+    import pyarrow.compute as pc
     import pyarrow.dataset as ds
     import pyarrow.parquet as pq
 
@@ -301,20 +400,7 @@ def load_price_window(days: int, max_tickers: int) -> Tuple[pd.DataFrame, List[s
         raise RuntimeError('could not determine latest date in prices.parquet (no row-group stats)')
 
     max_date = date.fromisoformat(max_date_str)
-    # Over-fetch calendar days (weekends/holidays) so the slice comfortably
-    # covers `days` trading days plus a small lookback buffer.
-    calendar_days_needed = int(days * 1.6) + 15
-    cutoff = max_date - timedelta(days=calendar_days_needed)
-
     dataset = ds.dataset(str(PRICES_PARQUET), format='parquet')
-    table = dataset.to_table(
-        columns=['ticker', 'date', 'close', 'volume'],
-        filter=(ds.field('date') >= cutoff.isoformat()),
-    )
-    df = table.to_pandas()
-    if df.empty:
-        raise RuntimeError('no price rows found in the prescreen window')
-    df['date'] = pd.to_datetime(df['date'])
 
     # Equity/ETF only (matches unified_backtest.py's static_universe filter,
     # lib.price_panel.is_equity_ticker) — excludes indices (^…), crypto
@@ -322,15 +408,49 @@ def load_price_window(days: int, max_tickers: int) -> Tuple[pd.DataFrame, List[s
     # dollar-volume ranking below with unit-inconsistent "volume" figures
     # and are never what a backtest actually trades.
     from lib.price_panel import is_equity_ticker
-    df = df[df['ticker'].map(is_equity_ticker)]
-    if df.empty:
+
+    # ---- Pass 1: RANK — recent `days` window only, ALL tickers, Arrow-only ----
+    rank_calendar_days_needed = int(days * 1.6) + 15
+    rank_cutoff = max_date - timedelta(days=rank_calendar_days_needed)
+    rank_table = dataset.to_table(
+        columns=['ticker', 'close', 'volume'],
+        filter=(ds.field('date') >= rank_cutoff.isoformat()),
+    )
+    if rank_table.num_rows == 0:
+        raise RuntimeError('no price rows found in the prescreen ranking window')
+
+    distinct_tickers = rank_table.column('ticker').unique().to_pylist()
+    equity_tickers = [t for t in distinct_tickers if is_equity_ticker(t)]
+    if not equity_tickers:
         raise RuntimeError('no equity/ETF price rows found in the prescreen window')
+    rank_table = rank_table.filter(pc.field('ticker').isin(equity_tickers))
 
-    dollar_vol = (df['close'] * df['volume']).groupby(df['ticker']).mean()
-    universe = list(dollar_vol.sort_values(ascending=False).head(max_tickers).index)
+    dollar_vol_col = pc.multiply(
+        pc.cast(rank_table.column('close'), pa.float64()),
+        pc.cast(rank_table.column('volume'), pa.float64()),
+    )
+    rank_table = rank_table.append_column('dollar_vol', dollar_vol_col)
+    ranked = (rank_table.group_by('ticker')
+              .aggregate([('dollar_vol', 'mean')])
+              .sort_by([('dollar_vol_mean', 'descending')]))
+    universe = ranked.column('ticker').to_pylist()[:max_tickers]
 
-    sliced = df[df['ticker'].isin(universe)]
-    close_wide = sliced.pivot(index='date', columns='ticker', values='close').sort_index()
+    # ---- Pass 2: HISTORY — `days + lookback` window, ticker filter PUSHED
+    # DOWN to the kept universe only ----
+    total_trading_days = days + max(0, lookback)
+    calendar_days_needed = int(total_trading_days * 1.6) + 15
+    cutoff = max_date - timedelta(days=calendar_days_needed)
+
+    table = dataset.to_table(
+        columns=['ticker', 'date', 'close', 'volume'],
+        filter=(ds.field('date') >= cutoff.isoformat()) & (ds.field('ticker').isin(universe)),
+    )
+    df = table.to_pandas()
+    if df.empty:
+        raise RuntimeError('no price rows found in the prescreen window')
+    df['date'] = pd.to_datetime(df['date'])
+
+    close_wide = df.pivot(index='date', columns='ticker', values='close').sort_index()
     return close_wide, universe, 'fallback'
 
 
@@ -360,8 +480,27 @@ def _signal_sets_and_counts(daily_signals: List[list]):
 
 
 def compute_stats(daily_signals: List[list],
-                   universe_source: str = 'fallback') -> Tuple[bool, Optional[str], dict]:
+                   universe_source: str = 'fallback',
+                   history_bars: Optional[int] = None,
+                   lookback_used: Optional[int] = None,
+                   declared_min_lookback: Optional[int] = None) -> Tuple[bool, Optional[str], dict]:
     """Aggregate stats + hard-fail verdict from per-day signal lists.
+
+    `history_bars` (added with the history/decision-window fix, 2026-08-24)
+    is the total row count load_price_window() returned — AT LEAST
+    days + lookback_used trading days (see load_price_window's docstring
+    for why it's routinely a bit more, never less unless the underlying
+    data is shorter) — None when the caller has no such figure (e.g. a
+    unit test driving compute_stats() directly).
+
+    `lookback_used` / `declared_min_lookback` (min_lookback-aware floor/cap
+    extension, 2026-08-24 — see run_prescreen()'s docstring for the full
+    rule): `lookback_used` is the extra-history figure actually passed to
+    load_price_window after applying the strategy's own declared
+    `min_lookback` as a floor (plus a pad) and the MAX_LOOKBACK_BARS cap;
+    `declared_min_lookback` is the raw value read off the strategy instance
+    (None when absent/unreadable). Both None when the caller has no such
+    figures (same unit-test case as `history_bars`).
 
     HARD-FAIL (pass=False) ONLY on provably degenerate output:
       - zero_signals:    no signals anywhere in the sample window, AND the
@@ -406,12 +545,15 @@ def compute_stats(daily_signals: List[list],
         turnover_proxy = None
 
     stats = {
-        'signals_total':     signals_total,
-        'active_days':       active_days,
-        'direction_balance': direction_balance,
-        'unique_tickers':    unique_tickers,
-        'turnover_proxy':    turnover_proxy,
-        'universe_source':   universe_source,
+        'signals_total':         signals_total,
+        'active_days':           active_days,
+        'direction_balance':     direction_balance,
+        'unique_tickers':        unique_tickers,
+        'turnover_proxy':        turnover_proxy,
+        'universe_source':       universe_source,
+        'history_bars':          history_bars,
+        'lookback_used':         lookback_used,
+        'declared_min_lookback': declared_min_lookback,
     }
 
     n_driven_days = len(daily_signals)
@@ -425,14 +567,46 @@ def compute_stats(daily_signals: List[list],
 
 
 def run_prescreen(strategy_file: str, days: int = DEFAULT_DAYS,
-                   max_tickers: int = DEFAULT_MAX_TICKERS) -> dict:
+                   max_tickers: int = DEFAULT_MAX_TICKERS,
+                   lookback: Optional[int] = None) -> dict:
     """Drive generate_signals() over the last `days` trading days and return
     the {"pass", "reason", "stats"} verdict dict.
+
+    `lookback` (history/decision-window fix, 2026-08-24): extra trading days
+    of history loaded ahead of the `days` decision window so long-lookback
+    strategies (52-week high, 200-day MA, ...) see realistic history on
+    every driven call, same as unified_backtest.py's per-bar full-history
+    slice. None resolves to _default_lookback() (DEFAULT_LOOKBACK, or
+    OPENCLAW_PRESCREEN_LOOKBACK when set) — never a hardcoded default value
+    on the signature itself, so an env-var change is picked up even by
+    callers that already froze `lookback=None` at import time.
+
+    MIN_LOOKBACK-AWARE FLOOR (extension, 2026-08-24): once the strategy
+    class is loaded, if it DECLARES `min_lookback` (the same class
+    attribute unified_backtest.py reads via
+    `getattr(instance, 'min_lookback', 20)` — confirmed via base.py's
+    `BaseStrategy.min_lookback: int = 20` default and a repo-wide grep of
+    src/strategies/implementations/, e.g. `min_lookback = 504` on
+    s_idiosyncratic_vol_puzzle.py, `= 1260` on
+    S_fama_french_anomaly_dissection.py), the ACTUAL lookback fed to
+    load_price_window is `max(lookback, declared_min_lookback +
+    MIN_LOOKBACK_PAD)`, capped at `MAX_LOOKBACK_BARS` (1300) — so a
+    strategy needing more history than the flat `--lookback` default
+    still clears its own bar with margin (the +10 pad), without a
+    pathological declaration blowing up the load. `stats.lookback_used`
+    records the value actually used; `stats.declared_min_lookback` records
+    the raw declared value (None when the loaded class has no readable
+    `min_lookback` at all — in practice every BaseStrategy subclass has
+    one via the base-class default, so this is a defensive fallback, not
+    an expected path).
 
     Raises on any infra problem (strategy load failure, price load failure,
     an exception raised inside generate_signals) — main() turns any raise
     here into exit 1, which the orchestrator treats as prescreen_infra_fail.
     """
+    if lookback is None:
+        lookback = _default_lookback()
+
     cls = _load_strategy_class(strategy_file)
 
     # Aux-dependent bypass (controller ruling 2026-08-24, widened same day —
@@ -457,16 +631,40 @@ def run_prescreen(strategy_file: str, days: int = DEFAULT_DAYS,
 
     instance = cls()
 
-    close_wide, universe, universe_source = load_price_window(days, max_tickers)
+    # min_lookback-aware floor + cap (see docstring). Read off the
+    # INSTANCE (matches unified_backtest.py's getattr(instance,
+    # 'min_lookback', 20) precedent) so an instance-level override in
+    # __init__ is honored, not just the class attribute.
+    declared_min_lookback = getattr(instance, 'min_lookback', None)
+    try:
+        declared_min_lookback = int(declared_min_lookback) if declared_min_lookback is not None else None
+    except (TypeError, ValueError):
+        declared_min_lookback = None
+
+    lookback_used = lookback
+    if declared_min_lookback is not None:
+        lookback_used = max(lookback_used, declared_min_lookback + MIN_LOOKBACK_PAD)
+    lookback_used = min(lookback_used, MAX_LOOKBACK_BARS)
+
+    close_wide, universe, universe_source = load_price_window(days, max_tickers, lookback_used)
     n_rows = len(close_wide.index)
     if n_rows < 1:
         raise RuntimeError('empty price panel for prescreen window')
 
+    # DECISION window stays the last `days` rows — unchanged from before this
+    # fix. `close_wide` now carries up to `lookback_used` EXTRA leading rows
+    # of history ahead of that window (see load_price_window), so each
+    # `prices_to_date` slice below already carries that history without any
+    # change to this indexing.
     start_idx = max(0, n_rows - days)
     regime = _benign_regime()
 
     daily_signals = []
     for i in range(start_idx, n_rows):
+        # Full history up to and including bar i — mirrors
+        # unified_backtest.py's per-bar `close_wide.loc[:current_date]`
+        # (never a `days`-sized slice), so a long-lookback strategy sees the
+        # same panel shape here that it would see in the real backtest.
         prices_to_date = close_wide.iloc[:i + 1]
         # Same aux_data convention validate_strategy.py uses: try the
         # aux_data kwarg, fall back to the 3-arg call for strategies whose
@@ -479,7 +677,9 @@ def run_prescreen(strategy_file: str, days: int = DEFAULT_DAYS,
             signals = []
         daily_signals.append(signals)
 
-    passed, reason, stats = compute_stats(daily_signals, universe_source=universe_source)
+    passed, reason, stats = compute_stats(daily_signals, universe_source=universe_source,
+                                           history_bars=n_rows, lookback_used=lookback_used,
+                                           declared_min_lookback=declared_min_lookback)
     return {'pass': passed, 'reason': reason, 'stats': stats}
 
 
@@ -488,10 +688,14 @@ def main(argv=None) -> int:
     ap.add_argument('--strategy-file', required=True)
     ap.add_argument('--days', type=int, default=DEFAULT_DAYS)
     ap.add_argument('--max-tickers', type=int, default=DEFAULT_MAX_TICKERS)
+    ap.add_argument('--lookback', type=int, default=_default_lookback(),
+                     help='Extra trading days of leading history loaded ahead of --days '
+                          '(default 300; env OPENCLAW_PRESCREEN_LOOKBACK overrides the default)')
     args = ap.parse_args(argv)
 
     try:
-        result = run_prescreen(args.strategy_file, days=args.days, max_tickers=args.max_tickers)
+        result = run_prescreen(args.strategy_file, days=args.days, max_tickers=args.max_tickers,
+                                lookback=args.lookback)
     except Exception as e:  # noqa: BLE001 — any infra failure -> exit 1, JS side passes-through
         print(f'prescreen infra error: {e}', file=sys.stderr)
         return 1

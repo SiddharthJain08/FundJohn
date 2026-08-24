@@ -35,12 +35,31 @@ def _synthetic_prices(n_days: int, tickers=('ZZT1', 'ZZT2', 'ZZT3')):
 
 
 def _synthetic_loader(universe_source='fallback', tickers=('ZZT1', 'ZZT2', 'ZZT3')):
-    """Builds a load_price_window(days, max_tickers) stand-in returning a
-    fixed universe_source — lets tests exercise both branches of the
-    zero_signals / universe_source ruling without a real declared-universe
-    resolution path existing yet (see factor_prescreen.load_price_window)."""
-    def _loader(days, max_tickers):
+    """Builds a load_price_window(days, max_tickers, lookback) stand-in
+    returning a fixed universe_source — lets tests exercise both branches of
+    the zero_signals / universe_source ruling without a real
+    declared-universe resolution path existing yet (see
+    factor_prescreen.load_price_window). Ignores `lookback` and always
+    returns `days + 5` rows total (same shape as before the history/decision
+    window fix), so existing exact-count assertions on the `days`-sized
+    decision window stay valid — the lookback-specific behaviour is
+    exercised separately, via a loader that actually varies with it."""
+    def _loader(days, max_tickers, lookback=None):
         prices, universe = _synthetic_prices(n_days=days + 5, tickers=tickers)
+        return prices, universe, universe_source
+    return _loader
+
+
+def _synthetic_loader_history_aware(universe_source='fallback', tickers=('ZZT1', 'ZZT2', 'ZZT3')):
+    """Unlike _synthetic_loader (which ignores `lookback` and always returns
+    a fixed `days + 5` rows, to keep the pre-existing exact-count
+    assertions stable), this loader actually HONORS `lookback` — returning
+    `days + lookback` total rows, the same history/decision-window contract
+    the real load_price_window() now implements. Used by the R2b regression
+    test below to prove a long-lookback strategy sees real history."""
+    def _loader(days, max_tickers, lookback=None):
+        n_days = days + (lookback or 0)
+        prices, universe = _synthetic_prices(n_days=n_days, tickers=tickers)
         return prices, universe, universe_source
     return _loader
 
@@ -102,6 +121,75 @@ class ZZTRaisesStrategy(BaseStrategy):
 
     def generate_signals(self, prices, regime, universe, aux_data=None):
         raise RuntimeError("synthetic strategy blew up")
+"""
+
+# R2b regression fixture: mirrors S24_52wk_high_proximity's shape — needs a
+# long trailing window (200 bars, standing in for a 52-week/252-bar high
+# lookback) before it will emit anything at all. Before the history/
+# decision-window fix, load_price_window() only ever loaded `days` trading
+# days of history total, so every one of the `days` expanding-window calls
+# saw a truncated panel and this always returned [] regardless of the real
+# strategy logic — exactly the false zero-signal the fix addresses.
+STRATEGY_LONG_LOOKBACK = """
+from strategies.base import BaseStrategy, Signal
+
+class ZZTLongLookbackStrategy(BaseStrategy):
+    id = "ZZT_long_lookback"
+    name = "ZZT long-lookback (52-week-high-style) test strategy"
+
+    def generate_signals(self, prices, regime, universe, aux_data=None):
+        if len(prices) < 200:
+            return []
+        return [
+            Signal(ticker=t, direction="LONG", entry_price=100.0, stop_loss=95.0,
+                   target_1=105.0, target_2=110.0, target_3=120.0,
+                   position_size_pct=0.05, confidence="MED")
+            for t in universe
+        ]
+"""
+
+# R2b-ext regression fixtures (min_lookback-aware floor/cap extension,
+# 2026-08-24): these DECLARE the min_lookback class attribute directly —
+# same attribute BaseStrategy defaults to 20 and unified_backtest.py reads
+# via getattr(instance, 'min_lookback', 20) — unlike STRATEGY_LONG_LOOKBACK
+# above, which deliberately leaves it undeclared (inherits the base
+# default) to keep the earlier history/decision-window tests decoupled
+# from this floor/cap logic. generate_signals is unconditional (unlike
+# STRATEGY_LONG_LOOKBACK's len(prices)-gated body) — these two fixtures
+# test the FLOOR/CAP ARITHMETIC on stats.lookback_used /
+# stats.declared_min_lookback, not a history-gated signal outcome.
+STRATEGY_MIN_LOOKBACK_500 = """
+from strategies.base import BaseStrategy, Signal
+
+class ZZTMinLookback500Strategy(BaseStrategy):
+    id = "ZZT_min_lookback_500"
+    name = "ZZT min_lookback=500 test strategy"
+    min_lookback = 500
+
+    def generate_signals(self, prices, regime, universe, aux_data=None):
+        return [
+            Signal(ticker=t, direction="LONG", entry_price=100.0, stop_loss=95.0,
+                   target_1=105.0, target_2=110.0, target_3=120.0,
+                   position_size_pct=0.05, confidence="MED")
+            for t in universe
+        ]
+"""
+
+STRATEGY_MIN_LOOKBACK_2000 = """
+from strategies.base import BaseStrategy, Signal
+
+class ZZTMinLookback2000Strategy(BaseStrategy):
+    id = "ZZT_min_lookback_2000"
+    name = "ZZT min_lookback=2000 (above-cap) test strategy"
+    min_lookback = 2000
+
+    def generate_signals(self, prices, regime, universe, aux_data=None):
+        return [
+            Signal(ticker=t, direction="LONG", entry_price=100.0, stop_loss=95.0,
+                   target_1=105.0, target_2=110.0, target_3=120.0,
+                   position_size_pct=0.05, confidence="MED")
+            for t in universe
+        ]
 """
 
 # Module-level INSTRUMENT_CLASS constant — AST-detected by
@@ -192,13 +280,16 @@ class FactorPrescreenCLITests(unittest.TestCase):
         self.addCleanup(self._tmpdir.cleanup)
 
     def _run(self, strategy_path: str, days: int = 5, max_tickers: int = 10,
-              loader=None):
+              loader=None, lookback=None):
         loader = loader or _synthetic_loader()
+        argv = ['--strategy-file', strategy_path,
+                '--days', str(days), '--max-tickers', str(max_tickers)]
+        if lookback is not None:
+            argv += ['--lookback', str(lookback)]
         stdout = io.StringIO()
         with patch.object(fp, 'load_price_window', side_effect=loader):
             with contextlib.redirect_stdout(stdout):
-                code = fp.main(['--strategy-file', strategy_path,
-                                 '--days', str(days), '--max-tickers', str(max_tickers)])
+                code = fp.main(argv)
         return code, stdout.getvalue()
 
     def test_momentum_strategy_passes_with_exact_signal_count(self):
@@ -218,7 +309,22 @@ class FactorPrescreenCLITests(unittest.TestCase):
         self.assertEqual(
             set(result['stats'].keys()),
             {'signals_total', 'active_days', 'direction_balance', 'unique_tickers',
-             'turnover_proxy', 'universe_source'})
+             'turnover_proxy', 'universe_source', 'history_bars',
+             'lookback_used', 'declared_min_lookback'})
+        # 10 total rows loaded by the synthetic loader (days=5 + 5 pad);
+        # history_bars records the FULL loaded panel, not just the decision
+        # window driven above.
+        self.assertEqual(result['stats']['history_bars'], 10)
+        # STRATEGY_MOMENTUM doesn't declare its own min_lookback, so it
+        # inherits BaseStrategy's default (20) — never None/absent in
+        # practice for a real BaseStrategy subclass. declared_min_lookback
+        # + 10 (30) is below the default --lookback (300, no --lookback
+        # passed here), so lookback_used stays the unfloored default.
+        # (_synthetic_loader itself ignores whatever lookback_used it's
+        # called with — see its docstring — so history_bars above is
+        # unaffected by this floor.)
+        self.assertEqual(result['stats']['declared_min_lookback'], 20)
+        self.assertEqual(result['stats']['lookback_used'], 300)
 
     def test_zero_signal_on_fallback_universe_soft_passes(self):
         # Controller ruling 2026-08-24 (concern-2 fix): zero_signals on the
@@ -327,6 +433,96 @@ class FactorPrescreenCLITests(unittest.TestCase):
         code, out = self._run('/nonexistent/path/to/S_ghost.py', days=5)
         self.assertEqual(code, 1)
         self.assertEqual(out, '')
+
+    def test_long_lookback_strategy_produces_signals_with_sufficient_lookback(self):
+        # R2b regression test: a strategy needing >=200 bars of history
+        # (standing in for S24_52wk_high_proximity's real 52-week-high
+        # lookback) returned [] on EVERY driven day before the history/
+        # decision-window split existed, because load_price_window() only
+        # ever loaded `days` trading days of history total. With
+        # lookback=300 (>= the 200-bar requirement) and days=60, every one
+        # of the 60 driven decision bars now carries >=200 bars of leading
+        # history and the strategy produces real signals.
+        path = _write_strategy(self._tmpdir.name, 'zzt_long_lookback', STRATEGY_LONG_LOOKBACK)
+        loader = _synthetic_loader_history_aware()
+        code, out = self._run(path, days=60, max_tickers=10, loader=loader, lookback=300)
+        self.assertEqual(code, 0)
+        result = json.loads(out.strip().splitlines()[-1])
+        self.assertTrue(result['pass'])
+        self.assertIsNone(result['reason'])
+        # 60 driven days * 3 universe tickers, deterministic fixture.
+        self.assertEqual(result['stats']['signals_total'], 180)
+        self.assertEqual(result['stats']['active_days'], 60)
+        self.assertEqual(result['stats']['history_bars'], 360)  # days(60) + lookback_used(300)
+        # STRATEGY_LONG_LOOKBACK doesn't declare its own min_lookback
+        # (inherits BaseStrategy's default 20); 20+10=30 is below the
+        # explicit --lookback=300 passed here, so lookback_used is
+        # unfloored.
+        self.assertEqual(result['stats']['declared_min_lookback'], 20)
+        self.assertEqual(result['stats']['lookback_used'], 300)
+
+    def test_long_lookback_strategy_zero_signals_without_lookback(self):
+        # Same strategy and days, but lookback=0 reproduces the PRE-FIX
+        # shape (history == the days-sized decision window, nothing extra):
+        # every driven day sees < 200 bars of history and the strategy
+        # returns [] on all of them — proving the bug this fix addresses
+        # actually existed, and that it's the lookback split (not some
+        # other change) that resolves it. history_bars is 90, not 60: the
+        # NEW min_lookback-aware floor (extension, 2026-08-24) still bumps
+        # the effective lookback up to BaseStrategy's inherited default
+        # (declared_min_lookback=20) + the 10-bar pad = 30, even though
+        # this fixture never declares min_lookback itself and the caller
+        # asked for lookback=0 — that floor is universal (see
+        # run_prescreen's docstring), not opt-in. 30 is still nowhere near
+        # this fixture's internal >=200-bar requirement, so the zero-signal
+        # outcome this test exists to pin is unaffected.
+        path = _write_strategy(self._tmpdir.name, 'zzt_long_lookback', STRATEGY_LONG_LOOKBACK)
+        loader = _synthetic_loader_history_aware()
+        code, out = self._run(path, days=60, max_tickers=10, loader=loader, lookback=0)
+        self.assertEqual(code, 0)
+        result = json.loads(out.strip().splitlines()[-1])
+        self.assertTrue(result['pass'])
+        self.assertEqual(result['reason'], 'zero_signals_on_fallback_universe')
+        self.assertEqual(result['stats']['signals_total'], 0)
+        self.assertEqual(result['stats']['declared_min_lookback'], 20)
+        self.assertEqual(result['stats']['lookback_used'], 30)  # floored: max(0, 20+10)
+        self.assertEqual(result['stats']['history_bars'], 90)   # days(60) + lookback_used(30)
+
+    def test_declared_min_lookback_floors_lookback_used(self):
+        # R2b-ext regression: a strategy DECLARING min_lookback=500 (above
+        # the 300 default --lookback) must be floored up to
+        # declared_min_lookback + 10 = 510, not truncated to the flat
+        # default — otherwise the same false-zero-signal bug this task
+        # fixed for S24 (min_lookback=260) would resurface for any
+        # strategy needing more than the default 300-bar lookback (a real,
+        # non-hypothetical case — a repo-wide grep found 30 such
+        # strategies, several at 504/756/1260).
+        path = _write_strategy(self._tmpdir.name, 'zzt_min_lookback_500', STRATEGY_MIN_LOOKBACK_500)
+        loader = _synthetic_loader_history_aware()
+        # No --lookback passed -> CLI default (300, absent an env override).
+        code, out = self._run(path, days=5, max_tickers=10, loader=loader)
+        self.assertEqual(code, 0)
+        result = json.loads(out.strip().splitlines()[-1])
+        self.assertTrue(result['pass'])
+        self.assertEqual(result['stats']['declared_min_lookback'], 500)
+        self.assertEqual(result['stats']['lookback_used'], 510)  # 500 + 10 pad
+        # "gets >=510 history bars with the default --lookback 300" (brief wording).
+        self.assertGreaterEqual(result['stats']['history_bars'], 510)
+        self.assertEqual(result['stats']['history_bars'], 5 + 510)  # exact, via the history-aware loader
+
+    def test_declared_min_lookback_caps_at_max_lookback_bars(self):
+        # R2b-ext regression: a pathological/very-long declaration (2000,
+        # above MAX_LOOKBACK_BARS=1300) is CAPPED, not honored verbatim —
+        # keeps a bad/typo'd min_lookback from blowing up the load.
+        path = _write_strategy(self._tmpdir.name, 'zzt_min_lookback_2000', STRATEGY_MIN_LOOKBACK_2000)
+        loader = _synthetic_loader_history_aware()
+        code, out = self._run(path, days=5, max_tickers=10, loader=loader)
+        self.assertEqual(code, 0)
+        result = json.loads(out.strip().splitlines()[-1])
+        self.assertTrue(result['pass'])
+        self.assertEqual(result['stats']['declared_min_lookback'], 2000)
+        self.assertEqual(result['stats']['lookback_used'], 1300)  # capped, NOT 2010
+        self.assertEqual(result['stats']['history_bars'], 5 + 1300)
 
 
 class ComputeStatsTests(unittest.TestCase):
