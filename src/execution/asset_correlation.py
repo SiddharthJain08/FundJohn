@@ -18,6 +18,12 @@ from execution import shrinkage
 PARQUET = "/root/openclaw/data/master/prices.parquet"
 MIN_OBS = 20            # min overlapping returns to trust a pair; else 0.0
 ASSET_CORR_LW_ENV = 'OPENCLAW_ASSET_CORR_LW'
+# Dense-panel (LW path only) column-coverage floor. Convention lifted from
+# MIN_OBS_FRAC in scripts/run_pyportfolioopt_shadow.py's own weekday-filter +
+# coverage-drop panel builder — kept as a local constant here rather than an
+# import so this production sizing module has no dependency on a top-level
+# script. Legacy corr_from_returns / MIN_OBS above are untouched by this.
+MIN_OBS_FRAC = 0.9
 
 
 def _pearson(xs, ys):
@@ -109,19 +115,51 @@ def _asset_corr_lw_mode() -> str:
 def _dense_panel_from_returns(returns: dict[str, dict[str, float]]):
     """dates x tickers DENSE (no-NaN) panel from {ticker: {date: ret}}.
 
-    Tickers that can't even clear the legacy pairwise thin-evidence floor
-    (MIN_OBS) are dropped BEFORE intersecting dates — including one would
-    only poison the N-way date intersection for every other, well-covered
-    ticker, while its own pairs get forced to 0.0 post-fit regardless (see
-    _lw_corr_same_shape). What remains is intersected on date to form a
-    truly dense (no-NaN) panel. None if fewer than 2 well-covered tickers
-    remain or the intersection is empty; shrinkage.py's own MIN_ROWS/MIN_COLS
-    floor handles the remaining thinness cases."""
+    Three steps, in order (mirrors the weekday-filter + MIN_OBS_FRAC
+    convention in scripts/run_pyportfolioopt_shadow.py):
+
+    (a) Weekday filter: if ANY ticker carries a weekend (Sat/Sun)
+        observation — e.g. a 24/7 crypto ticker mixed in with weekday-only
+        equities — every weekday-only column is NaN on those rows by
+        construction, so a weekend row can never be part of a dense
+        (all-tickers) panel; dropping them up front stops them from
+        needlessly shrinking the trading-calendar row count the coverage
+        check in (b) measures against. A panel with no weekend rows at all
+        is left untouched.
+    (b) Coverage filter: tickers whose non-NaN coverage over that
+        (weekday-filtered) window is < MIN_OBS_FRAC (0.9) are dropped
+        BEFORE intersecting dates — including one would only poison the
+        N-way date intersection in (c) for every other, well-covered
+        ticker, while its own pairs get forced to 0.0 post-fit regardless
+        (see _lw_corr_same_shape's `fitted` check). Logs
+        `[asset_corr_lw] panel: kept <k>/<n> tickers (coverage>=0.9),
+        rows=<r>` — emitted ONLY when at least one ticker was actually
+        dropped (k < n): the well-covered common case stays silent so it
+        doesn't add a second `[asset_corr_lw]`-prefixed line alongside the
+        shadow/'1' summary line callers already emit.
+    (c) THEN drop rows with any remaining NaN — forms the truly dense
+        (no-NaN) panel handed to shrinkage.lw_corr.
+
+    None if fewer than 2 well-covered tickers remain after (b) or the
+    row intersection in (c) is empty; shrinkage.py's own MIN_ROWS/MIN_COLS
+    floor handles the remaining thinness cases (e.g. too few rows left)."""
     if len(returns) < 2:
         return None
     import pandas as pd
     df = pd.DataFrame(returns)
-    well_covered = [c for c in df.columns if df[c].notna().sum() >= MIN_OBS]
+    if df.empty:
+        return None
+    dow = pd.to_datetime(df.index).dayofweek
+    if (dow >= 5).any():
+        df = df.loc[dow < 5]
+        if df.empty:
+            return None
+    n_total = len(df.columns)
+    min_count = MIN_OBS_FRAC * len(df)
+    well_covered = [c for c in df.columns if df[c].notna().sum() >= min_count]
+    if len(well_covered) < n_total:
+        print(f"[asset_corr_lw] panel: kept {len(well_covered)}/{n_total} tickers "
+              f"(coverage>={MIN_OBS_FRAC}), rows={len(df)}", file=sys.stderr)
     if len(well_covered) < 2:
         return None
     dense = df[well_covered].dropna(axis=0, how='any')
@@ -135,8 +173,11 @@ def _lw_corr_same_shape(returns: dict[str, dict[str, float]]):
     corr_from_returns (sorted tickers, diagonal 1.0, symmetric, clipped to
     [-1, 1]). Pairs with < MIN_OBS overlapping observations are forced to 0.0
     AFTER shrinkage (preserves the legacy thin-evidence rule) — as are pairs
-    touching a ticker the dense panel had to drop. None if the panel is too
-    thin for shrinkage.lw_corr to fit at all (caller falls back to legacy)."""
+    touching a ticker the dense panel had to drop (`a not in fitted or b not
+    in fitted` below), whatever the drop reason — thin MIN_OBS overlap,
+    sub-MIN_OBS_FRAC coverage, or an all-NaN column shrinkage._clean_panel
+    strips. None if the panel is too thin for shrinkage.lw_corr to fit at
+    all (caller falls back to legacy)."""
     panel = _dense_panel_from_returns(returns)
     if panel is None:
         return None

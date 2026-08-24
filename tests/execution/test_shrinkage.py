@@ -292,8 +292,12 @@ def _legacy_pearson_reference(returns: dict) -> dict:
 
 
 def _fixture_returns() -> dict:
-    # 90 obs: >= MIN_OBS(20, legacy pairwise) AND >= shrinkage.MIN_ROWS(40),
-    # so the LW path (not just the legacy path) actually gets exercised.
+    # 90 CONSECUTIVE CALENDAR days (weekends included) starting 2026-01-01 —
+    # all 3 tickers dense across every one of them. Task P1c's weekday
+    # filter in _dense_panel_from_returns trims this to ~64 weekday rows
+    # before the LW fit, still comfortably >= MIN_OBS(20, legacy pairwise)
+    # and >= shrinkage.MIN_ROWS(40), so the LW path (not just the legacy
+    # path) actually gets exercised.
     import datetime
     rng = np.random.default_rng(7)
     n = 90
@@ -431,6 +435,105 @@ class TestPriceReturnCorrByteIdentical:
         monkeypatch.setenv('OPENCLAW_ASSET_CORR_LW', '1')
         lw_armed = ac.price_return_corr(['ZZT1', 'ZZT2', 'ZZT3'], window=63)
         assert lw_armed['ZZT1']['ZZT2'] != pytest.approx(legacy_default['ZZT1']['ZZT2'])
+
+
+# ---------------------------------------------------------------------------
+# task P1c: _dense_panel_from_returns weekday-filter + MIN_OBS_FRAC coverage
+# drop. Regression target: logs/daily_cycle_steps_2026-08-24.log line 109 —
+# "[asset_corr_lw] shadow: skipped (lw_corr could not fit, n_dense=76
+# rows=34)" — the OLD full-row-intersection dense panel let sparse/mismatched
+# -calendar tickers survive an absolute-count (MIN_OBS=20) filter and then
+# poison the N-way date intersection for every well-covered ticker too.
+# ---------------------------------------------------------------------------
+
+class TestDensePanelWeekdayAndCoverageFilter:
+    @staticmethod
+    def _weekday_dates(n=63, start='2026-01-05'):
+        return [d.date().isoformat() for d in pd.bdate_range(start=start, periods=n)]
+
+    def test_coverage_drop_keeps_well_covered_tickers_and_lw_fits(self, capsys):
+        """10 tickers, 63 weekdays (no weekend rows at all, so the weekday
+        filter is a no-op here — isolates the coverage filter). 2 tickers
+        only have 44/63 (~70%) coverage, well under MIN_OBS_FRAC=0.9, and
+        must be dropped BEFORE the row intersection so the 8 well-covered
+        tickers keep their full window (not collapsed to a thin remainder)
+        and shrinkage.lw_corr can actually fit."""
+        rng = np.random.default_rng(11)
+        dates = self._weekday_dates(63)
+        thin_dates = dates[:44]
+        returns = {}
+        for i in range(8):
+            vals = rng.normal(0, 1.0, len(dates))
+            returns[f'ZZTG{i}'] = dict(zip(dates, vals.tolist()))
+        for i in range(2):
+            vals = rng.normal(0, 1.0, len(thin_dates))
+            returns[f'ZZTB{i}'] = dict(zip(thin_dates, vals.tolist()))
+
+        panel = ac._dense_panel_from_returns(returns)
+        assert panel is not None
+        assert set(panel.columns) == {f'ZZTG{i}' for i in range(8)}
+        assert panel.shape[1] == 8
+        assert panel.shape[0] >= 55   # not collapsed by the 2 thin tickers
+
+        corr, gamma = sk.lw_corr(panel)
+        assert corr is not None
+        assert gamma is not None
+
+        err = capsys.readouterr().err
+        assert ('[asset_corr_lw] panel: kept 8/10 tickers (coverage>=0.9), '
+                'rows=63') in err
+
+    def test_crypto_weekend_ticker_does_not_collapse_row_count(self):
+        """1 ticker trades every calendar day (weekends included, e.g.
+        crypto) alongside 5 weekday-only equities, each fully covered on
+        its own trading calendar. If coverage were measured BEFORE dropping
+        weekend rows, the crypto ticker's weekend observations would inflate
+        the window denominator (63 weekday obs / ~91-row raw window ~=69% <
+        0.9) and spuriously starve every equity. With the weekday filter
+        applied first, coverage is measured on the 63-weekday window all 6
+        tickers actually share, so nobody is dropped and the row count is
+        not collapsed."""
+        rng = np.random.default_rng(13)
+        weekdays = pd.bdate_range(start='2026-01-05', periods=63)
+        all_days = pd.date_range(start=weekdays[0], end=weekdays[-1], freq='D')
+        wd_strs = [d.date().isoformat() for d in weekdays]
+        all_strs = [d.date().isoformat() for d in all_days]
+        assert any(d not in wd_strs for d in all_strs)  # sanity: weekends present
+
+        returns = {}
+        for i in range(5):
+            vals = rng.normal(0, 1.0, len(wd_strs))
+            returns[f'ZZTE{i}'] = dict(zip(wd_strs, vals.tolist()))
+        crypto_vals = rng.normal(0, 1.0, len(all_strs))
+        returns['ZZTC'] = dict(zip(all_strs, crypto_vals.tolist()))
+
+        panel = ac._dense_panel_from_returns(returns)
+        assert panel is not None
+        assert set(panel.columns) == {f'ZZTE{i}' for i in range(5)} | {'ZZTC'}
+        assert panel.shape[0] == 63   # weekday row count preserved, not collapsed
+
+        corr, gamma = sk.lw_corr(panel)
+        assert corr is not None
+        assert gamma is not None
+
+    def test_default_zero_mode_still_byte_identical_after_p1c_fix(self, monkeypatch, capsys):
+        """The '0' path never touches _dense_panel_from_returns at all —
+        re-run the byte-identical default check against this task's own
+        (weekend-bearing) fixture to confirm the P1c change is fully inert
+        on the live sizing path."""
+        monkeypatch.delenv('OPENCLAW_ASSET_CORR_LW', raising=False)
+        fixed = _fixture_returns()
+        monkeypatch.setattr(ac, '_load_returns', lambda tickers, window, as_of=None: fixed)
+
+        def _must_not_be_called(*_a, **_kw):
+            raise AssertionError('_dense_panel_from_returns must not be called '
+                                  'when OPENCLAW_ASSET_CORR_LW is unset')
+        monkeypatch.setattr(ac, '_dense_panel_from_returns', _must_not_be_called)
+
+        got = ac.price_return_corr(['ZZT1', 'ZZT2', 'ZZT3'], window=63)
+        want = _legacy_pearson_reference(fixed)
+        assert got == want
+        assert '[asset_corr_lw]' not in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
