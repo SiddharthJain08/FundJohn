@@ -20,6 +20,7 @@ const path = require('path');
 const { spawn, execSync, spawnSync } = require('child_process');
 const { spawnWithTimeout } = require('../../lib/spawn_timeout');
 const { emitGateDecision, paperIdForCandidate } = require('./gate-decisions');
+const { redteamStrategy } = require('../curators/strategy_redteam');
 
 const OPENCLAW_DIR      = process.env.OPENCLAW_DIR || path.join(__dirname, '../../..');
 const NODE_CLI          = path.join(OPENCLAW_DIR, 'src/agent/run-subagent-cli.js');
@@ -733,7 +734,76 @@ class ResearchOrchestrator {
       outcome:     'pass',
       metadata:    { signal_count: validResult.signal_count ?? null },
     });
-    notify?.(`  ✅ ${stratId} validation passed — running backtest (may take 2–5 min)...`);
+    notify?.(`  ✅ ${stratId} validation passed — running red-team review...`);
+    onPhase('redteam', 50);
+
+    // ── Phase 1.5: Mandatory LLM red-team gate (Task S1) ──────────────────────
+    // Code-enforced: runs for EVERY candidate that reaches this point, never
+    // skippable by an LLM's discretion. redteamStrategy() derives its verdict
+    // in code from structured findings (never trusts the model's own verdict
+    // field) and fails OPEN on infra trouble — see strategy_redteam.js. A
+    // block here follows the exact same DB-update / emitGateDecision /
+    // early-return pattern as the validate-failure path above. Reuses
+    // vPaperId (same candidate_id -> same paper_id lookup) rather than
+    // re-querying paperIdForCandidate a second time.
+    const rtPaperId = vPaperId;
+    let rtResult;
+    try {
+      rtResult = await redteamStrategy({
+        implPath,
+        paperContext: strategy_spec?.hypothesis_one_liner || strategy_spec?.signal_logic || null,
+      });
+    } catch (e) {
+      // redteamStrategy() already contains its own retry/infra-fail handling
+      // around the claude-bin call; this catch is a last-resort backstop so
+      // an unexpected bug here can never silently block research either.
+      console.error(`[redteam] unexpected exception auditing ${stratId}: ${e.message}`);
+      rtResult = { verdict: 'pass', findings: [], infra_fail: true };
+    }
+
+    if (rtResult.infra_fail) {
+      await emitGateDecision({
+        paperId:     rtPaperId,
+        candidateId: candidate_id,
+        strategyId:  stratId,
+        gateName:    'redteam',
+        outcome:     'pass',
+        reasonCode:  'redteam_infra_fail',
+        metadata:    { findings: rtResult.findings },
+      });
+      notify?.(`  ⚠️ ${stratId} red-team reviewer infra failure — WARN-and-pass, continuing to backtest.`);
+    } else if (rtResult.verdict === 'block') {
+      const criticalFindings = rtResult.findings.filter((f) => f.severity === 'critical');
+      const reason = criticalFindings[0]?.concern || 'red-team gate blocked (no concern text)';
+      await this._query(
+        `UPDATE implementation_queue SET status = 'redteam_blocked', error_log = $1 WHERE candidate_id = $2`,
+        [reason, candidate_id]
+      );
+      await emitGateDecision({
+        paperId:      rtPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'redteam',
+        outcome:      'reject',
+        reasonCode:   'redteam_blocked',
+        reasonDetail: reason,
+        metadata:     { findings: rtResult.findings },
+      });
+      notify?.(`  ❌ ${stratId} blocked by red-team gate: ${reason.slice(0, 200)}`);
+      channelNotify?.(`❌ **${stratId}** blocked by red-team review — ${reason.slice(0, 200)}`);
+      return { promoted: false, reasonCode: 'redteam_blocked', error: reason };
+    } else {
+      await emitGateDecision({
+        paperId:     rtPaperId,
+        candidateId: candidate_id,
+        strategyId:  stratId,
+        gateName:    'redteam',
+        outcome:     'pass',
+        metadata:    { findings: rtResult.findings },
+      });
+    }
+
+    notify?.(`  ✅ ${stratId} red-team review passed — running backtest (may take 2–5 min)...`);
     onPhase('backtest', 60);
 
     // ── Phase 2: Unified backtest convergence gate ────────────────────────────
