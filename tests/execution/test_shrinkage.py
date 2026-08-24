@@ -5,6 +5,9 @@ Covers:
   * orthogonalization.resolve_tangency_gamma precedence (pure).
   * asset_correlation.price_return_corr byte-identical default when
     OPENCLAW_ASSET_CORR_LW is unset (the task's binding requirement).
+  * task P1b: orthogonalization.tangency_net_sharpe gamma plumb-through, and
+    regime_blended_sizer._tangency_gamma_for_cycle (the live call-site
+    resolve+log helper) — both pure, no DB.
 
 Synthetic-only: no real parquet/DB reads. ZZT-prefixed fake tickers per the
 task brief's fixture-ticker convention.
@@ -27,6 +30,7 @@ from execution import shrinkage as sk
 from execution import orthogonalization as og
 from execution import asset_correlation as ac
 from execution import strategy_similarity as ss
+from execution import regime_blended_sizer as rbs
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +165,90 @@ class TestResolveTangencyGamma:
         monkeypatch.setenv('OPENCLAW_TANGENCY_SHRINK', 'abc')
         monkeypatch.delenv('OPENCLAW_TANGENCY_LW', raising=False)
         assert og.resolve_tangency_gamma(0.05) == og.TANGENCY_SHRINK_DEFAULT
+
+
+class TestResolveTangencyGammaRangeClamp:
+    """Review fix (2026-08-24): any resolved candidate outside [0,1], from
+    ANY source (env override or artifact_gamma), is rejected rather than
+    silently used — R = (1-γ)R_raw + γI is only a convex blend inside that
+    range."""
+
+    def test_env_above_one_falls_through_to_default_when_lw_unarmed(self, monkeypatch, capsys):
+        monkeypatch.setenv('OPENCLAW_TANGENCY_SHRINK', '1.5')
+        monkeypatch.delenv('OPENCLAW_TANGENCY_LW', raising=False)
+
+        assert og.resolve_tangency_gamma(0.05) == og.TANGENCY_SHRINK_DEFAULT
+
+        err = capsys.readouterr().err
+        assert '[tangency_lw] rejected gamma=1.500 outside [0,1]; using 0.10' in err
+
+    def test_env_above_one_falls_through_to_artifact_when_lw_armed(self, monkeypatch, capsys):
+        monkeypatch.setenv('OPENCLAW_TANGENCY_SHRINK', '1.5')
+        monkeypatch.setenv('OPENCLAW_TANGENCY_LW', '1')
+
+        assert og.resolve_tangency_gamma(0.05) == pytest.approx(0.05)
+
+        err = capsys.readouterr().err
+        assert '[tangency_lw] rejected gamma=1.500 outside [0,1]; using 0.05' in err
+
+    def test_env_below_zero_falls_through_to_default_when_lw_unarmed(self, monkeypatch, capsys):
+        monkeypatch.setenv('OPENCLAW_TANGENCY_SHRINK', '-0.2')
+        monkeypatch.delenv('OPENCLAW_TANGENCY_LW', raising=False)
+
+        assert og.resolve_tangency_gamma(0.05) == og.TANGENCY_SHRINK_DEFAULT
+
+        err = capsys.readouterr().err
+        assert '[tangency_lw] rejected gamma=-0.200 outside [0,1]; using 0.10' in err
+
+    def test_env_below_zero_falls_through_to_artifact_when_lw_armed(self, monkeypatch, capsys):
+        monkeypatch.setenv('OPENCLAW_TANGENCY_SHRINK', '-0.2')
+        monkeypatch.setenv('OPENCLAW_TANGENCY_LW', '1')
+
+        assert og.resolve_tangency_gamma(0.05) == pytest.approx(0.05)
+
+        err = capsys.readouterr().err
+        assert '[tangency_lw] rejected gamma=-0.200 outside [0,1]; using 0.05' in err
+
+    def test_env_boundary_one_accepted_as_is(self, monkeypatch, capsys):
+        monkeypatch.setenv('OPENCLAW_TANGENCY_SHRINK', '1.0')
+        monkeypatch.delenv('OPENCLAW_TANGENCY_LW', raising=False)
+
+        assert og.resolve_tangency_gamma(0.05) == 1.0
+
+        err = capsys.readouterr().err
+        assert 'rejected' not in err
+
+    def test_env_boundary_zero_accepted_as_is(self, monkeypatch, capsys):
+        monkeypatch.setenv('OPENCLAW_TANGENCY_SHRINK', '0.0')
+        monkeypatch.delenv('OPENCLAW_TANGENCY_LW', raising=False)
+
+        assert og.resolve_tangency_gamma(0.05) == 0.0
+
+        err = capsys.readouterr().err
+        assert 'rejected' not in err
+
+    def test_artifact_gamma_out_of_range_also_rejected_defense_in_depth(self, monkeypatch, capsys):
+        """artifact_gamma is already bounded [0,1] by pypfopt's own delta
+        clamp in practice, but the resolver validates it too — a corrupted
+        or unexpected stored value must not silently pass through."""
+        monkeypatch.delenv('OPENCLAW_TANGENCY_SHRINK', raising=False)
+        monkeypatch.setenv('OPENCLAW_TANGENCY_LW', '1')
+
+        assert og.resolve_tangency_gamma(1.7) == og.TANGENCY_SHRINK_DEFAULT
+
+        err = capsys.readouterr().err
+        assert '[tangency_lw] rejected gamma=1.700 outside [0,1]; using 0.10' in err
+
+    def test_malformed_override_unaffected_by_clamp_still_silent(self, monkeypatch, capsys):
+        """Non-numeric override stays silent (no 'rejected' line) — the
+        clamp only fires for a value that actually parsed as a float."""
+        monkeypatch.setenv('OPENCLAW_TANGENCY_SHRINK', 'abc')
+        monkeypatch.delenv('OPENCLAW_TANGENCY_LW', raising=False)
+
+        assert og.resolve_tangency_gamma(None) == og.TANGENCY_SHRINK_DEFAULT
+
+        err = capsys.readouterr().err
+        assert 'rejected' not in err
 
 
 # ---------------------------------------------------------------------------
@@ -426,3 +514,222 @@ class TestLoadGroupsLwGammaRoundTrip:
         # fake row's matrix, untouched by load_groups.
         assert out['matrix'] is fake_matrix
         assert out['lw_gamma'] == pytest.approx(0.123)
+
+
+# ---------------------------------------------------------------------------
+# Task P1b — orthogonalization.tangency_net_sharpe gamma plumb-through
+# ---------------------------------------------------------------------------
+
+# Live LOW_VOL trade-factored weights + similarity (same fixture family as
+# tests/execution/test_tangency_sadj.py — kept local so this file has no
+# cross-test-file dependency).
+_TAN_W = {'mom': 1.430, 'vme': 1.271, 'ff': 0.781}
+_TAN_SIM = {
+    'mom': {'vme': 0.29086, 'ff': 0.33220},
+    'vme': {'mom': 0.29086, 'ff': 0.58238},
+    'ff':  {'mom': 0.33220, 'vme': 0.58238},
+}
+_TAN_CONTRIBS = {'T': [('mom', 1), ('vme', 1), ('ff', 1)]}
+
+
+class TestTangencyNetSharpeGammaPlumbThrough:
+    def test_gamma_none_is_byte_identical_to_pre_existing_default(self):
+        """The binding requirement: omitting `gamma` (or passing None) must
+        behave EXACTLY as before this parameter existed — i.e. exactly as
+        gamma=0.10 (TANGENCY_SHRINK_DEFAULT)."""
+        out_default, deg_default = og.tangency_net_sharpe(_TAN_CONTRIBS, _TAN_SIM, _TAN_W)
+        out_gamma_none, deg_none = og.tangency_net_sharpe(
+            _TAN_CONTRIBS, _TAN_SIM, _TAN_W, gamma=None)
+        out_gamma_010, deg_010 = og.tangency_net_sharpe(
+            _TAN_CONTRIBS, _TAN_SIM, _TAN_W, gamma=0.10)
+        assert out_gamma_none['T'] == out_default['T']
+        assert out_gamma_010['T'] == out_default['T']
+        assert deg_none == deg_default == deg_010
+
+    def test_gamma_030_changes_the_result(self):
+        """Proves the plumb-through is actually live: a different gamma must
+        move the tangency solve, not be silently ignored."""
+        out_default, _ = og.tangency_net_sharpe(_TAN_CONTRIBS, _TAN_SIM, _TAN_W)
+        out_030, _ = og.tangency_net_sharpe(_TAN_CONTRIBS, _TAN_SIM, _TAN_W, gamma=0.30)
+        assert out_030['T'] != pytest.approx(out_default['T'])
+
+
+# ---------------------------------------------------------------------------
+# Task P1b — regime_blended_sizer._tangency_gamma_for_cycle (call-site helper)
+# ---------------------------------------------------------------------------
+
+class TestTangencyGammaForCycle:
+    def test_artifact_present_lw_unarmed_returns_default_and_logs(self, monkeypatch, capsys):
+        monkeypatch.delenv('OPENCLAW_TANGENCY_SHRINK', raising=False)
+        monkeypatch.delenv('OPENCLAW_TANGENCY_LW', raising=False)
+
+        gamma = rbs._tangency_gamma_for_cycle({'lw_gamma': 0.222})
+
+        assert gamma == og.TANGENCY_SHRINK_DEFAULT
+        err = capsys.readouterr().err
+        assert '[tangency_lw] would_use_gamma=0.222' in err
+        assert 'current=0.10' in err
+
+    def test_lw_armed_returns_artifact_gamma_no_would_use_log(self, monkeypatch, capsys):
+        monkeypatch.delenv('OPENCLAW_TANGENCY_SHRINK', raising=False)
+        monkeypatch.setenv('OPENCLAW_TANGENCY_LW', '1')
+
+        gamma = rbs._tangency_gamma_for_cycle({'lw_gamma': 0.222})
+
+        assert gamma == pytest.approx(0.222)
+        err = capsys.readouterr().err
+        assert 'would_use_gamma' not in err
+
+    def test_no_key_returns_default_and_no_log(self, monkeypatch, capsys):
+        monkeypatch.delenv('OPENCLAW_TANGENCY_SHRINK', raising=False)
+        monkeypatch.delenv('OPENCLAW_TANGENCY_LW', raising=False)
+
+        gamma = rbs._tangency_gamma_for_cycle({})
+
+        assert gamma == og.TANGENCY_SHRINK_DEFAULT
+        assert capsys.readouterr().err == ''
+
+    def test_none_groups_returns_default_and_no_raise(self, monkeypatch, capsys):
+        monkeypatch.delenv('OPENCLAW_TANGENCY_SHRINK', raising=False)
+        monkeypatch.delenv('OPENCLAW_TANGENCY_LW', raising=False)
+
+        gamma = rbs._tangency_gamma_for_cycle(None)
+
+        assert gamma == og.TANGENCY_SHRINK_DEFAULT
+        assert capsys.readouterr().err == ''
+
+    def test_malformed_groups_shape_cannot_raise(self, monkeypatch):
+        """A non-dict `groups` (a corrupted/unexpected artifact shape) must
+        never raise — it degrades to the default, silently."""
+        monkeypatch.delenv('OPENCLAW_TANGENCY_SHRINK', raising=False)
+        monkeypatch.delenv('OPENCLAW_TANGENCY_LW', raising=False)
+
+        gamma = rbs._tangency_gamma_for_cycle(['not', 'a', 'dict'])
+
+        assert gamma == og.TANGENCY_SHRINK_DEFAULT
+
+    def test_env_override_wins_even_with_artifact_gamma(self, monkeypatch, capsys):
+        """Mirrors resolve_tangency_gamma precedence #1 through the call-site
+        helper: a live OPENCLAW_TANGENCY_SHRINK override short-circuits before
+        the would_use_gamma log (it would be misleading — arming LW would not
+        change the resolved value in this case)."""
+        monkeypatch.setenv('OPENCLAW_TANGENCY_SHRINK', '0.42')
+        monkeypatch.setenv('OPENCLAW_TANGENCY_LW', '1')
+
+        gamma = rbs._tangency_gamma_for_cycle({'lw_gamma': 0.222})
+
+        assert gamma == pytest.approx(0.42)
+        assert 'would_use_gamma' not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Task P1b — composed path: _corr_adjusted_maps + _tangency_gamma_for_cycle,
+# in the state production will actually be in once lw_gamma starts getting
+# stored (artifact gamma present, LW not yet armed). This is the byte-
+# identical claim that matters live, not just each helper tested alone.
+# ---------------------------------------------------------------------------
+
+class TestCorrAdjustedMapsComposedGammaByteIdentical:
+    def test_artifact_gamma_present_lw_unarmed_is_byte_identical_to_no_gamma(self, monkeypatch):
+        monkeypatch.delenv('OPENCLAW_TANGENCY_SHRINK', raising=False)
+        monkeypatch.delenv('OPENCLAW_TANGENCY_LW', raising=False)
+        monkeypatch.delenv('OPENCLAW_TANGENCY_SADJ', raising=False)
+        meta = {'T': {'strategies': ['mom', 'vme', 'ff'], 'directions': [1, 1, 1]}}
+
+        gate_a, size_a, nb_g_a, nb_s_a = rbs._corr_adjusted_maps(meta, _TAN_W, _TAN_W, _TAN_SIM)
+        _gamma = rbs._tangency_gamma_for_cycle({'lw_gamma': 0.44})
+        gate_b, size_b, nb_g_b, nb_s_b = rbs._corr_adjusted_maps(
+            meta, _TAN_W, _TAN_W, _TAN_SIM, gamma=_gamma)
+
+        assert _gamma == og.TANGENCY_SHRINK_DEFAULT
+        assert gate_b['T'] == gate_a['T']
+        assert size_b['T'] == size_a['T']
+        assert (nb_g_b, nb_s_b) == (nb_g_a, nb_s_a)
+
+    def test_artifact_gamma_present_lw_armed_diverges_from_default(self, monkeypatch):
+        monkeypatch.delenv('OPENCLAW_TANGENCY_SHRINK', raising=False)
+        monkeypatch.setenv('OPENCLAW_TANGENCY_LW', '1')
+        monkeypatch.delenv('OPENCLAW_TANGENCY_SADJ', raising=False)
+        meta = {'T': {'strategies': ['mom', 'vme', 'ff'], 'directions': [1, 1, 1]}}
+
+        gate_a, size_a, _, _ = rbs._corr_adjusted_maps(meta, _TAN_W, _TAN_W, _TAN_SIM)
+        _gamma = rbs._tangency_gamma_for_cycle({'lw_gamma': 0.44})
+        gate_b, size_b, _, _ = rbs._corr_adjusted_maps(
+            meta, _TAN_W, _TAN_W, _TAN_SIM, gamma=_gamma)
+
+        assert _gamma == pytest.approx(0.44)
+        assert gate_b['T'] != pytest.approx(gate_a['T'])
+
+
+# ---------------------------------------------------------------------------
+# Task P1b review fix 2 (2026-08-24) — gate the gamma resolve+log on the same
+# tangency-branch condition, so the OPENCLAW_TANGENCY_SADJ=0 legacy
+# killswitch path (where gamma is discarded) never emits a would_use_gamma /
+# rejected-gamma log for a value nothing consumes.
+# ---------------------------------------------------------------------------
+
+class TestTangencySadjEnabled:
+    def test_default_unset_is_enabled(self, monkeypatch):
+        monkeypatch.delenv('OPENCLAW_TANGENCY_SADJ', raising=False)
+        assert rbs._tangency_sadj_enabled() is True
+
+    def test_explicit_one_is_enabled(self, monkeypatch):
+        monkeypatch.setenv('OPENCLAW_TANGENCY_SADJ', '1')
+        assert rbs._tangency_sadj_enabled() is True
+
+    def test_zero_disables(self, monkeypatch):
+        monkeypatch.setenv('OPENCLAW_TANGENCY_SADJ', '0')
+        assert rbs._tangency_sadj_enabled() is False
+
+    def test_garbage_value_is_enabled(self, monkeypatch):
+        """Only the literal '0' killswitch disables — matches the pre-existing
+        `!= '0'` semantics inside _corr_adjusted_maps, now shared verbatim."""
+        monkeypatch.setenv('OPENCLAW_TANGENCY_SADJ', 'garbage')
+        assert rbs._tangency_sadj_enabled() is True
+
+
+class TestGammaResolveGatedOnTangencyBranch:
+    """These reproduce the call-site line inside _sharpe_cadence_path
+    (`_gamma = _tangency_gamma_for_cycle(...) if _tangency_sadj_enabled()
+    else None`) directly — that line lives inside a DB-backed function too
+    heavy to invoke here, so this pins the composed behavior of its two
+    pure ingredients instead."""
+
+    def test_legacy_killswitch_skips_resolve_and_stays_log_silent(self, monkeypatch, capsys):
+        monkeypatch.setenv('OPENCLAW_TANGENCY_SADJ', '0')
+        monkeypatch.delenv('OPENCLAW_TANGENCY_SHRINK', raising=False)
+        monkeypatch.delenv('OPENCLAW_TANGENCY_LW', raising=False)
+
+        groups = {'lw_gamma': 0.222}   # artifact gamma present, LW unarmed —
+                                       # would normally trigger would_use_gamma
+        gamma = rbs._tangency_gamma_for_cycle(groups) if rbs._tangency_sadj_enabled() else None
+
+        assert gamma is None
+        assert capsys.readouterr().err == ''
+
+    def test_default_on_path_still_resolves_and_logs(self, monkeypatch, capsys):
+        monkeypatch.delenv('OPENCLAW_TANGENCY_SADJ', raising=False)
+        monkeypatch.delenv('OPENCLAW_TANGENCY_SHRINK', raising=False)
+        monkeypatch.delenv('OPENCLAW_TANGENCY_LW', raising=False)
+
+        groups = {'lw_gamma': 0.222}
+        gamma = rbs._tangency_gamma_for_cycle(groups) if rbs._tangency_sadj_enabled() else None
+
+        assert gamma == og.TANGENCY_SHRINK_DEFAULT
+        err = capsys.readouterr().err
+        assert '[tangency_lw] would_use_gamma=0.222' in err
+
+    def test_corr_adjusted_maps_output_unaffected_by_gamma_none_under_killswitch(self, monkeypatch):
+        """The point of gating is to suppress the LOG, not to change sizing:
+        the legacy branch already ignores gamma entirely, so gamma=None vs
+        gamma=0.10 must produce identical output under the killswitch."""
+        monkeypatch.setenv('OPENCLAW_TANGENCY_SADJ', '0')
+        meta = {'T': {'strategies': ['mom', 'vme', 'ff'], 'directions': [1, 1, 1]}}
+
+        gate_none, size_none, _, _ = rbs._corr_adjusted_maps(
+            meta, _TAN_W, _TAN_W, _TAN_SIM, gamma=None)
+        gate_010, size_010, _, _ = rbs._corr_adjusted_maps(
+            meta, _TAN_W, _TAN_W, _TAN_SIM, gamma=0.10)
+
+        assert gate_none['T'] == gate_010['T']
+        assert size_none['T'] == size_010['T']

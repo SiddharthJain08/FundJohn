@@ -333,7 +333,49 @@ def _load_trade_factor_anchor(default: int = None) -> int:
     return default
 
 
-def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim):
+def _tangency_sadj_enabled() -> bool:
+    """Whether S_adj is computed via the tangency (optimal non-negative
+    weights) combination Sharpe, vs the legacy fixed-proportional
+    corr_adjusted_net_sharpe. DEFAULT-ON; OPENCLAW_TANGENCY_SADJ=0 is the
+    killswitch back to legacy. Single source of truth for this branch —
+    shared by _corr_adjusted_maps (which function it calls) and the call
+    site (task P1b review fix, 2026-08-24: whether it's even worth resolving
+    — and possibly logging — a tangency gamma nothing will consume)."""
+    return os.environ.get('OPENCLAW_TANGENCY_SADJ', '1') != '0'
+
+
+def _tangency_gamma_for_cycle(groups: dict | None) -> float:
+    """Resolve the tangency shrinkage gamma once per sizer cycle (task P1b —
+    wires orthogonalization.resolve_tangency_gamma into the live call site).
+
+    `groups` is the `_ortho_groups` dict from strategy_similarity.load_groups()
+    (or None on a load failure). Precedence, per resolve_tangency_gamma: env
+    OPENCLAW_TANGENCY_SHRINK > groups['lw_gamma'] when OPENCLAW_TANGENCY_LW=='1'
+    > TANGENCY_SHRINK_DEFAULT (0.10). With both env vars unset this always
+    returns 0.10 — byte-identical to pre-wiring behavior.
+
+    Soak signal: when the artifact carries a gamma but LW is not armed (and no
+    env override is in play), resolve_tangency_gamma logs one
+    `[tangency_lw] would_use_gamma=...` line to stderr — the operator's signal
+    for what arming OPENCLAW_TANGENCY_LW would resolve to. Calling this once
+    per sizer invocation (the sole call site below) is what keeps that log to
+    once per cycle; the resolver itself is stateless.
+
+    Never raises: a missing `lw_gamma` key, a non-dict `groups`, or any
+    resolver failure all fall back to TANGENCY_SHRINK_DEFAULT with no log —
+    a broken/absent artifact can never block or alter live sizing."""
+    from execution import orthogonalization as _og
+    try:
+        artifact_gamma = (groups or {}).get('lw_gamma')
+    except Exception:
+        artifact_gamma = None
+    try:
+        return _og.resolve_tangency_gamma(artifact_gamma)
+    except Exception:
+        return _og.TANGENCY_SHRINK_DEFAULT
+
+
+def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim, gamma=None):
     """Build the correlation-adjusted gate + sizing maps from per-ticker contributors.
     Gate uses RAW daily_weight (size_scalar-exempt — matches the legacy 'gate stays raw'
     intent); sizing uses eff_weight (size_scalar folded in). Identical when all scalars=1.
@@ -343,18 +385,27 @@ def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim):
     (orthogonalization.tangency_net_sharpe — optimal non-negative weights,
     monotone in confirming contributors, opposing sides subtract) for BOTH gate
     and sizing. OPENCLAW_TANGENCY_SADJ=0 reverts to the legacy fixed-
-    proportional corr_adjusted_net_sharpe."""
+    proportional corr_adjusted_net_sharpe.
+
+    `gamma` (task P1b — see _tangency_gamma_for_cycle): the resolved tangency
+    shrinkage intensity for this cycle, forwarded to tangency_net_sharpe only
+    (the legacy corr_adjusted_net_sharpe branch has no shrinkage parameter and
+    ignores it). Left at the default None, tangency_net_sharpe falls back to
+    its own TANGENCY_SHRINK_DEFAULT — unchanged from before this parameter
+    existed."""
     from execution import orthogonalization as _og
     contribs_by_ticker = {tkr: list(zip(m['strategies'], m['directions']))
                           for tkr, m in ticker_meta.items()}
-    if os.environ.get('OPENCLAW_TANGENCY_SADJ', '1') != '0':
+    if _tangency_sadj_enabled():
         _fn = _og.tangency_net_sharpe
         logger.info('corr_cumsharpe: S_adj basis = tangency (optimal-weights) combination Sharpe')
+        gate_net_sharpe, nb_gate = _fn(contribs_by_ticker, sim, weight_by_strat, gamma=gamma)
+        sizing_weight, nb_size = _fn(contribs_by_ticker, sim, eff_weight_by_strat, gamma=gamma)
     else:
         _fn = _og.corr_adjusted_net_sharpe
         logger.info('corr_cumsharpe: S_adj basis = legacy fixed-proportional combination Sharpe')
-    gate_net_sharpe, nb_gate = _fn(contribs_by_ticker, sim, weight_by_strat)
-    sizing_weight, nb_size = _fn(contribs_by_ticker, sim, eff_weight_by_strat)
+        gate_net_sharpe, nb_gate = _fn(contribs_by_ticker, sim, weight_by_strat)
+        sizing_weight, nb_size = _fn(contribs_by_ticker, sim, eff_weight_by_strat)
     return gate_net_sharpe, sizing_weight, nb_gate, nb_size
 
 
@@ -1580,8 +1631,17 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     _n_tf = sum(1 for f in _twf.values() if abs(f - 1.0) > 1e-9)
     logger.info('trade_weight: applied √(ln n) factor to %d/%d strategies (anchor n=%d)',
                 _n_tf, len(_twf), _trade_factor_anchor)
+    # Task P1b: resolve the tangency shrinkage gamma once for this cycle
+    # (env override > LW-armed artifact gamma > TANGENCY_SHRINK_DEFAULT).
+    # With OPENCLAW_TANGENCY_LW/OPENCLAW_TANGENCY_SHRINK both unset this
+    # always resolves to 0.10 — byte-identical to the pre-wiring constant.
+    # Gated on _tangency_sadj_enabled() (review fix, 2026-08-24): under the
+    # OPENCLAW_TANGENCY_SADJ=0 legacy killswitch _corr_adjusted_maps ignores
+    # gamma entirely, so resolving (and possibly logging would_use_gamma /
+    # rejected-gamma) it there would be noise for a value nothing consumes.
+    _gamma = _tangency_gamma_for_cycle(_ortho_groups) if _tangency_sadj_enabled() else None
     gate_net_sharpe, _size_adj, _nb_g, _nb_s = _corr_adjusted_maps(
-        ticker_meta, _cw_gate, _cw_size, _sim)
+        ticker_meta, _cw_gate, _cw_size, _sim, gamma=_gamma)
     # Conviction gate (2026-08-22): per-regime MINIMUM ACTING-STRATEGY COUNT.
     # A ticker is taken only when at least `min_acting` DISTINCT strategies
     # act on it in its net direction. Replaces the S_adj floor

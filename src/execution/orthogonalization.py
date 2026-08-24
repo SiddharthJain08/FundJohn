@@ -84,35 +84,77 @@ def resolve_tangency_gamma(artifact_gamma: float | None) -> float:
     the live sizer's conviction gate must stay byte-identical until the LW
     flag is deliberately armed).
 
+    Range validation (task P1b review fix, 2026-08-24): a candidate value from
+    ANY source (env override or artifact_gamma) is REJECTED if it falls
+    outside [0.0, 1.0] — R = (1-γ)R_raw + γI is only a convex blend inside
+    that range; outside it the "shrinkage" isn't shrinkage (e.g. γ=1.5 makes
+    the raw-matrix coefficient negative). A rejected candidate falls through
+    to the next precedence level exactly as a malformed (non-numeric) one
+    does, but — since a numeric value COULD be logged, unlike a parse
+    failure — also logs `[tangency_lw] rejected gamma=<x> outside [0,1];
+    using <fallback>` so a bad override or a corrupted artifact is visible,
+    not silently swapped for the default. artifact_gamma is already bounded
+    to [0,1] by pypfopt's own delta clamp in practice, but this validates it
+    too (defense in depth against a corrupted/unexpected stored value).
+
     Shadow visibility: when artifact_gamma is available but the LW flag is NOT
-    armed (i.e. it would be ignored) AND no OPENCLAW_TANGENCY_SHRINK override
-    is in play, log once per call so an operator can see what the LW estimate
-    would resolve to before flipping the flag. A live OPENCLAW_TANGENCY_SHRINK
-    override short-circuits before this log: since it unconditionally wins
-    precedence #1, arming the LW flag would NOT change the resolved value in
-    that case, so "would_use_gamma" would be a misleading thing to print.
+    armed (i.e. it would be ignored) AND no valid OPENCLAW_TANGENCY_SHRINK
+    override is in play, log once per call so an operator can see what the LW
+    estimate would resolve to before flipping the flag. A live, IN-RANGE
+    OPENCLAW_TANGENCY_SHRINK override short-circuits before this log: since it
+    unconditionally wins precedence #1, arming the LW flag would NOT change
+    the resolved value in that case, so "would_use_gamma" would be a
+    misleading thing to print. (A rejected out-of-range override does NOT
+    short-circuit — precedence continues past it, so would_use_gamma can
+    still fire alongside the rejection line.)
     (De-dup to "once per sizer invocation" is the caller's responsibility —
-    this resolver is pure and stateless, and is not itself wired into a live
-    per-cycle call site by this task.)
+    this resolver is pure and stateless.)
     """
+    lw_armed = os.environ.get('OPENCLAW_TANGENCY_LW') == '1'
+
+    # Precedence #1: env override — only an in-range numeric value wins
+    # outright. A parse failure falls through silently (unchanged from
+    # before); an out-of-range numeric value falls through too, but is
+    # reported once the fallback below is known.
+    rejected_override = None
     override = os.environ.get('OPENCLAW_TANGENCY_SHRINK')
     if override not in (None, ''):
         try:
-            return float(override)
+            override_val = float(override)
         except (TypeError, ValueError):
             pass   # malformed override -> fall through to the remaining precedence
+        else:
+            if 0.0 <= override_val <= 1.0:
+                return override_val
+            rejected_override = override_val
 
-    lw_armed = os.environ.get('OPENCLAW_TANGENCY_LW') == '1'
+    # Precedence #2/#3: LW-armed artifact_gamma, else TANGENCY_SHRINK_DEFAULT.
     if artifact_gamma is not None and not lw_armed:
         print(f"[tangency_lw] would_use_gamma={float(artifact_gamma):.3f} "
               f"(current={TANGENCY_SHRINK_DEFAULT:.2f})", file=sys.stderr)
+
+    resolved = TANGENCY_SHRINK_DEFAULT
     if lw_armed and artifact_gamma is not None:
-        return float(artifact_gamma)
-    return TANGENCY_SHRINK_DEFAULT
+        try:
+            ag = float(artifact_gamma)
+        except (TypeError, ValueError):
+            ag = None
+        if ag is not None and 0.0 <= ag <= 1.0:
+            resolved = ag
+        elif ag is not None:
+            print(f"[tangency_lw] rejected gamma={ag:.3f} outside [0,1]; "
+                  f"using {TANGENCY_SHRINK_DEFAULT:.2f}", file=sys.stderr)
+
+    if rejected_override is not None:
+        print(f"[tangency_lw] rejected gamma={rejected_override:.3f} outside [0,1]; "
+              f"using {resolved:.2f}", file=sys.stderr)
+
+    return resolved
 
 
 def _tangency_side_sharpe(sids: list[str], s: list[float],
-                          sim: dict, shrink: float) -> tuple[float, bool]:
+                          sim: dict, shrink: float,
+                          gamma: float | None = None) -> tuple[float, bool]:
     """Max attainable combination Sharpe over one SAME-DIRECTION contributor set,
     with NON-NEGATIVE tangency weights: max over non-empty subsets T of
     √(s_Tᵀ R_T⁻¹ s_T) where x = R_T⁻¹ s_T has every component >= 0.
@@ -124,6 +166,11 @@ def _tangency_side_sharpe(sids: list[str], s: list[float],
     removes them) and every singleton is feasible (x = s_i > 0), so the result
     is always >= max(s_i) — a confirming strategy can never LOWER conviction.
 
+    `gamma`, when not None, overrides `shrink` (task P1b: the resolved
+    Ledoit-Wolf/env shrinkage intensity from resolve_tangency_gamma). Left
+    None, behavior is unchanged — `shrink` alone controls the blend, exactly
+    as before this parameter existed.
+
     Returns (best_sharpe, degraded) — degraded=True when any multi-member solve
     failed numerically (result fell back to smaller subsets; still valid)."""
     import numpy as _np
@@ -132,6 +179,7 @@ def _tangency_side_sharpe(sids: list[str], s: list[float],
         return 0.0, False
     if n == 1:
         return float(s[0]), False
+    eff_shrink = shrink if gamma is None else float(gamma)
     if n > TANGENCY_MAX_ENUM:
         # keep the heaviest contributors for enumeration; the rest can only
         # have added, never removed, so this is a conservative floor
@@ -147,7 +195,7 @@ def _tangency_side_sharpe(sids: list[str], s: list[float],
             if rho is None:
                 rho = sim.get(sids[j], {}).get(sids[i], SPARSE_DEFAULT)
             R[i, j] = R[j, i] = float(rho)
-    R = (1.0 - shrink) * R + shrink * _np.eye(n)
+    R = (1.0 - eff_shrink) * R + eff_shrink * _np.eye(n)
     sv = _np.asarray(s, dtype=float)
     best = float(max(s))                       # singletons always feasible
     degraded = False
@@ -171,7 +219,8 @@ def _tangency_side_sharpe(sids: list[str], s: list[float],
 def tangency_net_sharpe(contribs_by_ticker: dict[str, list[tuple]],
                         sim: dict[str, dict[str, float]],
                         weight_by_strat: dict[str, float],
-                        shrink: float = TANGENCY_SHRINK_DEFAULT) -> tuple[dict[str, float], int]:
+                        shrink: float = TANGENCY_SHRINK_DEFAULT,
+                        gamma: float | None = None) -> tuple[dict[str, float], int]:
     """Signed per-ticker conviction via the OPTIMAL-weights (tangency) combination
     Sharpe (operator directive 2026-07-27, replaces the fixed-proportional
     corr_adjusted_net_sharpe as the live S_adj).
@@ -189,6 +238,13 @@ def tangency_net_sharpe(contribs_by_ticker: dict[str, list[tuple]],
       • never rewards disagreement: without the non-negativity constraint an
         opposed pair at ρ=0.3 would score ABOVE either solo (spread arbitrage
         a net per-ticker position cannot hold).
+    `gamma` (task P1b — orthogonalization.resolve_tangency_gamma), when not
+    None, overrides `shrink` for this call's shrinkage intensity. Left at the
+    default None, behavior is byte-identical to before this parameter
+    existed: `shrink` (itself defaulting to TANGENCY_SHRINK_DEFAULT) is used
+    unchanged. No math changes — this only plumbs an already-resolved gamma
+    through to the two side-solves.
+
     Same signature/return shape as corr_adjusted_net_sharpe; the second value
     counts tickers whose multi-member solves degraded to smaller subsets."""
     out: dict[str, float] = {}
@@ -207,8 +263,8 @@ def tangency_net_sharpe(contribs_by_ticker: dict[str, list[tuple]],
                 shorts_s.append(float(w))
         if not longs_s and not shorts_s:
             continue
-        s_long, deg_l = _tangency_side_sharpe(longs_id, longs_s, sim, shrink)
-        s_short, deg_s = _tangency_side_sharpe(shorts_id, shorts_s, sim, shrink)
+        s_long, deg_l = _tangency_side_sharpe(longs_id, longs_s, sim, shrink, gamma=gamma)
+        s_short, deg_s = _tangency_side_sharpe(shorts_id, shorts_s, sim, shrink, gamma=gamma)
         if deg_l or deg_s:
             n_degraded += 1
         out[ticker] = s_long - s_short
