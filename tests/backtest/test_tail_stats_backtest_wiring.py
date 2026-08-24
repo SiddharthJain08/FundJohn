@@ -8,12 +8,22 @@
 2. A tail_stats failure is caught and logged (`[tail_stats] skipped: ...`)
    and never fails the backtest.
 3. The best-effort per-run tearsheet subprocess call is gated on
-   commit=True, OPENCLAW_BT_TEARSHEET != '0', AND generate_tearsheet=True
-   (the last one is False ONLY on the --all-live fleet CLI path — review
-   finding: firing a tearsheet subprocess per strategy inside the ~140-
-   strategy --all-live loop, serialized at 5-180s each with memory-unbounded
-   matplotlib/quantstats children, risks the nightly fleet window's real
-   bound (RuntimeMaxSec SIGKILL) on this 8GB no-swap box).
+   commit=True, OPENCLAW_BT_TEARSHEET == '1' (OPT-IN — default unset means
+   no spawn), AND generate_tearsheet=True.
+
+   Updated 2026-08-24 (final fix wave, review finding I1): the env gate used
+   to default ON (fired unless explicitly set to '0'), suppressed only by
+   generate_tearsheet=False on the --all-live fleet CLI path. But the ACTUAL
+   nightly fleet re-gate (scripts/refresh_backtests_resumable.js ->
+   `--strategy-id <sid>` per strategy; also scripts/rebacktest_runner.py,
+   scripts/backtest_ids.js) drives the SINGLE-STRATEGY path, where
+   generate_tearsheet still defaults True — so a 140-strategy fleet re-gate
+   would have spawned 140 serialized 5-180s matplotlib/quantstats children
+   regardless of the --all-live suppression. The env default is now OFF
+   (opt-in via OPENCLAW_BT_TEARSHEET=1, checked with strict `== '1'` — 'true'
+   / 'yes' do not fire) so every caller is safe by default; --all-live still
+   ALSO passes generate_tearsheet=False explicitly (belt-and-suspenders — it
+   must never fire even if an operator sets the env to '1').
 
 No real DB or price-panel IO: load_prices_panels / load_regimes /
 load_strategy_class / find_strategy_file / _code_sha / _per_bar_simulate are
@@ -93,7 +103,15 @@ def _regimes_series(regime='LOW_VOL', periods=40):
 def _run(trades, *, commit=False, env=None, subprocess_mock=None,
          generate_tearsheet=True):
     """Run unified_backtest.run_backtest with all IO mocked; returns
-    (run_id, execute_values_calls, subprocess_mock)."""
+    (run_id, execute_values_calls, subprocess_mock).
+
+    env values of None mean "force this key UNSET for the duration of the
+    call" — patch.dict(os.environ, ...) only ever ADDS/OVERRIDES keys, it
+    never clears them, so without this a test asserting default (unset)
+    OPENCLAW_BT_TEARSHEET behavior would silently inherit whatever the
+    ambient shell/.env happens to have exported and could pass or fail for
+    reasons unrelated to the code under test.
+    """
     mock_conn = _make_mock_conn()
     close_wide = pd.DataFrame(
         {'ZZT1': [100.0] * 40},
@@ -107,6 +125,9 @@ def _run(trades, *, commit=False, env=None, subprocess_mock=None,
 
     base_env = {'OPENCLAW_BT_ASSET_GATE': 'off', 'OPENCLAW_BT_SPREAD_COSTS': '0'}
     base_env.update(env or {})
+    force_unset = [k for k, v in list(base_env.items()) if v is None]
+    for k in force_unset:
+        del base_env[k]
 
     if subprocess_mock is None:
         subprocess_mock = MagicMock(
@@ -114,6 +135,8 @@ def _run(trades, *, commit=False, env=None, subprocess_mock=None,
 
     with ExitStack() as stack:
         stack.enter_context(patch.dict(os.environ, base_env))
+        for k in force_unset:
+            os.environ.pop(k, None)
         stack.enter_context(patch('backtest.unified_backtest.load_prices_panels',
                                    return_value=(close_wide, {'ZZT1': close_wide})))
         stack.enter_context(patch('backtest.unified_backtest.load_regimes',
@@ -184,9 +207,22 @@ def test_tail_stats_failure_is_caught_and_logged(capsys):
     assert '[tail_stats] skipped' in out
 
 
-def test_tearsheet_fires_on_commit_true_default_env():
+def test_tearsheet_skipped_on_default_env_single_strategy_path():
+    """Final fix wave (I1): the single-strategy path (generate_tearsheet's
+    True default — this is exactly what --strategy-id / --strategy-file
+    invocations, including the nightly fleet re-gate's per-strategy
+    subprocess, get) must NOT spawn the tearsheet subprocess when
+    OPENCLAW_BT_TEARSHEET is left unset. This is the behavior change: before
+    the fix, an unset env fired the subprocess (default-ON); now it does
+    not (opt-in)."""
     trades = _synthetic_trades(n=25)
-    run_id, _, sp_mock = _run(trades, commit=True)
+    _, _, sp_mock = _run(trades, commit=True, env={'OPENCLAW_BT_TEARSHEET': None})
+    assert sp_mock.call_count == 0
+
+
+def test_tearsheet_fires_when_env_explicitly_enabled():
+    trades = _synthetic_trades(n=25)
+    run_id, _, sp_mock = _run(trades, commit=True, env={'OPENCLAW_BT_TEARSHEET': '1'})
     assert sp_mock.call_count == 1
     args, kwargs = sp_mock.call_args
     cmd = args[0]
@@ -197,7 +233,7 @@ def test_tearsheet_fires_on_commit_true_default_env():
 
 def test_tearsheet_skipped_when_commit_false():
     trades = _synthetic_trades(n=25)
-    _, _, sp_mock = _run(trades, commit=False)
+    _, _, sp_mock = _run(trades, commit=False, env={'OPENCLAW_BT_TEARSHEET': '1'})
     assert sp_mock.call_count == 0
 
 
@@ -207,10 +243,20 @@ def test_tearsheet_skipped_when_env_disabled():
     assert sp_mock.call_count == 0
 
 
+def test_tearsheet_skipped_when_env_not_exactly_one():
+    """The gate is a strict `== '1'` string compare — 'true' / 'yes' / '2'
+    must NOT fire it (avoids surprising an operator who exports a truthy-
+    looking value expecting shell-boolean semantics)."""
+    trades = _synthetic_trades(n=25)
+    _, _, sp_mock = _run(trades, commit=True, env={'OPENCLAW_BT_TEARSHEET': 'true'})
+    assert sp_mock.call_count == 0
+
+
 def test_tearsheet_subprocess_failure_is_swallowed(capsys):
     trades = _synthetic_trades(n=25)
     sp_mock = MagicMock(side_effect=TimeoutError('wedged'))
-    run_id, _, _ = _run(trades, commit=True, subprocess_mock=sp_mock)
+    run_id, _, _ = _run(trades, commit=True, env={'OPENCLAW_BT_TEARSHEET': '1'},
+                         subprocess_mock=sp_mock)
     assert run_id  # run_backtest did not raise
     out = capsys.readouterr().out
     assert '[tearsheet] skipped' in out
@@ -223,10 +269,23 @@ def test_tearsheet_subprocess_failure_is_swallowed(capsys):
 
 def test_generate_tearsheet_false_suppresses_subprocess_even_when_commit_true():
     """Direct run_backtest-level check of the new gate: generate_tearsheet=
-    False (what --all-live now passes) must suppress the subprocess even
-    though commit=True and OPENCLAW_BT_TEARSHEET is left at its ON default."""
+    False (what --all-live now passes) must suppress the subprocess with
+    commit=True and OPENCLAW_BT_TEARSHEET left at its (now OFF) default —
+    both conditions independently suppress here, so this alone doesn't
+    isolate the generate_tearsheet gate from the env gate; the next test
+    (env explicitly '1') is the one that does."""
     trades = _synthetic_trades(n=25)
     _, _, sp_mock = _run(trades, commit=True, generate_tearsheet=False)
+    assert sp_mock.call_count == 0
+
+
+def test_generate_tearsheet_false_suppresses_subprocess_even_with_env_enabled():
+    """--all-live's generate_tearsheet=False must win even when an operator
+    has OPENCLAW_BT_TEARSHEET=1 set — belt-and-suspenders: --all-live must
+    NEVER spawn the fleet-scale-unsafe subprocess regardless of the env."""
+    trades = _synthetic_trades(n=25)
+    _, _, sp_mock = _run(trades, commit=True, generate_tearsheet=False,
+                          env={'OPENCLAW_BT_TEARSHEET': '1'})
     assert sp_mock.call_count == 0
 
 
@@ -244,8 +303,12 @@ def test_main_all_live_cli_passes_generate_tearsheet_false(monkeypatch):
 
 def test_main_strategy_id_cli_defaults_generate_tearsheet_true(monkeypatch):
     """CLI-level: the single-strategy path must NOT pass generate_tearsheet=
-    False — it relies on run_backtest's True default, so the tearsheet
-    subprocess still fires for --strategy-id / --strategy-file invocations."""
+    False — it relies on run_backtest's True default, keeping the env
+    opt-in (OPENCLAW_BT_TEARSHEET=1) AVAILABLE for --strategy-id /
+    --strategy-file invocations (unlike --all-live, which pins the param to
+    False so no env setting can ever re-enable it there). Whether the
+    subprocess actually fires is a separate, env-gated question — see the
+    OPENCLAW_BT_TEARSHEET tests above; this test only checks the kwarg."""
     captured = {}
     monkeypatch.setattr(
         ub, 'run_backtest',

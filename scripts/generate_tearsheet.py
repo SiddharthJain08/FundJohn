@@ -277,7 +277,22 @@ def run(*, run_id: Optional[str] = None, strategy_id: Optional[str] = None,
 
     daily = build_daily_returns(trades, run_row['start_date'], run_row['end_date'])
     out_dir = Path(output_dir) if output_dir else DEFAULT_OUTPUT_DIR
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # 2026-08-24 final fix wave (ruling I2/b): this mkdir used to be
+    # unguarded, so a permission error (e.g. output/tearsheets owned by a
+    # different user than whichever process invokes this script — johnbot
+    # can run as root, an operator's shell may not) would raise out of run(),
+    # past main(), to an uncaught traceback and non-zero exit — breaking this
+    # script's own documented "every failure mode prints a reason and returns
+    # 0" contract, and (worse) breaking the non-fatality research-orchestrator
+    # .js's out-of-band tearsheet spawn depends on. Caught here so any OSError
+    # (PermissionError included — it subclasses OSError) degrades to an
+    # advisory skip instead.
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f'[generate_tearsheet] output dir not creatable ({out_dir}): '
+              f'{type(e).__name__}: {e} — skipping (advisory, non-fatal)')
+        return 0
     out_path = out_dir / f'{run_row["strategy_id"]}_{run_row["run_id"]}.html'
     try:
         generate_html_tearsheet(

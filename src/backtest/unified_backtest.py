@@ -1110,13 +1110,22 @@ def run_backtest(strategy_id: str, *,
     from strategy_regime_params (2026-07-14 operator directive: config max_hold
     is baked into every backtest); pass an int to pin it (coupling candidates do).
 
-    generate_tearsheet=True (the default) fires the best-effort per-run
-    tearsheet subprocess (see below) after a committed run. The --all-live
-    CLI path passes generate_tearsheet=False explicitly — at fleet scale
-    (~140 strategies) a serialized 5-180s matplotlib/quantstats child per
-    strategy on an 8GB no-swap box risks the nightly RuntimeMaxSec SIGKILL
-    bound; operators generate a fleet strategy's tearsheet on demand via
-    scripts/generate_tearsheet.py --strategy <sid> instead.
+    generate_tearsheet=True is the default VALUE of the parameter, but the
+    in-process tearsheet subprocess (see below) is now OPT-IN at the env
+    layer: it only fires when generate_tearsheet is True AND env
+    OPENCLAW_BT_TEARSHEET == '1' (default unset ⇒ no spawn). Review finding
+    2026-08-24 (five-repo-adoptions final fix wave, I1): the nightly fleet
+    re-gate (scripts/refresh_backtests_resumable.js, scripts/rebacktest_
+    runner.py, scripts/backtest_ids.js) drives this module through the
+    SINGLE-STRATEGY --strategy-id CLI path, one subprocess per strategy — the
+    pre-existing "--all-live only" suppression never covered that fan-out, so
+    a 140-strategy fleet re-gate would have spawned 140 serialized
+    matplotlib/quantstats children on this 8GB no-swap box regardless. The
+    --all-live CLI path *also* still passes generate_tearsheet=False
+    explicitly (belt-and-suspenders — kept so --all-live never fires even if
+    an operator sets the env to '1'). Operators generate any strategy's
+    tearsheet on demand via `OPENCLAW_BT_TEARSHEET=1` or directly via
+    `scripts/generate_tearsheet.py --strategy <sid>` / `--run-id <run_id>`.
     """
     if max_hold_days is None:
         max_hold_days = _configured_max_hold_days(strategy_id)
@@ -1404,15 +1413,48 @@ def run_backtest(strategy_id: str, *,
             print(f'[unified_backtest] panel rebuild skipped: {_e}')
         # Best-effort per-run tearsheet (task P3+R3, 2026-08-24). A subprocess
         # with a hard timeout so a hung/slow render can never wedge the
-        # backtest (2-core box). Gated OFF only by explicit opt-out, AND only
-        # fired for single-strategy invocations: generate_tearsheet defaults
-        # True for --strategy-id / --strategy-file, but the --all-live fleet
-        # CLI path passes generate_tearsheet=False explicitly — at ~140
-        # strategies, a serialized 5-180s matplotlib/quantstats child per
-        # strategy is memory-unbounded and risks the nightly fleet window's
-        # real bound (RuntimeMaxSec SIGKILL) on this 8GB no-swap box.
-        # Operators can generate a fleet strategy's tearsheet on demand via
-        # `scripts/generate_tearsheet.py --strategy <sid>`.
+        # backtest (2-core box).
+        #
+        # OPT-IN as of the 2026-08-24 final fix wave (review finding I1): this
+        # in-process hook now fires ONLY when OPENCLAW_BT_TEARSHEET == '1'
+        # (default unset ⇒ no spawn), AND ONLY when generate_tearsheet is
+        # True. The original design gated solely on generate_tearsheet
+        # (default True, --all-live explicitly passes False) on the theory
+        # that only the --all-live fleet CLI path ran at fleet scale — but the
+        # ACTUAL nightly fleet re-gate (scripts/refresh_backtests_resumable.js
+        # -> `-m backtest.unified_backtest --strategy-id <sid>` per strategy;
+        # also scripts/rebacktest_runner.py, scripts/backtest_ids.js) drives
+        # the SINGLE-STRATEGY path, where generate_tearsheet still defaults
+        # True. That would have serialized ~140 5-180s matplotlib/quantstats
+        # children across a 140-strategy re-gate regardless of the
+        # --all-live suppression. Flipping the env default to OFF closes that
+        # gap for every caller at once, single-strategy or fleet, without
+        # touching the fleet runner scripts themselves. research-orchestrator.
+        # js now fires its OWN out-of-band tearsheet subprocess after this
+        # call returns (see I2 below) instead of relying on this in-process
+        # hook, so the two never double-fire under normal operation.
+        #
+        # I2 (2026-08-24, also review): this in-process hook runs BEFORE
+        # run_backtest returns, i.e. inside a caller's own timeout budget for
+        # the whole run_backtest() call (research-orchestrator.js bounds its
+        # single `python3 -m backtest.unified_backtest ...` spawn to 900s). A
+        # SIGTERM landing during tearsheet render would make such a caller
+        # record the run as failed even though the run row was already
+        # committed durably. Opt-in-only removes this risk for the
+        # orchestrator's normal path (env unset there); an operator who sets
+        # OPENCLAW_BT_TEARSHEET=1 to render inline accepts that the tearsheet
+        # subprocess's own 180s timeout now shares whatever timeout budget
+        # wraps run_backtest() in their calling context.
+        #
+        # The --all-live CLI path still ALSO passes generate_tearsheet=False
+        # explicitly (kept, belt-and-suspenders) — at ~140 strategies, a
+        # serialized 5-180s matplotlib/quantstats child per strategy is
+        # memory-unbounded and risks the nightly fleet window's real bound
+        # (RuntimeMaxSec SIGKILL) on this 8GB no-swap box even if an operator
+        # sets the env to '1'. Operators can generate a fleet strategy's
+        # tearsheet on demand via `scripts/generate_tearsheet.py --strategy
+        # <sid>` (no env needed — that script is a standalone invocation, not
+        # this in-process hook).
         #
         # commit=False runs (this whole block is inside `if commit:`) are
         # skipped here, period — this is NOT the same claim as "there is no
@@ -1422,7 +1464,7 @@ def run_backtest(strategy_id: str, *,
         # rebuild for exactly that reason. Those callers get no tearsheet
         # from this in-process hook either way — a known follow-up gap, not
         # a case of "nothing was persisted".
-        if generate_tearsheet and os.environ.get('OPENCLAW_BT_TEARSHEET', '1') != '0':
+        if generate_tearsheet and os.environ.get('OPENCLAW_BT_TEARSHEET') == '1':
             try:
                 _tear = subprocess.run(
                     [sys.executable or 'python3',

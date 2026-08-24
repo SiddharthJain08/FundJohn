@@ -252,6 +252,50 @@ function _spawnPython(args, opts = {}) {
   });
 }
 
+// Task final-fix-wave (2026-08-24, review findings I1+I2): best-effort,
+// OUT-OF-BAND per-run tearsheet. Fired once per _codeFromQueue call (single-
+// shot AND tournament, see the call site below) AFTER the backtest step has
+// already returned a run_id, using its own SEPARATE 180s timeout budget —
+// never the backtest spawn's 900s one.
+//
+// I2 was: unified_backtest.py used to fire scripts/generate_tearsheet.py
+// in-process, before printing `wrote run_id=` and returning, which put the
+// tearsheet render INSIDE the orchestrator's single 900s `_spawnPython` call
+// for the whole `python3 -m backtest.unified_backtest ...` invocation. A
+// SIGTERM landing during that in-process tearsheet (e.g. a slow render
+// pushing total wall time past 900s) killed the WHOLE backtest child, so the
+// orchestrator recorded backtest_failed (code !== 0) even though the run row
+// had already been committed durably by unified_backtest.py before the
+// tearsheet subprocess ever started. unified_backtest.py's in-process hook
+// is now opt-in-only (env OPENCLAW_BT_TEARSHEET=='1', default unset ⇒ off —
+// see src/backtest/unified_backtest.py), so this out-of-band call is now the
+// ONLY thing that renders a tearsheet for orchestrator-driven runs, and it
+// runs strictly AFTER run_backtest() has already returned successfully —
+// there is no run to fail anymore by the time this executes.
+//
+// Never fatal: any spawn failure, non-zero exit, or timeout logs exactly one
+// `[tearsheet] skipped: ...` line via `notify` and returns — it must never
+// affect the implementation_queue row or any gate/tournament decision, both
+// of which are already finalized by the time the call site below runs this.
+//
+// `spawnFn` defaults to the module's real `_spawnPython` but is an explicit
+// parameter (not a closed-over reference) so tests can inject a stub without
+// spawning a real python3 process — see tests/agent/test_tearsheet_hook.test.js.
+async function _generateTearsheet(runId, notify, spawnFn = _spawnPython) {
+  if (!runId) return;
+  try {
+    const { code, stderr } = await spawnFn(
+      ['scripts/generate_tearsheet.py', '--run-id', runId],
+      { cwd: OPENCLAW_DIR, timeoutMs: 180_000,
+        env: { ...process.env, PYTHONPATH: 'src' } });
+    if (code !== 0) {
+      notify?.(`  [tearsheet] skipped: exit=${code} ${(stderr || '').slice(-300)}`);
+    }
+  } catch (e) {
+    notify?.(`  [tearsheet] skipped: ${e.message}`);
+  }
+}
+
 class ResearchOrchestrator {
   constructor() {
     this._redis       = null;
@@ -277,6 +321,15 @@ class ResearchOrchestrator {
     // path (processQueue, runHunterFanout, Phase 3's 'promotion' decision)
     // are unchanged and still call the free function directly.
     this._emitDecisionFn = emitGateDecision;
+    // Final-fix-wave (2026-08-24, I1+I2): out-of-band post-backtest
+    // tearsheet, see _generateTearsheet's doc above. Same seam pattern as
+    // the four above — real implementation by default, never overridden in
+    // production. _codeFromQueue's call site is NOT exercised by
+    // scripts/tournament_dryrun.js (that script calls _runTournament()
+    // directly, never _codeFromQueue — see its own module docstring), so
+    // this seam exists for tests/agent/test_tearsheet_hook.test.js rather
+    // than for dry-run isolation.
+    this._tearsheetFn = _generateTearsheet;
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -793,6 +846,21 @@ class ResearchOrchestrator {
       vPaperId = gate.vPaperId;
     }
 
+    // Out-of-band tearsheet (I1+I2, see _generateTearsheet's doc above).
+    // Deliberately placed HERE — the one point after both the single-shot
+    // (_runGateChain, above) and tournament (_runTournament) branches have
+    // converged on a single non-error btResult: the tournament branch
+    // already re-attributed the winner's run_id to the canonical stratId
+    // before returning (strategy_backtest_runs/_trades UPDATE inside
+    // _runTournament), so this fires exactly once per queue row either way
+    // — never per tournament variant — and always against the canonical,
+    // already-committed run. Awaited (not fire-and-forget): its own 180s
+    // timeout is what fixes I2, not backgrounding it, and by this point the
+    // queue row was never set to backtest_failed and the convergence/
+    // tournament-winner decision was already emitted, so nothing downstream
+    // can be affected by how long this takes or whether it fails.
+    await this._tearsheetFn(btResult?.run_id, notify);
+
     // ── Phase 3: Auto-promote (state-aware) ─────────────────────────────────
     // Under the fused-approval lifecycle (2026-04-27), the canonical promotion
     // is STAGING → CANDIDATE: the fused worker invokes _codeFromQueue inline
@@ -1020,7 +1088,19 @@ class ResearchOrchestrator {
         ['-m', 'backtest.unified_backtest', '--strategy-file', implPath,
          '--universe-cap', 'tier_liquid'],
         { cwd: OPENCLAW_DIR, timeoutMs: 900_000, onChild: opts.onChild,
-          env: { ...process.env, PYTHONPATH: 'src' } });
+          // OPENCLAW_BT_TEARSHEET forced '0' regardless of ambient env/`.env`
+          // (final fix wave, I2): unified_backtest.py's in-process tearsheet
+          // hook is opt-in via this var, and _generateTearsheet (this
+          // file's own out-of-band call, fired after this spawn returns —
+          // see the call site in _codeFromQueue) is now the ONLY tearsheet
+          // path for orchestrator-driven runs. Without this override, an
+          // operator exporting OPENCLAW_BT_TEARSHEET=1 for direct CLI use
+          // (or a future `.env` entry — resurrect_failed_validation_queue.js
+          // loads `.env` via dotenv before calling this same code path)
+          // would silently reintroduce I2 (tearsheet render back inside this
+          // 900s budget) AND double-render every run (in-process + this
+          // file's out-of-band call).
+          env: { ...process.env, PYTHONPATH: 'src', OPENCLAW_BT_TEARSHEET: '0' } });
       const runIdMatch = stdout.match(/run_id=([0-9a-f-]{36})/);
       if (code !== 0 || !runIdMatch) {
         return { error: `unified_backtest exit=${code}; stdout: ${stdout.slice(-400)}; stderr: ${stderr.slice(-400)}` };
@@ -2146,3 +2226,4 @@ module.exports._isPrescreenShape = _isPrescreenShape;
 module.exports.buildCoderContext = buildCoderContext;
 module.exports._variantPath = _variantPath;
 module.exports.QUEUE_STATUS_FOR_REASON = QUEUE_STATUS_FOR_REASON;
+module.exports._generateTearsheet = _generateTearsheet;
