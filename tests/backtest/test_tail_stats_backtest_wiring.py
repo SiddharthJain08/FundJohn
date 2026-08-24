@@ -154,7 +154,7 @@ def test_cvar_and_tail_sortino_populated_without_disturbing_sortino():
     # tuple layout: run_id, regime, trade_count, sharpe, max_dd_pct,
     # return_pct, hit_rate, avg_pnl_pct, avg_holding_days,
     # oos_days_in_regime, sortino, calmar, cvar_5, tail_sortino
-    assert len(low_vol_row) == 14
+    assert len(low_vol_row) == 15  # +benchmark_sharpe (R1, mig 149)
     existing_sortino, existing_calmar, cvar_5, tail_sortino = low_vol_row[10:14]
     assert cvar_5 is not None
     assert tail_sortino is not None

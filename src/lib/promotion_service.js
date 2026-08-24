@@ -21,6 +21,13 @@
 // (momentum_12_1 LOW_VOL: Sharpe 2.62 on 4,759 trades, DD 26%). A sleeve
 // whose Calmar >= min_calmar passes the DD leg up to dd_hard_cap_pct (the
 // catastrophic ceiling that keeps martingale-shaped curves out regardless).
+// R1 (2026-08-24, five-repo-adoptions): FOURTH sleeve leg, benchmark-
+// relative. When the sleeve's persisted benchmark_sharpe (strategy_
+// backtest_regimes.benchmark_sharpe, migration 149; regime-conditioned SPY
+// Sharpe from src/backtest/benchmark_baseline.py) is present, ALSO require
+// sharpe STRICTLY EXCEEDS benchmark_sharpe + MIN_EXCESS_SHARPE_VS_BENCHMARK
+// (0.0 default). NULL benchmark_sharpe -> criterion skipped, fail open
+// (logged). This leg only ever TIGHTENS the gate (see judgeRegimeSleeve).
 const PROMOTION_THRESHOLDS = {
   equity: { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 50 },
   etp:    { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 50 },
@@ -30,15 +37,43 @@ const PROMOTION_THRESHOLDS = {
   option: { min_sharpe: 0, max_drawdown_pct: 30, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 60 },
   crypto: { min_sharpe: 0, max_drawdown_pct: 70, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 85 },
 };
+// R1 (2026-08-24, five-repo-adoptions, benchmark-relative promotion
+// criterion): mirrors lifecycle.py MIN_EXCESS_SHARPE_VS_BENCHMARK_BY_CLASS —
+// keep the literal 0.0 values in sync (tests/backtest/test_benchmark_baseline.py
+// has a twin-sync tripwire). Kept as its OWN class-keyed object rather than
+// folded into PROMOTION_THRESHOLDS, matching the python side's shape (see
+// lifecycle.py's header comment on that dict for why: folding it in would
+// change PROMOTION_THRESHOLDS's key set under existing exact-equality
+// assertions). All four classes share the same 0.0 default for now.
+const MIN_EXCESS_SHARPE_VS_BENCHMARK = 0;
+const MIN_EXCESS_SHARPE_VS_BENCHMARK_BY_CLASS = {
+  equity: MIN_EXCESS_SHARPE_VS_BENCHMARK,
+  etp:    MIN_EXCESS_SHARPE_VS_BENCHMARK,
+  option: MIN_EXCESS_SHARPE_VS_BENCHMARK,
+  crypto: MIN_EXCESS_SHARPE_VS_BENCHMARK,
+};
 const CANONICAL_REGIMES = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
 function getPromotionThreshold(instrumentClass) {
   return PROMOTION_THRESHOLDS[instrumentClass] || PROMOTION_THRESHOLDS.equity;
 }
+function getMinExcessSharpeVsBenchmark(instrumentClass) {
+  return instrumentClass in MIN_EXCESS_SHARPE_VS_BENCHMARK_BY_CLASS
+    ? MIN_EXCESS_SHARPE_VS_BENCHMARK_BY_CLASS[instrumentClass]
+    : MIN_EXCESS_SHARPE_VS_BENCHMARK;
+}
 // Judge ONE regime sleeve row against the class thresholds. Returns the list
-// of failed gate kinds ('no_backtest' | 'sharpe' | 'max_dd' | 'trades'); an
-// empty list means the sleeve qualifies. Missing row / NULL metric fails
-// closed as no_backtest — never a silent pass.
-function judgeRegimeSleeve(row, thresholds) {
+// of failed gate kinds ('no_backtest' | 'sharpe' | 'max_dd' | 'trades' |
+// 'benchmark_sharpe'); an empty list means the sleeve qualifies. Missing row
+// / NULL metric fails closed as no_backtest — never a silent pass.
+//
+// `ctx` (optional) carries {instrumentClass, sid, regime} for the R1
+// benchmark leg + its log lines: instrumentClass selects the per-class
+// excess-Sharpe floor (falls back to 'equity', matching getPromotionThreshold);
+// sid/regime only name the log lines. Omitting ctx (as the pre-R1 test
+// suite's 2-arg calls do) degrades gracefully — equity floor, '?' placeholders
+// — with no change to the legacy fails[] behavior.
+function judgeRegimeSleeve(row, thresholds, ctx = {}) {
+  const { instrumentClass = 'equity', sid = '?', regime = '?' } = ctx;
   const s  = row && row.sharpe      != null ? parseFloat(row.sharpe)          : NaN;
   const dd = row && row.max_dd_pct  != null ? parseFloat(row.max_dd_pct)      : NaN;
   const n  = row && row.trade_count != null ? parseInt(row.trade_count, 10)   : NaN;
@@ -55,6 +90,34 @@ function judgeRegimeSleeve(row, thresholds) {
   if (!(s > thresholds.min_sharpe)) fails.push('sharpe');          // strict: must EXCEED
   if (!ddOk) fails.push('max_dd');
   if (n < thresholds.min_trades) fails.push('trades');
+  const legacyPass = fails.length === 0;
+
+  // R1 (2026-08-24, five-repo-adoptions): benchmark-relative promotion
+  // criterion. `row.benchmark_sharpe` is the sleeve's persisted
+  // strategy_backtest_regimes.benchmark_sharpe (migration 149), written by
+  // unified_backtest.py from backtest.benchmark_baseline.regime_benchmark_sharpe.
+  // pg's node-postgres driver returns NUMERIC columns as strings; parseFloat
+  // + isNaN handles both a missing column (undefined -> NaN) and a
+  // non-finite persisted value the same way: skip, fail open.
+  const bench = row && row.benchmark_sharpe != null ? parseFloat(row.benchmark_sharpe) : NaN;
+  if (isNaN(bench)) {
+    // [bench_gate] no benchmark for <regime>; skipped -- logged every
+    // evaluation (First-Sunday observability requirement), independent of
+    // the legacy verdict.
+    console.debug(`[bench_gate] no benchmark for ${regime}; skipped`);
+    return fails;
+  }
+  const minExcess = getMinExcessSharpeVsBenchmark(instrumentClass);
+  if (!(s > bench + minExcess)) fails.push('benchmark_sharpe');
+  const benchPass = fails.length === 0;
+  // Benchmark is ANDed on top of the legacy result, so it can only ever
+  // TIGHTEN the gate (legacyPass=true, benchPass=false) — the reverse flip
+  // is unreachable by construction; a comment here beats an assert inside a
+  // live promotion gate.
+  const _msg = `[bench_gate] ${sid} ${regime} legacy=${legacyPass ? 'PASS' : 'FAIL'} `
+    + `bench=${benchPass ? 'PASS' : 'FAIL'} (sharpe=${s} bench=${bench})`;
+  if (legacyPass !== benchPass) console.log(_msg);       // outcome changed: operator-visible
+  else console.debug(_msg);                              // unchanged: still logged, quieter
   return fails;
 }
 async function _latestPrimaryRun(dbQuery, sid) {
@@ -78,7 +141,7 @@ async function _regimeSleeves(dbQuery, runId) {
   if (runId == null) return null;
   try {
     const rg = await dbQuery(
-      `SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
+      `SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar, benchmark_sharpe
          FROM strategy_backtest_regimes WHERE run_id = $1`, [runId]);
     return new Map(rg.rows.map(r => [r.regime_state, r]));
   } catch (_) { return null; }
@@ -97,7 +160,7 @@ async function computeQualifyingRegimes({ dbQuery, sid, instrumentClass }) {
   for (const regime of CANONICAL_REGIMES) {
     const row = byRegime.get(regime);
     if (!row) continue;                            // strategy never fired in this regime
-    const fails = judgeRegimeSleeve(row, thresholds);
+    const fails = judgeRegimeSleeve(row, thresholds, { instrumentClass, sid, regime });
     out.diag[regime] = {
       sharpe: row.sharpe != null ? parseFloat(row.sharpe) : null,
       trade_count: row.trade_count != null ? parseInt(row.trade_count, 10) : null,
@@ -129,7 +192,7 @@ async function evaluatePromotionGate({ dbQuery, sid, instrumentClass, force, eli
     // 'sharpe:CRISIS', 'max_dd:LOW_VOL', 'trades:HIGH_VOL', 'no_backtest:R'.
     const qualifying = [];
     for (const regime of eligibleRegimes) {
-      const fails = byRegime ? judgeRegimeSleeve(byRegime.get(regime), thresholds) : ['no_backtest'];
+      const fails = byRegime ? judgeRegimeSleeve(byRegime.get(regime), thresholds, { instrumentClass, sid, regime }) : ['no_backtest'];
       if (fails.length === 0) qualifying.push(regime);
       for (const f of fails) failedGates.push(`${f}:${regime}`);
     }
@@ -143,7 +206,7 @@ async function evaluatePromotionGate({ dbQuery, sid, instrumentClass, force, eli
     for (const regime of CANONICAL_REGIMES) {
       const row = byRegime.get(regime);
       if (!row) continue;
-      const fails = judgeRegimeSleeve(row, thresholds);
+      const fails = judgeRegimeSleeve(row, thresholds, { instrumentClass, sid, regime });
       if (fails.length === 0) qualifying.push(regime);
       else for (const f of fails) diagFails.push(`${f}:${regime}`);
     }
@@ -241,4 +304,5 @@ async function transitionStrategy({ dbQuery, manifestPath, sid, toState, fromSta
            qualifyingRegimes: autoQualifying || (Array.isArray(eligibleRegimes) && eligibleRegimes.length ? eligibleRegimes.slice() : null) };
 }
 module.exports = { getPromotionThreshold, evaluatePromotionGate, computeQualifyingRegimes, judgeRegimeSleeve,
-                   transitionStrategy, PROMOTION_THRESHOLDS, REGISTRY_STATUS_FOR, CANONICAL_REGIMES };
+                   transitionStrategy, PROMOTION_THRESHOLDS, REGISTRY_STATUS_FOR, CANONICAL_REGIMES,
+                   getMinExcessSharpeVsBenchmark, MIN_EXCESS_SHARPE_VS_BENCHMARK_BY_CLASS };

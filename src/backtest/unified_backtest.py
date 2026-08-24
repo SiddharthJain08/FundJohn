@@ -1291,6 +1291,25 @@ def run_backtest(strategy_id: str, *,
         except Exception as _e:
             _log(f'[tail_stats] skipped: {type(_e).__name__}: {_e}')
 
+        # Benchmark-relative promotion criterion (task R1, 2026-08-24
+        # five-repo-adoptions): regime-conditioned SPY Sharpe baseline,
+        # computed ONCE per run (cached in this dict, not per-regime-row) via
+        # src/backtest/benchmark_baseline.py. Feeds
+        # strategy_backtest_regimes.benchmark_sharpe (migration 149), read by
+        # regime_qualification.qualifies_regime (python) and
+        # promotion_service.js judgeRegimeSleeve (JS) as the excess-Sharpe-
+        # over-benchmark gate leg. try/except non-fatal — a missing/broken
+        # benchmark must never fail a backtest run (fail-open contract; see
+        # benchmark_baseline module docstring). regime_benchmark_sharpe
+        # itself also fails open (returns {} / per-regime None), so this
+        # try/except only guards the import + call plumbing.
+        _benchmark_sharpe_by_regime: dict[str, float] = {}
+        try:
+            from backtest.benchmark_baseline import regime_benchmark_sharpe
+            _benchmark_sharpe_by_regime = regime_benchmark_sharpe(start_dt, end_dt) or {}
+        except Exception as _e:
+            _log(f'[bench_gate] persist skipped: {_e}')
+
         # 2026-05-19: always write a row per canonical regime, even when
         # the strategy produced 0 trades in that regime. The dashboard's
         # per-regime BT Sharpe view (renderBacktestRegimeBreakdown) reads
@@ -1307,13 +1326,14 @@ def run_backtest(strategy_id: str, *,
             _tail = _tail_stats_by_regime.get(regime) or {}
             _cvar_5 = _tail.get('cvar_5')
             _tail_sortino = _tail.get('sortino')
+            _bench_sharpe = _benchmark_sharpe_by_regime.get(regime)
             if n_trades == 0:
                 regime_rows.append((
                     run_id, regime,
                     0, None, None, None, None, None, None,
                     int(agg.get('oos_days_in_regime') or 0),
                     None, None,
-                    _cvar_5, _tail_sortino,
+                    _cvar_5, _tail_sortino, _bench_sharpe,
                 ))
                 continue
             regime_rows.append((
@@ -1322,14 +1342,15 @@ def run_backtest(strategy_id: str, *,
                 agg['return_pct'], agg['hit_rate'], agg['avg_pnl_pct'],
                 agg['avg_holding_days'], agg['oos_days_in_regime'],
                 agg.get('sortino'), agg.get('calmar'),
-                _cvar_5, _tail_sortino,
+                _cvar_5, _tail_sortino, _bench_sharpe,
             ))
         if regime_rows:
             psycopg2.extras.execute_values(cur, """
                 INSERT INTO strategy_backtest_regimes
                   (run_id, regime_state, trade_count, sharpe, max_dd_pct,
                    return_pct, hit_rate, avg_pnl_pct, avg_holding_days,
-                   oos_days_in_regime, sortino, calmar, cvar_5, tail_sortino)
+                   oos_days_in_regime, sortino, calmar, cvar_5, tail_sortino,
+                   benchmark_sharpe)
                 VALUES %s
             """, regime_rows)
         if trades:
