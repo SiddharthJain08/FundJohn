@@ -1090,7 +1090,8 @@ def run_backtest(strategy_id: str, *,
                  return_metrics: bool = False,
                  instrument_class: str = 'equity',
                  fill_model: Optional[str] = None,
-                 universe_cap: Optional[str] = None) -> str:
+                 universe_cap: Optional[str] = None,
+                 generate_tearsheet: bool = True) -> str:
     """Execute the unified backtest for one strategy. Returns the run_id (UUID).
 
     Side effect: writes one row to strategy_backtest_runs, up to 4 rows
@@ -1108,6 +1109,14 @@ def run_backtest(strategy_id: str, *,
     max_hold_days=None (the default) resolves the STRATEGY-CONFIGURED horizon
     from strategy_regime_params (2026-07-14 operator directive: config max_hold
     is baked into every backtest); pass an int to pin it (coupling candidates do).
+
+    generate_tearsheet=True (the default) fires the best-effort per-run
+    tearsheet subprocess (see below) after a committed run. The --all-live
+    CLI path passes generate_tearsheet=False explicitly — at fleet scale
+    (~140 strategies) a serialized 5-180s matplotlib/quantstats child per
+    strategy on an 8GB no-swap box risks the nightly RuntimeMaxSec SIGKILL
+    bound; operators generate a fleet strategy's tearsheet on demand via
+    scripts/generate_tearsheet.py --strategy <sid> instead.
     """
     if max_hold_days is None:
         max_hold_days = _configured_max_hold_days(strategy_id)
@@ -1255,6 +1264,33 @@ def run_backtest(strategy_id: str, *,
             None,
             total_metrics['sortino'], total_metrics['calmar'], total_metrics['avg_pnl_pct'],
         ))
+        # Advisory sleeve tail stats (task P3+R3, 2026-08-24 five-repo-
+        # adoptions): CVaR(5%) + a raw per-trade Sortino per regime sleeve,
+        # computed from that sleeve's own pnl_pct series (the `trades` list
+        # already in scope here — no extra query needed). Best-effort: a
+        # failure must never fail the backtest, hence the blanket try/except.
+        # Written to distinctly-named columns (cvar_5, tail_sortino) rather
+        # than overwriting the pre-existing `sortino` column (migration 135,
+        # a different annualized/portfolio-based metric already read by the
+        # dashboard) — see migration 148's header comment for the full
+        # rationale. Never a gate/sizing/promotion input.
+        _tail_stats_by_regime: dict[str, dict] = {}
+        try:
+            from backtest.tail_stats import sleeve_tail_stats
+            _by_regime_pnl: dict[str, list] = {r: [] for r in CANONICAL_REGIMES}
+            for t in trades:
+                _r = t.get('entry_regime')
+                _pnl = t.get('pnl_pct')
+                # Drop non-finite pnl_pct the same way aggregate_metrics does
+                # (2026-06-15 BRK-B incident: one corrupt price bar must not
+                # poison a sleeve-wide stat with a NaN/inf).
+                if _r in _by_regime_pnl and _pnl is not None and math.isfinite(_pnl):
+                    _by_regime_pnl[_r].append(float(_pnl))
+            for _regime, _pnl_list in _by_regime_pnl.items():
+                _tail_stats_by_regime[_regime] = sleeve_tail_stats(_pnl_list)
+        except Exception as _e:
+            _log(f'[tail_stats] skipped: {type(_e).__name__}: {_e}')
+
         # 2026-05-19: always write a row per canonical regime, even when
         # the strategy produced 0 trades in that regime. The dashboard's
         # per-regime BT Sharpe view (renderBacktestRegimeBreakdown) reads
@@ -1268,12 +1304,16 @@ def run_backtest(strategy_id: str, *,
         for regime in CANONICAL_REGIMES:
             agg = per_regime.get(regime, {})
             n_trades = int(agg.get('trade_count', 0) or 0)
+            _tail = _tail_stats_by_regime.get(regime) or {}
+            _cvar_5 = _tail.get('cvar_5')
+            _tail_sortino = _tail.get('sortino')
             if n_trades == 0:
                 regime_rows.append((
                     run_id, regime,
                     0, None, None, None, None, None, None,
                     int(agg.get('oos_days_in_regime') or 0),
                     None, None,
+                    _cvar_5, _tail_sortino,
                 ))
                 continue
             regime_rows.append((
@@ -1282,13 +1322,14 @@ def run_backtest(strategy_id: str, *,
                 agg['return_pct'], agg['hit_rate'], agg['avg_pnl_pct'],
                 agg['avg_holding_days'], agg['oos_days_in_regime'],
                 agg.get('sortino'), agg.get('calmar'),
+                _cvar_5, _tail_sortino,
             ))
         if regime_rows:
             psycopg2.extras.execute_values(cur, """
                 INSERT INTO strategy_backtest_regimes
                   (run_id, regime_state, trade_count, sharpe, max_dd_pct,
                    return_pct, hit_rate, avg_pnl_pct, avg_holding_days,
-                   oos_days_in_regime, sortino, calmar)
+                   oos_days_in_regime, sortino, calmar, cvar_5, tail_sortino)
                 VALUES %s
             """, regime_rows)
         if trades:
@@ -1340,6 +1381,41 @@ def run_backtest(strategy_id: str, *,
             _rebuild_panel(strategy_id)
         except Exception as _e:
             print(f'[unified_backtest] panel rebuild skipped: {_e}')
+        # Best-effort per-run tearsheet (task P3+R3, 2026-08-24). A subprocess
+        # with a hard timeout so a hung/slow render can never wedge the
+        # backtest (2-core box). Gated OFF only by explicit opt-out, AND only
+        # fired for single-strategy invocations: generate_tearsheet defaults
+        # True for --strategy-id / --strategy-file, but the --all-live fleet
+        # CLI path passes generate_tearsheet=False explicitly — at ~140
+        # strategies, a serialized 5-180s matplotlib/quantstats child per
+        # strategy is memory-unbounded and risks the nightly fleet window's
+        # real bound (RuntimeMaxSec SIGKILL) on this 8GB no-swap box.
+        # Operators can generate a fleet strategy's tearsheet on demand via
+        # `scripts/generate_tearsheet.py --strategy <sid>`.
+        #
+        # commit=False runs (this whole block is inside `if commit:`) are
+        # skipped here, period — this is NOT the same claim as "there is no
+        # persisted run for the tearsheet to read": some commit=False callers
+        # (e.g. src/execution/backtest_coupled_recs.py's apply path) commit
+        # the run externally at their own call site and even redo the panel
+        # rebuild for exactly that reason. Those callers get no tearsheet
+        # from this in-process hook either way — a known follow-up gap, not
+        # a case of "nothing was persisted".
+        if generate_tearsheet and os.environ.get('OPENCLAW_BT_TEARSHEET', '1') != '0':
+            try:
+                _tear = subprocess.run(
+                    [sys.executable or 'python3',
+                     str(ROOT / 'scripts' / 'generate_tearsheet.py'),
+                     '--run-id', run_id],
+                    cwd=str(ROOT), capture_output=True, text=True, timeout=180,
+                )
+                for _line in (_tear.stdout or '').splitlines():
+                    _log(f'[tearsheet] {_line}')
+                if _tear.returncode != 0:
+                    _log(f'[tearsheet] exit={_tear.returncode} '
+                         f'stderr={(_tear.stderr or "")[-500:]}')
+            except Exception as _e:
+                _log(f'[tearsheet] skipped: {type(_e).__name__}: {_e}')
     if return_metrics:
         import statistics
         sd = [abs(t['entry_price'] - t['signal_stop']) / t['entry_price']
@@ -1386,13 +1462,18 @@ def main() -> int:
     if args.all_live:
         sids = _all_live_strategies()
         _log(f'running {len(sids)} strategies')
+        _log('[tearsheet] skipped for --all-live fleet run (per-strategy '
+             'generation would serialize ~140 5-180s matplotlib/quantstats '
+             'children on this 8GB no-swap box); generate on demand via '
+             '`scripts/generate_tearsheet.py --strategy <sid>`')
         ok = 0; fail = 0
         for sid in sids:
             try:
                 run_backtest(sid,
                              start_date=args.start_date, end_date=args.end_date,
                              max_hold_days=args.max_hold_days,
-                             instrument_class=_resolve_instrument_class(sid))
+                             instrument_class=_resolve_instrument_class(sid),
+                             generate_tearsheet=False)
                 ok += 1
             except Exception as e:
                 _log(f'FAIL {sid}: {type(e).__name__}: {e}')
