@@ -138,6 +138,21 @@ async function sweepCandidates({ log, dryRun, apiBase }) {
       if (r.status === 200 && r.body.ok) {
         promoted.push({ sid, qualifying: r.body.qualifying_regimes || [] });
         log(`  PROMOTED ${sid} → live in [${(r.body.qualifying_regimes || []).join(', ')}]`);
+        // Task S3: structured adversarial dissent, best-effort and NON-VETO —
+        // the transition above is already final. Awaited SERIALLY (2-core
+        // VPS; no Promise.all fan-out) so one dissent call finishes before
+        // the next candidate is offered the gate. A dissent failure must
+        // never interrupt the sweep.
+        try {
+          const { dissentOnPromotion } = require('./promotion_dissent');
+          await dissentOnPromotion({
+            strategyId: sid,
+            actor: 'system:sunday-auto-approval',
+            model: process.env.OPENCLAW_DISSENT_MODEL || undefined,
+          });
+        } catch (e) {
+          log(`[dissent] failed for ${sid}: ${e.message}`);
+        }
       } else if (r.status === 422) {
         blocked.push({ sid, failed_gates: r.body.failed_gates || [r.body.error] });
       } else {
