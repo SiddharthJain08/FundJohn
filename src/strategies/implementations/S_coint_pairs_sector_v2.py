@@ -1,0 +1,355 @@
+"""
+S_coint_pairs_sector_v2: sector cointegration pairs — ledger-driven z-score
+edge-trigger entries.
+
+This strategy does ZERO statistical estimation at signal time. A separate,
+offline pairs scanner performs the Engle-Granger cointegration test, FDR
+correction across candidate pairs, and cost gating, and freezes the result
+(hedge ratio, intercept, and pass/fail flags) into one row per pair per
+scan date in `data/derived/pair_ledger.parquet` (path overridable via
+`OPENCLAW_PAIR_LEDGER` — tests point this at a tmp file). This file only:
+  1. reads the ledger, look-ahead-filtered to the CURRENT prices panel,
+  2. recomputes a rolling z-score of the frozen spread from the live prices
+     panel, and
+  3. fires an edge-triggered entry when that z-score newly crosses +-2.0.
+Keeping this file numpy/pandas/pyarrow-only (no statsmodels) means the
+live/backtest signal path never re-runs the (expensive, look-ahead-fragile)
+cointegration estimation — that estimation is frozen data, read here exactly
+like any other ledger.
+
+Spread convention (fixed by the scanner; this file must match it exactly):
+    spread_t = log(ticker_a_t) - beta * log(ticker_b_t) - alpha
+
+LOOK-AHEAD SAFETY
+-----------------
+`as_of = prices.index.max()` is the last bar of the PASSED-IN prices panel —
+not wall-clock "today". This matters for backtests, which pass a prices
+panel truncated to the replay date. The ledger read filters
+`ledger.as_of <= as_of` and then keeps only the newest as_of value that
+survives that filter (a ledger row minted the day AFTER the panel's last bar
+is invisible here even if it already sits in the parquet file — this is what
+makes a backtest over historical dates replay-safe as new scanner rows
+accumulate in the same physical ledger file over time). Within that selected
+as_of snapshot, only `approved == True` rows are used; fdr_pass/cost_ok are
+assumed already folded into `approved` by the scanner (this file does not
+re-check them independently — see report for this assumption).
+
+SIZING — equal-dollar-notional legs
+------------------------------------
+`beta` here is a LOG-price hedge ratio (spread = log(A) - beta*log(B) -
+alpha), not a dollar hedge ratio. Converting it into an exact dollar-neutral
+weight would require beta_dollar = beta * (price_B / price_A) recomputed at
+execution time, and even that only holds instantaneously since it drifts as
+the two legs move — that computation needs portfolio-level dollar/NAV context
+this method is never given (generate_signals only sees the prices panel,
+regime, and universe). The neighboring live pairs strategy,
+S_pairs_trading_jump_diffusion_intraday, sidesteps this the same way: it
+gives BOTH legs of a pair the identical position_size_pct (its BASE_SIZE,
+scaled by regime) rather than a beta-weighted split. We follow the exact same
+mechanism (`self.BASE_SIZE * scale` on both legs) — equal DOLLAR notional per
+leg is the correct first-order dollar-neutral construction for a log-price
+hedge when no downstream dollar-sizing context is available at this layer.
+
+HOLDING / CADENCE
+-----------------
+base.py (BaseStrategy) provides no dedicated "holding days" class attribute
+or Signal field. The house convention observed in S24_52wk_high_proximity.py
+and S_microcap_insider_purchase_momentum.py is:
+  - `default_parameters()['hold_days']` — a strategy-level flat fallback,
+    genuinely read at signal time (BaseStrategy.__init__ merges any DB-level
+    `parameters` override on top of this default into `self.parameters`, so
+    an operator override of `hold_days` actually takes effect here).
+  - `Signal.signal_params['hold_days']` — a per-signal override.
+Because half-life is PER-PAIR (read straight off the ledger row), when
+`half_life_days` is present and finite we use the per-signal override:
+`signal_params['hold_days'] = min(round(3 * half_life_days), 30)`. When
+`half_life_days` is NaN/missing (the ledger row carries no usable estimate),
+there is no per-pair basis for that formula, so we fall back directly to the
+operator-overridable class default instead of fabricating a half-life:
+`hold_days = self.parameters.get('hold_days', 21)`, and
+`signal_params['half_life_days']` is left `None` (never a fabricated 21.0)
+so a downstream reader can tell "no half-life was available" apart from
+"the half-life happened to compute to 21".
+
+EXITS — what's engine-expressible today vs. approximated
+----------------------------------------------------------
+The typical exit spec for this strategy family is: (a) close when
+|z| <= 0.5 (reversion achieved), (b) a "structural kill" if the pair's
+cointegration relationship breaks down on a later re-scan, and (c) a
+time-based stop after roughly N days without reversion. The engine that
+consumes Signal objects holds a position via CADENCE (next-fire-date
+bookkeeping driven by signal_params['hold_days']) plus hard stop/target
+levels from compute_stops_and_targets() — there is no generic per-bar
+"recompute an indicator and flatten on threshold-cross" hook available to a
+strategy at this layer. So, concretely:
+  - (a) the |z|<=0.5 early exit is APPROXIMATED by the cadence window (a
+    holding period calibrated off the same half-life/reversion assumption)
+    — it is NOT an exact per-bar z-recheck-and-flatten.
+  - (b) the structural-kill (pair decoheres) is APPROXIMATED indirectly: if
+    the scanner drops the pair from `approved` on its next run, this
+    strategy simply stops re-firing NEW entries on it; it does not
+    proactively flatten an already-open position early. Doing that would
+    require an exit-side hook this strategy layer does not have.
+  - (c) the time stop is exactly what hold_days/cadence gives.
+Do not invent engine features to close this gap — it is reported as owed in
+the task report, not silently worked around here.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+from typing import List
+
+import numpy as np
+import pandas as pd
+
+from strategies.base import BaseStrategy, Signal
+
+__all__ = ['CointPairsSectorV2']
+
+# repo_root: src/strategies/implementations/<this file> -> parents[3] == repo root
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_DEFAULT_LEDGER_REL = Path('data') / 'derived' / 'pair_ledger.parquet'
+
+# Columns this file cannot operate safely without. Missing `approved` in
+# particular must NEVER be treated as "everything is approved" -- that is
+# the one gate this strategy exists to enforce. Validated once, right after
+# read, in _load_approved_pairs(); any miss returns the empty result rather
+# than raising or falling open.
+_REQUIRED_LEDGER_COLUMNS = [
+    'as_of', 'ticker_a', 'ticker_b', 'beta', 'alpha', 'half_life_days', 'approved',
+]
+
+
+def _ledger_path() -> Path:
+    """Resolve the pair ledger path — OPENCLAW_PAIR_LEDGER overrides the
+    default (repo_root/data/derived/pair_ledger.parquet). Resolved fresh on
+    every call (not cached) so tests can point this at a tmp file per-test."""
+    override = os.environ.get('OPENCLAW_PAIR_LEDGER')
+    return Path(override) if override else (_REPO_ROOT / _DEFAULT_LEDGER_REL)
+
+
+def _load_approved_pairs(as_of_date: pd.Timestamp) -> pd.DataFrame:
+    """Load the pair ledger, look-ahead-filtered to as_of_date via pyarrow
+    predicate pushdown, LATEST surviving as_of snapshot only, approved-only.
+    Always returns a DataFrame (empty on any miss) — never raises.
+
+    The scanner (src/pipeline/pairs_scanner.py) writes `as_of` as a python
+    date (parquet date32); pyarrow's filter comparator accepts a pd.Timestamp
+    against a date32 column directly (verified), so no dtype juggling is
+    needed before the pushdown read."""
+    path = _ledger_path()
+    if not path.exists():
+        print(f'[debug] pair_ledger missing at {path}', file=sys.stderr)
+        return pd.DataFrame()
+    try:
+        import pyarrow.parquet as pq
+        table = pq.read_table(str(path), filters=[('as_of', '<=', as_of_date)])
+    except Exception as e:
+        print(f'[debug] pair_ledger read failed ({path}): {e}', file=sys.stderr)
+        return pd.DataFrame()
+
+    df = table.to_pandas()
+
+    # Validate the full required column set ONCE, right after read. A
+    # malformed ledger (e.g. missing `approved`) must fail CLOSED (empty
+    # result, one log line) — never raise (AttributeError downstream in
+    # generate_signals) and never silently treat every row as approved.
+    missing_cols = [c for c in _REQUIRED_LEDGER_COLUMNS if c not in df.columns]
+    if missing_cols:
+        print(f'[debug] pair_ledger at {path} missing required columns {missing_cols} '
+              f'-- treating as no approved pairs (fail-closed)', file=sys.stderr)
+        return pd.DataFrame()
+
+    if df.empty:
+        print(f'[debug] pair_ledger has no rows with as_of <= {as_of_date.date()}', file=sys.stderr)
+        return df
+
+    df = df.copy()
+    df['as_of'] = pd.to_datetime(df['as_of'])
+    latest = df['as_of'].max()
+    df = df[df['as_of'] == latest]
+    df = df[df['approved'] == True]  # noqa: E712 — explicit bool compare; NaN/None safely excluded
+    if df.empty:
+        print(f'[debug] pair_ledger has no approved rows for as_of={latest.date()}', file=sys.stderr)
+    return df
+
+
+class CointPairsSectorV2(BaseStrategy):
+    """Sector cointegration pairs: ledger-driven z-score edge-trigger entries.
+    See module docstring for the full look-ahead-safety / sizing / holding /
+    exit-approximation design notes.
+    """
+
+    id                = 'S_coint_pairs_sector_v2'
+    name              = 'CointPairsSectorV2'
+    description       = ('Sector cointegration pairs trading — offline EG/FDR-gated pair '
+                          'ledger, live z-score edge-trigger entries, dollar-neutral legs.')
+    tier              = 2
+    min_lookback      = 61
+    # Let the eligibility assigner narrow this from backtest data later (operator directive).
+    active_in_regimes = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS']
+
+    Z_WINDOW     = 60      # rolling window for mean/std of the spread
+    Z_ENTRY      = 2.0     # edge-trigger entry threshold
+    Z_BACKSTOP   = 4.0     # reject as a probable data/estimation glitch
+    Z_HIGH_CONF  = 2.5     # HIGH vs MED confidence cutoff
+    BASE_SIZE    = 0.04    # fraction per leg — matches PairsTradingJumpDiffusionIntraday's
+                            # per-leg convention (equal dollar notional both legs; see docstring)
+
+    def default_parameters(self) -> dict:
+        return {
+            # Genuinely read at signal time when a pair's half_life_days is
+            # NaN/missing (see generate_signals) -- operator-overridable via
+            # a DB `parameters` row, merged into self.parameters by
+            # BaseStrategy.__init__. When half-life IS present, the
+            # per-signal hold_days is min(3*half_life_days, 30) instead.
+            'hold_days': 21,
+        }
+
+    def generate_signals(
+        self, prices: pd.DataFrame, regime: dict, universe: List[str], aux_data: dict = None
+    ) -> List[Signal]:
+        if prices is None or prices.empty:
+            return []
+        regime_state = regime.get('state', 'LOW_VOL')
+        if not self.should_run(regime_state):
+            return []
+        scale = self.position_scale(regime_state)
+
+        as_of_date = pd.Timestamp(prices.index.max())
+        ledger = _load_approved_pairs(as_of_date)
+        if ledger.empty:
+            return []
+
+        universe_set = set(universe)
+        signals: List[Signal] = []
+
+        for row in ledger.itertuples(index=False):
+            ticker_a = row.ticker_a
+            ticker_b = row.ticker_b
+            if ticker_a not in prices.columns or ticker_b not in prices.columns:
+                continue
+            if ticker_a not in universe_set or ticker_b not in universe_set:
+                continue
+
+            col_a = prices[ticker_a]
+            col_b = prices[ticker_b]
+            # Bar-t must actually exist for both legs — otherwise there is no
+            # fresh z_t for this pair today, regardless of history depth.
+            if pd.isna(col_a.iloc[-1]) or pd.isna(col_b.iloc[-1]):
+                continue
+            if col_a.notna().sum() < self.Z_WINDOW + 1 or col_b.notna().sum() < self.Z_WINDOW + 1:
+                continue
+
+            both = pd.concat([col_a, col_b], axis=1).dropna(how='any')
+            if len(both) < self.Z_WINDOW + 1:
+                continue
+            window = both.iloc[-(self.Z_WINDOW + 1):]
+            if window.index[-1] != as_of_date:
+                # A gap in one leg right at the panel's last bar — no aligned
+                # bar-t data for this pair even though each leg individually
+                # has enough history. Skip rather than reuse a stale bar.
+                continue
+
+            beta = float(row.beta)
+            alpha = float(row.alpha)
+            window_a = window[ticker_a].to_numpy(dtype=float)
+            window_b = window[ticker_b].to_numpy(dtype=float)
+            # A non-positive close inside the window (data error -- not
+            # caught by the earlier NaN-only checks) would otherwise hit
+            # log(<=0) and emit a RuntimeWarning plus a NaN that silently
+            # poisons the z-score. Mask to NaN explicitly and skip the pair
+            # for this bar rather than let that escape or fabricate a signal.
+            window_a = np.where(window_a > 0.0, window_a, np.nan)
+            window_b = np.where(window_b > 0.0, window_b, np.nan)
+            if np.isnan(window_a).any() or np.isnan(window_b).any():
+                continue
+            log_a = np.log(window_a)
+            log_b = np.log(window_b)
+            spread = log_a - beta * log_b - alpha   # length Z_WINDOW + 1
+
+            win_t   = spread[-self.Z_WINDOW:]          # window ending at t
+            win_tm1 = spread[-(self.Z_WINDOW + 1):-1]  # window ending at t-1
+
+            std_t   = float(np.std(win_t, ddof=1))
+            std_tm1 = float(np.std(win_tm1, ddof=1))
+            if std_t == 0.0 or std_tm1 == 0.0:
+                continue
+
+            z_t   = (spread[-1] - float(np.mean(win_t)))   / std_t
+            z_tm1 = (spread[-2] - float(np.mean(win_tm1))) / std_tm1
+
+            if not (abs(z_t) >= self.Z_ENTRY and abs(z_tm1) < self.Z_ENTRY and abs(z_t) < self.Z_BACKSTOP):
+                continue
+
+            # z_t positive => spread rich (A too expensive relative to fair
+            # value implied by B) => SHORT A, LONG B. Negative => the mirror.
+            dir_a = 'SHORT' if z_t > 0 else 'LONG'
+            dir_b = 'LONG' if dir_a == 'SHORT' else 'SHORT'
+            conf  = 'HIGH' if abs(z_t) >= self.Z_HIGH_CONF else 'MED'
+            size  = round(float(self.BASE_SIZE * scale), 4)
+
+            raw_half_life = getattr(row, 'half_life_days', None)
+            half_life_valid = (
+                raw_half_life is not None and pd.notna(raw_half_life) and np.isfinite(float(raw_half_life))
+            )
+            if half_life_valid:
+                half_life = float(raw_half_life)
+                hold_days = max(1, int(round(min(3.0 * half_life, 30.0))))
+            else:
+                # No usable per-pair half-life -- fall back directly to the
+                # operator-overridable class default rather than fabricating
+                # one (see default_parameters() / module docstring). Coerce
+                # defensively: a malformed DB `parameters` override (e.g.
+                # None, a string) must not raise here -- same fail-safe
+                # posture as the ledger validation above.
+                half_life = None
+                try:
+                    hold_days = int(self.parameters.get('hold_days', 21))
+                except (TypeError, ValueError):
+                    hold_days = 21
+
+            pa = float(col_a.iloc[-1])
+            pb = float(col_b.iloc[-1])
+            if not (np.isfinite(pa) and pa > 0.0 and np.isfinite(pb) and pb > 0.0):
+                continue
+
+            raw_industry = getattr(row, 'industry', None)
+            raw_eg_pvalue = getattr(row, 'eg_pvalue', None)
+            raw_fdr_q = getattr(row, 'fdr_q', None)
+            params_common = {
+                'pair':           f'{ticker_a}/{ticker_b}',
+                'beta':           round(beta, 6),
+                'alpha':          round(alpha, 6),
+                'z':              round(float(z_t), 4),
+                'z_prev':         round(float(z_tm1), 4),
+                'half_life_days': round(half_life, 2) if half_life is not None else None,
+                'hold_days':      hold_days,
+                'industry':       raw_industry,
+                'eg_pvalue':      float(raw_eg_pvalue) if raw_eg_pvalue is not None and pd.notna(raw_eg_pvalue) else None,
+                'fdr_q':          float(raw_fdr_q) if raw_fdr_q is not None and pd.notna(raw_fdr_q) else None,
+            }
+
+            st_a = self.compute_stops_and_targets(col_a.dropna(), dir_a, pa, regime_state=regime_state)
+            st_b = self.compute_stops_and_targets(col_b.dropna(), dir_b, pb, regime_state=regime_state)
+
+            signals.append(Signal(
+                ticker=ticker_a, direction=dir_a, entry_price=pa,
+                stop_loss=st_a['stop'], target_1=st_a['t1'], target_2=st_a['t2'], target_3=st_a['t3'],
+                position_size_pct=size, confidence=conf,
+                signal_params={**params_common, 'leg': 'a'},
+            ))
+            signals.append(Signal(
+                ticker=ticker_b, direction=dir_b, entry_price=pb,
+                stop_loss=st_b['stop'], target_1=st_b['t1'], target_2=st_b['t2'], target_3=st_b['t3'],
+                position_size_pct=size, confidence=conf,
+                signal_params={**params_common, 'leg': 'b'},
+            ))
+            if len(signals) >= self.MAX_SIGNALS:
+                break
+
+        signals = signals[:self.MAX_SIGNALS]
+        print(f'[debug] signals={len(signals)}', file=sys.stderr)
+        return signals

@@ -89,6 +89,8 @@ _IMPL_MAP = {
     'low_volatility_us':                      ('strategies.implementations.low_volatility_us',                      'LowVolatilityUS'),
     'S_cross_sectional_price_momentum':       ('strategies.implementations.S_cross_sectional_price_momentum',       'CrossSectionalPriceMomentum'),
     'S_pairs_trading_jump_diffusion_intraday': ('strategies.implementations.S_pairs_trading_jump_diffusion_intraday', 'PairsTradingJumpDiffusionIntraday'),
+    # Task D3: sector cointegration pairs — offline EG/FDR-gated pair ledger, live z-score edge-trigger entries
+    'S_coint_pairs_sector_v2': ('strategies.implementations.S_coint_pairs_sector_v2', 'CointPairsSectorV2'),
     'S_ivol_mispricing_asymmetry': ('strategies.implementations.s_ivol_mispricing_asymmetry', 'IvolMispricingAsymmetry'),
     'S_conditional_coskewness_factor': ('strategies.implementations.S_conditional_coskewness_factor', 'ConditionalCoskewnessFactor'),
     'S_daily_high_ml_classifier':      ('strategies.implementations.S_daily_high_ml_classifier',      'DailyHighMLClassifier'),
