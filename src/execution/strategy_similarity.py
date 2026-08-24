@@ -11,6 +11,7 @@ Spec: docs/archive/superpowers/specs/2026-05-29-strategy-orthogonalization-desig
 from __future__ import annotations
 
 import os
+import re
 from typing import Optional
 
 from execution.orthogonalization import _dir_to_int
@@ -23,6 +24,21 @@ RETURN_CORR_ALPHA_CEIL = 0.6     # max weight return-corr ever takes in the blen
 ALPHA_FULL_OBS = 60              # overlapping observations at which alpha reaches the ceiling
 MAX_OFF_DIAGONAL = 0.95
 SPARSE_DEFAULT = 0.05
+LW_GAMMA_MIN_ROWS = 60    # task P1: min overlapping return obs to fit lw_gamma at rebuild
+# task P1 (shadow-first) storage choice: the per-regime LW gamma estimate rides
+# ALONGSIDE the existing strategy_similarity_matrix row's `trigger` TEXT column
+# as a parseable suffix, rather than as an extra key inside the `matrix` JSONB
+# blob. `trigger` already carries suffix-encoded provenance (see the
+# `+src=backtest` tag below) and nothing reads it with strict equality, so
+# this is the least invasive option: the `matrix` JSONB stays byte-identical
+# to today for every existing consumer (including the dashboard's
+# /api/strategy-similarity route, which serves `matrix` verbatim) — a
+# sentinel key mixed into `matrix` would have appeared there as a bogus
+# pseudo-strategy row. See task-P1-report.md for the full rationale.
+# Matches up to the next '+' (another suffix) or end-of-string — NOT anchored
+# to end-of-string alone, so a hypothetical future appender that tacks on yet
+# another '+something' suffix after ours still parses correctly.
+_LW_GAMMA_TRIGGER_RE = re.compile(r'\+lw_gamma=([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)(?:\+|$)')
 
 _DOTENV_LOADED = False
 
@@ -420,6 +436,74 @@ def representatives(fold_groups: dict[int, list[str]],
     return out
 
 
+def _dense_return_panel(returns_by_strat: dict[str, dict[str, float]],
+                        min_rows: int = LW_GAMMA_MIN_ROWS):
+    """{strategy_id: {date: return}} -> a dates x strategies DataFrame
+    restricted to dates where EVERY included strategy has an observation (a
+    true dense panel — no NaN-zeroing inside the shrinkage estimator). None
+    if fewer than 3 strategies or fewer than `min_rows` such common dates
+    survive (task P1: 'if the panel is too thin, store nothing').
+
+    Strategies with fewer than `min_rows` OWN observations are dropped BEFORE
+    the N-way date intersection (mirrors asset_correlation._dense_panel_from_
+    returns) — a sparsely-observed strategy can never itself reach min_rows
+    of overlap and would otherwise poison the intersection for every
+    well-observed strategy too. NOTE (verified against live
+    strategy_daily_returns, 2026-08-24): per-regime distinct-date counts over
+    a 90-day window currently run well under 60 for every regime (HIGH_VOL≈3,
+    TRANSITIONING≈21, LOW_VOL≈54) — under today's return-recording density
+    this floor is rarely if ever clearable, so `store nothing` is the
+    EXPECTED outcome for most rebuilds right now, not a bug in this filter.
+    See task-P1-report.md."""
+    if not returns_by_strat or len(returns_by_strat) < 3:
+        return None
+    import pandas as pd
+    df = pd.DataFrame(returns_by_strat)
+    well_covered = [c for c in df.columns if df[c].notna().sum() >= min_rows]
+    if len(well_covered) < 3:
+        return None
+    dense = df[well_covered].dropna(axis=0, how='any')
+    if dense.shape[0] < min_rows or dense.shape[1] < 3:
+        return None
+    return dense
+
+
+def _regime_lw_gamma(regime: str, src: str, rets, bt_rets) -> Optional[float]:
+    """Best-effort LW shrinkage intensity for one regime's strategy returns
+    (task P1). Never raises — any failure (thin panel, import error, etc.)
+    just means nothing gets stored for that regime this rebuild."""
+    try:
+        returns_by_strat = ((rets or {}).get(regime, {}) if src == 'live'
+                            else (bt_rets or {}).get(regime, {}))
+        panel = _dense_return_panel(returns_by_strat)
+        if panel is None:
+            return None
+        from execution.shrinkage import lw_gamma as _lw_gamma
+        return _lw_gamma(panel)
+    except Exception:
+        return None
+
+
+def _parse_lw_gamma_trigger(trigger) -> Optional[float]:
+    """Extract the lw_gamma value a `+lw_gamma=<x>` suffix on a
+    strategy_similarity_matrix.trigger value, or None if absent/unparseable."""
+    if not trigger:
+        return None
+    m = _LW_GAMMA_TRIGGER_RE.search(str(trigger))
+    return float(m.group(1)) if m else None
+
+
+def _build_matrix_trigger(trigger: str, lw_g: Optional[float]) -> str:
+    """Pure string op: append the `+lw_gamma=<x.xxxxxx>` suffix (task P1) that
+    carries a regime's fitted LW shrinkage intensity alongside the plain
+    `trigger` value stored on this rebuild's strategy_similarity_matrix row;
+    returns `trigger` unchanged when lw_g wasn't estimated (thin panel).
+    Round-trips with _parse_lw_gamma_trigger. `trigger` may already carry a
+    prior `+`-suffix (e.g. `+src=backtest`) — this appends after it, and the
+    parser is not end-anchored so either order still parses."""
+    return trigger if lw_g is None else f'{trigger}+lw_gamma={lw_g:.6f}'
+
+
 def rebuild(trigger: str = 'manual', window_days: int = DEFAULT_WINDOW_DAYS,
             verbose: bool = False, source: Optional[str] = None) -> dict:
     """Build per-regime similarity + clusters; persist matrix, fold-groups, factor-blocks, audit.
@@ -472,10 +556,23 @@ def rebuild(trigger: str = 'manual', window_days: int = DEFAULT_WINDOW_DAYS,
                 eff = _eff_sharpe_by_strat(regime)
                 reps = representatives(fold, eff)
 
+                # task P1 (shadow-first): best-effort LW gamma estimate for
+                # this regime's strategy returns, stored alongside the matrix
+                # as a `+lw_gamma=<x>` suffix on THIS row's trigger only (see
+                # LW_GAMMA_MIN_ROWS comment above) — never blocks the rebuild.
+                lw_g = _regime_lw_gamma(regime, src, rets, bt_rets)
+                # WARNING for future maintainers: matrix_trigger may carry an
+                # optional '+lw_gamma=<float>' suffix appended by
+                # _build_matrix_trigger — any code that matches `trigger` by
+                # strict equality (`==`) will silently stop matching rows
+                # written here; use _parse_lw_gamma_trigger or a substring
+                # check instead.
+                matrix_trigger = _build_matrix_trigger(trigger, lw_g)
+
                 # Insert new similarity matrix row
                 cur.execute(
                     "INSERT INTO strategy_similarity_matrix (regime_state, matrix, trigger) VALUES (%s, %s, %s)",
-                    (regime, json.dumps(sim), trigger))
+                    (regime, json.dumps(sim), matrix_trigger))
 
                 # Insert fold groups + audit
                 for gid, members in fold.items():
@@ -517,12 +614,18 @@ def rebuild(trigger: str = 'manual', window_days: int = DEFAULT_WINDOW_DAYS,
 
 
 def load_groups(regime_state: str) -> dict:
-    """Live read for the sizer: {fold_map, rep_map, block_map, matrix}.
+    """Live read for the sizer: {fold_map, rep_map, block_map, matrix, lw_gamma}.
     fold_map: strategy_id -> group_id (multi-member groups only).
     rep_map:  group_id -> representative strategy_id.
     block_map: strategy_id -> block_id (multi-member blocks only).
-    matrix:   {strategy_id: {strategy_id: rho}} (current row, or {})."""
-    out = {'fold_map': {}, 'rep_map': {}, 'block_map': {}, 'matrix': {}}
+    matrix:   {strategy_id: {strategy_id: rho}} (current row, or {}) —
+              byte-identical to the pre-task-P1 shape; lw_gamma is carried
+              out-of-band on the row's `trigger` column, never inside `matrix`.
+    lw_gamma: task P1 — the LW shrinkage intensity estimated at the matrix's
+              last rebuild, or None if it wasn't estimated (thin panel) or
+              the row predates this feature. Feed to
+              orthogonalization.resolve_tangency_gamma as `artifact_gamma`."""
+    out = {'fold_map': {}, 'rep_map': {}, 'block_map': {}, 'matrix': {}, 'lw_gamma': None}
     conn = _db()
     try:
         with conn.cursor() as cur:
@@ -554,14 +657,15 @@ def load_groups(regime_state: str) -> dict:
                     for s in ms:
                         out['block_map'][s] = bid
 
-            # Load similarity matrix
+            # Load similarity matrix (+ trigger, to recover any lw_gamma suffix)
             cur.execute(
-                "SELECT matrix FROM strategy_similarity_matrix "
+                "SELECT matrix, trigger FROM strategy_similarity_matrix "
                 "WHERE regime_state=%s AND is_current ORDER BY id DESC LIMIT 1",
                 (regime_state,))
             row = cur.fetchone()
             if row and isinstance(row[0], dict):
                 out['matrix'] = row[0]
+                out['lw_gamma'] = _parse_lw_gamma_trigger(row[1])
     finally:
         conn.close()
     return out

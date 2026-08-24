@@ -3,12 +3,21 @@
 Memory-safe sliced read of data/master/prices.parquet via pyarrow predicate
 pushdown (NEVER loads the full panel). Pearson on daily close-to-close returns
 over a trailing window. Pure correlation math is separated for unit testing.
+
+Task P1 (shadow-first, docs/.superpowers/sdd/2026-08-24-five-repo-adoptions/
+task-P1-brief.md) adds an optional Ledoit-Wolf (constant-correlation target)
+shrinkage path behind OPENCLAW_ASSET_CORR_LW — see price_return_corr.
 """
 from __future__ import annotations
 import math
+import os
+import sys
+
+from execution import shrinkage
 
 PARQUET = "/root/openclaw/data/master/prices.parquet"
 MIN_OBS = 20            # min overlapping returns to trust a pair; else 0.0
+ASSET_CORR_LW_ENV = 'OPENCLAW_ASSET_CORR_LW'
 
 
 def _pearson(xs, ys):
@@ -84,10 +93,156 @@ def _load_returns(tickers, window, as_of=None):
     return out
 
 
+def _asset_corr_lw_mode() -> str:
+    """unset/'' -> '0' (DEFAULT: legacy path, ZERO new imports or computation
+    — controller ruling 2026-08-24, see task-P1-report.md fix log). 'shadow'
+    and '1' are opt-in modes only: the operator must set OPENCLAW_ASSET_CORR_LW
+    deliberately (e.g. in .env) to arm either one. Any unrecognized value also
+    falls back to '0' (defensive) so a typo can never accidentally arm the
+    shadow fit (which imports pypfopt — a measured ~0.774s cold import — and
+    is not something that may run on every live sizer cycle without explicit
+    opt-in on this 2-core box)."""
+    v = os.environ.get(ASSET_CORR_LW_ENV, '')
+    return v if v in ('shadow', '1', '0') else '0'
+
+
+def _dense_panel_from_returns(returns: dict[str, dict[str, float]]):
+    """dates x tickers DENSE (no-NaN) panel from {ticker: {date: ret}}.
+
+    Tickers that can't even clear the legacy pairwise thin-evidence floor
+    (MIN_OBS) are dropped BEFORE intersecting dates — including one would
+    only poison the N-way date intersection for every other, well-covered
+    ticker, while its own pairs get forced to 0.0 post-fit regardless (see
+    _lw_corr_same_shape). What remains is intersected on date to form a
+    truly dense (no-NaN) panel. None if fewer than 2 well-covered tickers
+    remain or the intersection is empty; shrinkage.py's own MIN_ROWS/MIN_COLS
+    floor handles the remaining thinness cases."""
+    if len(returns) < 2:
+        return None
+    import pandas as pd
+    df = pd.DataFrame(returns)
+    well_covered = [c for c in df.columns if df[c].notna().sum() >= MIN_OBS]
+    if len(well_covered) < 2:
+        return None
+    dense = df[well_covered].dropna(axis=0, how='any')
+    if dense.empty:
+        return None
+    return dense
+
+
+def _lw_corr_same_shape(returns: dict[str, dict[str, float]]):
+    """LW-shrunk correlations reshaped into the SAME nested-dict shape as
+    corr_from_returns (sorted tickers, diagonal 1.0, symmetric, clipped to
+    [-1, 1]). Pairs with < MIN_OBS overlapping observations are forced to 0.0
+    AFTER shrinkage (preserves the legacy thin-evidence rule) — as are pairs
+    touching a ticker the dense panel had to drop. None if the panel is too
+    thin for shrinkage.lw_corr to fit at all (caller falls back to legacy)."""
+    panel = _dense_panel_from_returns(returns)
+    if panel is None:
+        return None
+    corr, _gamma = shrinkage.lw_corr(panel)
+    if corr is None:
+        return None
+    tickers = sorted(returns)
+    fitted = set(corr.index)
+    out: dict[str, dict[str, float]] = {t: {} for t in tickers}
+    for t in tickers:
+        out[t][t] = 1.0
+    for i, a in enumerate(tickers):
+        da = returns[a]
+        for b in tickers[i + 1:]:
+            db = returns[b]
+            common = set(da) & set(db)
+            if len(common) < MIN_OBS or a not in fitted or b not in fitted:
+                rho = 0.0
+            else:
+                rho = max(-1.0, min(1.0, float(corr.loc[a, b])))
+            out[a][b] = out[b][a] = rho
+    return out
+
+
+def _log_asset_corr_lw_shadow(returns: dict[str, dict[str, float]],
+                              legacy: dict[str, dict[str, float]]) -> None:
+    """Best-effort: fit LW on the dense panel and log ONE comparison line to
+    stderr. Never raises past this function; never touches `legacy`.
+
+    NOTE on mean_abs_delta_rho: it compares two DIFFERENT samples, not just
+    two estimators on the same data — legacy uses each pair's own
+    pairwise-max overlap (up to `window` obs each), while the LW side uses
+    the N-way dense intersection across every well-covered ticker (which can
+    be a strict subset of any one pair's overlap). Read the number as
+    "shrinkage + sample-narrowing combined", not shrinkage alone.
+
+    When the dense panel can't be formed or shrinkage.lw_corr can't fit it
+    (too few well-covered tickers / rows), this logs a distinct
+    '[asset_corr_lw] shadow: skipped ...' line instead of silently emitting
+    nothing — so an operator can tell "shadow ran, nothing to compare" apart
+    from "shadow never ran" or "shadow raised"."""
+    panel = _dense_panel_from_returns(returns)
+    if panel is None:
+        print(f"[asset_corr_lw] shadow: skipped (dense panel too thin, "
+              f"n_requested={len(returns)})", file=sys.stderr)
+        return
+    corr, gamma = shrinkage.lw_corr(panel)
+    if corr is None:
+        print(f"[asset_corr_lw] shadow: skipped (lw_corr could not fit, "
+              f"n_dense={panel.shape[1]} rows={panel.shape[0]})", file=sys.stderr)
+        return
+    cols = list(corr.columns)
+    deltas = []
+    for i, a in enumerate(cols):
+        for b in cols[i + 1:]:
+            leg_rho = legacy.get(a, {}).get(b)
+            if leg_rho is None:
+                continue
+            deltas.append(abs(float(corr.loc[a, b]) - leg_rho))
+    mean_abs_delta = (sum(deltas) / len(deltas)) if deltas else 0.0
+    print(f"[asset_corr_lw] shadow: n={len(cols)} "
+          f"mean_abs_delta_rho={mean_abs_delta:.4f} gamma={gamma:.3f}",
+          file=sys.stderr)
+
+
 def price_return_corr(tickers, window=63, as_of=None):
     """Ticker x ticker Pearson correlation of daily returns over the trailing
-    window. Fail-open: any read/compute error -> {} (caller applies no capping)."""
+    window. Fail-open: any read/compute error -> {} (caller applies no capping).
+
+    OPENCLAW_ASSET_CORR_LW (task P1, shadow-first) gates an optional
+    Ledoit-Wolf (constant-correlation target) shrinkage path:
+      unset/'' (DEFAULT) or '0' — legacy path ONLY: zero LW computation, zero
+        pypfopt import, zero logging. This is the default per controller
+        ruling 2026-08-24 — shadow mode must be an operator opt-in, never the
+        out-of-the-box behavior, on a 2-core box with an OOM history.
+      'shadow' (opt-in) — returns the legacy result UNCHANGED; best-effort,
+        in a try/except that can never affect the result, also fits LW on the
+        dense panel built from the same slices and logs one
+        `[asset_corr_lw] shadow: ...` comparison line to stderr (or
+        `[asset_corr_lw] shadow failed: <err>` on any exception).
+      '1' — returns the LW-shrunk correlations in the legacy output shape
+        (thin pairs still forced to 0.0 post-shrinkage); falls back to the
+        legacy result if LW can't be fit (e.g. the dense panel is too thin).
+    """
     try:
-        return corr_from_returns(_load_returns(tickers, window, as_of))
+        returns = _load_returns(tickers, window, as_of)
+        legacy = corr_from_returns(returns)
     except Exception:
         return {}
+
+    mode = _asset_corr_lw_mode()
+    if mode == '0':
+        return legacy
+
+    if mode == '1':
+        try:
+            lw = _lw_corr_same_shape(returns)
+        except Exception:
+            lw = None
+        return lw if lw is not None else legacy
+
+    # 'shadow' (opt-in only, never the default): legacy result is
+    # authoritative; LW runs best-effort purely for the stderr comparison
+    # line and can never affect the result.
+    try:
+        _log_asset_corr_lw_shadow(returns, legacy)
+    except Exception as e:
+        print(f"[asset_corr_lw] shadow failed: {e}", file=sys.stderr)
+    return legacy

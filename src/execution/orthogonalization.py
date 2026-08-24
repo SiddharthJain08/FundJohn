@@ -11,6 +11,8 @@ Spec: docs/archive/superpowers/specs/2026-05-29-strategy-orthogonalization-desig
 """
 from __future__ import annotations
 import math
+import os
+import sys
 
 SPARSE_DEFAULT = 0.05   # unknown strategy-pair similarity (matches strategy_similarity)
 
@@ -65,6 +67,48 @@ def fold_active_contributions(active: list[dict], fold_map: dict[str, int],
 TANGENCY_SHRINK_DEFAULT = 0.10   # R = (1-γ)R_raw + γI — tames the heuristic,
                                  # non-PSD-guaranteed similarity matrix before inversion
 TANGENCY_MAX_ENUM = 10           # per-side subset-enumeration cap (2^n solves)
+
+
+def resolve_tangency_gamma(artifact_gamma: float | None) -> float:
+    """Resolve the tangency shrinkage intensity gamma (task P1, shadow-first —
+    docs/.superpowers/sdd/2026-08-24-five-repo-adoptions/task-P1-brief.md).
+
+    Precedence:
+      1. env OPENCLAW_TANGENCY_SHRINK (float), if set -> that value, always.
+      2. artifact_gamma, if env OPENCLAW_TANGENCY_LW == '1' and artifact_gamma
+         is not None.
+      3. TANGENCY_SHRINK_DEFAULT (0.10).
+
+    With every new env var unset, this ALWAYS returns TANGENCY_SHRINK_DEFAULT —
+    the tangency solve's default behavior is unchanged (binding requirement:
+    the live sizer's conviction gate must stay byte-identical until the LW
+    flag is deliberately armed).
+
+    Shadow visibility: when artifact_gamma is available but the LW flag is NOT
+    armed (i.e. it would be ignored) AND no OPENCLAW_TANGENCY_SHRINK override
+    is in play, log once per call so an operator can see what the LW estimate
+    would resolve to before flipping the flag. A live OPENCLAW_TANGENCY_SHRINK
+    override short-circuits before this log: since it unconditionally wins
+    precedence #1, arming the LW flag would NOT change the resolved value in
+    that case, so "would_use_gamma" would be a misleading thing to print.
+    (De-dup to "once per sizer invocation" is the caller's responsibility —
+    this resolver is pure and stateless, and is not itself wired into a live
+    per-cycle call site by this task.)
+    """
+    override = os.environ.get('OPENCLAW_TANGENCY_SHRINK')
+    if override not in (None, ''):
+        try:
+            return float(override)
+        except (TypeError, ValueError):
+            pass   # malformed override -> fall through to the remaining precedence
+
+    lw_armed = os.environ.get('OPENCLAW_TANGENCY_LW') == '1'
+    if artifact_gamma is not None and not lw_armed:
+        print(f"[tangency_lw] would_use_gamma={float(artifact_gamma):.3f} "
+              f"(current={TANGENCY_SHRINK_DEFAULT:.2f})", file=sys.stderr)
+    if lw_armed and artifact_gamma is not None:
+        return float(artifact_gamma)
+    return TANGENCY_SHRINK_DEFAULT
 
 
 def _tangency_side_sharpe(sids: list[str], s: list[float],
