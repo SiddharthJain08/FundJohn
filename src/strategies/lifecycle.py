@@ -609,6 +609,40 @@ class LifecycleStateMachine:
                     f"candidate→live blocked: trades {trades} < "
                     f"minimum {thr['min_trades']} (instrument_class={rec.instrument_class})")
 
+            # R1-assigners (2026-08-25): benchmark-relative leg, ANDed on top
+            # of the legacy checks above -- every one of them already passed
+            # if execution reaches this line, so it can only ever TIGHTEN
+            # this guard, never loosen it. This guard judges CALLER-SUPPLIED
+            # AGGREGATE totals (no per-regime sleeve here, unlike
+            # promotion_service.js's judgeRegimeSleeve / activation_assigner
+            # / eligibility_assigner), so there is no real 'regime' to name
+            # in the [bench_gate] log line -- 'aggregate' names this call
+            # site instead. benchmark_sharpe is an OPTIONAL metadata key; no
+            # existing caller/test supplies one, so this fails open
+            # (skipped) for all of them today, matching every other R1
+            # consumer's fail-open contract on missing benchmark data.
+            # Deferred import: regime_qualification.py imports FROM this
+            # module at its own top level (_promotion_threshold,
+            # min_excess_sharpe_vs_benchmark) -- a module-level import here
+            # would be circular depending on which module a caller imports
+            # first, so it's resolved lazily at call time instead, by which
+            # point both modules are always already fully loaded.
+            from backtest.regime_qualification import (
+                benchmark_leg_passes, log_bench_gate_skip, log_bench_gate_verdict)
+            bench_sharpe = md.get("benchmark_sharpe")
+            bench_pass, bench_reason = benchmark_leg_passes(
+                sharpe, bench_sharpe, rec.instrument_class)
+            if bench_reason == 'skipped_null_benchmark':
+                log_bench_gate_skip(logger.info, strategy_id, 'aggregate')
+            log_bench_gate_verdict(logger.info, strategy_id, 'aggregate',
+                                   True, bench_pass, sharpe, bench_sharpe)
+            if not bench_pass:
+                return False, (
+                    f"candidate→live blocked: sharpe {sharpe:.2f} does not exceed "
+                    f"benchmark_sharpe {bench_sharpe} + minimum excess "
+                    f"{min_excess_sharpe_vs_benchmark(rec.instrument_class)} "
+                    f"(instrument_class={rec.instrument_class})")
+
         # Guard: candidate → staging requires regime eligibility
         # Spec: docs/archive/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md
         # §"Strategy creation pipeline changes"

@@ -71,13 +71,39 @@ class FakeConn:
         return self.cur.executed
 
 
-def _regime_row(regime, sharpe, trade_count, max_dd_pct=10.0):
+def _regime_row(regime, sharpe, trade_count, max_dd_pct=10.0, benchmark_sharpe=None):
     return {'regime_state': regime, 'sharpe': sharpe, 'trade_count': trade_count,
-            'max_dd_pct': max_dd_pct}
+            'max_dd_pct': max_dd_pct, 'benchmark_sharpe': benchmark_sharpe}
 
 
 def _prior_row(regime, eligible, size_scalar=None, stop_pct=None, target_pct=None, max_hold_days=None):
     return (regime, eligible, size_scalar, stop_pct, target_pct, max_hold_days)
+
+
+class RaisingOnceCursor(FakeCursor):
+    """Like FakeCursor, but the `raise_at`-th execute() call (1-indexed)
+    raises `exc` instead of consuming a queued response -- simulates a
+    pre-migration-149 DB where a benchmark_sharpe-augmented query fails
+    (UndefinedColumn). Every other call behaves exactly like FakeCursor."""
+    def __init__(self, responses=(), raise_at=None, exc=None):
+        super().__init__(responses)
+        self._raise_at = raise_at
+        self._exc = exc or RuntimeError('column "benchmark_sharpe" does not exist')
+        self._n = 0
+
+    def execute(self, sql, params=()):
+        self._n += 1
+        self.executed.append((sql, params))
+        if self._n == self._raise_at:
+            raise self._exc
+        self._current = self._responses.pop(0) if self._responses else None
+
+
+class RaisingOnceConn(FakeConn):
+    def __init__(self, responses=(), raise_at=None, exc=None):
+        self.cur = RaisingOnceCursor(responses, raise_at=raise_at, exc=exc)
+        self.committed = False
+        self.rolled_back = False
 
 
 # ── Config accessor (mirrors TestGetCap in test_bt_sharpe_clamp.py) ─────────
@@ -267,6 +293,66 @@ class TestComputeEligible(unittest.TestCase):
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
         eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
         self.assertEqual(eligible, {r: False for r in aa.CANONICAL_REGIMES})
+
+
+# ── compute_eligible: R1-assigners benchmark leg (2026-08-25) ───────────────
+class TestComputeEligibleBenchmarkLeg(unittest.TestCase):
+    def test_null_benchmark_is_a_noop_legacy_pass_stands(self):
+        rows = [_regime_row('LOW_VOL', 1.2, 150, benchmark_sharpe=None)]
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
+        eligible, diag = aa.compute_eligible(conn, 'S_ZZT_test', threshold=0.5)
+        self.assertTrue(eligible['LOW_VOL'])
+
+    def test_benchmark_flips_an_otherwise_passing_regime_to_ineligible(self):
+        # Legacy alone passes (sharpe 0.6 > 0, dd/trades fine, >= threshold);
+        # the benchmark leg (0.6 does not exceed 0.9 + 0.0) tightens it shut.
+        rows = [_regime_row('LOW_VOL', 0.6, 150, benchmark_sharpe=0.9)]
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
+        eligible, diag = aa.compute_eligible(conn, 'S_ZZT_test', threshold=0.5)
+        self.assertFalse(eligible['LOW_VOL'])
+
+    def test_benchmark_leaves_a_clearing_regime_eligible(self):
+        rows = [_regime_row('LOW_VOL', 1.5, 150, benchmark_sharpe=0.9)]
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
+        eligible, diag = aa.compute_eligible(conn, 'S_ZZT_test', threshold=0.5)
+        self.assertTrue(eligible['LOW_VOL'])
+
+    def test_benchmark_never_rescues_a_legacy_failure(self):
+        # trade_count 5 < min_trades 100 -- legacy already fails; a
+        # trivially-beaten benchmark must not rescue it.
+        rows = [_regime_row('LOW_VOL', 5.0, 5, benchmark_sharpe=-5.0)]
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
+        eligible, diag = aa.compute_eligible(conn, 'S_ZZT_test', threshold=0.5)
+        self.assertFalse(eligible['LOW_VOL'])
+
+    def test_benchmark_pulled_through_the_chosen_shrink_tier_join(self):
+        # The shrink-tier path (universe_shrink_metrics chosen rows) also
+        # carries benchmark_sharpe now (LEFT JOINed from
+        # strategy_backtest_regimes in production) -- exercised here simply
+        # as a row that already has the key, same as the direct path.
+        shrink = [_regime_row('LOW_VOL', 0.6, 150, benchmark_sharpe=0.9)]
+        conn = FakeConn(responses=[{'run_id': 'r1'}, shrink])
+        eligible, diag = aa.compute_eligible(conn, 'S_ZZT_test', threshold=0.5)
+        self.assertFalse(eligible['LOW_VOL'])  # tightened by the shrink-tier benchmark
+        self.assertEqual(len(conn.executed), 2)   # no fallback query — still the W3 contract
+
+    def test_missing_benchmark_column_fails_open_not_crash(self):
+        """Pre-migration-149 DB: the benchmark_sharpe-augmented SELECT on
+        strategy_backtest_regimes raises (UndefinedColumn-shaped). Must not
+        crash the caller -- rolls back and retries without the column, and
+        the legacy-only verdict stands (leg universally skipped since the
+        fallback rows never carry a benchmark_sharpe key)."""
+        legacy_rows_without_benchmark = [
+            {'regime_state': 'LOW_VOL', 'sharpe': 1.2, 'trade_count': 150, 'max_dd_pct': 10.0},
+        ]
+        conn = RaisingOnceConn(
+            responses=[{'run_id': 'r1'}, [], legacy_rows_without_benchmark],
+            raise_at=3,  # call 1=run_id, 2=shrink probe (empty), 3=RAISES, 4=fallback
+        )
+        eligible, diag = aa.compute_eligible(conn, 'S_ZZT_test', threshold=0.5)
+        self.assertTrue(eligible['LOW_VOL'])
+        self.assertTrue(conn.rolled_back)
+        self.assertEqual(len(conn.executed), 4)
 
 
 # ── _classify_action ─────────────────────────────────────────────────────────

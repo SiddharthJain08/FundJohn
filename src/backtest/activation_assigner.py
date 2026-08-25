@@ -72,7 +72,9 @@ import psycopg2.extras
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'src'))
 
-from backtest.regime_qualification import class_thresholds, dd_leg_passes  # noqa: E402
+from backtest.regime_qualification import (  # noqa: E402
+    class_thresholds, dd_leg_passes, benchmark_leg_passes,
+    log_bench_gate_skip, log_bench_gate_verdict)
 
 CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
 
@@ -155,6 +157,16 @@ def _load_instrument_classes() -> dict:
 
 def _log(msg: str) -> None:
     print(f'[activation_assigner] {msg}', flush=True)
+
+
+def _bench_log(msg: str) -> None:
+    """R1-assigners (2026-08-25): unprefixed print for `[bench_gate] ...`
+    lines (regime_qualification.log_bench_gate_skip/_verdict already spell
+    out the full `[bench_gate] ...` text) -- deliberately bypasses _log()'s
+    `[activation_assigner] ` prefix so the tag stays grep-identical to the
+    JS twin (promotion_service.js) and the lifecycle.py guard's logger
+    output, regardless of which consumer printed it."""
+    print(msg, flush=True)
 
 
 # ── Config accessor ─────────────────────────────────────────────────────────
@@ -244,22 +256,60 @@ def compute_eligible(conn, strategy_id: str, threshold: float,
     # full-universe strategy_backtest_regimes sleeves describe a universe the
     # strategy no longer trades. Falls back to the full-run sleeves when no
     # chosen rows exist (no shrink yet / non-ladder predicate).
-    cur.execute("""
-        SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
-        FROM universe_shrink_metrics
-        WHERE run_id = %s AND chosen AND regime_state <> 'TOTAL'
-    """, (run_id,))
-    rows = cur.fetchall()
+    #
+    # R1-assigners (2026-08-25): both branches also pull benchmark_sharpe.
+    # universe_shrink_metrics itself has no such column (migration 149 only
+    # touched strategy_backtest_regimes) — benchmark_sharpe is a per
+    # (run_id, regime_state) SPY baseline, identical regardless of which
+    # universe tier is chosen (backtest.benchmark_baseline.
+    # regime_benchmark_sharpe doesn't know about tiers), so a LEFT JOIN back
+    # onto the full-universe table is the correct source for the tier path
+    # too. Fail-open on a pre-migration-149 DB (column doesn't exist at
+    # all): catch the SQL error, roll back, retry without the column —
+    # every row's 'benchmark_sharpe' key is then simply absent, which the
+    # per-row lookup below (.get) treats identically to a NULL benchmark.
+    try:
+        cur.execute("""
+            SELECT usm.regime_state, usm.sharpe, usm.trade_count, usm.max_dd_pct,
+                   usm.calmar, sbr.benchmark_sharpe
+            FROM universe_shrink_metrics usm
+            LEFT JOIN strategy_backtest_regimes sbr
+                   ON sbr.run_id = usm.run_id AND sbr.regime_state = usm.regime_state
+            WHERE usm.run_id = %s AND usm.chosen AND usm.regime_state <> 'TOTAL'
+        """, (run_id,))
+        rows = cur.fetchall()
+    except Exception as e:
+        _log(f'{strategy_id}: benchmark_sharpe unavailable on the shrink-tier '
+             f'join ({e}); retrying without it (pre-mig-149 DB?)')
+        conn.rollback()
+        cur.execute("""
+            SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
+            FROM universe_shrink_metrics
+            WHERE run_id = %s AND chosen AND regime_state <> 'TOTAL'
+        """, (run_id,))
+        rows = cur.fetchall()
     if rows:
         _log(f'{strategy_id}: eligibility from chosen shrink sleeves '
              f'({len(rows)} regimes)')
     else:
-        cur.execute("""
-            SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
-            FROM strategy_backtest_regimes
-            WHERE run_id = %s
-        """, (run_id,))
-        rows = cur.fetchall()
+        try:
+            cur.execute("""
+                SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar, benchmark_sharpe
+                FROM strategy_backtest_regimes
+                WHERE run_id = %s
+            """, (run_id,))
+            rows = cur.fetchall()
+        except Exception as e:
+            _log(f'{strategy_id}: benchmark_sharpe column unavailable on '
+                 f'strategy_backtest_regimes ({e}); retrying without it '
+                 f'(pre-mig-149 DB?)')
+            conn.rollback()
+            cur.execute("""
+                SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
+                FROM strategy_backtest_regimes
+                WHERE run_id = %s
+            """, (run_id,))
+            rows = cur.fetchall()
     diag: dict[str, dict] = {}
     for r in rows:
         s = r['sharpe']
@@ -268,14 +318,28 @@ def compute_eligible(conn, strategy_id: str, threshold: float,
         # .get: tolerate legacy fixture rows without a calmar key — missing
         # calmar only forfeits the DD escape hatch (dd_leg_passes contract).
         cal = r.get('calmar') if hasattr(r, 'get') else r['calmar']
+        # R1-assigners (2026-08-25): same .get() tolerance for a row that
+        # never carried benchmark_sharpe (pre-R1 backtest, or the
+        # fail-open fallback query above) — absent key means "no benchmark
+        # data", same as an explicit NULL.
+        bench = r.get('benchmark_sharpe') if hasattr(r, 'get') else None
         # QUALIFIES (shared per-regime gate: >0 sharpe, class DD leg — flat
         # ceiling OR Calmar escape hatch under the hard cap (2026-07-27) —
         # trade floor) AND the slider's sharpe dial on top.
-        passes = (s is not None and dd is not None
-                  and s > gate['min_sharpe']
-                  and dd_leg_passes(dd, cal, gate)
-                  and n >= eff_min_trades
-                  and s >= threshold)
+        legacy_pass = (s is not None and dd is not None
+                       and s > gate['min_sharpe']
+                       and dd_leg_passes(dd, cal, gate)
+                       and n >= eff_min_trades
+                       and s >= threshold)
+        # R1-assigners (2026-08-25): the benchmark-relative leg, ANDed on
+        # top of legacy_pass — can only ever TIGHTEN this regime's verdict,
+        # never rescue it (see benchmark_leg_passes' docstring).
+        bench_pass, bench_reason = benchmark_leg_passes(s, bench, instrument_class)
+        if bench_reason == 'skipped_null_benchmark':
+            log_bench_gate_skip(_bench_log, strategy_id, r['regime_state'])
+        passes = legacy_pass and bench_pass
+        log_bench_gate_verdict(_bench_log, strategy_id, r['regime_state'],
+                               legacy_pass, bench_pass, s, bench)
         diag[r['regime_state']] = {'sharpe': s, 'trade_count': n,
                                    'max_dd_pct': dd, 'calmar': cal,
                                    'eligible': passes}

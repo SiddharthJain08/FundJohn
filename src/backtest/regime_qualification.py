@@ -12,15 +12,23 @@ judgeRegimeSleeve in src/lib/promotion_service.js — keep them in sync.
 Consumers: backtest.activation_assigner (live sizer eligibility, where the
 dashboard's activation min-Sharpe slider adds a further sharpe floor on top)
 and backtest.eligibility_assigner (manifest eligible_regimes hint). NOTE
-(verified 2026-08-24, R1): both of those actually reimplement the gate
-INLINE from class_thresholds()/dd_leg_passes() rather than calling
+(verified 2026-08-24, R1): both of those actually reimplement the LEGACY
+gate INLINE from class_thresholds()/dd_leg_passes() rather than calling
 qualifies_regime() itself — qualifies_regime is the reference rule and unit
 tests exercise it directly, but its only *production* import today is
-lifecycle.py's docstring cross-reference. The R1 benchmark-relative
-criterion added below therefore binds live traffic solely via the JS
-promotion path (src/lib/promotion_service.js judgeRegimeSleeve) until the
-assigners are threaded to call qualifies_regime() or read benchmark_sharpe
-themselves — see task-R1-report.md for the follow-up.
+lifecycle.py's docstring cross-reference.
+
+R1-assigners (2026-08-25, follow-up to R1): the benchmark-relative leg is
+now threaded into those two inline reimplementations, plus
+strategies.lifecycle.LifecycleStateMachine.can_transition's python
+candidate->live guard, via the pure `benchmark_leg_passes()` helper below
+(+ the `log_bench_gate_skip` / `log_bench_gate_verdict` logging helpers,
+kept alongside it so the `[bench_gate] ...` line text has exactly one
+source regardless of which consumer prints it). Each consumer ANDs
+`benchmark_leg_passes()`'s result onto its own already-computed
+legacy_pass — qualifies_regime's inline benchmark block is untouched and
+remains its own (equivalent) copy of this same comparison.
+
 Threshold VALUES come from strategies.lifecycle.PROMOTION_THRESHOLDS
 (fractional max_drawdown there → percent here, matching the
 strategy_backtest_regimes.max_dd_pct unit), plus (R1, 2026-08-24)
@@ -82,6 +90,79 @@ def dd_leg_passes(max_dd_pct, calmar, thr: dict) -> bool:
     return (calmar is not None
             and float(calmar) >= thr['min_calmar']
             and dd <= thr['dd_hard_cap_pct'])
+
+
+def benchmark_leg_passes(sharpe, benchmark_sharpe,
+                         instrument_class: Optional[str] = None) -> tuple[bool, str]:
+    """R1-assigners (2026-08-25): the benchmark-relative leg ALONE, factored
+    out of qualifies_regime so the Python gate consumers that reimplement
+    their own legacy sleeve gate inline -- backtest.activation_assigner.
+    compute_eligible, backtest.eligibility_assigner.compute_eligible, and
+    strategies.lifecycle.LifecycleStateMachine.can_transition's python
+    candidate->live guard -- can AND this leg onto their own legacy_pass
+    without re-deriving the comparison or re-declaring
+    MIN_EXCESS_SHARPE_VS_BENCHMARK_BY_CLASS as a literal (this is the ONE
+    place besides qualifies_regime itself that does the comparison).
+
+    Pure: no DB access, no logging -- callers own their own observability
+    (print()-based CLI tools vs. logging.getLogger library code disagree on
+    convention, so a shared helper doing I/O would have to pick one). See
+    log_bench_gate_skip / log_bench_gate_verdict below for the exact,
+    shared log-line text every caller should use.
+
+    Returns (passes, reason) with reason in {'pass', 'fail',
+    'skipped_null_benchmark'}. `passes` is True for BOTH 'pass' and
+    'skipped_null_benchmark' (fail-open on missing/non-finite benchmark
+    data, mirroring qualifies_regime's own contract) -- callers AND this
+    onto their own legacy_pass, so a skip never rescues an otherwise-
+    failing sleeve; only a 'fail' reason can additionally tighten it.
+
+    Same strict `>` comparison and same class-keyed threshold as
+    qualifies_regime's inline version: sharpe > benchmark_sharpe +
+    min_excess_sharpe_vs_benchmark(instrument_class).
+    """
+    bench_f = None
+    if benchmark_sharpe is not None:
+        try:
+            _cand = float(benchmark_sharpe)
+        except (TypeError, ValueError):
+            _cand = float('nan')
+        if math.isfinite(_cand):
+            bench_f = _cand
+    if bench_f is None:
+        return True, 'skipped_null_benchmark'
+    if sharpe is None:
+        # Defensive only: every caller's own legacy gate already requires a
+        # non-None sharpe before it would even consult this leg. Never
+        # silently pass/fail a comparison against None.
+        return False, 'fail'
+    min_excess = min_excess_sharpe_vs_benchmark(instrument_class)
+    passes = float(sharpe) > bench_f + min_excess
+    return passes, ('pass' if passes else 'fail')
+
+
+def log_bench_gate_skip(log_fn, sid: str, regime: str) -> None:
+    """`[bench_gate] no benchmark for <sid> <regime>; skipped` -- call when
+    benchmark_leg_passes() returns reason='skipped_null_benchmark'.
+    `log_fn` is the caller's own print/logger callable (str) -> None, so
+    the line reaches wherever that caller's other diagnostics go, while the
+    `[bench_gate]` text itself stays identical across every consumer (this
+    is the single place the text is spelled out)."""
+    log_fn(f'[bench_gate] no benchmark for {sid} {regime}; skipped')
+
+
+def log_bench_gate_verdict(log_fn, sid: str, regime: str, legacy_pass: bool,
+                           bench_passes: bool, sharpe, benchmark_sharpe) -> None:
+    """`[bench_gate] <sid> <regime> legacy=PASS bench=FAIL (sharpe=<x>
+    bench=<y>)` -- call after ANDing bench_passes onto legacy_pass. Logs
+    ONLY when the benchmark leg actually flips the verdict: the leg is
+    ANDed on top of legacy_pass (final = legacy_pass and bench_passes), so
+    it can only ever TIGHTEN the gate -- legacy_pass=False, bench_passes=
+    True can never produce a flip here, by construction of that AND, not
+    by a runtime assert inside a promotion gate."""
+    if legacy_pass and not bench_passes:
+        log_fn(f'[bench_gate] {sid} {regime} legacy=PASS bench=FAIL '
+               f'(sharpe={sharpe} bench={benchmark_sharpe})')
 
 
 def qualifies_regime(sharpe, trade_count, max_dd_pct,
