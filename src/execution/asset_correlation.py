@@ -24,6 +24,18 @@ ASSET_CORR_LW_ENV = 'OPENCLAW_ASSET_CORR_LW'
 # import so this production sizing module has no dependency on a top-level
 # script. Legacy corr_from_returns / MIN_OBS above are untouched by this.
 MIN_OBS_FRAC = 0.9
+# P1d (fixed 2026-08-25, production diagnosis 06:05 UTC 2026-08-25): fraction
+# of ALL tickers that must have a non-NaN return on a given (already
+# weekday-filtered) date for that date to survive into the coverage-check
+# denominator below. A ragged/crypto ticker whose own trading calendar
+# reaches further back or forward than the rest of the panel otherwise
+# carries dates nobody else touches, which widens that denominator with
+# dates that were never realistic for a normal ticker's coverage in the
+# first place (216 sized tickers, window=63: dense panel had rows=89 post
+# weekday-filter, but a normal equity only has ~63 rows in that window, so
+# 63/89 < MIN_OBS_FRAC dropped every ticker). See
+# _dense_panel_from_returns for the full before/after ordering.
+DATE_COVERAGE_FRAC = 0.5
 
 
 def _pearson(xs, ys):
@@ -115,8 +127,9 @@ def _asset_corr_lw_mode() -> str:
 def _dense_panel_from_returns(returns: dict[str, dict[str, float]]):
     """dates x tickers DENSE (no-NaN) panel from {ticker: {date: ret}}.
 
-    Three steps, in order (mirrors the weekday-filter + MIN_OBS_FRAC
-    convention in scripts/run_pyportfolioopt_shadow.py):
+    Four steps, in order (mirrors the weekday-filter + MIN_OBS_FRAC
+    convention in scripts/run_pyportfolioopt_shadow.py, plus a P1d
+    date-coverage trim fixed 2026-08-25):
 
     (a) Weekday filter: if ANY ticker carries a weekend (Sat/Sun)
         observation — e.g. a 24/7 crypto ticker mixed in with weekday-only
@@ -124,24 +137,37 @@ def _dense_panel_from_returns(returns: dict[str, dict[str, float]]):
         construction, so a weekend row can never be part of a dense
         (all-tickers) panel; dropping them up front stops them from
         needlessly shrinking the trading-calendar row count the coverage
-        check in (b) measures against. A panel with no weekend rows at all
+        check in (c) measures against. A panel with no weekend rows at all
         is left untouched.
-    (b) Coverage filter: tickers whose non-NaN coverage over that
-        (weekday-filtered) window is < MIN_OBS_FRAC (0.9) are dropped
-        BEFORE intersecting dates — including one would only poison the
-        N-way date intersection in (c) for every other, well-covered
-        ticker, while its own pairs get forced to 0.0 post-fit regardless
-        (see _lw_corr_same_shape's `fitted` check). Logs
-        `[asset_corr_lw] panel: kept <k>/<n> tickers (coverage>=0.9),
-        rows=<r>` — emitted ONLY when at least one ticker was actually
-        dropped (k < n): the well-covered common case stays silent so it
-        doesn't add a second `[asset_corr_lw]`-prefixed line alongside the
-        shadow/'1' summary line callers already emit.
-    (c) THEN drop rows with any remaining NaN — forms the truly dense
+    (b) P1d date-coverage trim: drop any (already weekday-filtered) date
+        where fewer than DATE_COVERAGE_FRAC (0.5) of ALL tickers have a
+        non-NaN return. Root cause this fixes (production diagnosis
+        2026-08-25 06:05 UTC, 216 sized tickers, window=63): a ragged
+        ticker (crypto, or one whose own trading calendar simply reaches
+        further back/forward than the rest) can carry dates the rest of
+        the panel never touches at all, which otherwise widens the row
+        count (c) measures coverage against — e.g. 63/89 < 0.9 dropping
+        every well-covered equity even though each individually has ~100%
+        coverage over ITS OWN 63-day window. Trimming these near-empty
+        dates first restores the coverage denominator to the window the
+        well-covered tickers actually share.
+    (c) Coverage filter: tickers whose non-NaN coverage over that
+        (weekday-filtered + date-trimmed) window is < MIN_OBS_FRAC (0.9)
+        are dropped BEFORE intersecting dates — including one would only
+        poison the N-way date intersection in (d) for every other,
+        well-covered ticker, while its own pairs get forced to 0.0
+        post-fit regardless (see _lw_corr_same_shape's `fitted` check).
+        Logs `[asset_corr_lw] panel: dates <r_kept>/<r_all>, kept <k>/<n>
+        tickers (coverage>=0.9), rows=<r>` — emitted whenever (b) trimmed
+        any dates OR (c) dropped any ticker: the fully-covered common case
+        (nothing trimmed, nothing dropped) stays silent so it doesn't add
+        a second `[asset_corr_lw]`-prefixed line alongside the shadow/'1'
+        summary line callers already emit.
+    (d) THEN drop rows with any remaining NaN — forms the truly dense
         (no-NaN) panel handed to shrinkage.lw_corr.
 
-    None if fewer than 2 well-covered tickers remain after (b) or the
-    row intersection in (c) is empty; shrinkage.py's own MIN_ROWS/MIN_COLS
+    None if fewer than 2 well-covered tickers remain after (c) or the
+    row intersection in (d) is empty; shrinkage.py's own MIN_ROWS/MIN_COLS
     floor handles the remaining thinness cases (e.g. too few rows left)."""
     if len(returns) < 2:
         return None
@@ -154,11 +180,20 @@ def _dense_panel_from_returns(returns: dict[str, dict[str, float]]):
         df = df.loc[dow < 5]
         if df.empty:
             return None
+    r_all = len(df)
     n_total = len(df.columns)
+    min_dates = DATE_COVERAGE_FRAC * n_total
+    date_ok = df.notna().sum(axis=1) >= min_dates
+    if not date_ok.all():
+        df = df.loc[date_ok]
+        if df.empty:
+            return None
+    r_kept = len(df)
     min_count = MIN_OBS_FRAC * len(df)
     well_covered = [c for c in df.columns if df[c].notna().sum() >= min_count]
-    if len(well_covered) < n_total:
-        print(f"[asset_corr_lw] panel: kept {len(well_covered)}/{n_total} tickers "
+    if len(well_covered) < n_total or r_kept < r_all:
+        print(f"[asset_corr_lw] panel: dates {r_kept}/{r_all}, "
+              f"kept {len(well_covered)}/{n_total} tickers "
               f"(coverage>={MIN_OBS_FRAC}), rows={len(df)}", file=sys.stderr)
     if len(well_covered) < 2:
         return None
@@ -260,7 +295,12 @@ def price_return_corr(tickers, window=63, as_of=None):
         `[asset_corr_lw] shadow failed: <err>` on any exception).
       '1' — returns the LW-shrunk correlations in the legacy output shape
         (thin pairs still forced to 0.0 post-shrinkage); falls back to the
-        legacy result if LW can't be fit (e.g. the dense panel is too thin).
+        legacy result if LW can't be fit (e.g. the dense panel is too thin)
+        or raises. Fixed 2026-08-25 (task P1d, production diagnosis in
+        _dense_panel_from_returns): either fallback reason prints ONE
+        `[asset_corr_lw] mode=1 fell back to legacy: <reason>` line to
+        stderr — this used to be a completely silent fallback to legacy,
+        which is how the coverage bug above went unnoticed in production.
     """
     try:
         returns = _load_returns(tickers, window, as_of)
@@ -273,11 +313,20 @@ def price_return_corr(tickers, window=63, as_of=None):
         return legacy
 
     if mode == '1':
+        lw = None
+        fallback_reason = None
         try:
             lw = _lw_corr_same_shape(returns)
-        except Exception:
-            lw = None
-        return lw if lw is not None else legacy
+            if lw is None:
+                fallback_reason = ('no LW fit (dense panel too thin or '
+                                    'shrinkage.lw_corr found no fit)')
+        except Exception as e:
+            fallback_reason = f'{type(e).__name__}: {e}'
+        if lw is None:
+            print(f"[asset_corr_lw] mode=1 fell back to legacy: {fallback_reason}",
+                  file=sys.stderr)
+            return legacy
+        return lw
 
     # 'shadow' (opt-in only, never the default): legacy result is
     # authoritative; LW runs best-effort purely for the stderr comparison

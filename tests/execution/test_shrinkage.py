@@ -436,6 +436,47 @@ class TestPriceReturnCorrByteIdentical:
         lw_armed = ac.price_return_corr(['ZZT1', 'ZZT2', 'ZZT3'], window=63)
         assert lw_armed['ZZT1']['ZZT2'] != pytest.approx(legacy_default['ZZT1']['ZZT2'])
 
+    def test_mode_one_fallback_never_silent_when_lw_corr_returns_none(self, monkeypatch, capsys):
+        """P1d: mode '1' must never silently fall back to legacy. Here the
+        dense panel forms fine (same fixture as the other '1' tests) but
+        shrinkage.lw_corr itself reports no fit (returns (None, None)) —
+        _lw_corr_same_shape propagates that as None, and price_return_corr
+        must print exactly one distinguishing stderr line before returning
+        the legacy result."""
+        monkeypatch.setenv('OPENCLAW_ASSET_CORR_LW', '1')
+        fixed = _fixture_returns()
+        monkeypatch.setattr(ac, '_load_returns', lambda tickers, window, as_of=None: fixed)
+        monkeypatch.setattr(sk, 'lw_corr', lambda panel: (None, None))
+        monkeypatch.setattr(ac, 'shrinkage', sk, raising=False)
+
+        got = ac.price_return_corr(['ZZT1', 'ZZT2', 'ZZT3'], window=63)
+        want = _legacy_pearson_reference(fixed)
+        assert got == want
+
+        err = capsys.readouterr().err
+        lines = [l for l in err.splitlines() if '[asset_corr_lw]' in l]
+        assert len(lines) == 1
+        assert lines[0].startswith('[asset_corr_lw] mode=1 fell back to legacy:')
+
+    def test_mode_one_fallback_never_silent_when_lw_corr_raises(self, monkeypatch, capsys):
+        """Same as above but the failure mode is an exception instead of a
+        (None, None) return — must still produce exactly one fallback line,
+        never propagate the exception to the caller."""
+        monkeypatch.setenv('OPENCLAW_ASSET_CORR_LW', '1')
+        fixed = _fixture_returns()
+        monkeypatch.setattr(ac, '_load_returns', lambda tickers, window, as_of=None: fixed)
+        monkeypatch.setattr(sk, 'lw_corr', lambda panel: (_ for _ in ()).throw(RuntimeError('boom')))
+        monkeypatch.setattr(ac, 'shrinkage', sk, raising=False)
+
+        got = ac.price_return_corr(['ZZT1', 'ZZT2', 'ZZT3'], window=63)
+        want = _legacy_pearson_reference(fixed)
+        assert got == want
+
+        err = capsys.readouterr().err
+        lines = [l for l in err.splitlines() if '[asset_corr_lw]' in l]
+        assert len(lines) == 1
+        assert lines[0] == '[asset_corr_lw] mode=1 fell back to legacy: RuntimeError: boom'
+
 
 # ---------------------------------------------------------------------------
 # task P1c: _dense_panel_from_returns weekday-filter + MIN_OBS_FRAC coverage
@@ -480,8 +521,8 @@ class TestDensePanelWeekdayAndCoverageFilter:
         assert gamma is not None
 
         err = capsys.readouterr().err
-        assert ('[asset_corr_lw] panel: kept 8/10 tickers (coverage>=0.9), '
-                'rows=63') in err
+        assert ('[asset_corr_lw] panel: dates 63/63, kept 8/10 tickers '
+                '(coverage>=0.9), rows=63') in err
 
     def test_crypto_weekend_ticker_does_not_collapse_row_count(self):
         """1 ticker trades every calendar day (weekends included, e.g.
@@ -515,6 +556,44 @@ class TestDensePanelWeekdayAndCoverageFilter:
         corr, gamma = sk.lw_corr(panel)
         assert corr is not None
         assert gamma is not None
+
+    def test_date_coverage_trim_reproduces_production_diagnosis(self, capsys):
+        """P1d regression: direct reproduction of the 2026-08-25 06:05 UTC
+        production diagnosis (216 sized tickers, window=63) — a dense panel
+        that logged 'kept 0/216 tickers (coverage>=0.9), rows=89' because 2
+        ragged/crypto-like tickers carried 26 extra weekday dates the other
+        12 (well-covered) equities never touch, widening the coverage
+        denominator to 89 when the equities only have ~63 rows each. Before
+        the P1d date-coverage trim, 63/89 < MIN_OBS_FRAC(0.9) dropped ALL 14
+        tickers, including the 12 fully-covered equities. After the trim,
+        the 26 near-empty (2/14 tickers present) dates are dropped BEFORE
+        the coverage check, so all 14 well-covered tickers survive and
+        shrinkage.lw_corr can actually fit."""
+        rng = np.random.default_rng(17)
+        all_wd = pd.bdate_range(start='2026-01-05', periods=89)
+        extra_dates = [d.date().isoformat() for d in all_wd[:26]]   # crypto-only
+        core_dates = [d.date().isoformat() for d in all_wd[26:]]    # shared, 63
+
+        returns = {}
+        for i in range(12):
+            vals = rng.normal(0, 1.0, len(core_dates))
+            returns[f'ZZTQ{i}'] = dict(zip(core_dates, vals.tolist()))
+        for i in range(2):
+            all_dates = extra_dates + core_dates
+            vals = rng.normal(0, 1.0, len(all_dates))
+            returns[f'ZZTX{i}'] = dict(zip(all_dates, vals.tolist()))
+
+        panel = ac._dense_panel_from_returns(returns)
+        assert panel is not None
+        assert panel.shape[1] == 14        # >= 12 required; all 14 survive
+        assert panel.shape[0] == 63         # trimmed to the shared equity span
+
+        corr, gamma = sk.lw_corr(panel)
+        assert corr is not None
+        assert gamma is not None
+
+        err = capsys.readouterr().err
+        assert '[asset_corr_lw] panel: dates 63/89, kept 14/14 tickers' in err
 
     def test_default_zero_mode_still_byte_identical_after_p1c_fix(self, monkeypatch, capsys):
         """The '0' path never touches _dense_panel_from_returns at all —
