@@ -328,3 +328,9 @@ signatures archive). Stays OFF until one supervised Saturday-brain run.
 - R2 preflight 08-24 20:37 UTC: WALL 4.65s / RSS 544MB on production defaults (budget PASS).
 - x1-ledger-backfill timer moved to 22:05 UTC (fleet retries S_mingle_factor_graph_portfolio at 21:30 — nightly OOM, pre-existing).
 - OPERATOR DECISIONS OWED: (1) apply R1's benchmark leg in activation_assigner / eligibility_assigner / lifecycle.py:593 (today: candidate→live only); (2) arm S2 with pipeline_config.tournament_variants=2 for one supervised Saturday; (3) flip OPENCLAW_ASSET_CORR_LW=1 after reviewing the shadow log; (4) redteam_blocked / prescreen_failed statuses need sweep + resurrect-script + dashboard-chip coverage (follow-up).
+
+## 2026-08-25 operator decisions applied
+- (1) R1 benchmark leg → activation_assigner / eligibility_assigner / lifecycle.py candidate→live guard via a shared helper in regime_qualification.py (in progress 06:xx UTC; expect ~0 flips until sleeves are re-backtested — benchmark_sharpe is NULL on all pre-08-24 rows, fail-open).
+- (2) S2 ARMED: pipeline_config.tournament_variants=2 (first supervised run Saturday).
+- (3) OPENCLAW_ASSET_CORR_LW=1 in .env; P1d fix (date-coverage trim before ticker coverage; mode-1 fallback now logged) makes the LW fit real: `dates 62/89, kept 214/216, gamma 0.34` on the 08-24 ticker set.
+- VPS: CPU steal hit 90% during the daytime backfill (burst-credit throttle); backfill stopped, resumes nightly single-threaded on one core (x1-ledger-backfill-4, 22:05→05:00 UTC). First X1 backtest → Wed night.
