@@ -123,7 +123,7 @@ async function sweepCandidates({ log, dryRun, apiBase }) {
           promoted.push({ sid, qualifying: q.qualifying });
           log(`  WOULD PROMOTE ${sid} → live in [${q.qualifying.join(', ')}]`);
         } else {
-          blocked.push({ sid, failed_gates: q.hasRun ? ['no_qualifying_regime'] : ['no_backtest'] });
+          blocked.push({ sid, failed_gates: q.exit_hook_live_disabled ? ['exit_hook_live_disabled'] : (q.hasRun ? ['no_qualifying_regime'] : ['no_backtest']) });
         }
       } catch (e) { errored.push({ sid, error: e.message }); }
       continue;
