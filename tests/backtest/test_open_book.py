@@ -354,7 +354,8 @@ class TestConfigJsonExitHook:
                 seen['params'] = params
         mock_cur.execute.side_effect = exec_spy
         with (
-            patch.dict(os.environ, {'OPENCLAW_BT_ASSET_GATE': 'off', 'OPENCLAW_BT_SPREAD_COSTS': '0'}),
+            patch.dict(os.environ, {'OPENCLAW_BT_ASSET_GATE': 'off', 'OPENCLAW_BT_SPREAD_COSTS': '0',
+                                     'OPENCLAW_BACKTEST_COUPLED_RECS': '0'}),
             patch('backtest.unified_backtest.load_prices_panels', return_value=(close_wide, bars)),
             patch('backtest.unified_backtest.load_regimes', return_value=regimes),
             patch('backtest.unified_backtest.load_strategy_class', return_value=strategy_cls),
@@ -362,10 +363,15 @@ class TestConfigJsonExitHook:
             patch('backtest.unified_backtest._code_sha', return_value='abc123'),
             patch('backtest.unified_backtest.psycopg2.extras.execute_values'),
         ):
-            # commit=False: the runs INSERT is still executed on the cursor (then rolled
-            # back) and the `if commit:` panel rebuild — which would touch the real DB —
-            # is skipped.
-            ub.run_backtest(strategy_cls.id, conn=mock_conn, commit=False, fill_model='same_close')
+            # commit=False: the runs INSERT is still executed on the mocked cursor and
+            # simply never committed (nothing rolls back on this clean path); the
+            # `if commit:` panel rebuild — which would touch the real DB — is skipped.
+            # max_hold_days=21 pinned explicitly, and OPENCLAW_BACKTEST_COUPLED_RECS
+            # forced off above: both belt-and-braces against _configured_max_hold_days
+            # reaching through regime_param_resolver to its OWN psycopg2.connect(...)
+            # (bypassing mock_conn) when the coupled-recs gate is on in the environment.
+            ub.run_backtest(strategy_cls.id, conn=mock_conn, commit=False,
+                             fill_model='same_close', max_hold_days=21)
         cfg = next(p for p in seen['params'] if isinstance(p, str) and p.startswith('{') and 'max_hold_days' in p)
         return json.loads(cfg)
 
