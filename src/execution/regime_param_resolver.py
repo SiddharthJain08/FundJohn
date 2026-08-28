@@ -149,6 +149,28 @@ def max_hold_days_override(strategy_id: str, regime_state: str) -> Optional[int]
     return int(row['max_hold_days'])
 
 
+def configured_max_hold_days(strategy_id: str, *, default: int = 21, log=None) -> int:
+    """Strategy-configured hold horizon shared by the backtest engine
+    (unified_backtest._configured_max_hold_days) and the live exit-hook time
+    stop (engine.update_pnl). MAX of the non-null per-regime
+    strategy_regime_params.max_hold_days values; `default` when the coupling
+    gate (OPENCLAW_BACKTEST_COUPLED_RECS) is off, when nothing is set, or on
+    any lookup failure (reported through `log` when given)."""
+    from execution import regime_param_override
+    from strategies.base import CANONICAL_REGIMES
+    if not regime_param_override.gate_on():
+        return int(default)
+    try:
+        vals = [max_hold_days_override(strategy_id, r) for r in CANONICAL_REGIMES]
+        vals = [int(v) for v in vals if v]
+        return max(vals) if vals else int(default)
+    except Exception as e:  # lookup plumbing only; never fail the caller
+        if log is not None:
+            log(f'{strategy_id}: configured max_hold lookup failed '
+                f'({type(e).__name__}: {e}); using default {default}')
+        return int(default)
+
+
 def _fetch_size_scalars(regime_state: str) -> list:
     """Raw (strategy_id, size_scalar) rows for a regime where size_scalar is set."""
     with _connect() as conn:

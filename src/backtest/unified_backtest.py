@@ -1110,17 +1110,8 @@ def _configured_max_hold_days(strategy_id: str) -> int:
     DEFAULT_MAX_HOLD_DAYS when unset, on lookup failure (logged), or when the
     coupling gate is OFF (byte-identical legacy, mirrors the stop/target
     override gating)."""
-    if not regime_param_override.gate_on():
-        return DEFAULT_MAX_HOLD_DAYS
-    try:
-        from execution import regime_param_resolver as rpr
-        vals = [rpr.max_hold_days_override(strategy_id, r) for r in CANONICAL_REGIMES]
-        vals = [v for v in vals if v]
-        return max(vals) if vals else DEFAULT_MAX_HOLD_DAYS
-    except Exception as e:
-        _log(f'{strategy_id}: configured max_hold lookup failed '
-             f'({type(e).__name__}: {e}); using default {DEFAULT_MAX_HOLD_DAYS}')
-        return DEFAULT_MAX_HOLD_DAYS
+    from execution import regime_param_resolver as rpr
+    return rpr.configured_max_hold_days(strategy_id, default=DEFAULT_MAX_HOLD_DAYS, log=_log)
 
 
 def _default_fill_model() -> str:
