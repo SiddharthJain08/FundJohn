@@ -1349,6 +1349,8 @@ def run_backtest(strategy_id: str, *,
                 'asset_gate': (os.environ.get('OPENCLAW_BT_ASSET_GATE', 'parity')
                                if _sim_kwargs.get('asset_gate') else 'off'),
                 'double_touch': os.environ.get('OPENCLAW_BT_DOUBLE_TOUCH', 'stop'),
+                'exit_hook':   bool(getattr(instance, 'exit_hook', False)),
+                'hook_exits':  int(sim.get('hook_exits', 0)),
                 # Fill-timing provenance (2026-07-29 same-day pivot):
                 # same_close = signal[t] fills at close[t]; close/open = legacy t+1.
                 'fill_model': fill_model,

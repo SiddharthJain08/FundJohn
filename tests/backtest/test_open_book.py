@@ -338,3 +338,43 @@ class TestPerBarSimulateOpenBook:
         assert len(drained) >= 5, seen
         assert all(drained), seen           # RED before the fix: drained marks are all False
         assert all(m for d, m in seen), seen
+
+
+class TestConfigJsonExitHook:
+    def _config_json_of(self, strategy_cls):
+        close_wide, bars, regimes, dates, closes = _dataset()
+        import json
+        from unittest.mock import MagicMock
+        seen = {}
+        mock_conn = MagicMock(); mock_cur = MagicMock()
+        mock_conn.cursor.return_value = mock_cur
+        mock_conn.__enter__ = lambda s: s; mock_conn.__exit__ = MagicMock(return_value=False)
+        def exec_spy(sql, params=None):
+            if 'INSERT INTO strategy_backtest_runs' in str(sql):
+                seen['params'] = params
+        mock_cur.execute.side_effect = exec_spy
+        with (
+            patch.dict(os.environ, {'OPENCLAW_BT_ASSET_GATE': 'off', 'OPENCLAW_BT_SPREAD_COSTS': '0'}),
+            patch('backtest.unified_backtest.load_prices_panels', return_value=(close_wide, bars)),
+            patch('backtest.unified_backtest.load_regimes', return_value=regimes),
+            patch('backtest.unified_backtest.load_strategy_class', return_value=strategy_cls),
+            patch('backtest.unified_backtest.find_strategy_file', return_value='x.py'),
+            patch('backtest.unified_backtest._code_sha', return_value='abc123'),
+            patch('backtest.unified_backtest.psycopg2.extras.execute_values'),
+        ):
+            # commit=False: the runs INSERT is still executed on the cursor (then rolled
+            # back) and the `if commit:` panel rebuild — which would touch the real DB —
+            # is skipped.
+            ub.run_backtest(strategy_cls.id, conn=mock_conn, commit=False, fill_model='same_close')
+        cfg = next(p for p in seen['params'] if isinstance(p, str) and p.startswith('{') and 'max_hold_days' in p)
+        return json.loads(cfg)
+
+    def test_plain_strategy_records_false(self):
+        cfg = self._config_json_of(_mk_plain_cls())
+        assert cfg['exit_hook'] is False and cfg['hook_exits'] == 0
+
+    def test_hook_strategy_records_true_and_count(self):
+        close_wide, bars, regimes, dates, closes = _dataset()
+        cls = _mk_hook_cls(lambda p, prices: 'z_revert' if p['days_held'] == 2 else None)
+        cfg = self._config_json_of(cls)
+        assert cfg['exit_hook'] is True and cfg['hook_exits'] == 1
