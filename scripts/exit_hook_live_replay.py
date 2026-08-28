@@ -10,6 +10,14 @@ update_pnl with a fake cursor + the real panel truncated to d, and compare the
 closes the live branch would issue against the backtest's recorded exits.
 Read-only: no DB writes, no broker calls. Run outside 13:00–20:15 UTC.
 
+Per-trade identity (fix round 1, 2026-08-28): comparisons are keyed by the
+backtest's own trade_seq, not by ticker. Two concurrently-open trades on the
+same ticker (different pairs entered the same day) each get matched to their
+OWN recovered Signal by consuming signals_by_entry[(entry_date, ticker)] — a
+list, in generate_signals' return order — in trade_seq order, skipping any
+signal whose direction doesn't match the trade it's being considered for.
+Ticker-keyed dicts previously collapsed such trades into a single comparison.
+
 Caveats:
 - The replay uses today's universe/prices panel, not the point-in-time panel
   the backtest used; a fixed LOW_VOL regime; and no aux_data. X1's hook reads
@@ -38,17 +46,36 @@ def open_trades_on(trades, d):
 
 
 def rows_from_trades(open_trades, signals_by_entry):
+    """signals_by_entry: dict[(entry_date, ticker)] -> list[Signal], in the
+    order generate_signals returned them. Trades are processed in trade_seq
+    order (the backtest appends trades in signal order, so the k-th
+    same-ticker signal IS the k-th same-ticker trade); for each trade we pop
+    the next unconsumed signal for its (entry_date, ticker), skipping any
+    whose direction disagrees and continuing to pop. Unrecoverable (queue
+    exhausted, or nullable stop/target missing) -> skipped, not fabricated."""
+    queues = {k: list(v) for k, v in (signals_by_entry or {}).items()}
     rows = []
-    for i, t in enumerate(open_trades):
-        sig = signals_by_entry.get((t['entry_date'], t['ticker']))
+    for t in sorted(open_trades, key=lambda x: x['trade_seq']):
+        if t.get('signal_stop') is None or t.get('signal_target') is None:
+            print(f'[replay] trade_seq={t.get("trade_seq")} {t["ticker"]}: '
+                  f'missing signal_stop/signal_target, skipping', file=sys.stderr)
+            continue
+        key = (t['entry_date'], t['ticker'])
+        q = queues.get(key, [])
+        sig = None
+        while q:
+            cand = q.pop(0)
+            if str(cand.direction).upper() == str(t['direction']).upper():
+                sig = cand
+                break
         if sig is None:
             continue
-        rows.append({'id': f'replay-{i}', 'strategy_id': None, 'ticker': t['ticker'],
+        rows.append({'id': f'replay-{t["trade_seq"]}', 'strategy_id': None, 'ticker': t['ticker'],
                      'direction': str(t['direction']).upper(), 'entry_price': float(t['entry_price']),
                      'mark_entry_price': float(t['entry_price']), 'target_date': t['entry_date'],
                      'lifecycle_state': 'FILLED', 'stop_loss': float(t['signal_stop']),
                      'target_1': float(t['signal_target']), 'signal_date': t['entry_date'],
-                     'signal_params': dict(sig.signal_params or {})})
+                     'signal_params': dict(sig.signal_params or {}), 'trade_seq': t['trade_seq']})
     return rows
 
 
@@ -83,41 +110,48 @@ def main():
 
     dates = [datetime.strptime(s.strip(), '%Y-%m-%d').date() for s in args.dates.split(',') if s.strip()]
     with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute("""SELECT ticker, direction, entry_date, exit_date, entry_price, exit_reason,
-                              signal_stop, signal_target FROM strategy_backtest_trades WHERE run_id=%s""", (args.run_id,))
+        cur.execute("""SELECT trade_seq, ticker, direction, entry_date, exit_date, entry_price, exit_reason,
+                              signal_stop, signal_target FROM strategy_backtest_trades
+                       WHERE run_id=%s ORDER BY trade_seq""", (args.run_id,))
         trades = [dict(r) for r in cur.fetchall()]
     cls = load_strategy_class(args.strategy); inst = cls(); inst.active_in_regimes = list(CANONICAL_REGIMES)
     for r in trades: r['strategy_id'] = args.strategy
     panel = engine.load_prices(sorted({t['ticker'] for t in trades}))       # real panel, all needed tickers
     universe = list(panel.columns)
     sig_cache: dict = {}
+    computed_entry_dates: set = set()
     total_agree = total_bt = 0
     for d in dates:
         opens = open_trades_on(trades, d)
         for t in opens:
-            key = (t['entry_date'], t['ticker'])
-            if key in sig_cache: continue
-            sub = panel.loc[:pd.Timestamp(t['entry_date'])]
+            ed = t['entry_date']
+            if ed in computed_entry_dates: continue
+            computed_entry_dates.add(ed)
+            sub = panel.loc[:pd.Timestamp(ed)]
             try:
                 sigs = inst.generate_signals(sub, {'state': 'LOW_VOL'}, universe)
             except Exception as e:
-                print(f'[replay] generate_signals failed on {t["entry_date"]}: {e}', file=sys.stderr); sigs = []
-            for s in sigs: sig_cache[(t['entry_date'], s.ticker)] = s
-            sig_cache.setdefault(key, None)
+                print(f'[replay] generate_signals failed on {ed}: {e}', file=sys.stderr); sigs = []
+            for s in sigs:
+                sig_cache.setdefault((ed, s.ticker), []).append(s)
         rows = rows_from_trades(opens, sig_cache)
         for r in rows: r['strategy_id'] = args.strategy
+        id_to_seq = {r['id']: r['trade_seq'] for r in rows}
         cur = _FakeCursor(rows)
         engine.update_pnl(cur, panel.loc[:pd.Timestamp(d)], d, strategies=[inst], regime={'state': 'LOW_VOL'})
         live = {}
         for sql, p in cur.executed:
             if 'INSERT INTO signal_pnl' in sql and p[7] == 'closed':
-                live[[r for r in rows if r['id'] == p[0]][0]['ticker']] = p[10]
-        bt = {t['ticker']: t['exit_reason'] for t in opens if t['exit_date'] == d
+                live[id_to_seq[p[0]]] = p[10]
+        bt = {t['trade_seq']: t['exit_reason'] for t in opens if t['exit_date'] == d
               and str(t['exit_reason']).startswith(('strategy_exit:', 'max_hold'))}
         agree, disagree = compare(live, bt)
         total_agree += agree; total_bt += len(bt)
+        hook_rows_closed = (engine.LAST_EXIT_HOOK_STATS.get('strategy_exit', 0)
+                            + engine.LAST_EXIT_HOOK_STATS.get('max_hold', 0))
         print(f'{d} open={len(opens)} rows={len(rows)} live_closes={len(live)} backtest_closes={len(bt)} '
-              f'agree={agree} disagree={disagree} stats={engine.LAST_EXIT_HOOK_STATS}')
+              f'agree={agree} disagree={disagree} hook_rows_closed={hook_rows_closed} '
+              f'stats={engine.LAST_EXIT_HOOK_STATS}')
     print(f'AGREEMENT {total_agree}/{total_bt}')
     return 0
 
