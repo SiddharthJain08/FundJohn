@@ -222,7 +222,11 @@ class BaseStrategy(ABC):
         arguments: `prices` ends at the evaluation bar; `position` carries
         ticker, direction ('LONG'|'SHORT'), entry_price, entry_date,
         days_held, stop_loss, target_1 and the entry-time signal_params dict.
-        Raising is caught by the caller and treated as None (hold)."""
+        Raising is caught by the caller and treated as None (hold).
+
+        Regime contract: rely on regime['state'] ONLY. The backtest passes
+        {'state','date','one_hot','transition_probs'}; live passes
+        {'state','vix_level','vix_percentile','regime_data','updated_at'}."""
         return None
 
     @abstractmethod

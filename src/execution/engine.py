@@ -91,6 +91,19 @@ def _hold_cap(signal_params, configured: int) -> int:
     return min(hd, int(configured)) if hd >= 1 else int(configured)
 
 
+def _exit_hook_run_summary(stats: dict):
+    """(log_line, execution_runs.errors entry) for the last update_pnl call."""
+    if not stats or not stats.get('enabled'):
+        return None, None
+    line = (f"[exit_hook] closes: {stats.get('strategy_exit', 0)} strategy_exit, "
+            f"{stats.get('max_hold', 0)} max_hold; hook errors {stats.get('hook_raised', 0)}; "
+            f"rows {stats.get('rows_evaluated', 0)}; instances loaded on demand {stats.get('loaded_on_demand', 0)}")
+    err = None
+    if stats.get('hook_raised', 0) > 0:
+        err = f"exit_hook: {stats['hook_raised']} hook errors (first: {stats.get('first_hook_raise')})"
+    return line, err
+
+
 _ALPACA_BIN = '/root/go/bin/alpaca'
 
 
@@ -2497,8 +2510,15 @@ def main():
         logger.info(f"Confluence signals: {confluence_count}")
 
         # 7. P&L updates
-        pnl_updates, newly_closed_ids = update_pnl(cur, prices, run_date)
+        pnl_updates, newly_closed_ids = update_pnl(cur, prices, run_date,
+                                                   strategies=strategies, regime=regime,
+                                                   aux_data=aux_data)
         logger.info(f"P&L rows updated: {pnl_updates}")
+        _hook_line, _hook_err = _exit_hook_run_summary(LAST_EXIT_HOOK_STATS)
+        if _hook_line:
+            logger.info(_hook_line)
+        if _hook_err:
+            errors.append(_hook_err)
 
         # 7b. Broker-close reconcile (2026-06-08): close still-open signals for
         # tickers the cycle liquidated / circuit-breaker'd that are now flat at

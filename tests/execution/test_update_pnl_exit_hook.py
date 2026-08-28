@@ -177,3 +177,26 @@ def test_bars_held_helper():
     assert engine._bars_held(p, date(2026, 5, 6), date(2026, 5, 13)) == 5
     assert engine._bars_held(p, date(2026, 5, 13), date(2026, 5, 13)) == 0
     assert engine._bars_held(pd.DataFrame({'AAPL': [1.0]}), date(2026, 5, 6), date(2026, 5, 13)) is None
+
+
+def test_exit_hook_run_summary():
+    assert engine._exit_hook_run_summary({'enabled': False}) == (None, None)
+    line, err = engine._exit_hook_run_summary({'enabled': True, 'strategy_exit': 2, 'max_hold': 1,
+                                                'hook_raised': 0, 'first_hook_raise': None,
+                                                'loaded_on_demand': 1, 'rows_evaluated': 7})
+    assert line == '[exit_hook] closes: 2 strategy_exit, 1 max_hold; hook errors 0; rows 7; instances loaded on demand 1'
+    assert err is None
+    line, err = engine._exit_hook_run_summary({'enabled': True, 'strategy_exit': 0, 'max_hold': 0,
+                                                'hook_raised': 3, 'first_hook_raise': 'ValueError: x',
+                                                'loaded_on_demand': 0, 'rows_evaluated': 3})
+    assert err == 'exit_hook: 3 hook errors (first: ValueError: x)'
+
+
+def test_main_passes_context_to_update_pnl():
+    """main() must hand strategies/regime/aux_data to update_pnl (source-level
+    contract check — main() itself needs a live DB)."""
+    import inspect
+    src = inspect.getsource(engine.main)
+    assert 'update_pnl(cur, prices, run_date,' in src
+    assert 'strategies=strategies' in src and 'regime=regime' in src and 'aux_data=aux_data' in src
+    assert '_exit_hook_run_summary(' in src
