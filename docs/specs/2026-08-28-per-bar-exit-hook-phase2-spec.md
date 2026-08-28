@@ -73,7 +73,7 @@ The hook receives the same `regime` dict `run_strategies` gives `generate_signal
 
 ### 2.8 Observability
 - Per close: `logger.info('[exit_hook] %s %s %s bars_held=%d', sid, ticker, close_reason, bars_held)`.
-- Per run: `logger.info('[exit_hook] closes: %d strategy_exit, %d max_hold; hook errors %d; instances loaded on demand %d')`; `update_pnl` returns counts via a third element? — NO: keep the `(n_updates, newly_closed_ids)` return (callers/tests pin it); counters are exposed as `update_pnl.last_hook_stats` (module-level dict set per call), read by `main()` for the log line and for `execution_runs.errors` (`f'exit_hook: {n} hook errors (first: {msg})'` appended only when `n > 0`).
+- Per run: `update_pnl` keeps its `(n_updates, newly_closed_ids)` return (callers and tests pin it); the counters (`strategy_exit`, `max_hold`, `hook_raised`, `first_hook_raise`, `loaded_on_demand`, `hook_load_failed`) are published as the module-level dict `engine.LAST_EXIT_HOOK_STATS` (reset at the start of every call). `main()` logs `[exit_hook] closes: %d strategy_exit, %d max_hold; hook errors %d; instances loaded on demand %d` and appends `f'exit_hook: {n} hook errors (first: {msg})'` to `execution_runs.errors` only when `hook_raised > 0`.
 - Digest: `buildDigest` gains one line, shown only when non-zero: `🪝 Exit hook: N strategy exits (a z_revert / b pair_decohered / …), M max_hold` from `SELECT close_reason, COUNT(*) FROM signal_pnl WHERE status='closed' AND closed_at::date = CURRENT_DATE AND (close_reason LIKE 'strategy_exit:%' OR close_reason = 'max_hold') GROUP BY 1`. No schema change.
 
 ### 2.9 Kill switch and flip
