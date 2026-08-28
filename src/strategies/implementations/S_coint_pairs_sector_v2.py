@@ -75,26 +75,38 @@ operator-overridable class default instead of fabricating a half-life:
 so a downstream reader can tell "no half-life was available" apart from
 "the half-life happened to compute to 21".
 
-EXITS — what's engine-expressible today vs. approximated
-----------------------------------------------------------
-The typical exit spec for this strategy family is: (a) close when
-|z| <= 0.5 (reversion achieved), (b) a "structural kill" if the pair's
-cointegration relationship breaks down on a later re-scan, and (c) a
-time-based stop after roughly N days without reversion. The engine that
-consumes Signal objects holds a position via CADENCE (next-fire-date
-bookkeeping driven by signal_params['hold_days']) plus hard stop/target
-levels from compute_stops_and_targets() — there is no generic per-bar
-"recompute an indicator and flatten on threshold-cross" hook available to a
-strategy at this layer. So, concretely:
-  - (a) the |z|<=0.5 early exit is APPROXIMATED by the cadence window (a
-    holding period calibrated off the same half-life/reversion assumption)
-    — it is NOT an exact per-bar z-recheck-and-flatten.
-  - (b) the structural-kill (pair decoheres) is APPROXIMATED indirectly: if
-    the scanner drops the pair from `approved` on its next run, this
-    strategy simply stops re-firing NEW entries on it; it does not
-    proactively flatten an already-open position early. Doing that would
-    require an exit-side hook this strategy layer does not have.
-  - (c) the time stop is exactly what hold_days/cadence gives.
+EXITS — exact since the Phase 1 per-bar exit hook (2026-08-28)
+--------------------------------------------------------------
+The exit spec for this strategy family is: (a) close when |z| <= Z_EXIT
+(reversion achieved), (b) a "structural kill" if the pair's cointegration
+relationship breaks down on a later re-scan, and (c) a time stop after
+roughly N days without reversion. All three are now expressed exactly rather
+than approximated by the cadence window, via `exit_hook = True` +
+`should_exit()` (spec docs/specs/2026-08-28-per-bar-exit-hook-spec.md,
+plan docs/superpowers/plans/2026-08-28-exit-hook-phase1.md):
+  - (a) REVERSION — EXACT. `should_exit` recomputes the log-spread z from the
+    entry-time beta/alpha over a rolling Z_WINDOW on the bar's prices panel
+    and returns `'z_revert'` when |z| <= Z_EXIT (0.5) OR z has flipped sign
+    since entry (signal_params['z']). Persisted as
+    `exit_reason='strategy_exit:z_revert'`. LIVE TODAY only in the BACKTEST
+    (`backtest/open_book.py`); the live `update_pnl` mirror is Phase 2 and is
+    gated on OPENCLAW_EXIT_HOOK_LIVE=1 — until that flag flips, promotion of
+    any run that used the hook is refused as `exit_hook_live_disabled`.
+  - (b) STRUCTURAL KILL — EXACT. `'pair_decohered'` when the latest ledger
+    snapshot with as_of <= the bar's date no longer approves the pair
+    (`_latest_snapshot_has_pair`; an unreadable/absent snapshot returns None
+    and the position is HELD, never flattened on a missing read). CAVEAT: the
+    scanner folds fdr_pass AND cost_ok into `approved`, so this fires on ANY
+    de-approval — a cost or persistence flap, not only a genuine loss of
+    cointegration. It is the dominant exit in practice: 695 of run 3's 1,069
+    hook exits (65 %) were `pair_decohered`, median hold 4 trading days
+    (~one weekly scan cycle) and net-losing, against 374 net-winning
+    `z_revert`. Read any median-hold number for this strategy with that in
+    mind — it tracks scanner cadence as much as reversion.
+  - (c) TIME STOP — the per-signal `signal_params['hold_days']`
+    (min(3*half_life_days, 30), or the operator-overridable class default
+    when no half-life is available) capped by the RUN's `max_hold_days`.
+    Honored per-bar by the open book; reason stays `'max_hold'`.
   - (d) PER-LEG PRICE STOPS (X1-D1, 2026-08-28): the engine requires a
     stop_loss/target per leg. Run 655c4bdb showed the base-class 2xATR /
     5% per-leg levels firing on 70% of trades -- a leg moving against you
@@ -103,8 +115,8 @@ strategy at this layer. So, concretely:
     over sqrt(hold_days) (see _pair_leg_levels; per-signal
     signal_params['stop_basis'] records both distances). This is still a
     per-leg guard, not a spread stop -- the true spread stop remains owed.
-Do not invent engine features to close this gap — it is reported as owed in
-the task report, not silently worked around here.
+On any given bar the order is FIXED and set by the engine: intra-bar bracket
+(d) -> hook at the close (a)/(b) -> time cap (c).
 """
 from __future__ import annotations
 
