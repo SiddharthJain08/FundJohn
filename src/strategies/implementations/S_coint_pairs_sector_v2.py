@@ -142,47 +142,125 @@ def _ledger_path() -> Path:
     return Path(override) if override else (_REPO_ROOT / _DEFAULT_LEDGER_REL)
 
 
-def _load_approved_pairs(as_of_date: pd.Timestamp) -> pd.DataFrame:
-    """Load the pair ledger, look-ahead-filtered to as_of_date via pyarrow
-    predicate pushdown, LATEST surviving as_of snapshot only, approved-only.
-    Always returns a DataFrame (empty on any miss) — never raises.
+# Compact projection of the ledger held in memory: everything
+# generate_signals reads off a row, nothing else. The full 15-column,
+# 860k-row parquet is ONE row group, so even a filtered read materialises the
+# whole thing (~190 ms) — and the exit hook probes the ledger once per open
+# leg per bar. Selecting these columns in arrow before to_pandas() keeps the
+# resident table at (approved rows x 9 cols).
+_CACHE_COLUMNS = (
+    'as_of', 'ticker_a', 'ticker_b', 'beta', 'alpha', 'half_life_days',
+    'industry', 'eg_pvalue', 'fdr_q',
+)
 
-    The scanner (src/pipeline/pairs_scanner.py) writes `as_of` as a python
-    date (parquet date32); pyarrow's filter comparator accepts a pd.Timestamp
-    against a date32 column directly (verified), so no dtype juggling is
-    needed before the pushdown read."""
-    path = _ledger_path()
-    if not path.exists():
-        print(f'[debug] pair_ledger missing at {path}', file=sys.stderr)
-        return pd.DataFrame()
+# One entry, replaced whenever the ledger version changes. The version key is
+# (path, st_mtime_ns, st_size), so OPENCLAW_PAIR_LEDGER is still honoured per
+# call (the path is part of the key) and a rewritten ledger is picked up.
+_LEDGER_CACHE = {'key': None, 'entry': None}
+
+
+def _read_ledger(path: Path) -> dict:
+    """Read the ledger once into the compact cache entry. Never raises.
+
+    Returns {'error', 'as_of', 'approved'}:
+      - `error` is None, ('read', msg) or ('columns', [missing]). The CALLERS
+        own the log lines, so a cached failure still logs on every call.
+      - `as_of` is the sorted DISTINCT as_of values over ALL rows (approved or
+        not). The latest snapshot must be selected over the full ledger and
+        only THEN filtered to approved — picking the latest snapshot that
+        happens to hold an approved row would resurrect the previous scan's
+        approvals whenever a scan de-approves a pair, and `pair_decohered`
+        would never fire. This mirrors the pre-cache read order exactly.
+      - `approved` is the compact approved==True frame, all snapshots.
+    """
     try:
+        import pyarrow as pa
+        import pyarrow.compute as pc
         import pyarrow.parquet as pq
-        table = pq.read_table(str(path), filters=[('as_of', '<=', as_of_date)])
+        table = pq.read_table(str(path))
     except Exception as e:
-        print(f'[debug] pair_ledger read failed ({path}): {e}', file=sys.stderr)
-        return pd.DataFrame()
-
-    df = table.to_pandas()
+        return {'error': ('read', str(e)), 'as_of': None, 'approved': None}
 
     # Validate the full required column set ONCE, right after read. A
     # malformed ledger (e.g. missing `approved`) must fail CLOSED (empty
     # result, one log line) — never raise (AttributeError downstream in
     # generate_signals) and never silently treat every row as approved.
-    missing_cols = [c for c in _REQUIRED_LEDGER_COLUMNS if c not in df.columns]
+    missing_cols = [c for c in _REQUIRED_LEDGER_COLUMNS if c not in table.column_names]
     if missing_cols:
-        print(f'[debug] pair_ledger at {path} missing required columns {missing_cols} '
-              f'-- treating as no approved pairs (fail-closed)', file=sys.stderr)
+        return {'error': ('columns', missing_cols), 'as_of': None, 'approved': None}
+
+    try:
+        as_of_all = pd.DatetimeIndex(
+            pd.to_datetime(pd.Series(pc.unique(table.column('as_of')).to_pandas())).dropna()
+        ).unique().sort_values()
+        # Explicit bool compare, in pandas, on the single `approved` column:
+        # identical semantics to the pre-cache `df['approved'] == True`
+        # (NaN/None/non-bool safely excluded) without materialising the other
+        # 14 columns for 860k rows.
+        keep = (table.column('approved').to_pandas() == True)   # noqa: E712
+        keep = keep.fillna(False).to_numpy(dtype=bool)
+        cols = [c for c in _CACHE_COLUMNS if c in table.column_names]
+        approved = table.select(cols).filter(pa.array(keep)).to_pandas()
+        approved['as_of'] = pd.to_datetime(approved['as_of'])
+    except Exception as e:
+        return {'error': ('read', str(e)), 'as_of': None, 'approved': None}
+    return {'error': None, 'as_of': as_of_all, 'approved': approved}
+
+
+def _approved_table(path: Path) -> dict:
+    """The cached `_read_ledger` entry for `path`, re-read only when the
+    file's (mtime_ns, size) changes. Never raises."""
+    try:
+        st = path.stat()
+    except OSError as e:
+        return {'error': ('read', f'{type(e).__name__}: {e}'), 'as_of': None, 'approved': None}
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    entry = _LEDGER_CACHE['entry']
+    if entry is not None and _LEDGER_CACHE['key'] == key:
+        return entry
+    entry = _read_ledger(path)
+    _LEDGER_CACHE['key'] = key
+    _LEDGER_CACHE['entry'] = entry
+    return entry
+
+
+def _latest_as_of(entry: dict, as_of_date: pd.Timestamp):
+    """Newest ledger snapshot date <= as_of_date, or None. This is the
+    look-ahead filter: a row minted after the panel's last bar is invisible
+    here even though it already sits in the parquet."""
+    eligible = entry['as_of'][entry['as_of'] <= as_of_date]
+    return eligible[-1] if len(eligible) else None
+
+
+def _load_approved_pairs(as_of_date: pd.Timestamp) -> pd.DataFrame:
+    """The pair ledger, look-ahead-filtered to as_of_date, LATEST surviving
+    as_of snapshot only, approved-only. Always returns a DataFrame (empty on
+    any miss) — never raises.
+
+    Answered from `_approved_table`'s cache: the physical parquet is read at
+    most once per ledger version, however many times this — or the exit
+    hook's `_latest_snapshot_has_pair` — is called."""
+    path = _ledger_path()
+    if not path.exists():
+        print(f'[debug] pair_ledger missing at {path}', file=sys.stderr)
+        return pd.DataFrame()
+    entry = _approved_table(path)
+    if entry['error'] is not None:
+        kind, detail = entry['error']
+        if kind == 'columns':
+            print(f'[debug] pair_ledger at {path} missing required columns {detail} '
+                  f'— treating as no approved pairs (fail-closed)', file=sys.stderr)
+        else:
+            print(f'[debug] pair_ledger read failed ({path}): {detail}', file=sys.stderr)
         return pd.DataFrame()
 
-    if df.empty:
+    latest = _latest_as_of(entry, as_of_date)
+    if latest is None:
         print(f'[debug] pair_ledger has no rows with as_of <= {as_of_date.date()}', file=sys.stderr)
-        return df
+        return pd.DataFrame()
 
-    df = df.copy()
-    df['as_of'] = pd.to_datetime(df['as_of'])
-    latest = df['as_of'].max()
-    df = df[df['as_of'] == latest]
-    df = df[df['approved'] == True]  # noqa: E712 — explicit bool compare; NaN/None safely excluded
+    df = entry['approved']
+    df = df[df['as_of'] == latest].copy()   # copy: the cached frame is shared
     if df.empty:
         print(f'[debug] pair_ledger has no approved rows for as_of={latest.date()}', file=sys.stderr)
     return df
@@ -196,16 +274,18 @@ def _latest_snapshot_has_pair(as_of_date: pd.Timestamp, ticker_a: str, ticker_b:
     path = _ledger_path()
     if not path.exists():
         return None
-    try:
-        import pyarrow.parquet as pq
-        df = pq.read_table(str(path), filters=[('as_of', '<=', as_of_date)]).to_pandas()
-    except Exception as e:
-        print(f'[debug] pair_ledger read failed in should_exit ({path}): {e}', file=sys.stderr)
+    entry = _approved_table(path)
+    if entry['error'] is not None:
+        kind, detail = entry['error']
+        if kind != 'columns':
+            print(f'[debug] pair_ledger read failed in should_exit ({path}): {detail}',
+                  file=sys.stderr)
         return None
-    if df.empty or any(c not in df.columns for c in ('as_of', 'ticker_a', 'ticker_b', 'approved')):
+    latest = _latest_as_of(entry, as_of_date)
+    if latest is None:
         return None
-    latest = pd.to_datetime(df['as_of']).max()
-    snap = df[(pd.to_datetime(df['as_of']) == latest) & (df['approved'] == True)]  # noqa: E712
+    snap = entry['approved']
+    snap = snap[snap['as_of'] == latest]
     keys = set(zip(snap['ticker_a'].astype(str), snap['ticker_b'].astype(str)))
     return (ticker_a, ticker_b) in keys or (ticker_b, ticker_a) in keys
 
@@ -279,6 +359,11 @@ class CointPairsSectorV2(BaseStrategy):
             beta = float(sp['beta']); alpha = float(sp['alpha']); z_entry = float(sp['z'])
             ticker_a, ticker_b = str(pair).split('/', 1)
         except (KeyError, TypeError, ValueError, AttributeError):
+            return None
+        if not np.isfinite(z_entry):
+            # A NaN entry z makes `(z_t > 0) != (z_entry > 0)` a FABRICATED
+            # sign flip for every positive z_t (NaN > 0 is False). With no
+            # usable entry reference the only safe answer is hold.
             return None
         if prices is None or prices.empty or ticker_a not in prices.columns or ticker_b not in prices.columns:
             return None

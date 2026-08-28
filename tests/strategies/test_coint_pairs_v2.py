@@ -777,3 +777,121 @@ def test_should_exit_none_when_leg_missing_or_params_incomplete(tmp_path, monkey
     assert strat.should_exit(pos, frame.drop(columns=['ZZTBB']), {'state': 'LOW_VOL'}) is None
     bad = dict(pos); bad['signal_params'] = {k: v for k, v in pos['signal_params'].items() if k != 'beta'}
     assert strat.should_exit(bad, frame, {'state': 'LOW_VOL'}) is None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 17. Ledger cache (F1, 2026-08-28): the approved table is read ONCE per
+#     (path, mtime_ns, size). The exit hook calls _latest_snapshot_has_pair
+#     per open leg per bar; re-reading an 860k-row single-row-group parquet
+#     every time is what made X1 run 3 take 38 min.
+# ─────────────────────────────────────────────────────────────────────────
+def test_ledger_read_once_per_version(tmp_path, monkeypatch):
+    import pyarrow.parquet as pq
+    from strategies.implementations import S_coint_pairs_sector_v2 as mod
+
+    last = _dates(120)[-1]
+    ledger_path = _write_ledger(tmp_path, [
+        _ledger_row(last, 'ZZTAA', 'ZZTBB', beta=0.75, alpha=0.10, approved=True)])
+    monkeypatch.setenv('OPENCLAW_PAIR_LEDGER', ledger_path)
+
+    calls = []
+    real_read_table = pq.read_table
+
+    def counting_read_table(*args, **kwargs):
+        calls.append(args[0] if args else kwargs.get('source'))
+        return real_read_table(*args, **kwargs)
+
+    monkeypatch.setattr(pq, 'read_table', counting_read_table)
+
+    first = mod._load_approved_pairs(pd.Timestamp(last))
+    second = mod._load_approved_pairs(pd.Timestamp(last))
+    assert len(first) == 1 and len(second) == 1
+    assert len(calls) == 1, calls
+
+    # the hook's per-bar probe answers off the same cached table
+    assert mod._latest_snapshot_has_pair(pd.Timestamp(last), 'ZZTAA', 'ZZTBB') is True
+    assert len(calls) == 1, calls
+
+
+def test_ledger_cache_invalidated_when_file_changes(tmp_path, monkeypatch):
+    from strategies.implementations import S_coint_pairs_sector_v2 as mod
+
+    last = _dates(120)[-1]
+    ledger_path = _write_ledger(tmp_path, [
+        _ledger_row(last, 'ZZTAA', 'ZZTBB', beta=0.75, alpha=0.10, approved=True)])
+    monkeypatch.setenv('OPENCLAW_PAIR_LEDGER', ledger_path)
+    assert len(mod._load_approved_pairs(pd.Timestamp(last))) == 1
+    assert mod._latest_snapshot_has_pair(pd.Timestamp(last), 'ZZTAA', 'ZZTBB') is True
+
+    # rewrite the SAME path with different rows -> the cached answer must go stale
+    _write_ledger(tmp_path, [
+        _ledger_row(last, 'ZZTAA', 'ZZTBB', beta=0.75, alpha=0.10, approved=False),
+        _ledger_row(last, 'ZZTCC', 'ZZTDD', beta=1.10, alpha=0.00, approved=True),
+        _ledger_row(last, 'ZZTEE', 'ZZTFF', beta=0.90, alpha=0.05, approved=True),
+    ])
+    again = mod._load_approved_pairs(pd.Timestamp(last))
+    assert len(again) == 2
+    assert set(again['ticker_a']) == {'ZZTCC', 'ZZTEE'}
+    assert mod._latest_snapshot_has_pair(pd.Timestamp(last), 'ZZTAA', 'ZZTBB') is False
+
+
+def test_latest_snapshot_selects_over_all_rows_not_approved_only(tmp_path, monkeypatch):
+    """The LATEST snapshot is chosen over EVERY row <= as_of_date, then filtered
+    to approved -- never 'the latest snapshot that happens to hold an approved
+    row'. Otherwise a scan that de-approves a pair resurrects the prior week's
+    approval and `pair_decohered` never fires."""
+    from strategies.implementations import S_coint_pairs_sector_v2 as mod
+
+    dates = _dates(120)
+    older, newer = dates[-6], dates[-1]
+    ledger_path = _write_ledger(tmp_path, [
+        _ledger_row(older, 'ZZTAA', 'ZZTBB', beta=0.75, alpha=0.10, approved=True),
+        _ledger_row(newer, 'ZZTAA', 'ZZTBB', beta=0.75, alpha=0.10, approved=False),
+    ])
+    monkeypatch.setenv('OPENCLAW_PAIR_LEDGER', ledger_path)
+
+    assert mod._load_approved_pairs(pd.Timestamp(newer)).empty
+    assert mod._latest_snapshot_has_pair(pd.Timestamp(newer), 'ZZTAA', 'ZZTBB') is False
+    # ...and the older snapshot is still visible in its own as-of window
+    assert len(mod._load_approved_pairs(pd.Timestamp(older))) == 1
+    assert mod._latest_snapshot_has_pair(pd.Timestamp(older), 'ZZTAA', 'ZZTBB') is True
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 18. _latest_snapshot_has_pair None branches (hold, never decoherence).
+# ─────────────────────────────────────────────────────────────────────────
+def test_latest_snapshot_none_when_file_missing(tmp_path, monkeypatch):
+    from strategies.implementations import S_coint_pairs_sector_v2 as mod
+    monkeypatch.setenv('OPENCLAW_PAIR_LEDGER', str(tmp_path / 'nope.parquet'))
+    assert mod._latest_snapshot_has_pair(pd.Timestamp('2026-06-01'), 'ZZTAA', 'ZZTBB') is None
+
+
+def test_latest_snapshot_none_when_file_unreadable(tmp_path, monkeypatch, capsys):
+    from strategies.implementations import S_coint_pairs_sector_v2 as mod
+    garbage = tmp_path / 'pair_ledger.parquet'
+    garbage.write_bytes(b'this is not a parquet file')
+    monkeypatch.setenv('OPENCLAW_PAIR_LEDGER', str(garbage))
+    assert mod._latest_snapshot_has_pair(pd.Timestamp('2026-06-01'), 'ZZTAA', 'ZZTBB') is None
+    assert 'read failed' in capsys.readouterr().err
+
+
+def test_latest_snapshot_none_when_rows_are_all_in_the_future(tmp_path, monkeypatch):
+    from strategies.implementations import S_coint_pairs_sector_v2 as mod
+    dates = _dates(120)
+    ledger_path = _write_ledger(tmp_path, [
+        _ledger_row(dates[-1], 'ZZTAA', 'ZZTBB', beta=0.75, alpha=0.10, approved=True)])
+    monkeypatch.setenv('OPENCLAW_PAIR_LEDGER', ledger_path)
+    assert mod._latest_snapshot_has_pair(dates[-10], 'ZZTAA', 'ZZTBB') is None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 19. A NaN entry z in signal_params must HOLD, not fabricate a sign flip
+#     (NaN > 0 is False, so the sign-flip test would fire on any z_t > 0).
+# ─────────────────────────────────────────────────────────────────────────
+def test_should_exit_none_when_entry_z_is_nan(tmp_path, monkeypatch):
+    strat, frame, signals, _ = _entered_pair(tmp_path, monkeypatch)
+    a_sig = next(s for s in signals if s.ticker == 'ZZTAA')
+    pos = _position(a_sig, frame.index[-1])
+    assert pos['signal_params']['z'] > 0          # entry was a rich spread
+    pos['signal_params'] = {**pos['signal_params'], 'z': float('nan')}
+    assert strat.should_exit(pos, frame, {'state': 'LOW_VOL'}) is None
