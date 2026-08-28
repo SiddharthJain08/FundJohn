@@ -142,6 +142,32 @@ def test_raising_hook_holds_and_counts():
     assert engine.LAST_EXIT_HOOK_STATS['first_hook_raise'].startswith('RuntimeError')
 
 
+def test_glue_error_holds_the_row_and_never_aborts_update_pnl():
+    """I2 (final review): the glue AROUND should_exit (instance lookup, bar
+    count, position build, hold-cap resolve) is inside the guard too. A raise
+    there must hold the row — the signal_pnl UPSERT still happens, status stays
+    'open' — and must not stop update_pnl from marking the other open rows."""
+    strat = _mk(lambda p, x: 'z_revert')
+    cur = _FakeCursor([_row()])
+    with (patch.dict(os.environ, ENV),
+          patch('execution.engine._bars_held', side_effect=RuntimeError('panel exploded'))):
+        n, closed = engine.update_pnl(cur, _panel(), date(2026, 5, 13),
+                                      strategies=[strat], regime={'state': 'LOW_VOL'})
+    assert closed == [] and _closes(cur) == [(None, 'open')]
+    assert engine.LAST_EXIT_HOOK_STATS['hook_raised'] == 1
+    assert engine.LAST_EXIT_HOOK_STATS['first_hook_raise'].startswith('RuntimeError')
+
+    # a second, non-hook row in the SAME call is still processed
+    plain = _mk(lambda p, x: 'x', exit_hook=False, sid='S_plain')
+    cur2 = _FakeCursor([_row(), _row(id='sig-2', strategy_id='S_plain')])
+    with (patch.dict(os.environ, ENV),
+          patch('execution.engine._bars_held', side_effect=RuntimeError('panel exploded'))):
+        n2, closed2 = engine.update_pnl(cur2, _panel(), date(2026, 5, 13),
+                                        strategies=[strat, plain], regime={'state': 'LOW_VOL'})
+    assert n2 == 2 and closed2 == [] and _closes(cur2) == [(None, 'open'), (None, 'open')]
+    assert engine.LAST_EXIT_HOOK_STATS['hook_raised'] == 1        # only the hook row raised
+
+
 def test_time_stop_from_signal_hold_days():
     strat = _mk(lambda p, x: None)
     cur = _FakeCursor([_row(signal_params={'hold_days': 4})])      # bars_held == 5 >= 4

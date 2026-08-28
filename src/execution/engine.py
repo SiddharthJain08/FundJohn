@@ -2082,43 +2082,59 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date, *,
         # Exit-hook live mirror (Phase 2 §2.4): hook, then time stop, only
         # while nothing above closed the row and only for exit_hook strategies.
         if _hook_on and close_reason is None:
-            _strat = _strategy_for(strat_id)
-            if _strat is not None and getattr(_strat, 'exit_hook', False):
-                LAST_EXIT_HOOK_STATS['rows_evaluated'] += 1
-                _entry_dt = _tgt_dt if (_tgt_dt is not None and isinstance(_tgt_dt, date)) else sig_date
-                _bars = _bars_held(prices, ticker, _entry_dt, run_date)
-                if _bars is None:
-                    _bars = days_held
-                _sp = row.get('signal_params') if isinstance(row.get('signal_params'), dict) else {}
-                position = {
-                    'ticker': ticker, 'direction': direction, 'entry_price': entry,
-                    'entry_date': _entry_dt, 'days_held': _bars,
-                    'stop_loss': stop_loss, 'target_1': target_1, 'signal_params': _sp,
-                }
-                try:
-                    _reason = _strat.should_exit(position, prices, regime, aux_data)
-                except Exception as _e:
-                    _reason = None
-                    LAST_EXIT_HOOK_STATS['hook_raised'] += 1
-                    if LAST_EXIT_HOOK_STATS['first_hook_raise'] is None:
-                        LAST_EXIT_HOOK_STATS['first_hook_raise'] = f'{type(_e).__name__}: {_e}'
-                        logger.error('[exit_hook] should_exit raised for %s %s: %s — holding',
-                                     strat_id, ticker, LAST_EXIT_HOOK_STATS['first_hook_raise'])
-                if _reason:
-                    close_reason = f'strategy_exit:{_reason}'
-                    close_status = 'closed'
-                    realized_pct = unrealized_pct
-                    LAST_EXIT_HOOK_STATS['strategy_exit'] += 1
-                    logger.info('[exit_hook] %s %s %s bars_held=%d', strat_id, ticker, close_reason, _bars)
-                elif close_reason is None:
-                    from execution import regime_param_resolver as _rpr
-                    _cap = _hold_cap(_sp, _rpr.configured_max_hold_days(strat_id, log=logger.warning))
-                    if _bars >= _cap:
-                        close_reason = 'max_hold'
+            # I2 (final review): the whole glue — instance lookup, bar count,
+            # position build, hold-cap resolve — sits inside this guard, not
+            # just the should_exit call. Anything raising here (a resolver DB
+            # blip, a bad signal_params shape) must hold the row and let
+            # update_pnl keep marking every other open signal; it must never
+            # abort the loop or half-close this one.
+            _pre_close = (close_reason, close_status, realized_pct)
+            try:
+                _strat = _strategy_for(strat_id)
+                if _strat is not None and getattr(_strat, 'exit_hook', False):
+                    LAST_EXIT_HOOK_STATS['rows_evaluated'] += 1
+                    _entry_dt = _tgt_dt if (_tgt_dt is not None and isinstance(_tgt_dt, date)) else sig_date
+                    _bars = _bars_held(prices, ticker, _entry_dt, run_date)
+                    if _bars is None:
+                        _bars = days_held
+                    _sp = row.get('signal_params') if isinstance(row.get('signal_params'), dict) else {}
+                    position = {
+                        'ticker': ticker, 'direction': direction, 'entry_price': entry,
+                        'entry_date': _entry_dt, 'days_held': _bars,
+                        'stop_loss': stop_loss, 'target_1': target_1, 'signal_params': _sp,
+                    }
+                    try:
+                        _reason = _strat.should_exit(position, prices, regime, aux_data)
+                    except Exception as _e:
+                        _reason = None
+                        LAST_EXIT_HOOK_STATS['hook_raised'] += 1
+                        if LAST_EXIT_HOOK_STATS['first_hook_raise'] is None:
+                            LAST_EXIT_HOOK_STATS['first_hook_raise'] = f'{type(_e).__name__}: {_e}'
+                            logger.error('[exit_hook] should_exit raised for %s %s: %s — holding',
+                                         strat_id, ticker, LAST_EXIT_HOOK_STATS['first_hook_raise'])
+                    if _reason:
+                        close_reason = f'strategy_exit:{_reason}'
                         close_status = 'closed'
                         realized_pct = unrealized_pct
-                        LAST_EXIT_HOOK_STATS['max_hold'] += 1
-                        logger.info('[exit_hook] %s %s max_hold bars_held=%d cap=%d', strat_id, ticker, _bars, _cap)
+                        LAST_EXIT_HOOK_STATS['strategy_exit'] += 1
+                        logger.info('[exit_hook] %s %s %s bars_held=%d', strat_id, ticker, close_reason, _bars)
+                    elif close_reason is None:
+                        from execution import regime_param_resolver as _rpr
+                        _cap = _hold_cap(_sp, _rpr.configured_max_hold_days(strat_id, log=logger.warning))
+                        if _bars >= _cap:
+                            close_reason = 'max_hold'
+                            close_status = 'closed'
+                            realized_pct = unrealized_pct
+                            LAST_EXIT_HOOK_STATS['max_hold'] += 1
+                            logger.info('[exit_hook] %s %s max_hold bars_held=%d cap=%d', strat_id, ticker, _bars, _cap)
+            except Exception as _e:
+                # Hold the row exactly as it was before the block ran.
+                close_reason, close_status, realized_pct = _pre_close
+                LAST_EXIT_HOOK_STATS['hook_raised'] += 1
+                if LAST_EXIT_HOOK_STATS['first_hook_raise'] is None:
+                    LAST_EXIT_HOOK_STATS['first_hook_raise'] = f'{type(_e).__name__}: {_e}'
+                logger.error('[exit_hook] glue error for %s %s: %s — holding',
+                             strat_id, ticker, f'{type(_e).__name__}: {_e}')
 
         try:
             # Upsert P&L row
