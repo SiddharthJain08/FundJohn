@@ -38,6 +38,13 @@ class OpenTrade:
     prev_mark: float = 0.0
     daily_marks: list = field(default_factory=list)
 
+    def __post_init__(self):
+        # The first interior mark is (close / prev_mark - 1); an unset
+        # prev_mark must therefore be the fill, never 0.0. Callers that pass
+        # prev_mark explicitly (unified_backtest, tests) are unaffected.
+        if self.prev_mark == 0.0:
+            self.prev_mark = self.entry_fill
+
 
 def resolve_hold_cap(signal_params, max_hold_days: int) -> int:
     """Per-signal hold_days capped by the run's max_hold_days (spec §1)."""
@@ -54,7 +61,10 @@ def _position_dict(t: OpenTrade) -> dict:
     return {
         'ticker':        t.ticker,
         'direction':     'LONG' if t.direction > 0 else 'SHORT',
-        'entry_price':   t.entry_price,
+        # spec §1: the ACTUAL FILL, mirroring live's mark_entry_price
+        # precedence. t.entry_price (the signal level) is what gets PERSISTED
+        # on the trade record; what the hook sees is what was paid.
+        'entry_price':   t.entry_fill,
         'entry_date':    t.entry_date,
         'days_held':     t.holding_days,
         'stop_loss':     t.stop_loss,

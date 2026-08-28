@@ -152,14 +152,30 @@ class TestAdvanceOpenBook:
         assert counters['first_hook_raise'].startswith('RuntimeError')
 
     def test_position_dict_contract(self):
+        # spec §1: position['entry_price'] is the ACTUAL FILL (entry_fill),
+        # i.e. the raw level after adverse entry slippage -- the same quantity
+        # the live mirror will pass as mark_entry_price. A hook that computes
+        # a return from entry must see what was paid, not the signal level.
         seen = {}
         def grab(pos, prices):
             seen.update(pos); return 'now'
         hook = _Hook(grab)
-        self._run(_trade(DATES[0], signal_params={'pair': 'AAA/BBB'}), hook)
-        assert seen == {'ticker': 'AAA', 'direction': 'LONG', 'entry_price': 100.0,
+        self._run(_trade(DATES[0], slippage=0.001, entry_fill=100.0 * 1.001,
+                          signal_params={'pair': 'AAA/BBB'}), hook)
+        assert seen.pop('entry_price') == pytest.approx(100.0 * 1.001)
+        assert seen == {'ticker': 'AAA', 'direction': 'LONG',
                         'entry_date': DATES[0], 'days_held': 1, 'stop_loss': 95.0,
                         'target_1': 108.0, 'signal_params': {'pair': 'AAA/BBB'}}
+
+    def test_prev_mark_defaults_to_entry_fill(self):
+        # An OpenTrade built without an explicit prev_mark must mark its first
+        # interior bar off the fill, not off 0.0 (which would divide by zero).
+        t = OpenTrade(ticker='AAA', direction=1, entry_date=DATES[0], entry_price=100.0,
+                      entry_fill=100.1, stop_loss=95.0, target_1=108.0, hold_cap=21,
+                      entry_regime='LOW_VOL', signal_params={}, slippage=0.001)
+        assert t.prev_mark == 100.1
+        # an explicitly supplied prev_mark is never overwritten
+        assert _trade(DATES[0]).prev_mark == 100.0
 
     def test_non_hook_instance_skips_hook_entirely(self):
         class NoHook:
