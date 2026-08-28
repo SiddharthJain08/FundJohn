@@ -1133,7 +1133,7 @@ def run_backtest(strategy_id: str, *,
     if not filepath:
         raise FileNotFoundError(f'no implementation file for {strategy_id}')
     strategy_cls = load_strategy_class(filepath)
-    _log(f'loaded {strategy_cls.__name__} from {Path(filepath).relative_to(ROOT)}')
+    _log(f'loaded {strategy_cls.__name__} from {Path(filepath).resolve().relative_to(ROOT)}')
     _cost_bps = resolve_cost_model_bps(instrument_class)
     # 2026-07-05: always-adverse slippage is now the STANDING DEFAULT — ON
     # unless explicitly disabled with =0 (escape hatch). Was default-OFF
