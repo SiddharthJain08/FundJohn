@@ -183,3 +183,116 @@ class TestAdvanceOpenBook:
         assert t['exit_price'] == 100.0 and t['pnl_pct'] == 0.0
         assert t['exit_date'] == DATES[0].date()
         assert hook.calls == [] and counters.get('hook_exits', 0) == 0
+
+
+from tests.backtest.test_backtest_fill_model import (_bars_from_rows, _run_capture,
+                                                    _trivial_dataset)
+from strategies.base import BaseStrategy, Signal, CANONICAL_REGIMES
+
+
+def _mk_hook_cls(decide, hold_days=None, stop_pct=0.07, target_pct=0.08):
+    """One LONG signal on the first bar with len(prices) >= 10, then quiet."""
+    class HookStub(BaseStrategy):
+        id = 'stub_hook'
+        min_lookback = 5
+        active_in_regimes = list(CANONICAL_REGIMES)
+        exit_hook = True
+        fired = False
+
+        def generate_signals(self, prices, regime, universe, aux_data=None):
+            if len(prices) < 10 or HookStub.fired or not universe:
+                return []
+            HookStub.fired = True
+            t = universe[0]
+            ep = float(prices[t].iloc[-1])
+            sp = {'hold_days': hold_days} if hold_days else {}
+            return [Signal(ticker=t, direction='LONG', entry_price=ep,
+                           stop_loss=ep * (1 - stop_pct), target_1=ep * (1 + target_pct),
+                           target_2=0.0, target_3=0.0, position_size_pct=0.0,
+                           confidence='MED', signal_params=sp)]
+
+        def should_exit(self, position, prices, regime, aux_data=None):
+            return decide(position, prices)
+    return HookStub
+
+
+def _mk_plain_cls(stop_pct=0.07, target_pct=0.08):
+    class PlainStub(BaseStrategy):
+        id = 'stub_plain'
+        min_lookback = 5
+        active_in_regimes = list(CANONICAL_REGIMES)
+        fired = False
+
+        def generate_signals(self, prices, regime, universe, aux_data=None):
+            if len(prices) < 10 or PlainStub.fired or not universe:
+                return []
+            PlainStub.fired = True
+            t = universe[0]
+            ep = float(prices[t].iloc[-1])
+            return [Signal(ticker=t, direction='LONG', entry_price=ep,
+                           stop_loss=ep * (1 - stop_pct), target_1=ep * (1 + target_pct),
+                           target_2=0.0, target_3=0.0, position_size_pct=0.0, confidence='MED')]
+    return PlainStub
+
+
+def _dataset(n=30):
+    dates = pd.date_range('2024-01-01', periods=n, freq='B')
+    closes = [100.0 + 0.5 * i for i in range(n)]
+    close_wide = pd.DataFrame({'AAA': closes}, index=dates); close_wide.index.name = 'date'
+    bars = _bars_from_rows({'AAA': [(c - 0.1, c + 0.2, c - 0.2, c) for c in closes]}, dates)
+    regimes = pd.Series({d: 'LOW_VOL' for d in dates})
+    return close_wide, bars, regimes, dates, closes
+
+
+class TestPerBarSimulateOpenBook:
+    def _strip(self, trades):
+        return [{k: v for k, v in t.items() if k != 'daily_marks'} for t in trades]
+
+    def test_hook_never_firing_equals_simulate_trade_path(self):
+        close_wide, bars, regimes, dates, closes = _dataset()
+        plain = _run_capture(_mk_plain_cls(), close_wide, bars, regimes, fill_model='same_close')
+        hook = _run_capture(_mk_hook_cls(lambda p, x: None), close_wide, bars, regimes, fill_model='same_close')
+        assert plain and len(plain) == 1
+        assert self._strip(hook) == self._strip(plain)
+        assert [round(m[1], 12) for m in hook[0]['daily_marks']] == [round(m[1], 12) for m in plain[0]['daily_marks']]
+
+    def test_hook_exit_lands_in_trade_list(self):
+        close_wide, bars, regimes, dates, closes = _dataset()
+        entry_idx = 9                                   # first bar with len(prices) >= 10
+        exit_day = dates[entry_idx + 4]
+        cls = _mk_hook_cls(lambda p, prices: 'z_revert' if prices.index[-1] == exit_day else None)
+        trades = _run_capture(cls, close_wide, bars, regimes, fill_model='same_close')
+        assert len(trades) == 1
+        t = trades[0]
+        assert t['exit_reason'] == 'strategy_exit:z_revert'
+        assert t['exit_date'] == exit_day.date()
+        assert t['holding_days'] == 4
+        # flat adverse slippage may still apply under _run_capture (spread costs off,
+        # OPENCLAW_BACKTEST_SLIPPAGE default ON) -> compare within 30 bps of the close
+        assert abs(t['exit_price'] / closes[entry_idx + 4] - 1.0) < 0.003
+
+    def test_signal_hold_days_caps_hold(self):
+        close_wide, bars, regimes, dates, closes = _dataset()
+        cls = _mk_hook_cls(lambda p, x: None, hold_days=3)
+        trades = _run_capture(cls, close_wide, bars, regimes, fill_model='same_close')
+        assert trades[0]['exit_reason'] == 'max_hold' and trades[0]['holding_days'] == 3
+
+    def test_open_fill_model_rejected_for_hook_strategies(self):
+        close_wide, bars, regimes, dates, closes = _dataset()
+        with pytest.raises(ValueError, match='exit_hook'):
+            _run_capture(_mk_hook_cls(lambda p, x: None), close_wide, bars, regimes, fill_model='open')
+
+    def test_trade_open_at_window_end_drains_past_end_dt(self):
+        close_wide, bars, regimes, dates, closes = _dataset(n=40)
+        cls = _mk_hook_cls(lambda p, x: None, hold_days=5)
+        inst = cls(); inst.active_in_regimes = list(CANONICAL_REGIMES)
+        # entry lands on dates[9]; end the OOS window on dates[11]: the trade
+        # must still run to its 5-bar cap on dates[14] like simulate_trade would
+        # (simulate_trade walks bars_by_ticker past end_dt; the open book drains).
+        with patch.dict(os.environ, {'OPENCLAW_BT_ASSET_GATE': 'off', 'OPENCLAW_BT_SPREAD_COSTS': '0'}):
+            out = ub._per_bar_simulate(inst, close_wide, bars, regimes, dates[0], dates[11],
+                                       strategy_id='stub_hook', max_hold_days=21,
+                                       fill_model='same_close')
+        t = out['trades'][0]
+        assert t['exit_reason'] == 'max_hold' and t['exit_date'] == dates[14].date()
+        assert out['hook_exits'] == 0

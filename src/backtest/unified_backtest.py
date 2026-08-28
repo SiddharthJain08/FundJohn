@@ -792,9 +792,40 @@ def _per_bar_simulate(
     # (no cross-run DB contamination — see aux_data_loader._recent_stop_outs).
     run_stop_history: dict = {}
 
+    # Exit-hook open-book path (spec §2). Only for instance.exit_hook=True;
+    # every other strategy keeps simulate_trade-at-entry byte-identical.
+    _use_open_book = bool(getattr(instance, 'exit_hook', False))
+    if _use_open_book and fill_model == 'open':
+        raise ValueError('exit_hook strategies support fill_model close/same_close only '
+                         '(the open-fill bar-inclusion rule is not modelled in the open book)')
+    _dt_priority = os.environ.get('OPENCLAW_BT_DOUBLE_TOUCH', 'stop')
+    open_book: list = []
+    hook_counters: dict = {}
+    if _use_open_book:
+        from backtest.open_book import OpenTrade, advance_open_book, resolve_hold_cap
+
     for current_date in oos_dates:
         # Need at least min_lookback days of history before strategy can run
         prices_to_date = close_wide.loc[:current_date]
+        if _use_open_book and open_book:
+            _rs = regimes.get(current_date, None)
+            _rp = {'state': (str(_rs) if _rs is not None and not pd.isna(_rs) else None),
+                   'date': (current_date.date() if hasattr(current_date, 'date') else current_date).isoformat()}
+            _aux_ob = {'options': {}}
+            if load_aux_data is not None:
+                try:
+                    _aux_ob = load_aux_data(current_date, strategy_id=strategy_id,
+                                            run_stop_history=run_stop_history)
+                except Exception:
+                    _aux_ob = {'options': {}}
+            for _ct in advance_open_book(open_book, current_date, bars_by_ticker, prices_to_date,
+                                         _rp, _aux_ob, instance,
+                                         dt_priority=_dt_priority, counters=hook_counters):
+                if _ct['exit_reason'] == 'stop':
+                    _sd = pd.Timestamp(_ct['exit_date'])
+                    if run_stop_history.get(_ct['ticker']) is None or _sd > run_stop_history[_ct['ticker']]:
+                        run_stop_history[_ct['ticker']] = _sd
+                trades.append(_ct if _true_mtm else {**_ct, 'daily_marks': []})
         if len(prices_to_date) < min_lookback + 5:
             continue
 
@@ -925,6 +956,17 @@ def _per_bar_simulate(
                 continue
             _tkr_bps = (cost_bps_by_ticker.get(ticker, slippage_bps)
                         if cost_bps_by_ticker is not None else slippage_bps)
+            if _use_open_book:
+                _s = float(_tkr_bps) / 10000.0
+                open_book.append(OpenTrade(
+                    ticker=ticker, direction=direction, entry_date=fill_date,
+                    entry_price=entry_price, entry_fill=entry_price * (1.0 + direction * _s),
+                    stop_loss=stop_loss, target_1=target_1,
+                    hold_cap=resolve_hold_cap(getattr(sig, 'signal_params', None), max_hold_days),
+                    entry_regime=str(regime_state),
+                    signal_params=dict(getattr(sig, 'signal_params', None) or {}),
+                    slippage=_s, prev_mark=entry_price * (1.0 + direction * _s)))
+                continue
             exit_info = simulate_trade(ticker_bars, fill_date, direction,
                                        entry_price, stop_loss, target_1, max_hold_days,
                                        include_entry_bar=_include_fill_bar,
@@ -956,6 +998,29 @@ def _per_bar_simulate(
                 'daily_marks':    exit_info.get('daily_marks', []) if _true_mtm else [],
             })
 
+    if _use_open_book and open_book:
+        for _dt in close_wide.index[close_wide.index > end_dt]:
+            if not open_book:
+                break
+            _rs = regimes.get(_dt, None)
+            _rp = {'state': (str(_rs) if _rs is not None and not pd.isna(_rs) else None),
+                   'date': _dt.date().isoformat()}
+            for _ct in advance_open_book(open_book, _dt, bars_by_ticker, close_wide.loc[:_dt],
+                                         _rp, {'options': {}}, instance,
+                                         dt_priority=_dt_priority, counters=hook_counters):
+                trades.append(_ct if _true_mtm else {**_ct, 'daily_marks': []})
+        for _t in open_book:   # ticker has no bar at all after entry
+            trades.append({'ticker': _t.ticker, 'direction': 'long' if _t.direction > 0 else 'short',
+                           'entry_date': _t.entry_date.date(), 'entry_price': _t.entry_price,
+                           'exit_date': _t.entry_date.date(), 'exit_price': _t.entry_price,
+                           'exit_reason': 'end_of_data', 'holding_days': 0, 'pnl_pct': 0.0,
+                           'entry_regime': _t.entry_regime, 'signal_stop': _t.stop_loss,
+                           'signal_target': _t.target_1, 'daily_marks': []})
+        open_book.clear()
+    if hook_counters.get('hook_exits') or hook_counters.get('hook_raised'):
+        _log(f'exit hook: {hook_counters.get("hook_exits", 0)} hook exits, '
+             f'{hook_counters.get("hook_raised", 0)} hook errors'
+             + (f' (first: {hook_counters["first_hook_raise"]})' if hook_counters.get('first_hook_raise') else ''))
     if bars_raised:
         total_bars = days_processed + bars_raised
         print(f'[WARN] generate_signals raised on {bars_raised}/{total_bars} bars '
@@ -974,6 +1039,9 @@ def _per_bar_simulate(
         'bars_raised':      bars_raised,
         'static_universe':  static_universe,
         'min_lookback':     min_lookback,
+        'hook_exits':       hook_counters.get('hook_exits', 0),
+        'hook_raised':      hook_counters.get('hook_raised', 0),
+        'first_hook_raise': hook_counters.get('first_hook_raise'),
     }
 
 
