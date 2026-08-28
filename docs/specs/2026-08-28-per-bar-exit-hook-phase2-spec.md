@@ -1,6 +1,6 @@
 # Spec — Per-bar exit hook, Phase 2 (live mirror)
 
-**Status:** LANDED 656c9aa..df950e4; OPENCLAW_EXIT_HOOK_LIVE still 0 —
+**Status:** LANDED 656c9aa..df950e4; OPENCLAW_EXIT_HOOK_LIVE still 0 — **FLIPPED 2026-08-28 23:26 UTC by operator instruction: `OPENCLAW_EXIT_HOOK_LIVE=1` in `.env`, johnbot (user scope) restarted; both the JS guard and the engine read `1` (verified). First hook strategy to be promoted still owes the §4.3 activation watch.**
 the 3-exit diagnosis is CONFIRMED (F7 re-run, 2026-08-28: replay-harness
 defect, fixed, gone on re-run) and the flip is UNBLOCKED, pending the
 operator's §4 runbook. Implements §3 / §5-live /
