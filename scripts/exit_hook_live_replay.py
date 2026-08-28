@@ -55,7 +55,17 @@ Caveats:
   OPENCLAW_CLOSE_PROXY_SNAPSHOT=1 (the production .env value). This replay is
   read-only and must not do that, so main() force-sets
   OPENCLAW_CLOSE_PROXY_SNAPSHOT=0 right after loading .env, alongside
-  OPENCLAW_EXIT_HOOK_LIVE=1.
+  OPENCLAW_EXIT_HOOK_LIVE=1. main() also pins OPENCLAW_INTRADAY_REDEPLOY=0
+  (F7, defence in depth): _exit_hook_enabled() returns False under that flag
+  (F3's intraday lane gate), which would silently zero out every hook close
+  this replay reports.
+
+Debug aid (F7, kept): --debug-seq SEQ[,SEQ...] prints, for each named
+trade_seq on the date it is open, the recovered signal's pair vs the
+partner-implied pair (this trade's ticker + its trade_seq+/-1 neighbour's
+ticker, same entry_date, opposite direction) — used to confirm the partner-leg
+recovery fix (round 3) actually reassigns the previously-misrecovered trades
+1073/1082/1086.
 """
 from __future__ import annotations
 
@@ -197,13 +207,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--strategy', required=True); ap.add_argument('--run-id', required=True)
     ap.add_argument('--dates', required=True, help='comma-separated YYYY-MM-DD')
+    ap.add_argument('--debug-seq', default='', help='comma-separated trade_seq values: '
+                     'print the recovered signal_params[pair] vs the partner-implied pair '
+                     'for these trades on the date each is open (F7 diagnosis aid)')
     args = ap.parse_args()
+    debug_seqs = {int(s.strip()) for s in args.debug_seq.split(',') if s.strip()}
     from dotenv import load_dotenv; load_dotenv(str(ROOT / '.env'))
     # Controller ruling: this replay is read-only and must never trigger the
     # live close-proxy network fetch inside engine.load_prices() — force it
     # off regardless of the production .env value.
     os.environ['OPENCLAW_CLOSE_PROXY_SNAPSHOT'] = '0'
     os.environ['OPENCLAW_EXIT_HOOK_LIVE'] = '1'
+    # Controller ruling (F7): defence in depth against the F3 lane gate —
+    # _exit_hook_enabled() returns False when OPENCLAW_INTRADAY_REDEPLOY=='1',
+    # which would silently make this replay report zero hook closes. Pin it
+    # off regardless of the ambient environment.
+    os.environ['OPENCLAW_INTRADAY_REDEPLOY'] = '0'
     import psycopg2, psycopg2.extras, pandas as pd
     from execution import engine
     from strategies.registry import load_strategy_class
@@ -238,6 +257,19 @@ def main():
         # round 3: the partner pool is EVERY trade of the run, not just those
         # open on d — a still-open leg's partner has often already closed.
         rows = rows_from_trades(opens, sig_cache, all_trades=trades)
+        if debug_seqs:
+            by_seq_dbg = {(t.get('entry_date'), t.get('trade_seq')): t for t in trades}
+            row_by_seq = {r['trade_seq']: r for r in rows}
+            for t in opens:
+                seq = t.get('trade_seq')
+                if seq not in debug_seqs:
+                    continue
+                partners = _partner_tickers(t, by_seq_dbg)
+                implied = sorted({t['ticker'], *partners}) if partners else None
+                row = row_by_seq.get(seq)
+                assigned = (row['signal_params'].get('pair') if row else None)
+                print(f'[debug-seq] {d} trade_seq={seq} ticker={t["ticker"]} '
+                      f'partner_implied_pair={implied} assigned_pair={assigned}', file=sys.stderr)
         for r in rows: r['strategy_id'] = args.strategy
         id_to_seq = {r['id']: r['trade_seq'] for r in rows}
         cur = _FakeCursor(rows)
@@ -248,6 +280,11 @@ def main():
                 live[id_to_seq[p[0]]] = p[10]
         bt = {t['trade_seq']: t['exit_reason'] for t in opens if t['exit_date'] == d
               and str(t['exit_reason']).startswith(('strategy_exit:', 'max_hold'))}
+        if debug_seqs:
+            for seq in sorted(debug_seqs):
+                if any(o.get('trade_seq') == seq for o in opens):
+                    print(f'[debug-seq] {d} trade_seq={seq}: live_close={live.get(seq)!r} '
+                          f'backtest_close_today={bt.get(seq)!r}', file=sys.stderr)
         agree, disagree = compare(live, bt)
         total_agree += agree; total_bt += len(bt)
         hook_rows_closed = (engine.LAST_EXIT_HOOK_STATS.get('strategy_exit', 0)

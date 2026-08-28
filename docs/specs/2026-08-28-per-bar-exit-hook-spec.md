@@ -1,8 +1,15 @@
 # Spec — Per-bar strategy exit hook (`BaseStrategy.should_exit`)
 
 **Status:** Phase 1 LANDED (`2d955fa..3695211`); Phase 2 code LANDED
-(`656c9aa..ceeb8a0`), `OPENCLAW_EXIT_HOOK_LIVE=0`, flip blocked pending the
-replay re-run — see §6 and the Phase 2 spec
+(`656c9aa..f9af79f`; a commit cannot name its own SHA, so this range ends one
+commit short of the docs commit that confirms the re-run below — see the
+Phase 2 spec's changelog for that final SHA), replay re-run CONFIRMED (F7,
+2026-08-28): the 3 early `strategy_exit:*` divergences were a replay-harness
+defect (fixed, not a live-code defect) and are gone on re-run.
+`OPENCLAW_EXIT_HOOK_LIVE=0` still — the flip is UNBLOCKED pending the
+operator's §4 runbook (the 21-vs-30-style hold-cap mismatch remains X1's
+activation prerequisite, now refused automatically at promotion by
+`exit_hook_hold_cap_mismatch`) — see §6 and the Phase 2 spec
 (`docs/specs/2026-08-28-per-bar-exit-hook-phase2-spec.md`). Design approved by
 operator 2026-08-28 (approach A of three; scope "backtest + live, phased").
 
