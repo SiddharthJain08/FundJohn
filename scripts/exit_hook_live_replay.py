@@ -17,6 +17,24 @@ OWN recovered Signal by consuming signals_by_entry[(entry_date, ticker,
 direction)] — a list, in generate_signals' return order — in trade_seq order.
 Ticker-keyed dicts previously collapsed such trades into a single comparison.
 
+Partner-leg recovery (fix round 3, 2026-08-28 final review): rounds 1-2 still
+resolved ties by FIFO within an (entry_date, ticker, direction) queue. X1 can
+open several pairs on the SAME ticker, direction and day (A/X and A/Y both go
+LONG A), and a queue only holds as many signals as the strategy emitted — so
+once the A/X trade had already CLOSED, it was absent from `open_trades` and
+never consumed its signal, and FIFO handed A/X's signal to the surviving A/Y
+trade. That trade then ran the hook with the wrong pair's beta/alpha/z and
+exited early: exactly the three "unexplained" divergences (trade_seq 1073,
+1082, 1086 — whose siblings 1046, 1065, 1078 closed the day before with the
+same reason). Recovery is now, in order: (1) the signal whose
+`signal_params['pair']` is exactly {this ticker, the PARTNER LEG's ticker} —
+X1 appends a pair's two legs as consecutive `trade_seq` with the same
+`entry_date` and opposite direction, so the partner is looked up at
+`trade_seq +/- 1` in the FULL trade list (closed siblings included, which is
+why `main()` passes every trade, not just those open on `d`); (2) an exact
+(entry_price, stop, target) fingerprint match; (3) FIFO, as before. A signal
+is consumed by at most one trade per call.
+
 Direction-partitioned recovery (fix round 2, 2026-08-28): round 1 used a
 single mixed-direction queue per (entry_date, ticker) and discarded any
 popped signal whose direction didn't match the trade under consideration —
@@ -55,18 +73,86 @@ def open_trades_on(trades, d):
     return [t for t in trades if t['entry_date'] < d <= t['exit_date']]
 
 
-def rows_from_trades(open_trades, signals_by_entry):
+def _pair_tickers(sig):
+    """The set of tickers named by a recovered Signal's `signal_params['pair']`
+    ('AAA/BBB' -> {'AAA','BBB'}). None when the field is absent or not a
+    string. Split-and-compare-as-a-set, never substring matching: 'WES' is a
+    substring of plenty of other tickers."""
+    pair = (getattr(sig, 'signal_params', None) or {}).get('pair')
+    if not isinstance(pair, str):
+        return None
+    parts = {p.strip() for p in pair.split('/') if p.strip()}
+    return parts or None
+
+
+def _partner_tickers(trade, by_seq):
+    """Tickers of this trade's possible PARTNER LEGS. X1 appends the two legs
+    of a pair as consecutive `trade_seq` sharing an `entry_date` with opposite
+    directions, so the partner is at `trade_seq +/- 1`. Both neighbours are
+    returned when both qualify (the pair boundary is not knowable from seq
+    alone); the pair-set match below then picks the one that actually has a
+    signal."""
+    seq, ed = trade.get('trade_seq'), trade.get('entry_date')
+    if seq is None:
+        return []
+    direction = str(trade['direction']).upper()
+    out = []
+    for neighbour in (seq - 1, seq + 1):
+        cand = by_seq.get((ed, neighbour))
+        if cand is None or str(cand['direction']).upper() == direction:
+            continue
+        if cand['ticker'] not in out:
+            out.append(cand['ticker'])
+    return out
+
+
+def _fingerprint(entry_price, stop, target):
+    try:
+        return (round(float(entry_price), 4), round(float(stop), 4), round(float(target), 4))
+    except (TypeError, ValueError):
+        return None
+
+
+def _recover_signal(trade, queue, by_seq):
+    """Pick THIS trade's Signal out of its (entry_date, ticker, direction)
+    queue. Order: partner-leg pair match -> (entry, stop, target) fingerprint
+    -> FIFO. Returns None only when the queue is empty."""
+    if not queue:
+        return None
+    wanted = [{trade['ticker'], partner} for partner in _partner_tickers(trade, by_seq)]
+    if wanted:
+        for sig in queue:
+            tickers = _pair_tickers(sig)
+            if tickers is not None and tickers in wanted:
+                return sig
+    fp = _fingerprint(trade.get('entry_price'), trade.get('signal_stop'), trade.get('signal_target'))
+    if fp is not None:
+        for sig in queue:
+            if _fingerprint(getattr(sig, 'entry_price', None), getattr(sig, 'stop_loss', None),
+                            getattr(sig, 'target_1', None)) == fp:
+                return sig
+    return queue[0]
+
+
+def rows_from_trades(open_trades, signals_by_entry, all_trades=None):
     """signals_by_entry: dict[(entry_date, ticker, direction.upper())] ->
     list[Signal], in the order generate_signals returned them, PARTITIONED
     BY DIRECTION (round 2 fix) so a trade only ever consumes signals of its
     own direction — no cross-direction discarding is possible or needed.
-    Trades are processed in trade_seq order (the backtest appends trades in
-    signal order, so the k-th same-(ticker,direction) signal IS the k-th
-    same-(ticker,direction) trade); for each trade we pop the next
-    unconsumed signal from its (entry_date, ticker, direction) queue.
+
+    `all_trades` is the FULL trade list for the run (round 3 fix); the partner
+    leg of a still-open trade is frequently a trade that has already CLOSED,
+    so it is absent from `open_trades` and must be found here. Defaults to
+    `open_trades` for callers that have nothing wider.
+
+    Each trade draws from its own (entry_date, ticker, direction) queue via
+    `_recover_signal` (partner-leg pair -> fingerprint -> FIFO); the chosen
+    signal is removed, so no signal is ever handed to two trades.
     Unrecoverable (queue exhausted/absent, or nullable stop/target missing)
     -> skipped, not fabricated."""
     queues = {k: list(v) for k, v in (signals_by_entry or {}).items()}
+    pool = list(all_trades) if all_trades else list(open_trades)
+    by_seq = {(t.get('entry_date'), t.get('trade_seq')): t for t in pool}
     rows = []
     for t in sorted(open_trades, key=lambda x: x['trade_seq']):
         if t.get('signal_stop') is None or t.get('signal_target') is None:
@@ -76,9 +162,15 @@ def rows_from_trades(open_trades, signals_by_entry):
         direction = str(t['direction']).upper()
         key = (t['entry_date'], t['ticker'], direction)
         q = queues.get(key)
-        if not q:
+        sig = _recover_signal(t, q, by_seq) if q else None
+        if sig is None:
             continue
-        sig = q.pop(0)
+        # remove BY IDENTITY: Signal is a dataclass, so list.remove() would
+        # drop the first equal object, not necessarily the one we picked.
+        for _i, _s in enumerate(q):
+            if _s is sig:
+                del q[_i]
+                break
         rows.append({'id': f'replay-{t["trade_seq"]}', 'strategy_id': None, 'ticker': t['ticker'],
                      'direction': direction, 'entry_price': float(t['entry_price']),
                      'mark_entry_price': float(t['entry_price']), 'target_date': t['entry_date'],
@@ -143,7 +235,9 @@ def main():
                 print(f'[replay] generate_signals failed on {ed}: {e}', file=sys.stderr); sigs = []
             for s in sigs:
                 sig_cache.setdefault((ed, s.ticker, str(s.direction).upper()), []).append(s)
-        rows = rows_from_trades(opens, sig_cache)
+        # round 3: the partner pool is EVERY trade of the run, not just those
+        # open on d — a still-open leg's partner has often already closed.
+        rows = rows_from_trades(opens, sig_cache, all_trades=trades)
         for r in rows: r['strategy_id'] = args.strategy
         id_to_seq = {r['id']: r['trade_seq'] for r in rows}
         cur = _FakeCursor(rows)
