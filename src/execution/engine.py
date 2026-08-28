@@ -60,6 +60,37 @@ DAYS_HELD_REPORT        = 30      # flag if held > 30 days with no target hit
 CONFLUENCE_MIN          = 2       # min strategies agreeing for confluence
 
 
+# Exit-hook live mirror (docs/specs/2026-08-28-per-bar-exit-hook-phase2-spec.md).
+# Counters for the last update_pnl call; main() logs them and records hook
+# errors in execution_runs.errors. Reset at the start of every call.
+LAST_EXIT_HOOK_STATS: dict = {}
+
+
+def _exit_hook_enabled() -> bool:
+    return os.environ.get('OPENCLAW_EXIT_HOOK_LIVE', '0') == '1'
+
+
+def _bars_held(prices: pd.DataFrame, entry_dt, run_date):
+    """Trading bars strictly after entry_dt up to and including run_date on
+    the prices index (parity with the backtest's holding_days). None when the
+    index is not a DatetimeIndex (legacy callers / tests with a RangeIndex)."""
+    if not isinstance(prices.index, pd.DatetimeIndex) or entry_dt is None:
+        return None
+    lo, hi = pd.Timestamp(entry_dt), pd.Timestamp(run_date)
+    return int(((prices.index > lo) & (prices.index <= hi)).sum())
+
+
+def _hold_cap(signal_params, configured: int) -> int:
+    """Per-signal hold_days capped by the configured max (mirrors
+    backtest.open_book.resolve_hold_cap; not imported to keep the engine free
+    of backtest modules)."""
+    try:
+        hd = int(float((signal_params or {}).get('hold_days')))
+    except (TypeError, ValueError):
+        return int(configured)
+    return min(hd, int(configured)) if hd >= 1 else int(configured)
+
+
 _ALPACA_BIN = '/root/go/bin/alpaca'
 
 
@@ -1893,7 +1924,8 @@ def detect_confluence(cur, strategy_results: dict, regime_state: str, run_date: 
 # 7. UPDATE P&L
 # ──────────────────────────────────────────────────────────
 
-def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> tuple[int, list]:
+def update_pnl(cur, prices: pd.DataFrame, run_date: date, *,
+               strategies=None, regime=None, aux_data=None) -> tuple[int, list]:
     """Update unrealized P&L for all open signals. Close if stop/target hit.
 
     Returns (n_updates, newly_closed_signal_ids). The ids are classified by
@@ -1901,12 +1933,44 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> tuple[int, list]:
     cur.execute("""
         SELECT id, strategy_id, ticker, direction, entry_price,
                mark_entry_price, target_date, lifecycle_state,
-               stop_loss, target_1, signal_date
+               stop_loss, target_1, signal_date, signal_params
         FROM execution_signals
         WHERE workspace_id = %s AND status = 'open'
           AND (lifecycle_state IS NULL OR lifecycle_state = 'FILLED')
     """, (WORKSPACE,))
     open_signals = cur.fetchall()
+
+    _hook_on = _exit_hook_enabled()
+    LAST_EXIT_HOOK_STATS.clear()
+    LAST_EXIT_HOOK_STATS.update({'enabled': _hook_on, 'strategy_exit': 0, 'max_hold': 0,
+                                 'hook_raised': 0, 'first_hook_raise': None,
+                                 'loaded_on_demand': 0, 'hook_load_failed': 0,
+                                 'rows_evaluated': 0})
+    _by_id = {getattr(s, 'id', None): s for s in (strategies or [])}
+    _loaded: dict = {}
+    if _hook_on:
+        logger.info('[exit_hook] enabled (OPENCLAW_EXIT_HOOK_LIVE=1); %d strategy instances', len(_by_id))
+
+    def _strategy_for(sid):
+        s = _by_id.get(sid)
+        if s is not None:
+            return s
+        if sid in _loaded:
+            return _loaded[sid]
+        try:
+            from strategies.registry import load_strategy_class
+            cls = load_strategy_class(sid)
+            inst = cls() if cls is not None else None
+            if inst is not None:
+                LAST_EXIT_HOOK_STATS['loaded_on_demand'] += 1
+            else:
+                LAST_EXIT_HOOK_STATS['hook_load_failed'] += 1
+        except Exception as _e:
+            logger.warning('[exit_hook] could not load %s for hook evaluation: %s', sid, _e)
+            LAST_EXIT_HOOK_STATS['hook_load_failed'] += 1
+            inst = None
+        _loaded[sid] = inst
+        return inst
 
     updates = 0
     _newly_closed_signal_ids: list[int] = []
@@ -1988,6 +2052,47 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> tuple[int, list]:
             close_reason = 'target_1'
             close_status = 'closed'
             realized_pct = unrealized_pct
+
+        # Exit-hook live mirror (Phase 2 §2.4): hook, then time stop, only
+        # while nothing above closed the row and only for exit_hook strategies.
+        if _hook_on and close_reason is None:
+            _strat = _strategy_for(strat_id)
+            if _strat is not None and getattr(_strat, 'exit_hook', False):
+                LAST_EXIT_HOOK_STATS['rows_evaluated'] += 1
+                _entry_dt = _tgt_dt if (_tgt_dt is not None and isinstance(_tgt_dt, date)) else sig_date
+                _bars = _bars_held(prices, _entry_dt, run_date)
+                if _bars is None:
+                    _bars = days_held
+                _sp = row.get('signal_params') if isinstance(row.get('signal_params'), dict) else {}
+                position = {
+                    'ticker': ticker, 'direction': direction, 'entry_price': entry,
+                    'entry_date': _entry_dt, 'days_held': _bars,
+                    'stop_loss': stop_loss, 'target_1': target_1, 'signal_params': _sp,
+                }
+                try:
+                    _reason = _strat.should_exit(position, prices, regime, aux_data)
+                except Exception as _e:
+                    _reason = None
+                    LAST_EXIT_HOOK_STATS['hook_raised'] += 1
+                    if LAST_EXIT_HOOK_STATS['first_hook_raise'] is None:
+                        LAST_EXIT_HOOK_STATS['first_hook_raise'] = f'{type(_e).__name__}: {_e}'
+                        logger.error('[exit_hook] should_exit raised for %s %s: %s — holding',
+                                     strat_id, ticker, LAST_EXIT_HOOK_STATS['first_hook_raise'])
+                if _reason:
+                    close_reason = f'strategy_exit:{_reason}'
+                    close_status = 'closed'
+                    realized_pct = unrealized_pct
+                    LAST_EXIT_HOOK_STATS['strategy_exit'] += 1
+                    logger.info('[exit_hook] %s %s %s bars_held=%d', strat_id, ticker, close_reason, _bars)
+                elif close_reason is None:
+                    from execution import regime_param_resolver as _rpr
+                    _cap = _hold_cap(_sp, _rpr.configured_max_hold_days(strat_id, log=logger.warning))
+                    if _bars >= _cap:
+                        close_reason = 'max_hold'
+                        close_status = 'closed'
+                        realized_pct = unrealized_pct
+                        LAST_EXIT_HOOK_STATS['max_hold'] += 1
+                        logger.info('[exit_hook] %s %s max_hold bars_held=%d cap=%d', strat_id, ticker, _bars, _cap)
 
         try:
             # Upsert P&L row
