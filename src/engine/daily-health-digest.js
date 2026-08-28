@@ -80,8 +80,12 @@ async function buildDigest(date = new Date(), failureCtx = null) {
     getDataFreshness().catch(() => []),
     dbQuery(`SELECT run_id, started_at, input_count, output_count, total_cost_usd
              FROM curator_runs ORDER BY started_at DESC LIMIT 1`).catch(() => ({ rows: [] })),
+    // closed_at is a DATE stamped with the cycle's run_date, not a timestamp
+    // of the write — a cycle that runs past midnight UTC, or a digest built
+    // the morning after, saw zero rows under `= CURRENT_DATE`. One day of
+    // slack covers both without pulling in the whole week.
     dbQuery(`SELECT close_reason, COUNT(*) AS n FROM signal_pnl
-              WHERE status='closed' AND closed_at::date = CURRENT_DATE
+              WHERE status='closed' AND closed_at >= CURRENT_DATE - 1
                 AND (close_reason LIKE 'strategy_exit:%' OR close_reason = 'max_hold')
               GROUP BY close_reason`).catch(() => ({ rows: [] })),
   ]);

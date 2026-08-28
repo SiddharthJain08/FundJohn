@@ -40,6 +40,7 @@ from strategies.regime_gate import is_eligible
 from strategies.instrument_class import instrument_class_for
 from regime.crypto_regime import load_crypto_regime_state
 from execution import regime_param_override
+from execution import regime_param_resolver as _rpr
 from lib.price_panel import apply_equity_calendar, calendar_for
 
 logging.basicConfig(
@@ -2140,7 +2141,6 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date, *,
                         LAST_EXIT_HOOK_STATS['strategy_exit'] += 1
                         logger.info('[exit_hook] %s %s %s bars_held=%d', strat_id, ticker, close_reason, _bars)
                     elif close_reason is None:
-                        from execution import regime_param_resolver as _rpr
                         _cap = _hold_cap(_sp, _rpr.configured_max_hold_days(strat_id, log=logger.warning))
                         if _bars >= _cap:
                             close_reason = 'max_hold'

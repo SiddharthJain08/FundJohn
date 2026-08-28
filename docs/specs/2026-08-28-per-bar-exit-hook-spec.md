@@ -1,7 +1,10 @@
 # Spec — Per-bar strategy exit hook (`BaseStrategy.should_exit`)
 
-**Status:** DESIGN APPROVED by operator 2026-08-28 (approach A of three; scope
-"backtest + live, phased"). Not implemented. Phase 1 = backtest, Phase 2 = live.
+**Status:** Phase 1 LANDED (`2d955fa..3695211`); Phase 2 code LANDED
+(`656c9aa..ceeb8a0`), `OPENCLAW_EXIT_HOOK_LIVE=0`, flip blocked pending the
+replay re-run — see §6 and the Phase 2 spec
+(`docs/specs/2026-08-28-per-bar-exit-hook-phase2-spec.md`). Design approved by
+operator 2026-08-28 (approach A of three; scope "backtest + live, phased").
 
 **Why:** the engines can express only three exits — intra-bar stop/target
 brackets and a uniform `max_hold_days` — so any strategy whose edge lives in
