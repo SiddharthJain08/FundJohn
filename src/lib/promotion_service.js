@@ -61,6 +61,9 @@ function getMinExcessSharpeVsBenchmark(instrumentClass) {
     ? MIN_EXCESS_SHARPE_VS_BENCHMARK_BY_CLASS[instrumentClass]
     : MIN_EXCESS_SHARPE_VS_BENCHMARK;
 }
+// Exit-hook spec §4: a backtest that flattened on BaseStrategy.should_exit
+// must not go live until the live mirror (Phase 2) is enabled.
+function exitHookLiveEnabled() { return process.env.OPENCLAW_EXIT_HOOK_LIVE === '1'; }
 // Judge ONE regime sleeve row against the class thresholds. Returns the list
 // of failed gate kinds ('no_backtest' | 'sharpe' | 'max_dd' | 'trades' |
 // 'benchmark_sharpe'); an empty list means the sleeve qualifies. Missing row
@@ -121,10 +124,10 @@ function judgeRegimeSleeve(row, thresholds, ctx = {}) {
   return fails;
 }
 async function _latestPrimaryRun(dbQuery, sid) {
-  let sharpe = NaN, maxDd = NaN, trades = NaN, runId = null, hasRun = false;
+  let sharpe = NaN, maxDd = NaN, trades = NaN, runId = null, hasRun = false, exitHook = false;
   try {
     const ubt = await dbQuery(
-      `SELECT run_id, total_sharpe, total_max_dd_pct, total_trades FROM strategy_backtest_runs
+      `SELECT run_id, total_sharpe, total_max_dd_pct, total_trades, config_json FROM strategy_backtest_runs
         WHERE strategy_id = $1 AND primary_window = TRUE
         ORDER BY run_at DESC LIMIT 1`, [sid]);
     if (ubt.rows[0]) {
@@ -133,9 +136,12 @@ async function _latestPrimaryRun(dbQuery, sid) {
       sharpe = parseFloat(ubt.rows[0].total_sharpe);
       maxDd  = parseFloat(ubt.rows[0].total_max_dd_pct);
       trades = ubt.rows[0].total_trades != null ? parseInt(ubt.rows[0].total_trades, 10) : NaN;
+      let cfg = ubt.rows[0].config_json;
+      if (typeof cfg === 'string') { try { cfg = JSON.parse(cfg); } catch (_) { cfg = null; } }
+      exitHook = !!(cfg && cfg.exit_hook === true);
     }
   } catch (_) {}
-  return { hasRun, runId, sharpe, maxDd, trades };
+  return { hasRun, runId, sharpe, maxDd, trades, exitHook };
 }
 async function _regimeSleeves(dbQuery, runId) {
   if (runId == null) return null;
@@ -155,6 +161,7 @@ async function computeQualifyingRegimes({ dbQuery, sid, instrumentClass }) {
   const run = await _latestPrimaryRun(dbQuery, sid);
   const out = { hasRun: run.hasRun, runId: run.runId, thresholds, qualifying: [], diag: {} };
   if (!run.hasRun) return out;
+  if (run.exitHook && !exitHookLiveEnabled()) { out.exit_hook_live_disabled = true; return out; }
   const byRegime = await _regimeSleeves(dbQuery, run.runId);
   if (!byRegime) return out;                       // no sleeves recorded → nothing qualifies
   for (const regime of CANONICAL_REGIMES) {
@@ -182,6 +189,9 @@ async function evaluatePromotionGate({ dbQuery, sid, instrumentClass, force, eli
   // force=true still bypasses everything.
   if (!run.hasRun) {
     return { pass: false, failedGates: ['no_backtest'], sharpe, maxDd, thresholds, qualifyingRegimes: [] };
+  }
+  if (run.exitHook && !exitHookLiveEnabled()) {
+    return { pass: false, failedGates: ['exit_hook_live_disabled'], sharpe, maxDd, thresholds, qualifyingRegimes: [] };
   }
   const byRegime = await _regimeSleeves(dbQuery, run.runId);
   const named = Array.isArray(eligibleRegimes) && eligibleRegimes.length > 0;
