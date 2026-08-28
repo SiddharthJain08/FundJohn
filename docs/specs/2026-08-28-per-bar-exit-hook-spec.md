@@ -128,7 +128,7 @@ A strategy whose backtest depends on the hook must not go live on a book that ca
 | phase | deliverables | done when |
 |---|---|---|
 | 1 — backtest | §1, §2, §4, X1 hook, tests; re-run X1 (`x1-backtest-3`, no `--max-hold-days` pin — `hold_days` now honored) | tests green; determinism fixture identical; X1 run persisted with `strategy_exit:*` exits |
-| 2 — live | §3 behind `OPENCLAW_EXIT_HOOK_LIVE`, health-digest counter, parity test, live unit test | flag flipped to `1` after ONE paper day on which a hook strategy's `strategy_exit:*` closes reconcile at the broker (`alpaca_reconcile`) |
+| 2 — live | §3 behind `OPENCLAW_EXIT_HOOK_LIVE`, health-digest counter, parity test, live unit test | flag flipped to `1` after ONE paper day on which a hook strategy's `strategy_exit:*` closes reconcile at the broker (`alpaca_reconcile`). **STATUS 2026-08-28: code LANDED `656c9aa..d23f77e`, flag OFF (`OPENCLAW_EXIT_HOOK_LIVE=0`)** — parity test 4/4 passed, live replay `AGREEMENT 11/11` (23/26 disagreements = `max_hold` hold-cap config mismatch, 21 vs 30; 3/26 = unexplained early `strategy_exit:*` divergence). Flip BLOCKED pending the 3-exit diagnosis; see `docs/specs/2026-08-28-per-bar-exit-hook-phase2-spec.md` §4 for the full record and runbook. |
 
 Phase 1 cost budget, measured: the open-book stepper itself is negligible against `simulate_trade`; the whole of run 3's 4× slowdown was hook-side ledger I/O (§2), removed by the ledger cache. Phase 2 should budget the live mirror the same way — one `should_exit` per open signal per run is cheap only if the hook's own reads are.
 
