@@ -359,3 +359,21 @@ Total Sharpe −0.24, 1,107 trades, hit rate 29.5 %, max DD 13.6 %. **Fails ever
 Re-run command (absolute path required — `4dfe878`): `systemd-run --unit=x1-backtest-2 --property=Nice=19 --property=CPUQuota=100% --property=MemoryMax=3500M --property=RuntimeMaxSec=2h --property=WorkingDirectory=/root/openclaw --property=EnvironmentFile=/root/openclaw/.env --setenv=PYTHONPATH=/root/openclaw/src --setenv=PYTHONUNBUFFERED=1 /usr/bin/python3 -m backtest.unified_backtest --strategy-file /root/openclaw/src/strategies/implementations/S_coint_pairs_sector_v2.py --universe-cap tier_liquid --start-date 2023-09-04` — leave `OPENCLAW_BT_TEARSHEET` unset (the in-process tearsheet subprocess pushed the cgroup over 3.5 GB after the commit) and render with `scripts/generate_tearsheet.py --run-id …` afterwards.
 
 Also landed: `4dfe878` (`--strategy-file` relative path no longer aborts the run at the loaded-from log line). Session helpers outside the repo: `/root/x1_finish.sh`, `/root/x1_watch.sh`.
+
+### X1-D1 applied — (a) spread-implied stops (`7ee5ae9`) and re-run `32ff3475` (2026-08-28 06:16 UTC)
+
+Per-leg stop = the wider of (i) the log-move of that leg that carries the pair spread to |z| = `Z_STOP` = 4.0 (leg B scaled by 1/β; vol floor only when β ≤ 0) and (ii) `STOP_HOLD_SIGMAS` = 2.0 leg daily log-σ × √hold_days; targets at `TARGET_R` = 2.0 × that distance; `signal_params['stop_basis']` records both distances. Caveat found while implementing: for tight pairs the spread-implied distance alone is *narrower* than the ATR stop (σ_spread is residual vol, far below a leg's own vol), so the vol floor is what carries the change — resulting stops sit a median 13.9 % from entry (p25 8 %). The backtest engine ignores per-signal `hold_days`, so the re-run pinned `--max-hold-days 25` (≈ the median intended `min(3·half-life, 30)`).
+
+| | run 1 `655c4bdb` | run 2 `32ff3475` |
+|---|---|---|
+| total Sharpe | −0.24 | **−0.08** |
+| return / max DD | +3.2 % / 13.6 % | +11.9 % / 8.5 % |
+| hit rate / median hold | 29.5 % / 3 d | 49.3 % / 25 d |
+| exits stop / target / time | 772 / 260 / 73 | 68 / 3 / 975 |
+| LOW_VOL (295) | −1.74 | −0.58 FAIL |
+| TRANSITIONING (741) | −0.03 | +0.16 (bench 1.14 → R1 FAIL) |
+| HIGH_VOL (59) | +1.82 | +0.40 (<100 trades) |
+
+**Verdict: still fails every promotion gate.** Run 2 is a faithful test of "enter at |z| ≥ 2, hold ~25 days, catastrophic per-leg guard" — and that object has no edge after honest costs (+1 bp per trade). What it is *not* a test of is the spec's reversion exit (flatten at |z| ≤ 0.5), which is where a pairs strategy's edge normally lives; the engine has no per-bar exit hook, and the strategy docstring already reports that gap as owed rather than working around it. **X1 is parked** pending that engine feature (an operator design decision: a per-bar `should_exit(bar)` hook on Signal/strategy consumed by `unified_backtest._simulate` and the live cadence engine). Runs and tearsheets are in the DB / `output/tearsheets/` for reference.
+
+Infra defect found: both units OOM'd *after* `wrote run_id` — `backtest_panel.rebuild()` runs in-process while the prices panel is still alive and tips a 3.5 GB cgroup (not the tearsheet). Logged in `~/.learnings/ERRORS.md`; panels rebuilt standalone.
