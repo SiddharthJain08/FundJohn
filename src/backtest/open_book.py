@@ -98,10 +98,26 @@ def advance_open_book(open_book: list, current_date, bars_by_ticker: dict,
             continue
         bars = bars_by_ticker.get(t.ticker)
         if bars is None or current_date not in bars.index:
-            # No bar for this ticker today. If no future bar exists either the
-            # trade ends at its last mark (end_of_data at prev_mark).
             if bars is None or len(bars.index[bars.index > current_date]) == 0:
-                closed.append(_close(t, current_date, t.prev_mark, 'end_of_data'))
+                # Mirrors simulate_trade's `bars_future.empty` case: the ticker has
+                # no bar after entry at all (holding_days is necessarily 0 here — a
+                # stepped bar that was the ticker's last already closed the trade as
+                # end_of_data at its close). No slippage, no fabricated mark.
+                closed.append({
+                    'ticker':        t.ticker,
+                    'direction':     'long' if t.direction > 0 else 'short',
+                    'entry_date':    t.entry_date.date() if hasattr(t.entry_date, 'date') else t.entry_date,
+                    'entry_price':   t.entry_price,
+                    'exit_date':     t.entry_date.date() if hasattr(t.entry_date, 'date') else t.entry_date,
+                    'exit_price':    t.entry_price,
+                    'exit_reason':   'end_of_data',
+                    'holding_days':  t.holding_days,
+                    'pnl_pct':       0.0,
+                    'entry_regime':  t.entry_regime,
+                    'signal_stop':   t.stop_loss,
+                    'signal_target': t.target_1,
+                    'daily_marks':   list(t.daily_marks),
+                })
             else:
                 still_open.append(t)
             continue

@@ -86,7 +86,7 @@ class TestAdvanceOpenBook:
         book = [trade]
         closed_all = []
         counters = {}
-        for d in (dates or DATES):
+        for d in (dates if dates is not None else DATES):
             if d <= trade.entry_date:
                 continue
             closed = advance_open_book(book, d, {'AAA': bars}, PANEL.loc[:d],
@@ -169,3 +169,17 @@ class TestAdvanceOpenBook:
         closed, book, counters = self._run(_trade(DATES[0], hold_cap=2), NoHook())
         assert closed[0]['exit_reason'] == 'max_hold'
         assert counters.get('hook_exits', 0) == 0
+
+    def test_ticker_with_no_bars_after_entry_closes_like_simulate_trade(self):
+        # Mirrors simulate_trade's `bars_future.empty` case: no slippage, no mark.
+        hook = _Hook(lambda pos, prices: 'z_revert')          # must never be consulted
+        only_entry_bar = _bars([(100.0, 100.5, 99.5, 100.0)], DATES[:1])
+        closed, book, counters = self._run(_trade(DATES[0], slippage=0.001), hook,
+                                           bars=only_entry_bar, dates=DATES[:2])
+        assert book == [] and len(closed) == 1
+        t = closed[0]
+        assert t['exit_reason'] == 'end_of_data'
+        assert t['holding_days'] == 0 and t['daily_marks'] == []
+        assert t['exit_price'] == 100.0 and t['pnl_pct'] == 0.0
+        assert t['exit_date'] == DATES[0].date()
+        assert hook.calls == [] and counters.get('hook_exits', 0) == 0
