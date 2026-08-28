@@ -44,8 +44,25 @@ function _runDoctor() {
   });
 }
 
+// Exit-hook live mirror (Phase 2 §2.8): today's hook/time-stop closes from
+// signal_pnl. Pure; null when there is nothing to say.
+function exitHookLine(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  let maxHold = 0; const reasons = [];
+  for (const r of rows) {
+    const n = parseInt(r.n, 10) || 0;
+    if (r.close_reason === 'max_hold') maxHold += n;
+    else if (String(r.close_reason).startsWith('strategy_exit:')) reasons.push([String(r.close_reason).slice('strategy_exit:'.length), n]);
+  }
+  const total = reasons.reduce((a, [, n]) => a + n, 0);
+  if (total === 0 && maxHold === 0) return null;
+  reasons.sort((a, b) => b[1] - a[1]);
+  const detail = reasons.length ? ` (${reasons.map(([k, n]) => `${k}=${n}`).join(', ')})` : '';
+  return `🪝 Exit hook: ${total} strategy exits${detail}, ${maxHold} max_hold`;
+}
+
 async function buildDigest(date = new Date(), failureCtx = null) {
-  const [signalRow, prevSignalRow, openCounts, closedStats, freshness, curatorRow] = await Promise.all([
+  const [signalRow, prevSignalRow, openCounts, closedStats, freshness, curatorRow, hookRows] = await Promise.all([
     dbQuery(`SELECT run_date, regime, n_signals, ev_pos, avg_ev, high_conv_count
              FROM daily_signal_summary ORDER BY run_date DESC, created_at DESC LIMIT 1`),
     dbQuery(`SELECT n_signals, ev_pos FROM daily_signal_summary
@@ -63,6 +80,10 @@ async function buildDigest(date = new Date(), failureCtx = null) {
     getDataFreshness().catch(() => []),
     dbQuery(`SELECT run_id, started_at, input_count, output_count, total_cost_usd
              FROM curator_runs ORDER BY started_at DESC LIMIT 1`).catch(() => ({ rows: [] })),
+    dbQuery(`SELECT close_reason, COUNT(*) AS n FROM signal_pnl
+              WHERE status='closed' AND closed_at::date = CURRENT_DATE
+                AND (close_reason LIKE 'strategy_exit:%' OR close_reason = 'max_hold')
+              GROUP BY close_reason`).catch(() => ({ rows: [] })),
   ]);
 
   const sig   = signalRow.rows[0];
@@ -70,6 +91,7 @@ async function buildDigest(date = new Date(), failureCtx = null) {
   const open  = openCounts.rows[0];
   const closed = closedStats.rows[0];
   const cur   = curatorRow.rows[0];
+  const hookLine = exitHookLine(hookRows.rows);
 
   const staleAlerts = freshness.filter(f => ['stale', 'very_stale', 'empty'].includes(f.status));
 
@@ -166,7 +188,7 @@ async function buildDigest(date = new Date(), failureCtx = null) {
   }
 
   const header = `📰 **OpenClaw daily health digest — ${date.toISOString().slice(0,10)}**`;
-  return [header, failureBlock, gateLine, deltaLine, posLine, pnlLine, stalenessLine, curatorLine, doctorLine].filter(Boolean).join('\n');
+  return [header, failureBlock, gateLine, deltaLine, posLine, pnlLine, hookLine, stalenessLine, curatorLine, doctorLine].filter(Boolean).join('\n');
 }
 
 /** Register a Mon–Fri 08:15 ET cron via node-cron. */
@@ -181,4 +203,4 @@ function register(cron, postFn) {
   }, { timezone: 'America/New_York' });
 }
 
-module.exports = { buildDigest, register };
+module.exports = { buildDigest, register, exitHookLine };
