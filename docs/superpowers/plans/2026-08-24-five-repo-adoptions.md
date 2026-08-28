@@ -334,3 +334,28 @@ signatures archive). Stays OFF until one supervised Saturday-brain run.
 - (2) S2 ARMED: pipeline_config.tournament_variants=2 (first supervised run Saturday).
 - (3) OPENCLAW_ASSET_CORR_LW=1 in .env; P1d fix (date-coverage trim before ticker coverage; mode-1 fallback now logged) makes the LW fit real: `dates 62/89, kept 214/216, gamma 0.34` on the 08-24 ticker set.
 - VPS: CPU steal hit 90% during the daytime backfill (burst-credit throttle); backfill stopped, resumes nightly single-threaded on one core (x1-ledger-backfill-4, 22:05→05:00 UTC). First X1 backtest → Wed night.
+
+## 2026-08-28 — X1 ledger complete + first backtest (operator-authorized monitored session)
+
+**Ledger**: `data/derived/pair_ledger.parquet` now holds all **156/156** weekly scans (2023-09-04 → 2026-08-24). The final 77 ran 2026-08-27 20:25 → 04:45 UTC as transient unit `x1-finish` (Nice 19, one core, single-thread BLAS, 1.3 GB peak, CPU steal ≤5% throughout). Unthrottled rate ≈ 6.5 min/scan; Tuesday's 69 min/scan was the burst-credit throttle, not the code. Stats: median 14 approved pairs/scan (p10 2, p90 51), 3,363 approved pair-weeks over 1,025 distinct pairs, median half-life 8.3 d. ⚠ 44 % of approved rows are fund/ETF buckets (Asset Management – Bonds/Global/Income).
+
+**First backtest** — `run_id 655c4bdb-8233-4f24-9133-3e0313951030`, `full_history` 2023-09-04..2026-08-27 (1,089 OOS days), `tier_liquid`, 8 min compute, 3.4 GB peak:
+
+| regime | trades | Sharpe | benchmark (SPY) | verdict |
+|---|---|---|---|---|
+| LOW_VOL | 295 | −1.74 | 2.20 | FAIL |
+| TRANSITIONING | 741 | −0.03 | 1.14 | FAIL |
+| HIGH_VOL | 59 | +1.82 | 1.08 | Sharpe/bench pass, **<100 trades** |
+| CRISIS | 12 | +4.74 | — | noise |
+
+Total Sharpe −0.24, 1,107 trades, hit rate 29.5 %, max DD 13.6 %. **Fails every promotion gate as run.**
+
+**Diagnosis — this was not a test of the pairs spec.** `S_coint_pairs_sector_v2` calls the base-class `compute_stops_and_targets()` for each leg, so every leg carries a **2×ATR price stop (median 1.5 % from entry; ~0.9 % on bond ETFs) and a 5 % per-leg target**. Exit reasons: `stop` 772 (256 of them on day 1), `target` 260, `max_hold` 73, `end_of_data` 2. Stops contributed −13.7 pts of P&L, targets +12.7. Median hold 3 days vs the intended `min(3·half_life, 30)` (≈25 d). A leg moving against you is the hedge working in a spread trade; per-leg stops convert the strategy into a per-leg ATR-stop/5 %-target system. This is the exit-side engine gap the strategy docstring already declares as owed ("EXITS — what's engine-expressible today").
+
+**Operator decision X1-D1** (owed): pick the pairs-leg stop policy, then re-run (≈10 min compute now that the ledger exists):
+- (a) **Recommended:** override `compute_stops_and_targets` in the strategy to set spread-implied wide stops (e.g. stop where the leg move corresponds to |z| ≈ 4 on the pair spread, target None/wide) so exits are governed by `hold_days` — closest to the spec's z-reversion / structural-kill / time-stop exits with today's engine.
+- (b) Disable per-leg stops for this strategy entirely (time exit only) — simplest, but loses all intra-hold protection.
+- (c) Accept the verdict as-is and park X1.
+Re-run command (absolute path required — `4dfe878`): `systemd-run --unit=x1-backtest-2 --property=Nice=19 --property=CPUQuota=100% --property=MemoryMax=3500M --property=RuntimeMaxSec=2h --property=WorkingDirectory=/root/openclaw --property=EnvironmentFile=/root/openclaw/.env --setenv=PYTHONPATH=/root/openclaw/src --setenv=PYTHONUNBUFFERED=1 /usr/bin/python3 -m backtest.unified_backtest --strategy-file /root/openclaw/src/strategies/implementations/S_coint_pairs_sector_v2.py --universe-cap tier_liquid --start-date 2023-09-04` — leave `OPENCLAW_BT_TEARSHEET` unset (the in-process tearsheet subprocess pushed the cgroup over 3.5 GB after the commit) and render with `scripts/generate_tearsheet.py --run-id …` afterwards.
+
+Also landed: `4dfe878` (`--strategy-file` relative path no longer aborts the run at the loaded-from log line). Session helpers outside the repo: `/root/x1_finish.sh`, `/root/x1_watch.sh`.
