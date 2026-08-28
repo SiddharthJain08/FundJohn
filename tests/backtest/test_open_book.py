@@ -435,9 +435,22 @@ class TestConfigJsonExitHook:
     def test_plain_strategy_records_false(self):
         cfg = self._config_json_of(_mk_plain_cls())
         assert cfg['exit_hook'] is False and cfg['hook_exits'] == 0
+        assert cfg['hook_raised'] == 0
 
     def test_hook_strategy_records_true_and_count(self):
         close_wide, bars, regimes, dates, closes = _dataset()
         cls = _mk_hook_cls(lambda p, prices: 'z_revert' if p['days_held'] == 2 else None)
         cfg = self._config_json_of(cls)
         assert cfg['exit_hook'] is True and cfg['hook_exits'] == 1
+        assert cfg['hook_raised'] == 0
+
+    def test_hook_errors_are_persisted_not_just_logged(self):
+        # A run whose hook raised on every bar produces the same trade list as
+        # a run whose hook never fired (spec §1: raise => hold). Without
+        # hook_raised in config_json the two are indistinguishable after the
+        # fact -- the counter only ever reached the journal.
+        def boom(position, prices):
+            raise RuntimeError('kaboom')
+        cfg = self._config_json_of(_mk_hook_cls(boom))
+        assert cfg['exit_hook'] is True and cfg['hook_exits'] == 0
+        assert cfg['hook_raised'] > 0

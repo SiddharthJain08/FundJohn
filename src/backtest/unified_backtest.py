@@ -1017,12 +1017,25 @@ def _per_bar_simulate(
                                          dt_priority=_dt_priority, counters=hook_counters):
                 trades.append(_ct if _true_mtm else {**_ct, 'daily_marks': []})
         for _t in open_book:   # ticker has no bar at all after entry
+            if _t.holding_days != 0:
+                # Reaching here with stepped bars means the invariant
+                # "a ticker's bars are a subset of close_wide.index" is broken:
+                # the drain loop walks close_wide dates, so a trade that was
+                # advanced on some of them and is STILL open has bars the drain
+                # cannot see. exit_price/pnl_pct below are then wrong (they
+                # assume an unstepped trade), hence the warning rather than a
+                # silent flat close.
+                print(f'[WARN] open-book flush: {_t.ticker} still open after the drain with '
+                      f'holding_days={_t.holding_days} — ticker bars are not a subset of '
+                      f'close_wide.index; closing flat at entry', file=sys.stderr)
             trades.append({'ticker': _t.ticker, 'direction': 'long' if _t.direction > 0 else 'short',
                            'entry_date': _t.entry_date.date(), 'entry_price': _t.entry_price,
                            'exit_date': _t.entry_date.date(), 'exit_price': _t.entry_price,
-                           'exit_reason': 'end_of_data', 'holding_days': 0, 'pnl_pct': 0.0,
+                           'exit_reason': 'end_of_data', 'holding_days': _t.holding_days,
+                           'pnl_pct': 0.0,
                            'entry_regime': _t.entry_regime, 'signal_stop': _t.stop_loss,
-                           'signal_target': _t.target_1, 'daily_marks': []})
+                           'signal_target': _t.target_1,
+                           'daily_marks': list(_t.daily_marks) if _true_mtm else []})
         open_book.clear()
     if hook_counters.get('hook_exits') or hook_counters.get('hook_raised'):
         _log(f'exit hook: {hook_counters.get("hook_exits", 0)} hook exits, '
@@ -1351,6 +1364,11 @@ def run_backtest(strategy_id: str, *,
                 'double_touch': os.environ.get('OPENCLAW_BT_DOUBLE_TOUCH', 'stop'),
                 'exit_hook':   bool(getattr(instance, 'exit_hook', False)),
                 'hook_exits':  int(sim.get('hook_exits', 0)),
+                # Persisted, not just logged: a run whose hook raised on every
+                # bar has the same trade list as one whose hook never fired
+                # (spec §1: raise => hold), so without this the two are
+                # indistinguishable once the journal rolls.
+                'hook_raised': int(sim.get('hook_raised', 0)),
                 # Fill-timing provenance (2026-07-29 same-day pivot):
                 # same_close = signal[t] fills at close[t]; close/open = legacy t+1.
                 'fill_model': fill_model,

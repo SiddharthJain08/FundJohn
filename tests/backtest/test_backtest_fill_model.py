@@ -110,8 +110,14 @@ def _run_capture(strategy_cls, close_wide, bars_by_ticker, regimes,
     # below the production liquidity floor, and per-ticker spread costs would
     # perturb the expected fill arithmetic. Gate behavior has its own tests.
     with (
+        # COUPLED_RECS is =1 in the production .env: with it on,
+        # _configured_max_hold_days and regime_param_override.resolve_override
+        # reach through regime_param_resolver to their OWN psycopg2.connect()
+        # -- past mock_conn, into the REAL database. Pinned off here for the
+        # same reason TestConfigJsonExitHook pins it.
         patch.dict(os.environ, {'OPENCLAW_BT_ASSET_GATE': 'off',
-                                'OPENCLAW_BT_SPREAD_COSTS': '0'}),
+                                'OPENCLAW_BT_SPREAD_COSTS': '0',
+                                'OPENCLAW_BACKTEST_COUPLED_RECS': '0'}),
         patch('backtest.unified_backtest.load_prices_panels',
               return_value=(close_wide, bars_by_ticker)),
         patch('backtest.unified_backtest.load_regimes', return_value=regimes),

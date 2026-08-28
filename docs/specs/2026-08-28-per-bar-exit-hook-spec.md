@@ -65,6 +65,7 @@ Rules:
 - A hook that raises is caught, logged once per (strategy, ticker, date), counted, and treated as `None` — the position is HELD (the bracket still protects). The counter is surfaced exactly like `bars_raised` in backtest and as a line in the daily health digest live.
 - Hook exits never feed the stop-out cooldown: `run_stop_history` (backtest) and `aux_data_loader._recent_stop_outs` (live) key on `exit_reason == 'stop'` / `close_reason == 'stop_loss'` only. Unchanged.
 - Reason tokens are free-form but persisted as `'strategy_exit:<reason>'` in `strategy_backtest_trades.exit_reason` and `signal_pnl.close_reason`. The `strategy_exit:` prefix is the contract consumers may match on.
+- **`regime` payload shape (Phase 1 measured):** the backtest hook receives `{'state': <regime string or None>, 'date': <ISO date string>}` — NOT the richer `one_hot` / `transition_probs` payload `generate_signals` sees on some paths. A hook may only rely on those two keys. Phase 2's live mirror must pass the same shape or the two sides diverge silently (a hook reading `regime['one_hot']` would work live and be a `KeyError` — i.e. a HOLD — in backtest).
 - **Per-signal time stop (same mechanism, same phase):** the open-book path honors `signal_params['hold_days']` as `min(int(hold_days), max_hold_days)`; missing/invalid ⇒ `max_hold_days` (today's behaviour). Reason stays `'max_hold'`. Live mirror: `update_pnl` closes with `close_reason='max_hold'` when `days_held >= min(hold_days, max_hold)` — live has NO time-based close today (close_reason census: `stale_tracker`, `target_1`, `stop_loss`, `rolled_continuation`, `signal_dropped`, `circuit_breaker`), so this is new behaviour gated with the hook flag (§3).
 
 ## 2. Backtest — open-book path (`src/backtest/unified_backtest.py`)
@@ -86,6 +87,8 @@ Ordering rationale: exits on bar t are decided before bar t's new entries, mirro
 Persistence: only new `exit_reason` values in `strategy_backtest_trades` — no migration. Captured `signal_params` live in memory for the run (Phase 1 does not persist them per trade).
 
 Cost: one hook call per open trade per day (X1 ≈ 15 open pairs ⇒ negligible). `prices` is passed as the `close_wide.loc[:current_date]` view, never copied.
+
+**Measured (X1 run 3, 2026-08-28):** the engine-side cost is indeed negligible; what dominated was I/O *inside the hook*. `S_coint_pairs_sector_v2.should_exit` re-read the 860k-row single-row-group pair ledger on every call (~154 ms), once per open leg per bar, turning a ~10 min backtest into 38 min. Fixed by caching the approved table per ledger version (one read per `(path, mtime_ns, size)`; 154 → 0.7 ms warm). The standing lesson for any future hook: `should_exit` runs O(open trades × bars) times, so treat every read inside it as being in that inner loop.
 
 ## 3. Live — `engine.update_pnl` (signals step, 15:00 ET)
 
@@ -109,6 +112,8 @@ A strategy whose backtest depends on the hook must not go live on a book that ca
 - `unified_backtest.run_backtest` writes `metadata.exit_hook: true` into the strategy's manifest entry when `instance.exit_hook` (same manifest-metadata surface as `backtest_universe_cap`, :1045/:1065).
 - `promotion_service.js` (candidate→live judgement, `judgeRegimeSleeve` callers) and `auto_approval.js` refuse promotion when `metadata.exit_hook` is true and `OPENCLAW_EXIT_HOOK_LIVE !== '1'`, with an explicit verdict line (`exit_hook_live_disabled`). Activation/eligibility assigners are NOT gated (they mint eligibility, not live-ness).
 
+`force: true` bypasses this guard like every other gate (existing force semantics) — the operator override is unchanged.
+
 **Refinement (Phase 1 plan, 2026-08-28):** `unified_backtest` only READS the manifest today; introducing a manifest write from the backtest would be a new pattern. The guard therefore reads `strategy_backtest_runs.config_json.exit_hook` (written by every run since Phase 1) via `_latestPrimaryRun` instead of manifest `metadata.exit_hook`. Behaviour is the same: the primary run that would be promoted declares whether it relied on the hook.
 
 ## 5. Parity and testing
@@ -124,6 +129,8 @@ A strategy whose backtest depends on the hook must not go live on a book that ca
 |---|---|---|
 | 1 — backtest | §1, §2, §4, X1 hook, tests; re-run X1 (`x1-backtest-3`, no `--max-hold-days` pin — `hold_days` now honored) | tests green; determinism fixture identical; X1 run persisted with `strategy_exit:*` exits |
 | 2 — live | §3 behind `OPENCLAW_EXIT_HOOK_LIVE`, health-digest counter, parity test, live unit test | flag flipped to `1` after ONE paper day on which a hook strategy's `strategy_exit:*` closes reconcile at the broker (`alpaca_reconcile`) |
+
+Phase 1 cost budget, measured: the open-book stepper itself is negligible against `simulate_trade`; the whole of run 3's 4× slowdown was hook-side ledger I/O (§2), removed by the ledger cache. Phase 2 should budget the live mirror the same way — one `should_exit` per open signal per run is cheap only if the hook's own reads are.
 
 Out of scope (YAGNI): partial exits/resizing, hook-driven re-entries, intraday evaluation, options legs, persisting `signal_params` per backtest trade.
 

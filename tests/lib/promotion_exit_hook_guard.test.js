@@ -42,6 +42,19 @@ test('non-hook run is unaffected; config_json as a JSON string is tolerated', as
   assert.deepStrictEqual(r2.failedGates, ['exit_hook_live_disabled']);
 });
 
+test('a config_json string that will not parse fails CLOSED', async () => {
+  // Every other unknown in this gate fails closed (no_backtest, no sleeves).
+  // An unparseable config_json must not be the one path that silently promotes.
+  delete process.env.OPENCLAW_EXIT_HOOK_LIVE;
+  const brokenRun = { ...hookRun, config_json: '{"exit_hook": tru' };
+  const r = await evaluatePromotionGate({ dbQuery: mkQuery(brokenRun, goodSleeves), sid: 'S_z', instrumentClass: 'equity' });
+  assert.strictEqual(r.pass, false);
+  assert.deepStrictEqual(r.failedGates, ['exit_hook_live_disabled']);
+  const q = await computeQualifyingRegimes({ dbQuery: mkQuery(brokenRun, goodSleeves), sid: 'S_z', instrumentClass: 'equity' });
+  assert.deepStrictEqual(q.qualifying, []);
+  assert.strictEqual(q.exit_hook_live_disabled, true);
+});
+
 test('force bypasses the guard', async () => {
   delete process.env.OPENCLAW_EXIT_HOOK_LIVE;
   const r = await evaluatePromotionGate({ dbQuery: mkQuery(hookRun, goodSleeves), sid: 'S_x', instrumentClass: 'equity', force: true });

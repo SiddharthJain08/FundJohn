@@ -137,8 +137,16 @@ async function _latestPrimaryRun(dbQuery, sid) {
       maxDd  = parseFloat(ubt.rows[0].total_max_dd_pct);
       trades = ubt.rows[0].total_trades != null ? parseInt(ubt.rows[0].total_trades, 10) : NaN;
       let cfg = ubt.rows[0].config_json;
-      if (typeof cfg === 'string') { try { cfg = JSON.parse(cfg); } catch (_) { cfg = null; } }
-      exitHook = !!(cfg && cfg.exit_hook === true);
+      // A config_json we cannot parse tells us NOTHING about whether the run
+      // leaned on the exit hook. Every other unknown in this gate fails closed
+      // (no_backtest, missing sleeves); this one must too, or a corrupt row is
+      // the single path that promotes a hook run onto a book that cannot honor
+      // it. force:true still bypasses, like every other gate.
+      let cfgBroken = false;
+      if (typeof cfg === 'string') {
+        try { cfg = JSON.parse(cfg); } catch (_) { cfg = null; cfgBroken = true; }
+      }
+      exitHook = cfgBroken || !!(cfg && cfg.exit_hook === true);
     }
   } catch (_) {}
   return { hasRun, runId, sharpe, maxDd, trades, exitHook };
