@@ -377,3 +377,21 @@ Per-leg stop = the wider of (i) the log-move of that leg that carries the pair s
 **Verdict: still fails every promotion gate.** Run 2 is a faithful test of "enter at |z| ≥ 2, hold ~25 days, catastrophic per-leg guard" — and that object has no edge after honest costs (+1 bp per trade). What it is *not* a test of is the spec's reversion exit (flatten at |z| ≤ 0.5), which is where a pairs strategy's edge normally lives; the engine has no per-bar exit hook, and the strategy docstring already reports that gap as owed rather than working around it. **X1 is parked** pending that engine feature (an operator design decision: a per-bar `should_exit(bar)` hook on Signal/strategy consumed by `unified_backtest._simulate` and the live cadence engine). Runs and tearsheets are in the DB / `output/tearsheets/` for reference.
 
 Infra defect found: both units OOM'd *after* `wrote run_id` — `backtest_panel.rebuild()` runs in-process while the prices panel is still alive and tips a 3.5 GB cgroup (not the tearsheet). Logged in `~/.learnings/ERRORS.md`; panels rebuilt standalone.
+
+### Exit hook applied (Phase 1) — run 3 `3a470001` (2026-08-28 09:11 UTC)
+
+Per-bar exit hook landed (`docs/superpowers/plans/2026-08-28-exit-hook-phase1.md`, `S_coint_pairs_sector_v2.should_exit`): `'z_revert'` when `|z| ≤ 0.5` or the sign of z flips from entry; `'pair_decohered'` when the pair drops off the latest approved-ledger snapshot. Re-run command identical to run 2 but `--max-hold-days 30` (the CAP; per-signal `hold_days = min(3·half_life, 30)` now governs instead of a pinned value). `x1-backtest-3.service` ran 38 min 9 s (~4× the ~10 min estimate — the open-book per-bar path is materially slower than the old cadence path; worth budgeting for Phase 2) and was OOM-killed immediately *after* `wrote run_id` (known `backtest_panel.rebuild()` issue, panel rebuilt standalone afterward — `{'built': 1, 'skipped': 0, 'failed': 0}`). `config_json.exit_hook='true'`, `config_json.hook_exits='1069'` (374 `z_revert` + 695 `pair_decohered`, reconciling exactly with the journal's `1069 hook exits, 0 hook errors`).
+
+| | run 1 `655c4bdb` | run 2 `32ff3475` | run 3 `3a470001` |
+|---|---|---|---|
+| total Sharpe | −0.24 | −0.08 | **+0.30** |
+| return / max DD | +3.2 % / 13.6 % | +11.9 % / 8.5 % | +19.9 % / 12.0 % |
+| hit rate / median hold | 29.5 % / 3 d | 49.3 % / 25 d | 48.4 % / 5 d |
+| exits stop / target / time | 772 / 260 / 73 | 68 / 3 / 975 | 5 / 0 / 33 (24 max_hold + 9 end_of_data) |
+| exits — hook (new, Phase 1) | — | — | 374 `z_revert` (sum pnl_pct +5.58, med hold 6 d) / 695 `pair_decohered` (sum pnl_pct −4.34, med hold 4 d) |
+| LOW_VOL (295) | −1.74 | −0.58 FAIL | +1.05 (bench 2.20) FAIL |
+| TRANSITIONING (741) | −0.03 | +0.16 (bench 1.14) FAIL | +0.20 (bench 1.14) FAIL |
+| HIGH_VOL (59) | +1.82 | +0.40 (<100 trades) | +0.61 (bench 1.08, <100 trades) |
+| CRISIS (12) | +4.74 noise | — | −0.58 noise |
+
+**Verdict: still fails every promotion gate — but the feature works exactly as specified.** Total Sharpe turns positive for the first time (+0.30, driven mostly by LOW_VOL swinging from −1.74 to +1.05) and hit rate nearly doubles (29.5 % → 48.4 %), yet every regime's Sharpe still sits below its SPY benchmark (R1 benchmark-relative gate): LOW_VOL 1.05 vs 2.20, TRANSITIONING 0.20 vs 1.14, HIGH_VOL 0.61 vs 1.08 (also <100 trades). CRISIS flipped from +4.74 to −0.58 on the same 12 trades (noise either way). **Read the exit mix before crediting reversion**: 695 of 1,069 hook exits (65 %) are `pair_decohered`, not `z_revert`, with a median hold of 4 trading days — almost exactly one weekly ledger-scan cycle (156 weekly scans feeding the ledger) — and those decoherence exits are net-*losing* (−4.34 pnl_pct summed) forced exits, not a structural-kill working as a safety valve. The net-*winning* exits are the 374 true `z_revert` reversions (+5.58 pnl_pct, median hold 6 d). So the median hold (5 d, well below the 25 d cap) is set largely by scanner cadence, not by the pair reverting — a faster or slower weekly scan cycle would move this number independent of any change to the reversion logic. **X1 remains PARKED**; this run is evidence the exit-hook engine feature is correct and load-bearing (positive total Sharpe vs. two negative prior runs), not evidence the pairs strategy itself has surmounted the benchmark-relative promotion gate.

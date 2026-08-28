@@ -109,6 +109,8 @@ A strategy whose backtest depends on the hook must not go live on a book that ca
 - `unified_backtest.run_backtest` writes `metadata.exit_hook: true` into the strategy's manifest entry when `instance.exit_hook` (same manifest-metadata surface as `backtest_universe_cap`, :1045/:1065).
 - `promotion_service.js` (candidate→live judgement, `judgeRegimeSleeve` callers) and `auto_approval.js` refuse promotion when `metadata.exit_hook` is true and `OPENCLAW_EXIT_HOOK_LIVE !== '1'`, with an explicit verdict line (`exit_hook_live_disabled`). Activation/eligibility assigners are NOT gated (they mint eligibility, not live-ness).
 
+**Refinement (Phase 1 plan, 2026-08-28):** `unified_backtest` only READS the manifest today; introducing a manifest write from the backtest would be a new pattern. The guard therefore reads `strategy_backtest_runs.config_json.exit_hook` (written by every run since Phase 1) via `_latestPrimaryRun` instead of manifest `metadata.exit_hook`. Behaviour is the same: the primary run that would be promoted declares whether it relied on the hook.
+
 ## 5. Parity and testing
 
 - **Parity test (Phase 2 exit gate):** synthetic two-ticker panel + a fixture hook strategy (deterministic z-like rule); run (a) the open-book simulator and (b) a harness that feeds the same rows through `update_pnl`'s hook branch day by day with a stub cursor (pattern: existing `tests/execution` DB stubs). Assert identical `{(ticker, exit_date, exit_reason)}`. Backtest side authoritative (operator ruling 2026-08-07).

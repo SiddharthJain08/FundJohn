@@ -1,8 +1,7 @@
 """
-STATUS: PARKED 2026-08-28 (operator) — registry-only, NOT in the manifest; do not
-register or promote until the per-bar exit hook lands
-(docs/specs/2026-08-28-per-bar-exit-hook-spec.md, Phase 1). Runs 655c4bdb /
-32ff3475 fail every gate without the |z| <= 0.5 reversion exit.
+STATUS: PARKED 2026-08-28 pending live exit hook (Phase 2). Backtest exit hook
+LANDED (Phase 1, docs/superpowers/plans/2026-08-28-exit-hook-phase1.md); promotion
+is refused by `exit_hook_live_disabled` until OPENCLAW_EXIT_HOOK_LIVE=1.
 
 S_coint_pairs_sector_v2: sector cointegration pairs — ledger-driven z-score
 edge-trigger entries.
