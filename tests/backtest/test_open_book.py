@@ -454,3 +454,56 @@ class TestConfigJsonExitHook:
         cfg = self._config_json_of(_mk_hook_cls(boom))
         assert cfg['exit_hook'] is True and cfg['hook_exits'] == 0
         assert cfg['hook_raised'] > 0
+
+
+def _regime_payload_for(state, cur_d):
+    return {'state': (str(state) if state is not None else None), 'date': cur_d.isoformat(),
+            'one_hot': {r: (1.0 if r == state else 0.0) for r in CANONICAL_REGIMES},
+            'transition_probs': {r1: {r2: (1.0 if r1 == r2 else 0.0) for r2 in CANONICAL_REGIMES}
+                                 for r1 in CANONICAL_REGIMES}}
+
+
+class TestPhase2Residuals:
+    def test_hook_receives_full_regime_payload(self):
+        close_wide, bars, regimes, dates, closes = _dataset(n=30)
+        seen = []
+        cls = _mk_hook_cls(lambda p, x: None, hold_days=3)
+        orig = cls.should_exit
+        def spy(self, position, prices, regime, aux_data=None):
+            seen.append(regime); return orig(self, position, prices, regime, aux_data)
+        cls.should_exit = spy
+        inst = cls(); inst.active_in_regimes = list(CANONICAL_REGIMES)
+        with patch.dict(os.environ, {'OPENCLAW_BT_ASSET_GATE': 'off', 'OPENCLAW_BT_SPREAD_COSTS': '0',
+                                     'OPENCLAW_BACKTEST_COUPLED_RECS': '0'}):
+            ub._per_bar_simulate(inst, close_wide, bars, regimes, dates[0], dates[-1],
+                                 strategy_id='stub_hook', max_hold_days=21, fill_model='same_close')
+        assert seen, 'hook never consulted'
+        assert seen[0] == _regime_payload_for('LOW_VOL', dates[10].date())
+        assert all(set(r) == {'state', 'date', 'one_hot', 'transition_probs'} for r in seen)
+
+    def test_short_trade_end_to_end_matches_simulate_trade(self):
+        close_wide, bars, regimes, dates, closes = _dataset(n=30)
+        # a falling tape so a SHORT is the natural trade: reverse the closes
+        rev = list(reversed(closes))
+        close_wide = pd.DataFrame({'AAA': rev}, index=dates); close_wide.index.name = 'date'
+        bars = _bars_from_rows({'AAA': [(c - 0.1, c + 0.2, c - 0.2, c) for c in rev]}, dates)
+
+        def mk(hook):
+            class S(BaseStrategy):
+                id = 'stub_short'; min_lookback = 5; active_in_regimes = list(CANONICAL_REGIMES); fired = False
+                exit_hook = hook
+                def generate_signals(self, prices, regime, universe, aux_data=None):
+                    if len(prices) < 10 or S.fired or not universe: return []
+                    S.fired = True; t = universe[0]; ep = float(prices[t].iloc[-1])
+                    return [Signal(ticker=t, direction='SHORT', entry_price=ep, stop_loss=ep * 1.07,
+                                   target_1=ep * 0.92, target_2=0.0, target_3=0.0,
+                                   position_size_pct=0.0, confidence='MED')]
+                if hook:
+                    def should_exit(self, position, prices, regime, aux_data=None): return None
+            return S
+        plain = _run_capture(mk(False), close_wide, bars, regimes, fill_model='same_close')
+        hooked = _run_capture(mk(True), close_wide, bars, regimes, fill_model='same_close')
+        assert plain and plain[0]['direction'] == 'short'
+        strip = lambda ts: [{k: v for k, v in t.items() if k != 'daily_marks'} for t in ts]
+        assert strip(hooked) == strip(plain)
+        assert [round(m[1], 12) for m in hooked[0]['daily_marks']] == [round(m[1], 12) for m in plain[0]['daily_marks']]

@@ -804,13 +804,21 @@ def _per_bar_simulate(
     if _use_open_book:
         from backtest.open_book import OpenTrade, advance_open_book, resolve_hold_cap
 
+    def _regime_payload_full(state, cur_d):
+        return {
+            'state':            (str(state) if state is not None and not pd.isna(state) else None),
+            'date':             cur_d.isoformat(),
+            'one_hot':          {r: (1.0 if r == state else 0.0) for r in CANONICAL_REGIMES},
+            'transition_probs': {r1: {r2: (1.0 if r1 == r2 else 0.0) for r2 in CANONICAL_REGIMES}
+                                 for r1 in CANONICAL_REGIMES},
+        }
+
     for current_date in oos_dates:
         # Need at least min_lookback days of history before strategy can run
         prices_to_date = close_wide.loc[:current_date]
         if _use_open_book and open_book:
             _rs = regimes.get(current_date, None)
-            _rp = {'state': (str(_rs) if _rs is not None and not pd.isna(_rs) else None),
-                   'date': (current_date.date() if hasattr(current_date, 'date') else current_date).isoformat()}
+            _rp = _regime_payload_full(_rs, current_date.date() if hasattr(current_date, 'date') else current_date)
             _aux_ob = {'options': {}}
             if load_aux_data is not None:
                 try:
@@ -1003,8 +1011,7 @@ def _per_bar_simulate(
             if not open_book:
                 break
             _rs = regimes.get(_dt, None)
-            _rp = {'state': (str(_rs) if _rs is not None and not pd.isna(_rs) else None),
-                   'date': _dt.date().isoformat()}
+            _rp = _regime_payload_full(_rs, _dt.date())
             _aux_dr = {'options': {}}
             if load_aux_data is not None:
                 try:
