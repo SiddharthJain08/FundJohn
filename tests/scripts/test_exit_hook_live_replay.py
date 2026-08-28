@@ -23,7 +23,7 @@ def test_rows_from_trades_uses_recovered_signal_params():
           'entry_price': 10.0, 'signal_stop': 9.0, 'signal_target': 12.0}]
     sig = Signal(ticker='A', direction='LONG', entry_price=10.0, stop_loss=9.0, target_1=12.0, target_2=0.0,
                  target_3=0.0, position_size_pct=0.0, confidence='MED', signal_params={'pair': 'A/B', 'z': 2.2})
-    rows = replay.rows_from_trades(t, {(date(2026, 6, 1), 'A'): [sig]})
+    rows = replay.rows_from_trades(t, {(date(2026, 6, 1), 'A', 'LONG'): [sig]})
     assert rows[0]['signal_params'] == {'pair': 'A/B', 'z': 2.2} and rows[0]['direction'] == 'LONG'
     assert rows[0]['target_date'] == date(2026, 6, 1) and rows[0]['mark_entry_price'] == 10.0
     assert rows[0]['trade_seq'] == 1
@@ -32,20 +32,37 @@ def test_rows_from_trades_uses_recovered_signal_params():
 
 def test_rows_from_trades_matches_same_ticker_trades_in_order():
     # Two concurrently-open trades, same ticker, same entry date, different
-    # pairs. The recovered signals must be matched to their OWN trade by
-    # (trade_seq order, direction) — not collapsed by ticker.
+    # pairs/directions. Recovery queues are keyed by (entry_date, ticker,
+    # direction) — round 2's fix — so the signals are matched to their OWN
+    # trade regardless of the order generate_signals returned them in. This
+    # is the re-reviewer's repro: queue order reversed relative to trade_seq
+    # order (SHORT signal built/listed before LONG) must still resolve
+    # seq 3 (LONG) -> 'A/B' and seq 5 (SHORT) -> 'A/C', with neither trade
+    # silently losing its signal to the other's direction.
     t = [{'trade_seq': 5, 'ticker': 'A', 'direction': 'short', 'entry_date': date(2026, 6, 1), 'exit_date': date(2026, 6, 6),
           'entry_price': 11.0, 'signal_stop': 12.0, 'signal_target': 9.0},
          {'trade_seq': 3, 'ticker': 'A', 'direction': 'long', 'entry_date': date(2026, 6, 1), 'exit_date': date(2026, 6, 5),
           'entry_price': 10.0, 'signal_stop': 9.0, 'signal_target': 12.0}]
-    sig_long = Signal(ticker='A', direction='LONG', entry_price=10.0, stop_loss=9.0, target_1=12.0, target_2=0.0,
-                       target_3=0.0, position_size_pct=0.0, confidence='MED', signal_params={'pair': 'A/B'})
     sig_short = Signal(ticker='A', direction='SHORT', entry_price=11.0, stop_loss=12.0, target_1=9.0, target_2=0.0,
                         target_3=0.0, position_size_pct=0.0, confidence='MED', signal_params={'pair': 'A/C'})
-    rows = replay.rows_from_trades(t, {(date(2026, 6, 1), 'A'): [sig_long, sig_short]})
+    sig_long = Signal(ticker='A', direction='LONG', entry_price=10.0, stop_loss=9.0, target_1=12.0, target_2=0.0,
+                       target_3=0.0, position_size_pct=0.0, confidence='MED', signal_params={'pair': 'A/B'})
+    rows = replay.rows_from_trades(t, {(date(2026, 6, 1), 'A', 'SHORT'): [sig_short],
+                                        (date(2026, 6, 1), 'A', 'LONG'): [sig_long]})
     by_seq = {r['trade_seq']: r for r in rows}
     assert by_seq[3]['signal_params'] == {'pair': 'A/B'}
     assert by_seq[5]['signal_params'] == {'pair': 'A/C'}
+
+
+def test_rows_from_trades_skips_trade_without_same_direction_signal():
+    # One LONG trade; only a SHORT signal exists for that (entry_date,
+    # ticker). Must be skipped (unrecoverable), never matched cross-direction.
+    t = [{'trade_seq': 7, 'ticker': 'A', 'direction': 'long', 'entry_date': date(2026, 6, 1), 'exit_date': date(2026, 6, 5),
+          'entry_price': 10.0, 'signal_stop': 9.0, 'signal_target': 12.0}]
+    sig_short = Signal(ticker='A', direction='SHORT', entry_price=11.0, stop_loss=12.0, target_1=9.0, target_2=0.0,
+                        target_3=0.0, position_size_pct=0.0, confidence='MED', signal_params={'pair': 'A/C'})
+    rows = replay.rows_from_trades(t, {(date(2026, 6, 1), 'A', 'SHORT'): [sig_short]})
+    assert rows == []
 
 
 def test_compare():

@@ -13,10 +13,20 @@ Read-only: no DB writes, no broker calls. Run outside 13:00–20:15 UTC.
 Per-trade identity (fix round 1, 2026-08-28): comparisons are keyed by the
 backtest's own trade_seq, not by ticker. Two concurrently-open trades on the
 same ticker (different pairs entered the same day) each get matched to their
-OWN recovered Signal by consuming signals_by_entry[(entry_date, ticker)] — a
-list, in generate_signals' return order — in trade_seq order, skipping any
-signal whose direction doesn't match the trade it's being considered for.
+OWN recovered Signal by consuming signals_by_entry[(entry_date, ticker,
+direction)] — a list, in generate_signals' return order — in trade_seq order.
 Ticker-keyed dicts previously collapsed such trades into a single comparison.
+
+Direction-partitioned recovery (fix round 2, 2026-08-28): round 1 used a
+single mixed-direction queue per (entry_date, ticker) and discarded any
+popped signal whose direction didn't match the trade under consideration —
+a discarded signal could never be given back to a later, opposite-direction
+trade that actually needed it (repro: trades LONG then SHORT, same ticker/
+entry date, signal queue order [SHORT, LONG] silently dropped the SHORT
+trade). Recovery queues are now keyed by (entry_date, ticker,
+direction.upper()) end to end — both in main()'s sig_cache and in
+rows_from_trades — so a trade only ever draws from its own direction's
+queue and no cross-direction discarding can occur.
 
 Caveats:
 - The replay uses today's universe/prices panel, not the point-in-time panel
@@ -46,13 +56,16 @@ def open_trades_on(trades, d):
 
 
 def rows_from_trades(open_trades, signals_by_entry):
-    """signals_by_entry: dict[(entry_date, ticker)] -> list[Signal], in the
-    order generate_signals returned them. Trades are processed in trade_seq
-    order (the backtest appends trades in signal order, so the k-th
-    same-ticker signal IS the k-th same-ticker trade); for each trade we pop
-    the next unconsumed signal for its (entry_date, ticker), skipping any
-    whose direction disagrees and continuing to pop. Unrecoverable (queue
-    exhausted, or nullable stop/target missing) -> skipped, not fabricated."""
+    """signals_by_entry: dict[(entry_date, ticker, direction.upper())] ->
+    list[Signal], in the order generate_signals returned them, PARTITIONED
+    BY DIRECTION (round 2 fix) so a trade only ever consumes signals of its
+    own direction — no cross-direction discarding is possible or needed.
+    Trades are processed in trade_seq order (the backtest appends trades in
+    signal order, so the k-th same-(ticker,direction) signal IS the k-th
+    same-(ticker,direction) trade); for each trade we pop the next
+    unconsumed signal from its (entry_date, ticker, direction) queue.
+    Unrecoverable (queue exhausted/absent, or nullable stop/target missing)
+    -> skipped, not fabricated."""
     queues = {k: list(v) for k, v in (signals_by_entry or {}).items()}
     rows = []
     for t in sorted(open_trades, key=lambda x: x['trade_seq']):
@@ -60,18 +73,14 @@ def rows_from_trades(open_trades, signals_by_entry):
             print(f'[replay] trade_seq={t.get("trade_seq")} {t["ticker"]}: '
                   f'missing signal_stop/signal_target, skipping', file=sys.stderr)
             continue
-        key = (t['entry_date'], t['ticker'])
-        q = queues.get(key, [])
-        sig = None
-        while q:
-            cand = q.pop(0)
-            if str(cand.direction).upper() == str(t['direction']).upper():
-                sig = cand
-                break
-        if sig is None:
+        direction = str(t['direction']).upper()
+        key = (t['entry_date'], t['ticker'], direction)
+        q = queues.get(key)
+        if not q:
             continue
+        sig = q.pop(0)
         rows.append({'id': f'replay-{t["trade_seq"]}', 'strategy_id': None, 'ticker': t['ticker'],
-                     'direction': str(t['direction']).upper(), 'entry_price': float(t['entry_price']),
+                     'direction': direction, 'entry_price': float(t['entry_price']),
                      'mark_entry_price': float(t['entry_price']), 'target_date': t['entry_date'],
                      'lifecycle_state': 'FILLED', 'stop_loss': float(t['signal_stop']),
                      'target_1': float(t['signal_target']), 'signal_date': t['entry_date'],
@@ -133,7 +142,7 @@ def main():
             except Exception as e:
                 print(f'[replay] generate_signals failed on {ed}: {e}', file=sys.stderr); sigs = []
             for s in sigs:
-                sig_cache.setdefault((ed, s.ticker), []).append(s)
+                sig_cache.setdefault((ed, s.ticker, str(s.direction).upper()), []).append(s)
         rows = rows_from_trades(opens, sig_cache)
         for r in rows: r['strategy_id'] = args.strategy
         id_to_seq = {r['id']: r['trade_seq'] for r in rows}
