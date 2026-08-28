@@ -129,6 +129,11 @@ class BaseStrategy(ABC):
     # Safety cap: generate_signals should not return more than this many signals.
     # Prevents runaway signal counts at large universe sizes without slicing in each strategy.
     MAX_SIGNALS:      int = 50
+    # Per-bar exit hook (spec docs/specs/2026-08-28-per-bar-exit-hook-spec.md §1).
+    # Explicit opt-in: the backtest open-book path and (Phase 2) live
+    # update_pnl call should_exit() ONLY when this is True. Overriding
+    # should_exit without setting the flag is inert by design.
+    exit_hook:        bool = False
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -164,6 +169,12 @@ class BaseStrategy(ABC):
                     stacklevel=3,
                 )
         cls.active_in_regimes = normalized or ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL']
+        # exit_hook=True with the base should_exit is a silent no-op that
+        # would masquerade as a tested exit — refuse at class definition.
+        if cls.__dict__.get('exit_hook', False) or getattr(cls, 'exit_hook', False):
+            if cls.should_exit is BaseStrategy.should_exit:
+                raise TypeError(
+                    f'{cls.__name__}: exit_hook=True requires overriding should_exit()')
 
     def __init__(self, parameters: dict = None):
         # Merge DB overrides on top of code defaults — replacing the dict
@@ -199,6 +210,20 @@ class BaseStrategy(ABC):
     def position_scale(self, regime_state: str) -> float:
         """Regime-adjusted position scale."""
         return REGIME_POSITION_SCALE.get(regime_state, 0.35)
+
+    def should_exit(self, position: dict, prices: pd.DataFrame,
+                    regime: dict, aux_data: dict = None):
+        """Per-bar exit decision for ONE open position (spec §1).
+
+        Called only when `exit_hook` is True, once per open position per bar,
+        AFTER the intra-bar bracket check and BEFORE the time stop. Return a
+        short snake_case reason token to flatten at TODAY's close, or None to
+        keep holding. Must be a pure, look-ahead-safe function of its
+        arguments: `prices` ends at the evaluation bar; `position` carries
+        ticker, direction ('LONG'|'SHORT'), entry_price, entry_date,
+        days_held, stop_loss, target_1 and the entry-time signal_params dict.
+        Raising is caught by the caller and treated as None (hold)."""
+        return None
 
     @abstractmethod
     def generate_signals(
