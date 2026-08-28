@@ -1,17 +1,15 @@
 # Spec — Per-bar strategy exit hook (`BaseStrategy.should_exit`)
 
 **Status:** Phase 1 LANDED (`2d955fa..3695211`); Phase 2 code LANDED
-(`656c9aa..f9af79f`; a commit cannot name its own SHA, so this range ends one
-commit short of the docs commit that confirms the re-run below — see the
-Phase 2 spec's changelog for that final SHA), replay re-run CONFIRMED (F7,
-2026-08-28): the 3 early `strategy_exit:*` divergences were a replay-harness
-defect (fixed, not a live-code defect) and are gone on re-run.
-`OPENCLAW_EXIT_HOOK_LIVE=0` still — the flip is UNBLOCKED pending the
-operator's §4 runbook (the 21-vs-30-style hold-cap mismatch remains X1's
-activation prerequisite, now refused automatically at promotion by
-`exit_hook_hold_cap_mismatch`) — see §6 and the Phase 2 spec
-(`docs/specs/2026-08-28-per-bar-exit-hook-phase2-spec.md`). Design approved by
-operator 2026-08-28 (approach A of three; scope "backtest + live, phased").
+(`656c9aa..df950e4`), replay re-run CONFIRMED (F7, 2026-08-28): the 3 early
+`strategy_exit:*` divergences were a replay-harness defect (fixed, not a
+live-code defect) and are gone on re-run. `OPENCLAW_EXIT_HOOK_LIVE=0` still —
+the flip is UNBLOCKED pending the operator's §4 runbook (the 21-vs-30-style
+hold-cap mismatch remains X1's activation prerequisite, now refused
+automatically at promotion by `exit_hook_hold_cap_mismatch`) — see §6 and the
+Phase 2 spec (`docs/specs/2026-08-28-per-bar-exit-hook-phase2-spec.md`).
+Design approved by operator 2026-08-28 (approach A of three; scope "backtest
++ live, phased").
 
 **Why:** the engines can express only three exits — intra-bar stop/target
 brackets and a uniform `max_hold_days` — so any strategy whose edge lives in
@@ -138,7 +136,7 @@ A strategy whose backtest depends on the hook must not go live on a book that ca
 | phase | deliverables | done when |
 |---|---|---|
 | 1 — backtest | §1, §2, §4, X1 hook, tests; re-run X1 (`x1-backtest-3`, no `--max-hold-days` pin — `hold_days` now honored) | tests green; determinism fixture identical; X1 run persisted with `strategy_exit:*` exits |
-| 2 — live | §3 behind `OPENCLAW_EXIT_HOOK_LIVE`, health-digest counter, parity test, live unit test | flag flipped to `1` after ONE paper day on which a hook strategy's `strategy_exit:*` closes reconcile at the broker (`alpaca_reconcile`). **STATUS 2026-08-28: code LANDED `656c9aa..d23f77e`, flag OFF (`OPENCLAW_EXIT_HOOK_LIVE=0`)** — parity test 4/4 passed, live replay `AGREEMENT 11/11` (23/26 disagreements = `max_hold` hold-cap config mismatch, 21 vs 30; 3/26 = unexplained early `strategy_exit:*` divergence). Flip BLOCKED pending the 3-exit diagnosis; see `docs/specs/2026-08-28-per-bar-exit-hook-phase2-spec.md` §4 for the full record and runbook. |
+| 2 — live | §3 behind `OPENCLAW_EXIT_HOOK_LIVE`, health-digest counter, parity test, live unit test | flag flipped to `1` after ONE paper day on which a hook strategy's `strategy_exit:*` closes reconcile at the broker (`alpaca_reconcile`). **STATUS 2026-08-28: code LANDED `656c9aa..df950e4`, flag OFF (`OPENCLAW_EXIT_HOOK_LIVE=0`)** — parity test 4/4 passed, live replay `AGREEMENT 11/11`; pre-fix disagreements were 23/26 `max_hold` hold-cap config mismatch (21 vs 30-style) plus 3/26 early `strategy_exit:*` divergence. Final-review fix wave (`aaac49b..ceeb8a0`) + F7 re-run confirmed both: the 3 early exits were a replay-harness defect (fixed, gone on re-run — `df950e4`) and the `max_hold` bucket is the pure hold-cap mismatch (down to 6/6, all verified `hold_days` > the live cap with a later backtest exit), now refused automatically at promotion as `exit_hook_hold_cap_mismatch`. **Flip UNBLOCKED, pending the operator's §4 runbook**; see `docs/specs/2026-08-28-per-bar-exit-hook-phase2-spec.md` §4 for the full record and runbook. |
 
 Phase 1 cost budget, measured: the open-book stepper itself is negligible against `simulate_trade`; the whole of run 3's 4× slowdown was hook-side ledger I/O (§2), removed by the ledger cache. Phase 2 should budget the live mirror the same way — one `should_exit` per open signal per run is cheap only if the hook's own reads are.
 

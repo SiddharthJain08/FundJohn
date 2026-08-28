@@ -1,7 +1,9 @@
 # Spec — Per-bar exit hook, Phase 2 (live mirror)
 
-**Status:** LANDED 656c9aa..d23f77e (docs commit follows); OPENCLAW_EXIT_HOOK_LIVE still 0 —
-flip BLOCKED pending the 3-exit diagnosis, then per §4 runbook. Implements §3 / §5-live /
+**Status:** LANDED 656c9aa..df950e4; OPENCLAW_EXIT_HOOK_LIVE still 0 —
+the 3-exit diagnosis is CONFIRMED (F7 re-run, 2026-08-28: replay-harness
+defect, fixed, gone on re-run) and the flip is UNBLOCKED, pending the
+operator's §4 runbook. Implements §3 / §5-live /
 §6-row-2 of `docs/specs/2026-08-28-per-bar-exit-hook-spec.md` (the parent spec, approved 08-28)
 with the detail that only the live code can supply. Phase 1 (backtest) landed `2d955fa..3695211`.
 
