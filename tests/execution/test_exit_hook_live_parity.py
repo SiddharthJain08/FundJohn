@@ -19,6 +19,7 @@ import backtest.unified_backtest as ub            # noqa: E402
 from strategies.base import BaseStrategy, Signal, CANONICAL_REGIMES  # noqa: E402
 
 ENV = {'OPENCLAW_EXIT_HOOK_LIVE': '1', 'OPENCLAW_BACKTEST_COUPLED_RECS': '0',
+       'OPENCLAW_INTRADAY_REDEPLOY': '0',
        'OPENCLAW_BT_ASSET_GATE': 'off', 'OPENCLAW_BT_SPREAD_COSTS': '0', 'OPENCLAW_BACKTEST_SLIPPAGE': '0'}
 DATES = pd.bdate_range('2026-03-02', periods=40)
 

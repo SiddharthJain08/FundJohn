@@ -66,8 +66,29 @@ CONFLUENCE_MIN          = 2       # min strategies agreeing for confluence
 LAST_EXIT_HOOK_STATS: dict = {}
 
 
+_EXIT_HOOK_INTRADAY_SKIP_LOGGED = False
+
+
 def _exit_hook_enabled() -> bool:
-    return os.environ.get('OPENCLAW_EXIT_HOOK_LIVE', '0') == '1'
+    """The hook + time stop belong to the daily 15:00 ET signals step only.
+
+    I3 (final review): `scripts/redeploy_pipeline._spawn_orchestrator` sets
+    `OPENCLAW_INTRADAY_REDEPLOY=1` on the orchestrator subprocess it spawns,
+    and that fragment includes the `signals` step — so an intraday
+    regime-transition redeploy would re-run `update_pnl` and evaluate the hook
+    a second time on the same day, against a mid-session panel whose last row
+    is not a close. Nothing in Phase 1/2 was specified for that lane, so it is
+    out of scope: the hook is off there and the daily cycle owns the exits.
+    """
+    if os.environ.get('OPENCLAW_EXIT_HOOK_LIVE', '0') != '1':
+        return False
+    if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1':
+        global _EXIT_HOOK_INTRADAY_SKIP_LOGGED
+        if not _EXIT_HOOK_INTRADAY_SKIP_LOGGED:
+            _EXIT_HOOK_INTRADAY_SKIP_LOGGED = True
+            logger.info('[exit_hook] disabled for intraday redeploy')
+        return False
+    return True
 
 
 def _bars_held(prices: pd.DataFrame, ticker, entry_dt, run_date):

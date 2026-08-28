@@ -17,7 +17,8 @@ sys.path.insert(0, str(ROOT / 'src'))
 from execution import engine  # noqa: E402
 from strategies.base import BaseStrategy, CANONICAL_REGIMES  # noqa: E402
 
-ENV = {'OPENCLAW_EXIT_HOOK_LIVE': '1', 'OPENCLAW_BACKTEST_COUPLED_RECS': '0'}
+ENV = {'OPENCLAW_EXIT_HOOK_LIVE': '1', 'OPENCLAW_BACKTEST_COUPLED_RECS': '0',
+       'OPENCLAW_INTRADAY_REDEPLOY': '0'}
 
 
 class _FakeCursor:
@@ -96,6 +97,26 @@ def test_flag_off_never_calls_hook_and_is_byte_identical():
     with patch.dict(os.environ, {**ENV, 'OPENCLAW_EXIT_HOOK_LIVE': '0'}):
         engine.update_pnl(cur_legacy, _panel(), date(2026, 5, 13))
     assert [s for s, _ in cur_legacy.executed] == [s for s, _ in cur_on_env_off.executed]
+
+
+def test_hook_never_evaluates_inside_an_intraday_redeploy():
+    """I3 (final review): redeploy_pipeline._spawn_orchestrator sets
+    OPENCLAW_INTRADAY_REDEPLOY=1 on the orchestrator fragment it spawns, and
+    that fragment runs the `signals` step. The hook + time stop are daily-cycle
+    only, so the flag being 1 disables them even with EXIT_HOOK_LIVE=1."""
+    engine._EXIT_HOOK_INTRADAY_SKIP_LOGGED = False
+    strat = _mk(lambda p, x: 'z_revert')
+    cur = _FakeCursor([_row()])
+    with patch.dict(os.environ, {**ENV, 'OPENCLAW_INTRADAY_REDEPLOY': '1'}):
+        assert engine._exit_hook_enabled() is False
+        n, closed = engine.update_pnl(cur, _panel(), date(2026, 5, 13),
+                                      strategies=[strat], regime={'state': 'LOW_VOL'})
+    assert closed == [] and type(strat).calls == []
+    assert _closes(cur) == [(None, 'open')]
+    assert engine.LAST_EXIT_HOOK_STATS['enabled'] is False
+    # daily lane (flag absent) is unaffected
+    with patch.dict(os.environ, ENV):
+        assert engine._exit_hook_enabled() is True
 
 
 def test_hook_reason_closes_with_prefixed_reason_and_position_contract():

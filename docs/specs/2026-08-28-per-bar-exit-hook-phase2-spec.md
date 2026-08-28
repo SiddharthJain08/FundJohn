@@ -78,6 +78,8 @@ The hook receives the same `regime` dict `run_strategies` gives `generate_signal
 - Digest: `buildDigest` gains one line, shown only when non-zero: `🪝 Exit hook: N strategy exits (a z_revert / b pair_decohered / …), M max_hold` from `SELECT close_reason, COUNT(*) FROM signal_pnl WHERE status='closed' AND closed_at::date = CURRENT_DATE AND (close_reason LIKE 'strategy_exit:%' OR close_reason = 'max_hold') GROUP BY 1`. No schema change.
 
 ### 2.9 Kill switch and flip
+**Lane:** the hook + time stop evaluate in the DAILY cycle's `signals` step only. `scripts/redeploy_pipeline._spawn_orchestrator` sets `OPENCLAW_INTRADAY_REDEPLOY=1` on the orchestrator fragment it spawns and that fragment includes `signals`, so `_exit_hook_enabled()` returns False (logging `[exit_hook] disabled for intraday redeploy` once) whenever that flag is `1` — an intraday regime-transition redeploy must not re-evaluate the hook against a mid-session panel whose last row is not a close (I3, final review 2026-08-28).
+
 `.env`: `OPENCLAW_EXIT_HOOK_LIVE=0` until Phase 2 verification passes (§4). Both the engine (`EnvironmentFile=/root/openclaw/.env` on the pipeline units) and the JS promotion guard (API process under `johnbot.service`, `dotenv`) must see the same value — the flip runbook (§4) verifies both.
 
 ## 3. Phase 1 residuals folded in
