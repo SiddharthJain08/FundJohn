@@ -189,6 +189,28 @@ def _load_approved_pairs(as_of_date: pd.Timestamp) -> pd.DataFrame:
     return df
 
 
+def _latest_snapshot_has_pair(as_of_date: pd.Timestamp, ticker_a: str, ticker_b: str):
+    """True/False = the LATEST ledger snapshot with as_of <= as_of_date does /
+    does not approve the (unordered) pair; None = no readable snapshot at all
+    (missing file, read error, missing columns, no rows <= as_of_date) — the
+    caller must HOLD on None, never treat it as decoherence."""
+    path = _ledger_path()
+    if not path.exists():
+        return None
+    try:
+        import pyarrow.parquet as pq
+        df = pq.read_table(str(path), filters=[('as_of', '<=', as_of_date)]).to_pandas()
+    except Exception as e:
+        print(f'[debug] pair_ledger read failed in should_exit ({path}): {e}', file=sys.stderr)
+        return None
+    if df.empty or any(c not in df.columns for c in ('as_of', 'ticker_a', 'ticker_b', 'approved')):
+        return None
+    latest = pd.to_datetime(df['as_of']).max()
+    snap = df[(pd.to_datetime(df['as_of']) == latest) & (df['approved'] == True)]  # noqa: E712
+    keys = set(zip(snap['ticker_a'].astype(str), snap['ticker_b'].astype(str)))
+    return (ticker_a, ticker_b) in keys or (ticker_b, ticker_a) in keys
+
+
 class CointPairsSectorV2(BaseStrategy):
     """Sector cointegration pairs: ledger-driven z-score edge-trigger entries.
     See module docstring for the full look-ahead-safety / sizing / holding /
@@ -217,6 +239,9 @@ class CointPairsSectorV2(BaseStrategy):
     Z_STOP           = 4.0
     STOP_HOLD_SIGMAS = 2.0
     TARGET_R         = 2.0
+    # Per-bar exit hook (spec 2026-08-28 §5): flatten on reversion or decoherence.
+    exit_hook        = True
+    Z_EXIT           = 0.5
     BASE_SIZE    = 0.04    # fraction per leg — matches PairsTradingJumpDiffusionIntraday's
                             # per-leg convention (equal dollar notional both legs; see docstring)
 
@@ -240,6 +265,45 @@ class CointPairsSectorV2(BaseStrategy):
             't3':       round(price * float(np.exp(-sgn * (r + 2.0) * used)), 4),
             'used_log': float(used),
         }
+
+    def should_exit(self, position: dict, prices: pd.DataFrame,
+                    regime: dict, aux_data: dict = None):
+        """Exit-hook: 'z_revert' when the pair's log-spread z (entry-time
+        beta/alpha, rolling Z_WINDOW std) is within Z_EXIT of the mean or has
+        flipped sign since entry; 'pair_decohered' when the latest ledger
+        snapshot as_of <= today no longer approves the pair; None otherwise
+        (including any missing leg / short window / incomplete params —
+        hold, the bracket and hold_days still protect)."""
+        sp = (position or {}).get('signal_params') or {}
+        pair = sp.get('pair')
+        try:
+            beta = float(sp['beta']); alpha = float(sp['alpha']); z_entry = float(sp['z'])
+            ticker_a, ticker_b = str(pair).split('/', 1)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return None
+        if prices is None or prices.empty or ticker_a not in prices.columns or ticker_b not in prices.columns:
+            return None
+        both = prices[[ticker_a, ticker_b]].dropna(how='any')
+        if len(both) < self.Z_WINDOW:
+            return None
+        window = both.iloc[-self.Z_WINDOW:]
+        if window.index[-1] != prices.index[-1]:
+            return None                       # no aligned bar today
+        wa = window[ticker_a].to_numpy(dtype=float)
+        wb = window[ticker_b].to_numpy(dtype=float)
+        if (wa <= 0.0).any() or (wb <= 0.0).any():
+            return None
+        spread = np.log(wa) - beta * np.log(wb) - alpha
+        std = float(np.std(spread, ddof=1))
+        if not np.isfinite(std) or std <= 0.0:
+            return None
+        z_t = float((spread[-1] - np.mean(spread)) / std)
+        if abs(z_t) <= self.Z_EXIT or (z_t > 0.0) != (z_entry > 0.0):
+            return 'z_revert'
+        has = _latest_snapshot_has_pair(pd.Timestamp(prices.index[-1]), ticker_a, ticker_b)
+        if has is False:
+            return 'pair_decohered'
+        return None                           # True (still approved) or None (no snapshot -> hold)
 
     def default_parameters(self) -> dict:
         return {

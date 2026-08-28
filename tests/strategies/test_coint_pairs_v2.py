@@ -676,3 +676,104 @@ def test_nonpositive_beta_drops_spread_term_on_leg_b_only(tmp_path, monkeypatch)
     assert b_sig.signal_params['stop_basis']['spread_log'] is None
     assert b_sig.signal_params['stop_basis']['used_log'] == pytest.approx(
         b_sig.signal_params['stop_basis']['vol_log'])
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Exit hook (spec 2026-08-28 §5): z-reversion + decoherence exits
+# ─────────────────────────────────────────────────────────────────────────
+def _entered_pair(tmp_path, monkeypatch, tail_values=(0.0, 0.05), seed=123, beta=0.75, alpha=0.10):
+    """Fire the ZZTAA/ZZTBB pair on the final bar and return (strategy, prices, signals, ledger_path)."""
+    dates = _dates(120)
+    last = dates[-1]
+    spread = _tail_spread(seed=seed, tail_values=list(tail_values))
+    frame = _pair_frame(dates, 'ZZTAA', 'ZZTBB', beta=beta, alpha=alpha, spread=spread, log_b_seed=555)
+    ledger_path = _write_ledger(tmp_path, [
+        _ledger_row(last, 'ZZTAA', 'ZZTBB', beta=beta, alpha=alpha, approved=True, half_life_days=6.0)])
+    strat = CointPairsSectorV2()
+    monkeypatch.setenv('OPENCLAW_PAIR_LEDGER', ledger_path)
+    signals = strat.generate_signals(frame, {'state': 'LOW_VOL'}, list(frame.columns))
+    assert len(signals) == 2
+    return strat, frame, signals, ledger_path
+
+
+def _position(sig, entry_date, days_held=1):
+    return {'ticker': sig.ticker, 'direction': sig.direction, 'entry_price': sig.entry_price,
+            'entry_date': entry_date, 'days_held': days_held, 'stop_loss': sig.stop_loss,
+            'target_1': sig.target_1, 'signal_params': dict(sig.signal_params)}
+
+
+def _extend(frame, log_spread_next, beta, alpha, log_b_step=0.0):
+    """Append one bar so that the pair's log spread equals log_spread_next."""
+    next_date = frame.index[-1] + pd.tseries.offsets.BDay(1)
+    log_b = float(np.log(frame['ZZTBB'].iloc[-1])) + log_b_step
+    log_a = log_spread_next + beta * log_b + alpha
+    row = pd.DataFrame({'ZZTAA': [float(np.exp(log_a))], 'ZZTBB': [float(np.exp(log_b))]}, index=[next_date])
+    return pd.concat([frame, row])
+
+
+def test_should_exit_is_armed_and_holds_while_spread_stays_rich(tmp_path, monkeypatch):
+    strat, frame, signals, _ = _entered_pair(tmp_path, monkeypatch)
+    assert CointPairsSectorV2.exit_hook is True
+    a_sig = next(s for s in signals if s.ticker == 'ZZTAA')
+    # same panel as entry (z ~ 2.39): still rich -> hold
+    assert strat.should_exit(_position(a_sig, frame.index[-1]), frame, {'state': 'LOW_VOL'}) is None
+
+
+def test_should_exit_z_revert_when_spread_returns_to_mean(tmp_path, monkeypatch):
+    strat, frame, signals, _ = _entered_pair(tmp_path, monkeypatch)
+    a_sig = next(s for s in signals if s.ticker == 'ZZTAA')
+    b_sig = next(s for s in signals if s.ticker == 'ZZTBB')
+    # push the log spread back to the window mean -> |z| <= 0.5
+    sp = a_sig.signal_params
+    win = (np.log(frame['ZZTAA']) - sp['beta'] * np.log(frame['ZZTBB']) - sp['alpha']).iloc[-CointPairsSectorV2.Z_WINDOW:]
+    frame2 = _extend(frame, float(win.mean()), sp['beta'], sp['alpha'])
+    pos_a = _position(a_sig, frame.index[-1], days_held=1)
+    pos_b = _position(b_sig, frame.index[-1], days_held=1)
+    assert strat.should_exit(pos_a, frame2, {'state': 'LOW_VOL'}) == 'z_revert'
+    assert strat.should_exit(pos_b, frame2, {'state': 'LOW_VOL'}) == 'z_revert'   # both legs agree
+
+
+def test_should_exit_z_revert_on_sign_flip(tmp_path, monkeypatch):
+    strat, frame, signals, _ = _entered_pair(tmp_path, monkeypatch)
+    a_sig = next(s for s in signals if s.ticker == 'ZZTAA')
+    sp = a_sig.signal_params
+    win = (np.log(frame['ZZTAA']) - sp['beta'] * np.log(frame['ZZTBB']) - sp['alpha']).iloc[-CointPairsSectorV2.Z_WINDOW:]
+    # overshoot far below the mean: |z| > 0.5 but sign flipped relative to entry (z_entry > 0)
+    frame2 = _extend(frame, float(win.mean() - 3.0 * win.std(ddof=1)), sp['beta'], sp['alpha'])
+    assert strat.should_exit(_position(a_sig, frame.index[-1]), frame2, {'state': 'LOW_VOL'}) == 'z_revert'
+
+
+def test_should_exit_pair_decohered_when_dropped_from_ledger(tmp_path, monkeypatch):
+    strat, frame, signals, ledger_path = _entered_pair(tmp_path, monkeypatch)
+    a_sig = next(s for s in signals if s.ticker == 'ZZTAA')
+    sp = a_sig.signal_params
+    # a later scan (next bar's date) that no longer approves the pair
+    next_date = frame.index[-1] + pd.tseries.offsets.BDay(1)
+    _write_ledger(tmp_path, [
+        _ledger_row(frame.index[-1], 'ZZTAA', 'ZZTBB', beta=sp['beta'], alpha=sp['alpha'], approved=True, half_life_days=6.0),
+        _ledger_row(next_date, 'ZZTAA', 'ZZTBB', beta=sp['beta'], alpha=sp['alpha'], approved=False, half_life_days=6.0),
+    ])
+    frame2 = _extend(frame, 0.05, sp['beta'], sp['alpha'])   # spread still rich (no z_revert)
+    assert strat.should_exit(_position(a_sig, frame.index[-1]), frame2, {'state': 'LOW_VOL'}) == 'pair_decohered'
+
+
+def test_should_exit_ignores_future_ledger_rows(tmp_path, monkeypatch):
+    strat, frame, signals, ledger_path = _entered_pair(tmp_path, monkeypatch)
+    a_sig = next(s for s in signals if s.ticker == 'ZZTAA')
+    sp = a_sig.signal_params
+    future = frame.index[-1] + pd.tseries.offsets.BDay(5)
+    _write_ledger(tmp_path, [
+        _ledger_row(frame.index[-1], 'ZZTAA', 'ZZTBB', beta=sp['beta'], alpha=sp['alpha'], approved=True, half_life_days=6.0),
+        _ledger_row(future, 'ZZTAA', 'ZZTBB', beta=sp['beta'], alpha=sp['alpha'], approved=False, half_life_days=6.0),
+    ])
+    frame2 = _extend(frame, 0.05, sp['beta'], sp['alpha'])
+    assert strat.should_exit(_position(a_sig, frame.index[-1]), frame2, {'state': 'LOW_VOL'}) is None
+
+
+def test_should_exit_none_when_leg_missing_or_params_incomplete(tmp_path, monkeypatch):
+    strat, frame, signals, _ = _entered_pair(tmp_path, monkeypatch)
+    a_sig = next(s for s in signals if s.ticker == 'ZZTAA')
+    pos = _position(a_sig, frame.index[-1])
+    assert strat.should_exit(pos, frame.drop(columns=['ZZTBB']), {'state': 'LOW_VOL'}) is None
+    bad = dict(pos); bad['signal_params'] = {k: v for k, v in pos['signal_params'].items() if k != 'beta'}
+    assert strat.should_exit(bad, frame, {'state': 'LOW_VOL'}) is None
