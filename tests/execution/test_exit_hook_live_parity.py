@@ -27,6 +27,16 @@ def _panel(closes):
     p = pd.DataFrame({'AAA': closes}, index=DATES); p.index.name = 'date'; return p
 
 
+def _union_panel(closes):
+    """The LIVE panel shape (C1, final review): engine.load_prices reindexes
+    every column onto `_parquet_date_axis`, a UNION calendar carrying weekend
+    rows because crypto trades then; an equity column is NaN there. The
+    backtest side keeps the bdate panel — bars_held must still match."""
+    p = _panel(closes).reindex(pd.date_range(DATES[0], DATES[-1], freq='D'))
+    p.index.name = 'date'
+    return p
+
+
 def _bars(closes):
     return {'AAA': pd.DataFrame({'open': closes, 'high': [c + 0.05 for c in closes],
                                  'low': [c - 0.05 for c in closes], 'close': closes},
@@ -73,7 +83,7 @@ def _backtest_exits(fx_cls, closes):
 def _live_exits(fx_cls, closes, entry_trade, env=ENV):
     """Replay the live branch day by day after the backtest's fill date."""
     fx_cls.fired = True                       # live harness never re-enters
-    inst = fx_cls(); panel = _panel(closes)
+    inst = fx_cls(); panel = _union_panel(closes)     # live = union calendar
     entry_date = entry_trade['entry_date']
     row = {'id': 'sig-1', 'strategy_id': 'stub_parity', 'ticker': 'AAA', 'direction': entry_trade['direction'].upper(),
            'entry_price': entry_trade['entry_price'], 'mark_entry_price': entry_trade['entry_price'],
@@ -86,7 +96,7 @@ def _live_exits(fx_cls, closes, entry_trade, env=ENV):
             n, closed = engine.update_pnl(cur, panel.loc[:d], d.date(), strategies=[inst], regime={'state': 'LOW_VOL'})
         if closed:
             reason = next(p[10] for s, p in cur.executed if 'INSERT INTO signal_pnl' in s)
-            bars = engine._bars_held(panel.loc[:d], entry_date, d.date())
+            bars = engine._bars_held(panel.loc[:d], 'AAA', entry_date, d.date())
             return {('AAA', d.date(), reason, bars)}
     return set()
 

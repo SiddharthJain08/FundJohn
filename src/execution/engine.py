@@ -70,14 +70,27 @@ def _exit_hook_enabled() -> bool:
     return os.environ.get('OPENCLAW_EXIT_HOOK_LIVE', '0') == '1'
 
 
-def _bars_held(prices: pd.DataFrame, entry_dt, run_date):
-    """Trading bars strictly after entry_dt up to and including run_date on
-    the prices index (parity with the backtest's holding_days). None when the
-    index is not a DatetimeIndex (legacy callers / tests with a RangeIndex)."""
+def _bars_held(prices: pd.DataFrame, ticker, entry_dt, run_date):
+    """Bars THIS TICKER actually traded, strictly after entry_dt up to and
+    including run_date — parity with the backtest's holding_days, which
+    `backtest/open_book.py` increments only on a date the ticker HAS a bar.
+
+    Counting index rows instead (the Phase 2 first cut) overcounts on the
+    live side: `load_prices` reindexes every column onto `_parquet_date_axis`,
+    a UNION calendar that carries weekend rows because crypto trades then, so
+    an equity's NaN weekend rows were being charged as held bars. Count
+    non-NaN values of the ticker's own column instead.
+
+    None when the index is not a DatetimeIndex (legacy callers / tests with a
+    RangeIndex) or the ticker is absent from the panel; callers fall back to
+    the calendar-day count."""
     if not isinstance(prices.index, pd.DatetimeIndex) or entry_dt is None:
         return None
+    if ticker not in prices.columns:
+        return None
     lo, hi = pd.Timestamp(entry_dt), pd.Timestamp(run_date)
-    return int(((prices.index > lo) & (prices.index <= hi)).sum())
+    idx = prices.index
+    return int(prices[ticker].loc[(idx > lo) & (idx <= hi)].notna().sum())
 
 
 def _hold_cap(signal_params, configured: int) -> int:
@@ -2073,7 +2086,7 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date, *,
             if _strat is not None and getattr(_strat, 'exit_hook', False):
                 LAST_EXIT_HOOK_STATS['rows_evaluated'] += 1
                 _entry_dt = _tgt_dt if (_tgt_dt is not None and isinstance(_tgt_dt, date)) else sig_date
-                _bars = _bars_held(prices, _entry_dt, run_date)
+                _bars = _bars_held(prices, ticker, _entry_dt, run_date)
                 if _bars is None:
                     _bars = days_held
                 _sp = row.get('signal_params') if isinstance(row.get('signal_params'), dict) else {}
