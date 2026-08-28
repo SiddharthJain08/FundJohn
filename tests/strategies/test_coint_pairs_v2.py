@@ -579,3 +579,100 @@ def test_negative_price_in_window_no_exception_no_signal_no_warning(tmp_path, mo
         signals = strat.generate_signals(frame, {'state': 'LOW_VOL'}, universe)
 
     assert signals == []
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# X1-D1 (2026-08-28): spread-implied per-leg stops with a hold-horizon vol
+# floor, replacing the base-class 2xATR / 5% per-leg levels that fired on
+# 70% of trades in run 655c4bdb.
+# ─────────────────────────────────────────────────────────────────────────
+def test_pair_leg_levels_geometry_uses_wider_of_spread_and_vol_floor():
+    # LONG leg: stop below entry by the wider of the two log-distances,
+    # targets above at TARGET_R multiples of that same distance.
+    lv = CointPairsSectorV2._pair_leg_levels('LONG', 100.0, spread_log=0.03, vol_log=0.05)
+    assert lv['stop'] == pytest.approx(100.0 * np.exp(-0.05), rel=1e-6)
+    assert lv['t1'] == pytest.approx(100.0 * np.exp(CointPairsSectorV2.TARGET_R * 0.05), rel=1e-6)
+    assert lv['t1'] < lv['t2'] < lv['t3']
+    assert lv['used_log'] == pytest.approx(0.05)
+    # SHORT leg mirrored, spread term wider this time.
+    sv = CointPairsSectorV2._pair_leg_levels('SHORT', 50.0, spread_log=0.08, vol_log=0.02)
+    assert sv['stop'] == pytest.approx(50.0 * np.exp(0.08), rel=1e-6)
+    assert sv['t1'] == pytest.approx(50.0 * np.exp(-CointPairsSectorV2.TARGET_R * 0.08), rel=1e-6)
+    assert sv['t1'] > sv['t2'] > sv['t3']
+    # No spread term (non-positive beta leg) -> vol floor alone.
+    nv = CointPairsSectorV2._pair_leg_levels('LONG', 10.0, spread_log=None, vol_log=0.04)
+    assert nv['used_log'] == pytest.approx(0.04)
+
+
+def test_signals_carry_spread_implied_stops_not_atr(tmp_path, monkeypatch):
+    dates = _dates(120)
+    last = dates[-1]
+    spread1 = _tail_spread(seed=123, tail_values=[0.0, 0.05])
+    frame1 = _pair_frame(dates, 'ZZTAA', 'ZZTBB', beta=0.75, alpha=0.10,
+                          spread=spread1, log_b_seed=555)
+    prices = frame1
+    universe = list(prices.columns)
+    ledger_path = _write_ledger(tmp_path, [
+        _ledger_row(last, 'ZZTAA', 'ZZTBB', beta=0.75, alpha=0.10, approved=True, half_life_days=6.0),
+    ])
+    strat = CointPairsSectorV2()
+    monkeypatch.setenv('OPENCLAW_PAIR_LEDGER', ledger_path)
+    signals = strat.generate_signals(prices, {'state': 'LOW_VOL'}, universe)
+    a_sig = next(s for s in signals if s.ticker == 'ZZTAA')   # SHORT (z>0)
+    b_sig = next(s for s in signals if s.ticker == 'ZZTBB')   # LONG
+
+    # Recompute the spread std the strategy used (last Z_WINDOW spread values).
+    sa = np.log(prices['ZZTAA'].to_numpy(dtype=float)[-(Z_WINDOW + 1):])
+    sb = np.log(prices['ZZTBB'].to_numpy(dtype=float)[-(Z_WINDOW + 1):])
+    spread = sa - 0.75 * sb - 0.10
+    std_t = spread[1:].std(ddof=1)
+    z = a_sig.signal_params['z']
+    expected_spread_a = (CointPairsSectorV2.Z_STOP - abs(z)) * std_t
+    hold = a_sig.signal_params['hold_days']   # 18
+    sig_a = np.diff(sa).std(ddof=1)
+    sig_b = np.diff(sb).std(ddof=1)
+    expected_vol_a = CointPairsSectorV2.STOP_HOLD_SIGMAS * sig_a * np.sqrt(hold)
+    expected_vol_b = CointPairsSectorV2.STOP_HOLD_SIGMAS * sig_b * np.sqrt(hold)
+
+    ba = a_sig.signal_params['stop_basis']
+    bb = b_sig.signal_params['stop_basis']
+    assert ba['spread_log'] == pytest.approx(expected_spread_a, rel=1e-3)
+    assert bb['spread_log'] == pytest.approx(expected_spread_a / 0.75, rel=1e-3)
+    assert ba['vol_log'] == pytest.approx(expected_vol_a, rel=1e-3)
+    assert bb['vol_log'] == pytest.approx(expected_vol_b, rel=1e-3)
+    assert ba['used_log'] == pytest.approx(max(ba['spread_log'], ba['vol_log']))
+    assert bb['used_log'] == pytest.approx(max(bb['spread_log'], bb['vol_log']))
+
+    # Levels follow the used distance: SHORT A stop above entry, LONG B below.
+    assert np.log(a_sig.stop_loss / a_sig.entry_price) == pytest.approx(ba['used_log'], rel=1e-3)
+    assert np.log(b_sig.entry_price / b_sig.stop_loss) == pytest.approx(bb['used_log'], rel=1e-3)
+    assert np.log(a_sig.entry_price / a_sig.target_1) == pytest.approx(
+        CointPairsSectorV2.TARGET_R * ba['used_log'], rel=1e-3)
+    assert np.log(b_sig.target_1 / b_sig.entry_price) == pytest.approx(
+        CointPairsSectorV2.TARGET_R * bb['used_log'], rel=1e-3)
+    # And it is NOT the base-class 2xATR stop.
+    base_a = strat.compute_stops_and_targets(prices['ZZTAA'].dropna(), 'SHORT', a_sig.entry_price,
+                                             regime_state='LOW_VOL')
+    assert a_sig.stop_loss != base_a['stop']
+
+
+def test_nonpositive_beta_drops_spread_term_on_leg_b_only(tmp_path, monkeypatch):
+    dates = _dates(120)
+    last = dates[-1]
+    spread1 = _tail_spread(seed=321, tail_values=[0.0, 0.05])
+    frame1 = _pair_frame(dates, 'ZZTAA', 'ZZTBB', beta=-0.6, alpha=0.05,
+                          spread=spread1, log_b_seed=444)
+    universe = list(frame1.columns)
+    ledger_path = _write_ledger(tmp_path, [
+        _ledger_row(last, 'ZZTAA', 'ZZTBB', beta=-0.6, alpha=0.05, approved=True, half_life_days=5.0),
+    ])
+    strat = CointPairsSectorV2()
+    monkeypatch.setenv('OPENCLAW_PAIR_LEDGER', ledger_path)
+    signals = strat.generate_signals(frame1, {'state': 'LOW_VOL'}, universe)
+    assert len(signals) == 2, _sig_set(signals)
+    a_sig = next(s for s in signals if s.ticker == 'ZZTAA')
+    b_sig = next(s for s in signals if s.ticker == 'ZZTBB')
+    assert a_sig.signal_params['stop_basis']['spread_log'] is not None
+    assert b_sig.signal_params['stop_basis']['spread_log'] is None
+    assert b_sig.signal_params['stop_basis']['used_log'] == pytest.approx(
+        b_sig.signal_params['stop_basis']['vol_log'])

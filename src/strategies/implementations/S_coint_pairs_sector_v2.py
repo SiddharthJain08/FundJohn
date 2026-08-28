@@ -91,6 +91,14 @@ strategy at this layer. So, concretely:
     proactively flatten an already-open position early. Doing that would
     require an exit-side hook this strategy layer does not have.
   - (c) the time stop is exactly what hold_days/cadence gives.
+  - (d) PER-LEG PRICE STOPS (X1-D1, 2026-08-28): the engine requires a
+    stop_loss/target per leg. Run 655c4bdb showed the base-class 2xATR /
+    5% per-leg levels firing on 70% of trades -- a leg moving against you
+    is the hedge working in a spread trade. Levels are now the WIDER of the
+    spread-implied distance to |z| = Z_STOP and STOP_HOLD_SIGMAS leg-sigmas
+    over sqrt(hold_days) (see _pair_leg_levels; per-signal
+    signal_params['stop_basis'] records both distances). This is still a
+    per-leg guard, not a spread stop -- the true spread stop remains owed.
 Do not invent engine features to close this gap — it is reported as owed in
 the task report, not silently worked around here.
 """
@@ -195,8 +203,38 @@ class CointPairsSectorV2(BaseStrategy):
     Z_ENTRY      = 2.0     # edge-trigger entry threshold
     Z_BACKSTOP   = 4.0     # reject as a probable data/estimation glitch
     Z_HIGH_CONF  = 2.5     # HIGH vs MED confidence cutoff
+    # X1-D1 (2026-08-28): per-leg stop = the WIDER of (i) the spread-implied
+    # distance to |z| = Z_STOP (the level at which entries are already refused
+    # as a structural break) and (ii) STOP_HOLD_SIGMAS leg-sigmas over the
+    # intended hold horizon, so co-movement of a hedged pair does not trip a
+    # single leg. Targets sit at TARGET_R x that distance. Replaces the
+    # base-class 2xATR / 5% per-leg levels (run 655c4bdb: 70% stop exits).
+    Z_STOP           = 4.0
+    STOP_HOLD_SIGMAS = 2.0
+    TARGET_R         = 2.0
     BASE_SIZE    = 0.04    # fraction per leg — matches PairsTradingJumpDiffusionIntraday's
                             # per-leg convention (equal dollar notional both legs; see docstring)
+
+    @staticmethod
+    def _pair_leg_levels(direction: str, price: float, spread_log, vol_log) -> dict:
+        """Stop/target levels for one pair leg from log-distances.
+
+        spread_log: adverse log-price move of THIS leg that would carry the
+        pair spread to |z| = Z_STOP (None when not derivable for the leg);
+        vol_log: STOP_HOLD_SIGMAS * leg daily log-vol * sqrt(hold_days).
+        The stop uses the wider of the two; targets at TARGET_R multiples.
+        """
+        cands = [d for d in (spread_log, vol_log) if d is not None and np.isfinite(d) and d > 0.0]
+        used = max(cands) if cands else float('nan')
+        sgn = -1.0 if direction == 'LONG' else 1.0
+        r = CointPairsSectorV2.TARGET_R
+        return {
+            'stop':     round(price * float(np.exp(sgn * used)), 4),
+            't1':       round(price * float(np.exp(-sgn * r * used)), 4),
+            't2':       round(price * float(np.exp(-sgn * (r + 1.0) * used)), 4),
+            't3':       round(price * float(np.exp(-sgn * (r + 2.0) * used)), 4),
+            'used_log': float(used),
+        }
 
     def default_parameters(self) -> dict:
         return {
@@ -332,20 +370,38 @@ class CointPairsSectorV2(BaseStrategy):
                 'fdr_q':          float(raw_fdr_q) if raw_fdr_q is not None and pd.notna(raw_fdr_q) else None,
             }
 
-            st_a = self.compute_stops_and_targets(col_a.dropna(), dir_a, pa, regime_state=regime_state)
-            st_b = self.compute_stops_and_targets(col_b.dropna(), dir_b, pb, regime_state=regime_state)
+            # X1-D1 spread-implied stops (see class attributes). Leg A carries
+            # coefficient 1 in the log spread, leg B coefficient -beta, so the
+            # same spread excursion maps to a 1/beta log-move on B. A
+            # non-positive/non-finite beta has no such mapping -> vol floor only.
+            d_spread_a = (self.Z_STOP - abs(float(z_t))) * float(std_t)
+            d_spread_b = d_spread_a / beta if (np.isfinite(beta) and beta > 0.0) else None
+            sqrt_hold = float(np.sqrt(hold_days))
+            vol_a = self.STOP_HOLD_SIGMAS * float(np.std(np.diff(log_a), ddof=1)) * sqrt_hold
+            vol_b = self.STOP_HOLD_SIGMAS * float(np.std(np.diff(log_b), ddof=1)) * sqrt_hold
+            st_a = self._pair_leg_levels(dir_a, pa, d_spread_a, vol_a)
+            st_b = self._pair_leg_levels(dir_b, pb, d_spread_b, vol_b)
+            if not (np.isfinite(st_a['used_log']) and np.isfinite(st_b['used_log'])):
+                # Degenerate distances (should not happen past the std_t>0
+                # guard) -> keep the base-class levels rather than emit NaNs.
+                st_a = self.compute_stops_and_targets(col_a.dropna(), dir_a, pa, regime_state=regime_state)
+                st_b = self.compute_stops_and_targets(col_b.dropna(), dir_b, pb, regime_state=regime_state)
+                basis_a = basis_b = None
+            else:
+                basis_a = {'spread_log': d_spread_a, 'vol_log': vol_a, 'used_log': st_a['used_log']}
+                basis_b = {'spread_log': d_spread_b, 'vol_log': vol_b, 'used_log': st_b['used_log']}
 
             signals.append(Signal(
                 ticker=ticker_a, direction=dir_a, entry_price=pa,
                 stop_loss=st_a['stop'], target_1=st_a['t1'], target_2=st_a['t2'], target_3=st_a['t3'],
                 position_size_pct=size, confidence=conf,
-                signal_params={**params_common, 'leg': 'a'},
+                signal_params={**params_common, 'leg': 'a', 'stop_basis': basis_a},
             ))
             signals.append(Signal(
                 ticker=ticker_b, direction=dir_b, entry_price=pb,
                 stop_loss=st_b['stop'], target_1=st_b['t1'], target_2=st_b['t2'], target_3=st_b['t3'],
                 position_size_pct=size, confidence=conf,
-                signal_params={**params_common, 'leg': 'b'},
+                signal_params={**params_common, 'leg': 'b', 'stop_basis': basis_b},
             ))
             if len(signals) >= self.MAX_SIGNALS:
                 break
