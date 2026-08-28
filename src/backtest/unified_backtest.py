@@ -368,6 +368,29 @@ def _signal_to_long_short(direction: str) -> int:
     return 0
 
 
+def _bar_exit(direction: int, high: float, low: float,
+              stop_loss: float, target_1: float, dt_priority: str):
+    """Intra-bar bracket decision shared by simulate_trade and the exit-hook
+    open-book stepper. Returns (exit_level, reason) or (None, None).
+    Long: target when high >= target_1, stop when low <= stop_loss; short
+    mirrored. Double-touch resolves by dt_priority ('stop' default)."""
+    if direction > 0:
+        t_hit = high >= target_1
+        s_hit = low <= stop_loss
+    else:
+        t_hit = low <= target_1
+        s_hit = high >= stop_loss
+    if t_hit and s_hit:
+        if dt_priority == 'target':
+            return float(target_1), 'target'
+        return float(stop_loss), 'stop'
+    if t_hit:
+        return float(target_1), 'target'
+    if s_hit:
+        return float(stop_loss), 'stop'
+    return None, None
+
+
 def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
                    direction: int, entry_price: float,
                    stop_loss: float, target_1: float,
@@ -426,22 +449,7 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
     _dt_priority = os.environ.get('OPENCLAW_BT_DOUBLE_TOUCH', 'stop')
     for i, (dt, bar) in enumerate(bars_window.iterrows(), start=1):
         high, low, close = float(bar['high']), float(bar['low']), float(bar['close'])
-        exit_level, reason = None, None
-        if direction > 0:   # long
-            t_hit = high >= target_1
-            s_hit = low <= stop_loss
-        else:               # short
-            t_hit = low <= target_1
-            s_hit = high >= stop_loss
-        if t_hit and s_hit:
-            if _dt_priority == 'target':
-                exit_level, reason = float(target_1), 'target'
-            else:
-                exit_level, reason = float(stop_loss), 'stop'
-        elif t_hit:
-            exit_level, reason = float(target_1), 'target'
-        elif s_hit:
-            exit_level, reason = float(stop_loss), 'stop'
+        exit_level, reason = _bar_exit(direction, high, low, stop_loss, target_1, _dt_priority)
         if exit_level is None and i == n:  # last bar, no bracket -> exit at close
             exit_level = close
             reason = 'max_hold' if n == max_hold_days else 'end_of_data'
