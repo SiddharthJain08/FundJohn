@@ -1005,8 +1005,15 @@ def _per_bar_simulate(
             _rs = regimes.get(_dt, None)
             _rp = {'state': (str(_rs) if _rs is not None and not pd.isna(_rs) else None),
                    'date': _dt.date().isoformat()}
+            _aux_dr = {'options': {}}
+            if load_aux_data is not None:
+                try:
+                    _aux_dr = load_aux_data(_dt, strategy_id=strategy_id,
+                                            run_stop_history=run_stop_history)
+                except Exception:
+                    _aux_dr = {'options': {}}
             for _ct in advance_open_book(open_book, _dt, bars_by_ticker, close_wide.loc[:_dt],
-                                         _rp, {'options': {}}, instance,
+                                         _rp, _aux_dr, instance,
                                          dt_priority=_dt_priority, counters=hook_counters):
                 trades.append(_ct if _true_mtm else {**_ct, 'daily_marks': []})
         for _t in open_book:   # ticker has no bar at all after entry

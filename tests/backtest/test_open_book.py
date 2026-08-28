@@ -296,3 +296,45 @@ class TestPerBarSimulateOpenBook:
         t = out['trades'][0]
         assert t['exit_reason'] == 'max_hold' and t['exit_date'] == dates[14].date()
         assert out['hook_exits'] == 0
+
+    def test_drain_path_passes_real_aux_to_hook(self):
+        close_wide, bars, regimes, dates, closes = _dataset(n=40)
+        seen = []
+
+        class AuxHook(BaseStrategy):
+            id = 'stub_aux'
+            min_lookback = 5
+            active_in_regimes = list(CANONICAL_REGIMES)
+            exit_hook = True
+            fired = False
+
+            def generate_signals(self, prices, regime, universe, aux_data=None):
+                if len(prices) < 10 or AuxHook.fired or not universe:
+                    return []
+                AuxHook.fired = True
+                t = universe[0]
+                ep = float(prices[t].iloc[-1])
+                return [Signal(ticker=t, direction='LONG', entry_price=ep,
+                               stop_loss=ep * 0.93, target_1=ep * 1.5,
+                               target_2=0.0, target_3=0.0, position_size_pct=0.0,
+                               confidence='MED', signal_params={'hold_days': 8})]
+
+            def should_exit(self, position, prices, regime, aux_data=None):
+                seen.append((prices.index[-1], bool((aux_data or {}).get('marker'))))
+                return None
+
+        inst = AuxHook(); inst.active_in_regimes = list(CANONICAL_REGIMES)
+        fake_aux = lambda date, **kw: {'options': {}, 'marker': True}
+        with (
+            patch.dict(os.environ, {'OPENCLAW_BT_ASSET_GATE': 'off', 'OPENCLAW_BT_SPREAD_COSTS': '0'}),
+            patch('strategies.aux_data_loader.load_aux_data', side_effect=fake_aux),
+        ):
+            out = ub._per_bar_simulate(inst, close_wide, bars, regimes, dates[0], dates[11],
+                                       strategy_id='stub_aux', max_hold_days=21,
+                                       fill_model='same_close')
+        # entry on dates[9]; hook consulted dates[10..17]; bars after end_dt=dates[11] are the drain
+        assert out['trades'][0]['exit_reason'] == 'max_hold'
+        drained = [m for d, m in seen if d > dates[11]]
+        assert len(drained) >= 5, seen
+        assert all(drained), seen           # RED before the fix: drained marks are all False
+        assert all(m for d, m in seen), seen
