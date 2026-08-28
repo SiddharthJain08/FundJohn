@@ -95,7 +95,7 @@ Cost: one hook call per open trade per day (X1 ≈ 15 open pairs ⇒ negligible)
 2. Build `position` from the row (§1 table; `signal_params` JSONB → dict).
 3. `reason = strat.should_exit(position, prices, regime, aux)` with the same close-proxy `prices` panel `update_pnl` already receives (parity with the backtest's `close_wide.loc[:current_date]`).
 4. On a reason: `close_reason=f'strategy_exit:{reason}'`, `close_status='closed'`, `realized_pct=unrealized_pct` — the identical UPSERT/UPDATE the stop/target branches use, so the id lands in `newly_closed_ids`.
-5. Time stop (§1): before the hook, `days_held >= min(hold_days, max_hold)` ⇒ `close_reason='max_hold'` (same UPSERT).
+5. Time stop (§1), evaluated after the hook when the row is still open: `days_held >= min(hold_days, max_hold)` ⇒ `close_reason='max_hold'` (same UPSERT). Order on both sides is bracket → hook → time (§2).
 
 Downstream needs nothing new: the closed row leaves the `APPROVED` carried set at 15:55 ⇒ `orphan_close` ⇒ executor closes at the 15:55 submit with cancel-before-close on the OCO legs. `fire_report_triggers`, `send_report`, `b1_order_source` switch on `close_reason` with `elif` / `IS DISTINCT FROM` chains — unknown reasons fall through; `stale_tracker` / `rolled_continuation` handling untouched. A pairs strategy's two legs are two signals evaluated with identical inputs ⇒ same-day close by construction; a lone surviving leg is already an orphan for `_classify_position_deltas`.
 
