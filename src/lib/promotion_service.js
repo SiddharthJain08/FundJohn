@@ -124,7 +124,7 @@ function judgeRegimeSleeve(row, thresholds, ctx = {}) {
   return fails;
 }
 async function _latestPrimaryRun(dbQuery, sid) {
-  let sharpe = NaN, maxDd = NaN, trades = NaN, runId = null, hasRun = false, exitHook = false;
+  let sharpe = NaN, maxDd = NaN, trades = NaN, runId = null, hasRun = false, exitHook = false, maxHoldDays = null;
   try {
     const ubt = await dbQuery(
       `SELECT run_id, total_sharpe, total_max_dd_pct, total_trades, config_json FROM strategy_backtest_runs
@@ -147,9 +147,43 @@ async function _latestPrimaryRun(dbQuery, sid) {
         try { cfg = JSON.parse(cfg); } catch (_) { cfg = null; cfgBroken = true; }
       }
       exitHook = cfgBroken || !!(cfg && cfg.exit_hook === true);
+      // I5: the hold cap the RUN was measured at. NULL when unrecorded (or
+      // when config_json would not parse) — the guard below then has nothing
+      // to compare and stays out of the way.
+      const mh = cfg && cfg.max_hold_days != null ? parseInt(cfg.max_hold_days, 10) : NaN;
+      maxHoldDays = Number.isFinite(mh) ? mh : null;
     }
   } catch (_) {}
-  return { hasRun, runId, sharpe, maxDd, trades, exitHook };
+  return { hasRun, runId, sharpe, maxDd, trades, exitHook, maxHoldDays };
+}
+// The hold cap the LIVE exit-hook time stop will actually apply — JS twin of
+// execution/regime_param_resolver.configured_max_hold_days: MAX of the
+// non-null per-regime strategy_regime_params.max_hold_days, but only when the
+// coupling gate OPENCLAW_BACKTEST_COUPLED_RECS=1; otherwise (and on any
+// lookup failure, and when nothing is set) the resolver's default of 21.
+const LIVE_HOLD_CAP_DEFAULT = 21;
+async function _liveHoldCap(dbQuery, sid) {
+  if (process.env.OPENCLAW_BACKTEST_COUPLED_RECS !== '1') return LIVE_HOLD_CAP_DEFAULT;
+  try {
+    const r = await dbQuery(
+      `SELECT MAX(max_hold_days) AS m FROM strategy_regime_params WHERE strategy_id = $1`, [sid]);
+    const m = r && r.rows && r.rows[0] && r.rows[0].m != null ? parseInt(r.rows[0].m, 10) : NaN;
+    return Number.isFinite(m) ? m : LIVE_HOLD_CAP_DEFAULT;
+  } catch (_) { return LIVE_HOLD_CAP_DEFAULT; }
+}
+// I5 (final review 2026-08-28): an exit_hook run measured at a different hold
+// cap than the live time stop will apply is not the strategy that was judged.
+// X1's qualifying run was pinned `--max-hold-days 30` while the live resolver
+// returns 21 (no strategy_regime_params row) — 23 of the replay's live-only
+// closes came from exactly that gap. Refuse rather than promote a mismatch;
+// the operator aligns one side and re-runs. Only checked for exit_hook runs
+// that RECORDED a cap: nothing to compare is not a failure.
+async function _holdCapMismatch(dbQuery, sid, run) {
+  if (!run.exitHook || run.maxHoldDays == null) return false;
+  const live = await _liveHoldCap(dbQuery, sid);
+  if (run.maxHoldDays === live) return false;
+  console.log(`[exit_hook_gate] ${sid} run max_hold_days=${run.maxHoldDays} != live hold cap ${live}`);
+  return true;
 }
 async function _regimeSleeves(dbQuery, runId) {
   if (runId == null) return null;
@@ -170,6 +204,7 @@ async function computeQualifyingRegimes({ dbQuery, sid, instrumentClass }) {
   const out = { hasRun: run.hasRun, runId: run.runId, thresholds, qualifying: [], diag: {} };
   if (!run.hasRun) return out;
   if (run.exitHook && !exitHookLiveEnabled()) { out.exit_hook_live_disabled = true; return out; }
+  if (await _holdCapMismatch(dbQuery, sid, run)) { out.exit_hook_hold_cap_mismatch = true; return out; }
   const byRegime = await _regimeSleeves(dbQuery, run.runId);
   if (!byRegime) return out;                       // no sleeves recorded → nothing qualifies
   for (const regime of CANONICAL_REGIMES) {
@@ -200,6 +235,9 @@ async function evaluatePromotionGate({ dbQuery, sid, instrumentClass, force, eli
   }
   if (run.exitHook && !exitHookLiveEnabled()) {
     return { pass: false, failedGates: ['exit_hook_live_disabled'], sharpe, maxDd, thresholds, qualifyingRegimes: [] };
+  }
+  if (await _holdCapMismatch(dbQuery, sid, run)) {
+    return { pass: false, failedGates: ['exit_hook_hold_cap_mismatch'], sharpe, maxDd, thresholds, qualifyingRegimes: [] };
   }
   const byRegime = await _regimeSleeves(dbQuery, run.runId);
   const named = Array.isArray(eligibleRegimes) && eligibleRegimes.length > 0;
