@@ -1,6 +1,6 @@
 # Spec — Benchmark-relative sizing, amendment 1: forward-looking `S_m`, regime-exit beta sleeve, always-on sleeve activation
 
-**Status:** DRAFT for operator review (2026-08-29 22:00 UTC). Amends
+**Status:** LANDED 2026-08-29 (`bcfaee2..191d4f2e`; final review clean; flag paused to SHADOW per D-E1, re-flip owed after two shadow cycles). Approved 21:55 UTC. Amends
 `docs/specs/2026-08-29-benchmark-relative-sizing-spec.md` (D1–D9; code landed
 `67afceb..78e5bbf`, flag flipped 20:36 UTC). Design approved in chat 2026-08-29
 21:55 UTC ("A, horizon 1 day by default"; "(c), keep the beta sleeve active in all
@@ -117,7 +117,7 @@ without `schema == 2` as a miss (this is what invalidates today's contemporaneou
 cache on the first cycle after deploy; no migration, no manual delete).
 
 **D-A6.** Horizon selection: `benchmark_horizon_days` read from
-`pipeline_config` (int, clamped to the grid; **default 1**; missing/garbage ⇒ 1),
+`pipeline_config` (int; must be ON the grid — off-grid, missing or garbage ⇒ **default 1**, off-grid logged),
 via a small `_load_benchmark_horizon(default=1)` in `benchmark_sizing` mirroring
 `regime_blended_sizer._load_lambda`'s pattern. `regime_benchmark_sharpe_for_sizing`
 returns `by_regime[regime][str(H)]`. The `shadow_line` gains `h=<H>` next to
@@ -150,9 +150,11 @@ re-entered lot under the hook lives min(21, days until the next flip).
 
 **D-B3.** Re-entry: `generate_signals` is unchanged (one LONG SPY per bar,
 `signal_params['regime']` = the bar's state), so the bar after a flip opens a
-new lot tagged with the new regime. Backtest: exit at close *t* (hook), new lot
-at close *t* (`same_close` fill) ⇒ one `spread_v1` round trip per flip
-(≈1/month on the 2016–2026 tags: 127 spells). Live, in the 15:00 step
+new lot tagged with the new regime. Backtest: every open lot exits at close *t* (hook) and a new lot opens
+at close *t* (`same_close` fill) — each lot still has exactly one entry and one
+exit, so a flip shortens lots rather than adding round trips (cost per lot
+unchanged, cost per unit time higher; 1,487 hook exits over 127 spells on the
+2016–2026 tags). Live, in the 15:00 step
 `run_strategies` → `write_signals` runs BEFORE `update_pnl` (`engine.main`,
 :2452 vs :2563): with `OPENCLAW_SAMEDAY_EXEC=1` (`.env:179`) `write_signals`'
 `_lifecycle_rows` gate is on, the held ticker's spent row (`target_date` <
