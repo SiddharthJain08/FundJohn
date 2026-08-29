@@ -1664,7 +1664,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # act on it in its net direction. Replaces the S_adj floor
     # (min_corr_cum_sharpe), which is no longer read anywhere in the sizer.
     min_acting = _resolve_min_acting_strategies(params)
-    acting_n = _acting_counts(ticker_meta, _net_signs(gate_net_sharpe, dict(ticker_w)))
+    _net_sign = _net_signs(gate_net_sharpe, dict(ticker_w))
+    acting_n = _acting_counts(ticker_meta, _net_sign)
     # Live diagnostics: |S_adj| distribution, acting-count distribution and the
     # names clearing the current minimum, per-ticker cap binding, and direction
     # flips of the corr sizing vs the naive pre-replacement ticker_w. The legacy
@@ -1705,7 +1706,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # both caps further down.
     from execution import benchmark_sleeve as _bsl
     _bench_ids = _bsl.load_benchmark_sleeve_ids()
-    _bench_tkrs = _bsl.benchmark_tickers(ticker_meta, _bench_ids)
+    _bench_tkrs = _bsl.benchmark_tickers(ticker_meta, _bench_ids, net_sign=_net_sign)
     if _bench_tkrs:
         logger.info('bench_sleeve: %d benchmark ticker(s) %s from sleeves %s',
                     len(_bench_tkrs), sorted(_bench_tkrs), sorted(_bench_ids))
@@ -1714,8 +1715,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # strategies act on in the net direction. At the floor setting (1) the
     # block is skipped — every ticker with a contributor already has ≥1 acting
     # strategy, so the book is byte-identical to the pre-gate behaviour.
-    # Benchmark tickers are exempt (their conviction is the market's own;
-    # spec §2.4 (i)).
+    # Benchmark tickers that are net-direction-qualified (spec §2.4 i) are
+    # exempt (their conviction is the market's own).
     if min_acting > MIN_ACTING_STRATEGIES_LO:
         gated_out = [tkr for tkr in list(ticker_w.keys())
                      if acting_n.get(tkr, 0) < min_acting and tkr not in _bench_tkrs]

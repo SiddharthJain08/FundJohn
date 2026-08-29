@@ -39,6 +39,14 @@ def test_benchmark_tickers_any_direction():
     assert bs.benchmark_tickers(meta, set()) == set()
 
 
+def test_benchmark_tickers_net_direction():
+    meta = {'SPY': {'strategies': ['S_beta_spy', 'S_x'], 'directions': [1, -1]},
+            'QQQ': {'strategies': ['S_beta_spy'], 'directions': [1]}}
+    assert bs.benchmark_tickers(meta, {'S_beta_spy'}, net_sign={'SPY': 0, 'QQQ': 1}) == {'QQQ'}
+    assert bs.benchmark_tickers(meta, {'S_beta_spy'}, net_sign={'SPY': -1, 'QQQ': 1}) == {'QQQ'}
+    assert bs.benchmark_tickers(meta, {'S_beta_spy'}, net_sign={'SPY': 1, 'QQQ': 1}) == {'SPY', 'QQQ'}
+
+
 def test_caller_connection_is_not_closed():
     c = _Conn([('S_beta_spy',)])
     assert bs.load_benchmark_sleeve_ids(conn=c) == {'S_beta_spy'}

@@ -72,3 +72,14 @@ def test_registry_flag_is_the_switch(monkeypatch):
     # Same book, but the registry says nobody is a benchmark sleeve -> SPY gated like any ticker.
     t = targets(run(monkeypatch, [_row('S_beta_spy', 2.0)], [_carried('S_beta_spy', 'SPY')], set()))
     assert 'SPY' not in t
+
+
+def test_cancelled_benchmark_ticker_is_not_exempt(monkeypatch):
+    # Equal-Sharpe long/short on the same ticker gives S_net = 0 -> net sign 0
+    # -> acting 0 -> gated, and the benchmark exemption must not resurrect it
+    # (spec §2.4 i requires the benchmark contributor to act IN the net direction).
+    t = targets(run(monkeypatch,
+                     [_row('S_beta_spy', 2.0), _row('S_x', 2.0)],
+                     [_carried('S_beta_spy', 'SPY'), _carried('S_x', 'SPY', direction='SHORT')],
+                     {'S_beta_spy'}))
+    assert 'SPY' not in t

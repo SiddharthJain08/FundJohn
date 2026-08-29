@@ -42,10 +42,23 @@ def load_benchmark_sleeve_ids(conn=None) -> set[str]:
                 pass
 
 
-def benchmark_tickers(ticker_meta: dict, bench_ids: set[str]) -> set[str]:
-    """Tickers with at least one benchmark-sleeve contributor, any direction.
+def benchmark_tickers(ticker_meta: dict, bench_ids: set[str], net_sign: dict | None = None) -> set[str]:
+    """Tickers with at least one benchmark-sleeve contributor: any direction
+    unless net_sign is given; then only a contributor acting in the ticker's
+    net direction counts, and a net-sign-0 ticker never qualifies.
     ticker_meta is the sizer's {ticker: {'strategies': [...], 'directions': [...]}}."""
     if not bench_ids:
         return set()
-    return {t for t, m in ticker_meta.items()
-            if any(s in bench_ids for s in (m or {}).get('strategies', []))}
+    if net_sign is None:
+        return {t for t, m in ticker_meta.items()
+                if any(s in bench_ids for s in (m or {}).get('strategies', []))}
+    out = set()
+    for t, m in ticker_meta.items():
+        sgn = net_sign.get(t, 0)
+        if sgn == 0:
+            continue
+        m = m or {}
+        if any(s in bench_ids and int(d) == sgn
+               for s, d in zip(m.get('strategies', []), m.get('directions', []))):
+            out.add(t)
+    return out
