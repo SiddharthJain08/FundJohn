@@ -7775,7 +7775,7 @@ function _buildAlphaBarsHtml(group) {
     const dirNorm  = c.direction || '';
     const valTxt   = (val >= 0 ? '+' : '') + val.toFixed(2) + (contribUnit === 'sizing' ? '' : '%');
     const labTitle = contribUnit === 'sizing'
-      ? c.strategy_id + ' · sizing contribution (conviction-weighted allocation: daily_weight × trade_factor × size_scalar × direction)'
+      ? c.strategy_id + ' · sizing contribution (conviction-weighted allocation: sleeve Sharpe × size_scalar × direction)'
       : c.strategy_id + ' · NAV contribution = size% × P&L%';
     return \`<div class="ab-row">
       <div class="ab-label" title="\${labTitle}">\${c.strategy_id}</div>

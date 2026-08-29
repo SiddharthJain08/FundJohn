@@ -691,7 +691,16 @@ def _current_weight_rows(regime_state: str) -> dict[str, dict]:
 
 
 def _gate_weight_map(regime_state: str) -> dict[str, float]:
-    """Replicates the sizer's gate leg: daily_weight × trade_weight_factor(bt_n)."""
+    """Replicates the sizer's gate leg: daily_weight × trade_weight_factor(bt_n)
+    when OPENCLAW_TRADE_WEIGHT_FACTOR=1, else daily_weight."""
+    # Duplicated one-line check rather than importing trade_weight_factor_enabled
+    # from regime_blended_sizer at module level: this module already imports
+    # regime_blended_sizer lazily (function-local, _keep_under_gate above) and
+    # regime_blended_sizer imports this module lazily too (load_groups, in
+    # _sharpe_cadence_path) — adding a module-level cross-import here would risk
+    # turning that mutually-lazy pair into a real load-time cycle.
+    if os.environ.get('OPENCLAW_TRADE_WEIGHT_FACTOR') != '1':
+        return {sid: r['daily_weight'] for sid, r in _current_weight_rows(regime_state).items()}
     from execution.orthogonalization import trade_weight_factor
     anchor = 1000.0
     conn = _db()

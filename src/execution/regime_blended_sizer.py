@@ -100,6 +100,16 @@ def _ortho_enabled(gate: str) -> bool:
     return os.environ.get(gate) == '1'
 
 
+# 2026-08-29 (spec D3): the √(ln n / ln anchor) trade-count factor is OFF by
+# default; set '1' to restore it (the anchor knob strategy_trade_factor_anchor
+# only matters on that path).
+TRADE_WEIGHT_FACTOR_ENV = 'OPENCLAW_TRADE_WEIGHT_FACTOR'
+
+
+def trade_weight_factor_enabled() -> bool:
+    return os.environ.get(TRADE_WEIGHT_FACTOR_ENV) == '1'
+
+
 def size_positions(
     signals: list[dict],
     account_state: dict,
@@ -1624,13 +1634,15 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # with NO special-casing: num = Σ f²w²d, q = Σ fᵢfⱼwᵢwⱼdᵢdⱼρ — i.e. (f∘w) in
     # the same form. A missing bt_n → factor 1.0 (neutral), never 0.
     from execution import orthogonalization as _ogtf
-    _twf = {sid: _ogtf.trade_weight_factor(trade_count_by_strat.get(sid), anchor=_trade_factor_anchor)
+    _twf_on = trade_weight_factor_enabled()
+    _twf = {sid: (_ogtf.trade_weight_factor(trade_count_by_strat.get(sid), anchor=_trade_factor_anchor)
+                  if _twf_on else 1.0)
             for sid in set(weight_by_strat) | set(eff_weight_by_strat)}
     _cw_gate = {sid: w * _twf.get(sid, 1.0) for sid, w in weight_by_strat.items()}
     _cw_size = {sid: w * _twf.get(sid, 1.0) for sid, w in eff_weight_by_strat.items()}
     _n_tf = sum(1 for f in _twf.values() if abs(f - 1.0) > 1e-9)
-    logger.info('trade_weight: applied √(ln n) factor to %d/%d strategies (anchor n=%d)',
-                _n_tf, len(_twf), _trade_factor_anchor)
+    logger.info('trade_weight: %s; applied √(ln n) factor to %d/%d strategies (anchor n=%d)',
+                'ON' if _twf_on else 'OFF (spec D3 2026-08-29)', _n_tf, len(_twf), _trade_factor_anchor)
     # Task P1b: resolve the tangency shrinkage gamma once for this cycle
     # (env override > LW-armed artifact gamma > TANGENCY_SHRINK_DEFAULT).
     # With OPENCLAW_TANGENCY_LW/OPENCLAW_TANGENCY_SHRINK both unset this
