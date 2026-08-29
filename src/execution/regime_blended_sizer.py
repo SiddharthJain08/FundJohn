@@ -1699,13 +1699,26 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                 '(non-PSD backstop fires gate=%d size=%d)',
                 len(gate_net_sharpe), _nb_g, _nb_s)
 
+    # Benchmark (beta) sleeve tickers — spec 2026-08-29 §2.4. Read once per
+    # cycle from the registry; fail-open to "no benchmark tickers" (logged in
+    # the loader). Used by the acting gate below, the S_adj − S_m hurdle and
+    # both caps further down.
+    from execution import benchmark_sleeve as _bsl
+    _bench_ids = _bsl.load_benchmark_sleeve_ids()
+    _bench_tkrs = _bsl.benchmark_tickers(ticker_meta, _bench_ids)
+    if _bench_tkrs:
+        logger.info('bench_sleeve: %d benchmark ticker(s) %s from sleeves %s',
+                    len(_bench_tkrs), sorted(_bench_tkrs), sorted(_bench_ids))
+
     # Acting-strategy gate: drop tickers fewer than `min_acting` distinct
     # strategies act on in the net direction. At the floor setting (1) the
     # block is skipped — every ticker with a contributor already has ≥1 acting
     # strategy, so the book is byte-identical to the pre-gate behaviour.
+    # Benchmark tickers are exempt (their conviction is the market's own;
+    # spec §2.4 (i)).
     if min_acting > MIN_ACTING_STRATEGIES_LO:
         gated_out = [tkr for tkr in list(ticker_w.keys())
-                     if acting_n.get(tkr, 0) < min_acting]
+                     if acting_n.get(tkr, 0) < min_acting and tkr not in _bench_tkrs]
         for tkr in gated_out:
             ticker_w.pop(tkr, None)
             ticker_meta.pop(tkr, None)
