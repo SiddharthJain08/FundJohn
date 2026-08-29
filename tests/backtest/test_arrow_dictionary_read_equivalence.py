@@ -107,3 +107,24 @@ def test_fully_quarantined_ticker_leaves_no_phantom_column(tmp_path, monkeypatch
     assert 'ZTS' not in cw.columns, "fully-quarantined ticker left a phantom column"
     assert 'ZTS' not in bars
     assert list(cw.columns) == ['AA', 'AAPL', 'BRK-B', 'MSFT']
+
+
+def test_tickers_filter_equals_unfiltered_slice(tmp_path, monkeypatch):
+    path = tmp_path / 'prices.parquet'
+    _write_synthetic(path)
+    # same neutralisation as test_arrow_read_matches_old_pandas_read above
+    monkeypatch.setattr(qf, '_cached', lambda master_table: set())
+    monkeypatch.setattr(ub, 'PRICES_PARQUET', path)
+    cw_all, bars_all = ub.load_prices_panels()
+    cw_one, bars_one = ub.load_prices_panels(tickers=['AAPL'])
+    assert list(cw_one.columns) == ['AAPL']
+    assert cw_one.equals(cw_all[['AAPL']]), "filtered close_wide not bit-identical to the sliced full panel"
+    assert set(bars_one) == {'AAPL'}
+    assert bars_one['AAPL'].equals(bars_all['AAPL'])
+    # two tickers, given unsorted with a duplicate -> sorted unique columns
+    cw_two, bars_two = ub.load_prices_panels(tickers=['MSFT', 'AA', 'MSFT'])
+    assert list(cw_two.columns) == ['AA', 'MSFT'] and set(bars_two) == {'AA', 'MSFT'}
+    assert cw_two.equals(cw_all[['AA', 'MSFT']])
+    # tickers=None / empty list are the unfiltered path (byte-identical)
+    assert ub.load_prices_panels(tickers=None)[0].equals(cw_all)
+    assert ub.load_prices_panels(tickers=[])[0].equals(cw_all)

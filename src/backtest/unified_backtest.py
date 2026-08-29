@@ -268,11 +268,16 @@ from lib.price_panel import (
 )
 
 
-def load_prices_panels(calendar: str = 'union') -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+def load_prices_panels(calendar: str = 'union', tickers=None) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     """Load prices.parquet and return:
       - close_wide: date × ticker close panel for strategy.generate_signals
       - bars_by_ticker: {ticker: DataFrame indexed by date with open/high/low/close}
         for the bracket walk-forward
+
+    tickers: optional collection of symbols; when given, the parquet read is
+    filtered to those tickers via a pyarrow predicate (Amendment 1 D-C1 — lets
+    a single-ticker strategy such as S_beta_spy run inside the fleet's memory
+    cap). None = the full panel, byte-identical to before.
     """
     # Column-pruned + pyarrow-DICTIONARY read (2026-07-16). Two same-day evolutions,
     # both forced by the 5-year backfill doubling prices.parquet (9.5M → 18.7M rows),
@@ -303,7 +308,12 @@ def load_prices_panels(calendar: str = 'union') -> tuple[pd.DataFrame, dict[str,
     _COLS = ['ticker', 'date', 'open', 'high', 'low', 'close']
     import pyarrow as pa
     import pyarrow.parquet as pq
-    _tbl = pq.read_table(PRICES_PARQUET, columns=_COLS, read_dictionary=['ticker', 'date'])
+    _filters = None
+    if tickers:
+        _wanted = sorted({str(t) for t in tickers if t})
+        _filters = [('ticker', 'in', _wanted)] if _wanted else None
+    _tbl = pq.read_table(PRICES_PARQUET, columns=_COLS, read_dictionary=['ticker', 'date'],
+                         filters=_filters)
     for _c in ('open', 'high', 'low', 'close'):
         _i = _tbl.schema.get_field_index(_c)
         _tbl = _tbl.set_column(_i, _c, _tbl.column(_c).cast(pa.float32()))
@@ -1172,6 +1182,23 @@ def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None,
     return PrecomputedResolver(arts[-1], cap)
 
 
+def _manifest_backtest_tickers(strategy_id: str, *, manifest_path=None):
+    """Amendment 1 D-C2: manifest metadata.backtest_tickers -> sorted unique
+    symbol list, or None (absent, empty, not a list, unreadable manifest, or
+    unregistered strategy). Feeds load_prices_panels(tickers=)."""
+    manifest_path = Path(manifest_path or ROOT / 'src' / 'strategies' / 'manifest.json')
+    try:
+        entry = (json.loads(manifest_path.read_text()).get('strategies', {})
+                 .get(strategy_id) or {})
+        raw = (entry.get('metadata') or {}).get('backtest_tickers')
+    except Exception:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        return None
+    out = sorted({str(t) for t in raw if t})
+    return out or None
+
+
 def run_backtest(strategy_id: str, *,
                  filepath: Optional[str] = None,
                  start_date: str = DEFAULT_START_DATE,
@@ -1252,7 +1279,11 @@ def run_backtest(strategy_id: str, *,
     if resolver is None:
         resolver = _bounded_resolver(strategy_id, cap_override=universe_cap)
 
-    close_wide, bars_by_ticker = load_prices_panels(calendar=_calendar_for(instrument_class))
+    _bt_tickers = _manifest_backtest_tickers(strategy_id)
+    if _bt_tickers:
+        _log(f'prices: manifest backtest_tickers={_bt_tickers} (filtered panel read)')
+    close_wide, bars_by_ticker = load_prices_panels(calendar=_calendar_for(instrument_class),
+                                                    tickers=_bt_tickers)
     regimes = load_regimes()
     _log(f'prices: {close_wide.shape[0]} dates × {close_wide.shape[1]} tickers; '
          f'regimes: {len(regimes)} days')
