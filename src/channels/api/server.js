@@ -9353,15 +9353,12 @@ function _stRenderDataUsage() {
 // trade_count, total_return_pct, hit_rate}. Shows backtest Sharpe per regime.
 const _REGIME_AXIS = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
 const _REGIME_TAGS = { LOW_VOL: 'LV', TRANSITIONING: 'TR', HIGH_VOL: 'HV', CRISIS: 'CR' };
-// Per-regime effective Sharpe — same definition as the row-level Eff.Sharpe
-// column and blendScope: sharpe / sqrt(avg holding days), floored at 1 day to
-// mirror strategy_weights._regime_weight EXACTLY (since 2026-07-27
-// daily_weight == this quantity). Null when the sleeve has no holding-days
-// figure (old serialized breakdown rows).
+// Per-regime effective Sharpe — since 2026-08-29 (benchmark-relative sizing
+// spec D2) this IS the raw sleeve Sharpe: strategy_weights.daily_weight ==
+// effective_sharpe, no sqrt(avg holding days) divisor. Kept as a function so
+// the column keeps its name and sort key.
 function _effSharpeOf(b) {
-  const s   = (b && b.sharpe != null) ? parseFloat(b.sharpe) : null;
-  const act = (b && b.avg_holding_days != null) ? parseFloat(b.avg_holding_days) : null;
-  return (s != null && act && act > 0) ? s / Math.sqrt(Math.max(1, act)) : null;
+  return (b && b.sharpe != null) ? parseFloat(b.sharpe) : null;
 }
 function _regimeBreakdown(r) {
   const breakdown = r.backtest_regime_breakdown || {};
@@ -9850,7 +9847,7 @@ function _renderActiveStack(rows) {
       <th data-sort-key="_active_rank" data-sort-type="num" title="Waiting(0)<Stale(1)<Live(2)">Status</th>
       <th title="Per-regime BACKTEST Sharpe; dot=current regime; blue=declared">By Regime</th>
       <th class="num" data-sort-key="sharpe" data-sort-type="num" title="Backtest Sharpe (primary window)">Sharpe</th>
-      <th class="num" data-sort-key="effective_sharpe" data-sort-type="num" title="Sharpe / sqrt(avg holding days)">Eff.Sharpe</th>
+      <th class="num" data-sort-key="effective_sharpe" data-sort-type="num" title="Sleeve Sharpe (cadence normalization retired 2026-08-29)">Eff.Sharpe</th>
       <th class="num" data-sort-key="closed_count" data-sort-type="num" title="Backtest trade count">Closed</th>
       <th class="num" data-sort-key="win_rate" data-sort-type="num" title="Backtest hit rate">Win&nbsp;%</th>
       <th class="num" data-sort-key="arr_pct" data-sort-type="num" title="Backtest mean trade return %">ARR&nbsp;%</th>

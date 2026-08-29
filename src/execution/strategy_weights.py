@@ -7,14 +7,16 @@ Per regime R, for each active strategy s with R ∈ eligible_regimes:
     effective_sharpe = bt_sharpe        # BACKTEST ONLY — see below
     weight        = effective_sharpe                  # no OUE multiplier (removed 2026-05-29)
     cadence_days  = avg_holding_days(s, R)                  # ONE time quantity
-    daily_weight  = weight / sqrt(avg_holding_days(s, R))   # == per-regime Eff.Sharpe
-                    # (operator 2026-07-27 v2: the REGIME sleeve's measured
-                    # holding period is BOTH the persisted cadence_days — the
-                    # sizer's signal window — AND the daily_weight divisor, so
-                    # daily_weight equals the dashboard's Eff.Sharpe exactly.
-                    # The strategy-level resolution (run-level backtest avg →
-                    # live avg → static declaration) is only the fallback for
-                    # sleeves without a holding-days figure.)
+    daily_weight  = weight     # cadence normalization retired 2026-08-29;
+                    # √hold only under OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM=1
+                    # (operator 2026-07-27 v2, REVERT PATH ONLY: under the flag,
+                    # the REGIME sleeve's measured holding period is BOTH the
+                    # persisted cadence_days — the sizer's signal window — AND
+                    # the daily_weight divisor, so daily_weight equals the
+                    # dashboard's Eff.Sharpe exactly. The strategy-level
+                    # resolution (run-level backtest avg → live avg → static
+                    # declaration) is only the fallback for sleeves without a
+                    # holding-days figure.)
 
 effective_sharpe was a sample-size blend of backtest and LIVE Sharpe until
 2026-07-16 (`(bt_n×bt_sharpe + live_n×live_sharpe)/(bt_n+live_n)`). Retired by
@@ -37,11 +39,15 @@ Sharpe units means both the cum-sharpe gate (Σ effective_sharpe ×
 direction) and the per-ticker allocation (Σ daily_weight × direction)
 speak the same language — Sharpe.
 
-Why sqrt(holding_days) and not holding_days? Sharpe scales with sqrt(time)
-under iid returns (σ_T = σ_1·sqrt(T)), so a strategy whose effective_sharpe
-is computed over T-day holding windows should be down-weighted by sqrt(T)
-to convert to a per-cycle-equivalent contribution — dividing by T itself
-double-counts the time-window and unfairly penalises multi-day holders.
+Why sqrt(holding_days) and not holding_days (revert path only, 2026-08-29)?
+Sharpe scales with sqrt(time) under iid returns (σ_T = σ_1·sqrt(T)), so a
+strategy whose effective_sharpe is computed over T-day holding windows should
+be down-weighted by sqrt(T) to convert to a per-cycle-equivalent contribution
+— dividing by T itself double-counts the time-window and unfairly penalises
+multi-day holders. Retired from the default path by operator directive (spec
+docs/specs/2026-08-29-benchmark-relative-sizing-spec.md D2): weight and
+daily_weight are both annualized-Sharpe units now, directly comparable to the
+benchmark's regime Sharpe (S_m).
 
 Σ_s w(s, R) = 1.0 within each regime by construction. Strategies with
 effective_sharpe ≤ 0 are excluded from that regime entirely (never
@@ -109,31 +115,33 @@ class StrategyWeightRow:
 # made `age_days` ago by exp(-age_days / OUE_TAU_DAYS).
 OUE_TAU_DAYS = 45.0      # half-life ≈ 31 days; trade @ 90d ago weighted 0.14
 
+# 2026-08-29 (spec docs/specs/2026-08-29-benchmark-relative-sizing-spec.md D2):
+# cadence normalization RETIRED from sizing. daily_weight == effective_sharpe
+# so weights (and the tangency S_adj built from them) are annualized-Sharpe
+# units, directly comparable to the benchmark's regime Sharpe (S_m). Set the
+# env to '1' to restore the legacy sharpe/√avg_holding_days divisor (revert
+# path, same pattern as OPENCLAW_STRATEGY_CADENCE_STOP_NORM for brackets).
+CADENCE_WEIGHT_NORM_ENV = 'OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM'
+
+
+def cadence_weight_norm_enabled() -> bool:
+    return os.environ.get(CADENCE_WEIGHT_NORM_ENV) == '1'
+
 
 def _regime_weight(effective_sharpe: float, holding_days: float) -> tuple[float, float]:
     """Per-(strategy, regime) sizing weight from effective Sharpe.
 
     weight       = effective_sharpe                       (no OUE multiplier)
-    daily_weight = effective_sharpe / sqrt(holding_days)   (Sharpe scales as
-                   σ·sqrt(T), so a T-day holder's per-cycle contribution is
-                   w/sqrt(T)). Floored at 1 day.
+    daily_weight = effective_sharpe                       (since 2026-08-29, D2)
+                 = effective_sharpe / sqrt(max(1, holding_days))
+                                       only under OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM=1
 
-    holding_days = the REGIME sleeve's avg holding days (operator directive
-    2026-07-27) — daily_weight is therefore EXACTLY the dashboard's per-regime
-    Eff.Sharpe (sharpe/√hold-days). cadence_days (signal re-fire interval)
-    no longer divides the weight; it remains the signal-window quantity only
-    (carried-set lookback, cadence gate). Callers fall back to cadence_days
-    when a sleeve has no holding-days figure.
-
-    The OUE multiplier was removed here 2026-05-29 (operator decision):
-    strategy sizing is governed by cross-sector corroboration + the
-    approved per-(strategy,regime) size_scalar (applied in the sizer when
-    its gate is ON), so an additional OUE-derived scaling here was
-    redundant. OUE classification is still loaded for the audit columns —
-    it just no longer scales size."""
+    holding_days is still persisted as cadence_days (the sizer's signal window)
+    by the caller — it just no longer divides the weight by default."""
     w = effective_sharpe
-    w_daily = w / math.sqrt(max(1, holding_days))
-    return w, w_daily
+    if cadence_weight_norm_enabled():
+        return w, w / math.sqrt(max(1, holding_days))
+    return w, w
 
 
 def _load_oue_by_strategy_regime(conn, strategy_ids: list[str]) -> dict[tuple[str, str], dict]:
@@ -867,6 +875,10 @@ def load_current(regime_state: str) -> list[dict]:
     conn = _db()
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        # daily_weight == effective_sharpe by default since 2026-08-29 (spec D2,
+        # cadence normalization retired — see _regime_weight); only
+        # OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM=1 restores the legacy
+        # sharpe/√avg_holding_days divisor persisted here.
         # bt_n = per-regime backtest trade count; feeds the sizer's trade-count
         # weight factor (√(ln n / ln anchor)), which replaced the √(ln N) breadth
         # factor 2026-07-16. NULL/missing → factor 1.0 in the sizer (neutral).
