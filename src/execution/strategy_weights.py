@@ -1002,6 +1002,19 @@ def find_negative_across_all_eligible(conn=None, grace_days: int | None = None) 
                       if e.get('state') in ('live', 'monitoring')]
         if not active_ids:
             return []
+        # Amendment 1 D-D2: a benchmark sleeve is never auto-demoted — its
+        # dormancy in a bad regime is expressed by weight, not by state. Read
+        # through the same cursor/transaction as the sets below (a registry
+        # failure fails this whole function like any other DB error here).
+        from execution.benchmark_sleeve import PARAM_KEY as _BENCH_PARAM_KEY
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM strategy_registry WHERE (parameters ->> %s) = 'true'",
+                    (_BENCH_PARAM_KEY,))
+        _bench_ids = {r[0] for r in cur}
+        if _bench_ids:
+            active_ids = [s for s in active_ids if s not in _bench_ids]
+            if not active_ids:
+                return []
         in_grace = _strategies_in_grace_period(manifest, grace_days)
         cur = conn.cursor()
         # Set A: strategies with at least one positive-Sharpe regime

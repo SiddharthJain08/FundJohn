@@ -428,3 +428,42 @@ class TestStampLastApplied(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(conn.rolled_back)
         self.assertFalse(conn.committed)
+
+
+class TestBenchmarkSleeveAlwaysOn(unittest.TestCase):
+    def _conn(self):
+        # responses (same convention as TestComputeEligible): primary_window run
+        # lookup -> {'run_id': ...}; universe_shrink_metrics chosen rows -> [] (none);
+        # then the 4 strategy_backtest_regimes rows
+        rows = [_regime_row('LOW_VOL', 0.20, 920), _regime_row('TRANSITIONING', 0.16, 1129),
+                _regime_row('HIGH_VOL', 0.69, 411), _regime_row('CRISIS', 1.15, 150)]
+        return FakeConn([{'run_id': 'r1'}, [], rows])
+
+    def test_always_on_makes_every_regime_eligible_but_keeps_diag(self):
+        elig, diag = aa.compute_eligible(self._conn(), 'S_beta_spy', threshold=1.0,
+                                         instrument_class='etp', always_on=True)
+        self.assertEqual(elig, {r: True for r in aa.CANONICAL_REGIMES})
+        self.assertFalse(diag['LOW_VOL']['eligible'])      # slider verdict still recorded
+        self.assertTrue(diag['CRISIS']['eligible'])
+
+    def test_default_is_unchanged(self):
+        elig, _ = aa.compute_eligible(self._conn(), 'S_beta_spy', threshold=1.0, instrument_class='etp')
+        self.assertEqual(elig, {'LOW_VOL': False, 'TRANSITIONING': False, 'HIGH_VOL': False, 'CRISIS': True})
+
+    def test_no_run_is_still_skipped(self):
+        elig, diag = aa.compute_eligible(FakeConn([None]), 'S_beta_spy', threshold=1.0, always_on=True)
+        self.assertIsNone(elig)
+        self.assertEqual(diag, {})
+
+    def test_apply_regime_reason_names_the_rule(self):
+        cur = FakeCursor([None, None])
+        aa._apply_regime(cur, 'S_beta_spy', 'LOW_VOL', True, {}, sharpe=0.2, trade_count=920,
+                         threshold=1.0, min_trades=100, max_dd_pct=35.1, instrument_class='etp',
+                         rule='benchmark_sleeve_always_on')
+        reasons = [p for sql, p in cur.executed if 'strategy_regime_param_changes' in sql]
+        self.assertTrue(any('rule=benchmark_sleeve_always_on' in str(p) for p in reasons))
+        cur2 = FakeCursor([None, None])
+        aa._apply_regime(cur2, 'S_y', 'LOW_VOL', True, {}, sharpe=1.2, trade_count=300,
+                         threshold=1.0, min_trades=100)
+        self.assertTrue(any('rule=qualifies(>0·classDD·trades)+slider' in str(p)
+                            for sql, p in cur2.executed if 'strategy_regime_param_changes' in sql))

@@ -19,6 +19,9 @@ Operator directive (2026-07-13 v2, supersedes 2026-07-05):
   Slider at 0 therefore activates a strategy in exactly its QUALIFYING
   regimes; a higher slider only narrows within that set. Instrument class
   comes from the manifest (default equity).
+  Benchmark sleeves (registry `parameters.benchmark_sleeve`) are always
+  eligible in all four regimes (Amendment 1 D-D1) — the slider never
+  touches them.
 
 Unlike the legacy manifest-writing `eligibility_assigner` (which REFUSES to
 wipe `eligible_regimes` to empty), this deriver is authoritative for the
@@ -212,7 +215,8 @@ def get_activation_min_trades(cur) -> Optional[int]:
 # ── Eligibility computation ─────────────────────────────────────────────────
 def compute_eligible(conn, strategy_id: str, threshold: float,
                      min_trades: Optional[int] = None,
-                     instrument_class: str = 'equity') -> tuple[Optional[dict], dict]:
+                     instrument_class: str = 'equity', *,
+                     always_on: bool = False) -> tuple[Optional[dict], dict]:
     """Return (eligible_by_regime, diag) for strategy_id's latest
     primary_window=TRUE run.
 
@@ -225,6 +229,10 @@ def compute_eligible(conn, strategy_id: str, threshold: float,
     diag: per-regime {sharpe, trade_count, eligible} for every regime row
     actually present in strategy_backtest_regimes (used for the prior->new
     diff report and the audit-row bt_sharpe_after/bt_n_trades columns).
+
+    always_on (Amendment 1 D-D1): benchmark sleeves are eligible in every
+    canonical regime regardless of the slider; `diag[..]['eligible']`
+    still records the slider verdict per regime.
     """
     gate = class_thresholds(instrument_class)
     eff_min_trades = gate['min_trades'] if min_trades is None else min_trades
@@ -285,7 +293,10 @@ def compute_eligible(conn, strategy_id: str, threshold: float,
         # rows (malformed/partial write) -- treat identically to "no run":
         # skip, don't wipe.
         return None, {}
-    eligible_by_regime = {r: diag.get(r, {}).get('eligible', False) for r in CANONICAL_REGIMES}
+    if always_on:
+        eligible_by_regime = {r: True for r in CANONICAL_REGIMES}
+    else:
+        eligible_by_regime = {r: diag.get(r, {}).get('eligible', False) for r in CANONICAL_REGIMES}
     return eligible_by_regime, diag
 
 
@@ -333,7 +344,8 @@ def _apply_regime(cur, strategy_id: str, regime_state: str, new_eligible: bool,
                   prior: dict, sharpe: Optional[float], trade_count: Optional[int],
                   threshold: float, min_trades: int,
                   max_dd_pct: Optional[float] = None,
-                  instrument_class: str = 'equity') -> str:
+                  instrument_class: str = 'equity',
+                  rule: str = 'qualifies(>0·classDD·trades)+slider') -> str:
     """Write one (strategy, regime) row IFF it actually changes (or has no
     prior row yet). Returns the action taken/would-be-taken. Exact upsert
     pattern matched from eligibility_manager.py / server.js: 4-column
@@ -361,7 +373,7 @@ def _apply_regime(cur, strategy_id: str, regime_state: str, new_eligible: bool,
     reason = (f'activation_assigner: sharpe={sharpe} n={trade_count} '
              f'dd={max_dd_pct} class={instrument_class} '
              f'threshold={threshold} min_trades={min_trades} '
-             f'rule=qualifies(>0·classDD·trades)+slider')
+             f'rule={rule}')
 
     cur.execute("""
         INSERT INTO strategy_regime_param_changes
@@ -384,7 +396,8 @@ def _apply_regime(cur, strategy_id: str, regime_state: str, new_eligible: bool,
 
 def apply_one(conn, strategy_id: str, threshold: float,
              dry_run: bool = False, min_trades: Optional[int] = None,
-             instrument_class: str = 'equity') -> dict:
+             instrument_class: str = 'equity', *,
+             always_on: bool = False) -> dict:
     """Compute + (unless dry_run) write eligibility for one strategy.
 
     Returns: {status: 'ok'|'skipped_no_run', strategy_id, prior, new, diag,
@@ -394,7 +407,8 @@ def apply_one(conn, strategy_id: str, threshold: float,
     not even a read of strategy_regime_params.
     """
     eligible_by_regime, diag = compute_eligible(conn, strategy_id, threshold, min_trades,
-                                                instrument_class=instrument_class)
+                                                instrument_class=instrument_class,
+                                                always_on=always_on)
     if eligible_by_regime is None:
         return {'status': 'skipped_no_run', 'strategy_id': strategy_id,
                 'prior': {}, 'new': {}, 'diag': {}, 'actions': {}}
@@ -417,7 +431,9 @@ def apply_one(conn, strategy_id: str, threshold: float,
                     cur, strategy_id, r, eligible_by_regime[r], prior_rows,
                     sharpe=d.get('sharpe'), trade_count=d.get('trade_count'),
                     threshold=threshold, min_trades=eff_min_trades,
-                    max_dd_pct=d.get('max_dd_pct'), instrument_class=instrument_class)
+                    max_dd_pct=d.get('max_dd_pct'), instrument_class=instrument_class,
+                    rule=('benchmark_sleeve_always_on' if always_on
+                          else 'qualifies(>0·classDD·trades)+slider'))
             conn.commit()
         except Exception:
             conn.rollback()
@@ -528,6 +544,21 @@ def main() -> int:
         cur.close()
 
     classes = _load_instrument_classes()
+    # Amendment 1 D-D1: benchmark sleeves (registry parameters.benchmark_sleeve=true)
+    # are eligible in every regime regardless of the slider. Fail-open to "no
+    # sleeves" (the loader logs); rollback keeps the transaction clean either way.
+    try:
+        from execution.benchmark_sleeve import load_benchmark_sleeve_ids
+        bench_ids = load_benchmark_sleeve_ids(conn)
+    except Exception as e:
+        _log(f'benchmark sleeve lookup failed ({e}); no always-on strategies this run')
+        bench_ids = set()
+    try:
+        conn.rollback()
+    except Exception:
+        pass
+    if bench_ids:
+        _log(f'always_on (benchmark sleeves): {sorted(bench_ids)}')
     # NOTE: header + summary line formats are PINNED by activation_preview.js
     # (HEADER_RE / SUMMARY_RE, consumed by the dashboard dry-run endpoint) —
     # keep `threshold=… min_trades=… dry_run=… strategies=…` byte-stable.
@@ -544,7 +575,8 @@ def main() -> int:
         try:
             r = apply_one(conn, sid, threshold, dry_run=args.dry_run,
                           min_trades=resolved_min_trades,
-                          instrument_class=classes.get(sid, 'equity'))
+                          instrument_class=classes.get(sid, 'equity'),
+                          always_on=(sid in bench_ids))
         except Exception as e:
             _log(f'  ERROR {sid}: {e}')
             try:
