@@ -1143,12 +1143,18 @@ XDG_RUNTIME_DIR=/run/user/0 systemctl --user restart johnbot.service && sleep 5 
 ```
 Expected: `=0` (shadow; `bench_relative_sizing_enabled()` is `== '1'`), `EXIT_HOOK_LIVE=1`, dashboard build responds.
 
-- [ ] **Step 2: apply migration 151 and verify**
+- [ ] **Step 2: verify migration 151**
+
+Migration 151 is applied by the Step 1 restart (postgres.js replays `src/database/migrations/*.sql` on start; 151 is idempotent). Verify with psycopg2:
 
 ```bash
-cd /root/openclaw && psql "$(grep -E '^POSTGRES_URI=' .env | cut -d= -f2- | tr -d '"')" -v ON_ERROR_STOP=1 -f src/database/migrations/151_benchmark_horizon_days.sql && psql "$(grep -E '^POSTGRES_URI=' .env | cut -d= -f2- | tr -d '"')" -Atc "select key, value from pipeline_config where key in ('benchmark_horizon_days','benchmark_regime_sharpe')"
+cd /root/openclaw && POSTGRES_URI="$(grep -E '^POSTGRES_URI=' .env | cut -d= -f2- | tr -d '"')" python3 -c "
+import sys; sys.path.insert(0,'src')
+from execution.strategy_weights import _db
+c=_db().cursor()
+c.execute(\"select key, value from pipeline_config where key in ('benchmark_horizon_days','benchmark_regime_sharpe')\"); print(c.fetchall())"
 ```
-Expected: `benchmark_horizon_days|1`; the `benchmark_regime_sharpe` row still shows the schema-1 payload (it is replaced by the sizer's next run — verified in Step 5). If `psql` is absent, run the two statements through `python3 -c` with psycopg2 using the same URI.
+Expected: `benchmark_horizon_days|1`; the `benchmark_regime_sharpe` row still shows the schema-1 payload (it is replaced by the sizer's next run — verified in Step 5).
 
 - [ ] **Step 3: sleeve re-backtest (transient unit; outside 13:00–20:15 UTC on weekdays)**
 

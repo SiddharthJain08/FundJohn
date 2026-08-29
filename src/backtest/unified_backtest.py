@@ -722,6 +722,7 @@ def _per_bar_simulate(
     slippage_bps: float = 0.0,
     cost_bps_by_ticker: Optional[dict] = None,
     asset_gate: Optional[dict] = None,
+    restrict_universe_to_panel: bool = False,
 ) -> dict:
     """Single source-of-truth for the per-bar simulation loop.
 
@@ -735,6 +736,14 @@ def _per_bar_simulate(
     the snapshot is today's Alpaca universe, and absent means delisted/unknown
     historically, where the point-in-time resolver remains the authority.
     Gated entries are counted in the returned ``entries_asset_gated``.
+
+    restrict_universe_to_panel: when True, ``bar_universe`` (from
+    ``resolver.resolve(...)`` or the static universe) is intersected with
+    ``close_wide.columns`` before being handed to ``generate_signals`` — for
+    a manifest ``backtest_tickers``-filtered run, where the resolver's
+    universe is otherwise unbounded by the (small) panel actually loaded.
+    ``universe_sizes`` records the intersected size in that case. Default
+    False keeps every other run byte-identical.
 
     Encapsulates: min_lookback gate, regime_payload construction,
     generate_signals 4-arg→3-arg fallback, entry_regime tagging,
@@ -779,6 +788,8 @@ def _per_bar_simulate(
     static_universe = [c for c in close_wide.columns
                        if not c.startswith('^') and '-USD' not in c and '=F' not in c]
     min_lookback = getattr(instance, 'min_lookback', 20)
+    # Built once (not per-bar) for the restrict_universe_to_panel intersection below.
+    _panel_columns = set(close_wide.columns) if restrict_universe_to_panel else None
 
     # Aux-data loader — strategies that need options/financials get it.
     try:
@@ -856,9 +867,18 @@ def _per_bar_simulate(
         # a point-in-time resolved one for this specific bar.
         if resolver is not None:
             bar_universe = resolver.resolve(strategy_id, as_of=cur_d)
+            if _panel_columns is not None:
+                # Amendment 1 final fix wave, Important #3: a manifest
+                # backtest_tickers-filtered panel is small, but an unbounded
+                # resolver (e.g. tier_liquid, ~4k tickers) still hands
+                # generate_signals a universe the panel can't back — restrict
+                # it to what was actually loaded (order preserved).
+                bar_universe = [t for t in bar_universe if t in _panel_columns]
             universe_sizes.append(len(bar_universe))
         else:
             bar_universe = static_universe
+            if _panel_columns is not None:
+                bar_universe = [t for t in bar_universe if t in _panel_columns]
 
         regime_payload = {
             'state':            str(regime_state),
@@ -1185,7 +1205,15 @@ def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None,
 def _manifest_backtest_tickers(strategy_id: str, *, manifest_path=None):
     """Amendment 1 D-C2: manifest metadata.backtest_tickers -> sorted unique
     symbol list, or None (absent, empty, not a list, unreadable manifest, or
-    unregistered strategy). Feeds load_prices_panels(tickers=)."""
+    unregistered strategy). Feeds load_prices_panels(tickers=). When set, the
+    per-bar universe is restricted to the panel's columns (see
+    _per_bar_simulate's restrict_universe_to_panel).
+
+    Minor #3 (2026-08-29 final fix wave): a present-but-malformed value (not
+    a list, or a list with no truthy entries) is rejected the same as an
+    absent one, but logged — silently falling through to a full-panel read
+    inside an OOM-prone unit is a box problem in disguise.
+    """
     manifest_path = Path(manifest_path or ROOT / 'src' / 'strategies' / 'manifest.json')
     try:
         entry = (json.loads(manifest_path.read_text()).get('strategies', {})
@@ -1194,8 +1222,14 @@ def _manifest_backtest_tickers(strategy_id: str, *, manifest_path=None):
     except Exception:
         return None
     if not isinstance(raw, (list, tuple)):
+        if raw is not None:
+            _log(f'WARNING backtest_tickers for {strategy_id} is {raw!r} (expected a '
+                 f'list of symbols) — ignoring; the full panel will be read')
         return None
     out = sorted({str(t) for t in raw if t})
+    if not out:
+        _log(f'WARNING backtest_tickers for {strategy_id} is {raw!r} (no usable symbols) '
+             f'— ignoring; the full panel will be read')
     return out or None
 
 
@@ -1304,6 +1338,11 @@ def run_backtest(strategy_id: str, *,
     if _sim_fn is _per_bar_simulate:
         _sim_kwargs['fill_model'] = fill_model
         _sim_kwargs['slippage_bps'] = _slippage_bps
+        # Important #3 (2026-08-29 final fix wave): a manifest backtest_tickers
+        # filter shrinks the panel but leaves the resolver (tier_liquid, ~4k
+        # tickers) unbounded — restrict the per-bar universe to what the panel
+        # actually holds so generate_signals never sees a ticker it can't price.
+        _sim_kwargs['restrict_universe_to_panel'] = bool(_bt_tickers)
         # Honest cost model (2026-07-27): per-ticker half-spread slippage + the
         # live asset-eligibility gate, equity/etp only. Both fail back to the
         # flat/ungated behavior loudly, never fatally.

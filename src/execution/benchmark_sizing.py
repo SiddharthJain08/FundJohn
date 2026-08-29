@@ -97,9 +97,9 @@ def load_benchmark_horizon(default: int = DEFAULT_HORIZON, conn=None) -> int:
     """pipeline_config[HORIZON_KEY] as an int on benchmark_baseline.BENCH_HORIZONS.
     Absent, unparseable or off-grid -> `default` (logged). Mirrors
     regime_blended_sizer._load_lambda's read-with-fallback pattern."""
-    from backtest.benchmark_baseline import BENCH_HORIZONS
     own = conn is None
     try:
+        from backtest.benchmark_baseline import BENCH_HORIZONS
         if own:
             import psycopg2
             conn = psycopg2.connect(os.environ['POSTGRES_URI'])

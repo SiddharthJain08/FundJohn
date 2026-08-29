@@ -38,7 +38,7 @@ def run(monkeypatch, rows, carried, corr_spy=None, bench_flag='1'):
     # B3 (final fix wave, 2026-08-29): the cap/cluster-cap exemptions are
     # gated on this flag; bench_flag=None exercises them OFF (test below).
     if bench_flag is None:
-        monkeypatch.delenv(bz.BENCH_SIZING_ENV, raising=False)
+        monkeypatch.setenv(bz.BENCH_SIZING_ENV, '0')
     else:
         monkeypatch.setenv(bz.BENCH_SIZING_ENV, bench_flag)
     for g in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_CORR_WEIGHT', 'OPENCLAW_STRATEGY_ORTHO_SHADOW',

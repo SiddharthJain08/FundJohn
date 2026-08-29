@@ -45,7 +45,7 @@ def run(monkeypatch, flag, s_m=2.0, lines=None):
               'OPENCLAW_INTRADAY_REDEPLOY'):
         monkeypatch.delenv(g, raising=False)
     if flag: monkeypatch.setenv(bz.BENCH_SIZING_ENV, '1')
-    else:    monkeypatch.delenv(bz.BENCH_SIZING_ENV, raising=False)
+    else:    monkeypatch.setenv(bz.BENCH_SIZING_ENV, '0')
     monkeypatch.setattr(_sizer, '_load_approved_carried_signals',
                         lambda weight_by_strat, cadence_by_strat=None, **_kw: list(CARRIED))
     monkeypatch.setattr(_sizer, '_load_lambda', lambda default=2.0, *, intraday=False: LAM)
