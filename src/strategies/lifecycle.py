@@ -109,43 +109,6 @@ PAPER_TO_LIVE_MAX_DRAWDOWN = CANDIDATE_TO_LIVE_MAX_DRAWDOWN
 CANDIDATE_TO_LIVE_MIN_CALMAR:  float = 0.5   # DD no worse than 2x annualized return
 CANDIDATE_TO_LIVE_DD_HARD_CAP: float = 0.50  # 50 % — catastrophic ceiling (equity)
 
-# R1 (2026-08-24, five-repo-adoptions, benchmark-relative promotion
-# criterion): a candidate/live sleeve must beat the regime-conditioned SPY
-# baseline by at least this much excess Sharpe (sharpe > benchmark_sharpe +
-# threshold) — applied ONLY when the sleeve carries a non-NULL
-# benchmark_sharpe (fail-open on missing benchmark data; see
-# backtest.benchmark_baseline / backtest.regime_qualification.qualifies_regime
-# / src/lib/promotion_service.js judgeRegimeSleeve — all three must stay
-# value-synced on this constant).
-#
-# Kept as its OWN class-keyed dict — mirroring PROMOTION_THRESHOLDS's
-# per-class-override shape — rather than folded into PROMOTION_THRESHOLDS
-# itself. Folding it in would change that dict's key set, which would break
-# the exact-dict-equality assertions in
-# tests/strategies/test_promotion_thresholds_per_class.py::test_thresholds_lookup
-# and tests/execution/test_phase_d_crypto.py::test_crypto_promotion_threshold_present
-# (both out of this task's file scope; verified failing against a
-# PROMOTION_THRESHOLDS with an added key before choosing this shape). All
-# four classes share the SAME 0.0 default for now; a class can be tuned
-# independently later by editing its entry here (and the matching entry in
-# promotion_service.js) without touching PROMOTION_THRESHOLDS at all.
-MIN_EXCESS_SHARPE_VS_BENCHMARK: float = 0.0
-MIN_EXCESS_SHARPE_VS_BENCHMARK_BY_CLASS: dict[str, float] = {
-    "equity": MIN_EXCESS_SHARPE_VS_BENCHMARK,
-    "etp":    MIN_EXCESS_SHARPE_VS_BENCHMARK,
-    "option": MIN_EXCESS_SHARPE_VS_BENCHMARK,
-    "crypto": MIN_EXCESS_SHARPE_VS_BENCHMARK,
-}
-
-
-def min_excess_sharpe_vs_benchmark(instrument_class: Optional[str]) -> float:
-    """Per-class excess-Sharpe-over-benchmark floor for the R1 benchmark-
-    relative promotion criterion. Unknown/None class falls back to equity
-    (matches _promotion_threshold's own fallback convention)."""
-    return MIN_EXCESS_SHARPE_VS_BENCHMARK_BY_CLASS.get(
-        instrument_class or "equity", MIN_EXCESS_SHARPE_VS_BENCHMARK)
-
-
 # SP-3/SP-4: per-instrument-class candidate→live thresholds. equity/etp keep the
 # legacy values. option + crypto calibrated in SP-4 (2026-05-27), operator-signed-off.
 PROMOTION_THRESHOLDS: dict[str, dict[str, float]] = {
@@ -608,40 +571,6 @@ class LifecycleStateMachine:
                 return False, (
                     f"candidate→live blocked: trades {trades} < "
                     f"minimum {thr['min_trades']} (instrument_class={rec.instrument_class})")
-
-            # R1-assigners (2026-08-25): benchmark-relative leg, ANDed on top
-            # of the legacy checks above -- every one of them already passed
-            # if execution reaches this line, so it can only ever TIGHTEN
-            # this guard, never loosen it. This guard judges CALLER-SUPPLIED
-            # AGGREGATE totals (no per-regime sleeve here, unlike
-            # promotion_service.js's judgeRegimeSleeve / activation_assigner
-            # / eligibility_assigner), so there is no real 'regime' to name
-            # in the [bench_gate] log line -- 'aggregate' names this call
-            # site instead. benchmark_sharpe is an OPTIONAL metadata key; no
-            # existing caller/test supplies one, so this fails open
-            # (skipped) for all of them today, matching every other R1
-            # consumer's fail-open contract on missing benchmark data.
-            # Deferred import: regime_qualification.py imports FROM this
-            # module at its own top level (_promotion_threshold,
-            # min_excess_sharpe_vs_benchmark) -- a module-level import here
-            # would be circular depending on which module a caller imports
-            # first, so it's resolved lazily at call time instead, by which
-            # point both modules are always already fully loaded.
-            from backtest.regime_qualification import (
-                benchmark_leg_passes, log_bench_gate_skip, log_bench_gate_verdict)
-            bench_sharpe = md.get("benchmark_sharpe")
-            bench_pass, bench_reason = benchmark_leg_passes(
-                sharpe, bench_sharpe, rec.instrument_class)
-            if bench_reason == 'skipped_null_benchmark':
-                log_bench_gate_skip(logger.info, strategy_id, 'aggregate')
-            log_bench_gate_verdict(logger.info, strategy_id, 'aggregate',
-                                   True, bench_pass, sharpe, bench_sharpe)
-            if not bench_pass:
-                return False, (
-                    f"candidate→live blocked: sharpe {sharpe:.2f} does not exceed "
-                    f"benchmark_sharpe {bench_sharpe} + minimum excess "
-                    f"{min_excess_sharpe_vs_benchmark(rec.instrument_class)} "
-                    f"(instrument_class={rec.instrument_class})")
 
         # Guard: candidate → staging requires regime eligibility
         # Spec: docs/archive/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md

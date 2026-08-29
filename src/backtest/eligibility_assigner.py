@@ -45,9 +45,7 @@ CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
 MIN_SHARPE_DEFAULT  = float(os.environ.get('ELIGIBILITY_MIN_SHARPE', '0.0'))
 MIN_TRADES_DEFAULT  = int(os.environ.get('ELIGIBILITY_MIN_TRADES', '100'))
 
-from backtest.regime_qualification import (  # noqa: E402
-    class_thresholds, dd_leg_passes, benchmark_leg_passes,
-    log_bench_gate_skip, log_bench_gate_verdict)
+from backtest.regime_qualification import class_thresholds, dd_leg_passes  # noqa: E402
 
 
 def _instrument_class_map() -> dict:
@@ -62,15 +60,6 @@ def _instrument_class_map() -> dict:
 
 def _log(msg: str) -> None:
     print(f'[eligibility_assigner] {msg}', flush=True)
-
-
-def _bench_log(msg: str) -> None:
-    """R1-assigners (2026-08-25): unprefixed print for `[bench_gate] ...`
-    lines -- deliberately bypasses _log()'s `[eligibility_assigner] `
-    prefix so the tag stays grep-identical across every consumer (the JS
-    twin, activation_assigner.py, and the lifecycle.py guard's logger
-    output)."""
-    print(msg, flush=True)
 
 
 def compute_eligible(conn, strategy_id: str,
@@ -92,26 +81,11 @@ def compute_eligible(conn, strategy_id: str,
     if not row:
         return [], {}
     run_id = row['run_id']
-    # R1-assigners (2026-08-25): pull benchmark_sharpe too, fail-open on a
-    # pre-migration-149 DB (column doesn't exist at all) — catch the SQL
-    # error, roll back, retry without the column; every row's
-    # 'benchmark_sharpe' key is then simply absent, which the per-row
-    # lookup below (.get) treats identically to a NULL benchmark.
-    try:
-        cur.execute("""
-            SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar, benchmark_sharpe
-            FROM strategy_backtest_regimes
-            WHERE run_id = %s
-        """, (run_id,))
-    except Exception as e:
-        _log(f'{strategy_id}: benchmark_sharpe column unavailable ({e}); '
-             f'retrying without it (pre-mig-149 DB?)')
-        conn.rollback()
-        cur.execute("""
-            SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
-            FROM strategy_backtest_regimes
-            WHERE run_id = %s
-        """, (run_id,))
+    cur.execute("""
+        SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
+        FROM strategy_backtest_regimes
+        WHERE run_id = %s
+    """, (run_id,))
     gate = class_thresholds(instrument_class)
     diag: dict[str, dict] = {}
     eligible: list[str] = []
@@ -120,22 +94,13 @@ def compute_eligible(conn, strategy_id: str,
         n     = r['trade_count'] or 0
         dd    = r.get('max_dd_pct') if hasattr(r, 'get') else r['max_dd_pct']
         cal   = r.get('calmar') if hasattr(r, 'get') else r['calmar']
-        bench = r.get('benchmark_sharpe') if hasattr(r, 'get') else None
         # Sharpe is a STRICT exceed (policy 2026-07-13 v2: "positive Sharpe");
         # the DD leg is the class ceiling OR the Calmar escape hatch under the
         # catastrophic hard cap (2026-07-27).
         legacy_pass = (s is not None and dd is not None
                       and s > min_sharpe and n >= min_trades
                       and dd_leg_passes(dd, cal, gate))
-        # R1-assigners (2026-08-25): the benchmark-relative leg, ANDed on top
-        # of legacy_pass — can only ever TIGHTEN this regime's verdict, never
-        # rescue it (see benchmark_leg_passes' docstring).
-        bench_pass, bench_reason = benchmark_leg_passes(s, bench, instrument_class)
-        if bench_reason == 'skipped_null_benchmark':
-            log_bench_gate_skip(_bench_log, strategy_id, r['regime_state'])
-        passes = legacy_pass and bench_pass
-        log_bench_gate_verdict(_bench_log, strategy_id, r['regime_state'],
-                               legacy_pass, bench_pass, s, bench)
+        passes = legacy_pass
         diag[r['regime_state']] = {
             'sharpe':      s,
             'trade_count': n,

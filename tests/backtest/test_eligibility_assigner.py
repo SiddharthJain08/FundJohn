@@ -28,28 +28,6 @@ def _mock_conn(run_id='run-uuid', regime_rows=None):
     return conn
 
 
-def _mock_conn_failopen(run_id='run-uuid', regime_rows=None, exc=None):
-    """Like _mock_conn, but the SECOND execute() call (the
-    benchmark_sharpe-augmented SELECT; the FIRST is the run_id lookup)
-    raises -- simulates a pre-migration-149 DB missing the column.
-    compute_eligible must catch it, roll back, and retry without the
-    column. Returns (conn, cur) so tests can assert on call counts."""
-    conn = MagicMock()
-    cur = MagicMock()
-    cur.fetchone.return_value = {'run_id': run_id} if run_id else None
-    cur.__iter__ = lambda self: iter(regime_rows or [])
-    calls = {'n': 0}
-
-    def _execute_side_effect(sql, params=None):
-        calls['n'] += 1
-        if calls['n'] == 2:
-            raise (exc or RuntimeError('column "benchmark_sharpe" does not exist'))
-
-    cur.execute.side_effect = _execute_side_effect
-    conn.cursor.return_value = cur
-    return conn, cur
-
-
 class TestComputeEligible(unittest.TestCase):
     def test_picks_only_regimes_clearing_both_thresholds(self):
         rows = [
@@ -110,57 +88,6 @@ class TestComputeEligible(unittest.TestCase):
         conn = _mock_conn(regime_rows=rows)
         eligible, diag = ea.compute_eligible(conn, 'S_test', min_sharpe=0.4, min_trades=20)
         self.assertEqual(eligible, ['LOW_VOL'])
-
-
-# ── compute_eligible: R1-assigners benchmark leg (2026-08-25) ───────────────
-class TestComputeEligibleBenchmarkLeg(unittest.TestCase):
-    def test_null_benchmark_is_a_noop_legacy_pass_stands(self):
-        rows = [{'regime_state': 'LOW_VOL', 'sharpe': 1.2, 'trade_count': 150,
-                'max_dd_pct': 10.0, 'benchmark_sharpe': None}]
-        conn = _mock_conn(regime_rows=rows)
-        eligible, diag = ea.compute_eligible(conn, 'S_ZZT_test')
-        self.assertEqual(eligible, ['LOW_VOL'])
-
-    def test_missing_benchmark_key_is_also_a_noop(self):
-        # No 'benchmark_sharpe' key at all (e.g. a pre-R1 fixture) is
-        # treated identically to an explicit None.
-        rows = [{'regime_state': 'LOW_VOL', 'sharpe': 1.2, 'trade_count': 150, 'max_dd_pct': 10.0}]
-        conn = _mock_conn(regime_rows=rows)
-        eligible, diag = ea.compute_eligible(conn, 'S_ZZT_test')
-        self.assertEqual(eligible, ['LOW_VOL'])
-
-    def test_benchmark_flips_an_otherwise_passing_regime_to_ineligible(self):
-        rows = [{'regime_state': 'LOW_VOL', 'sharpe': 0.6, 'trade_count': 150,
-                'max_dd_pct': 10.0, 'benchmark_sharpe': 0.9}]
-        conn = _mock_conn(regime_rows=rows)
-        eligible, diag = ea.compute_eligible(conn, 'S_ZZT_test')
-        self.assertEqual(eligible, [])
-        self.assertFalse(diag['LOW_VOL']['eligible'])
-
-    def test_benchmark_leaves_a_clearing_regime_eligible(self):
-        rows = [{'regime_state': 'LOW_VOL', 'sharpe': 1.5, 'trade_count': 150,
-                'max_dd_pct': 10.0, 'benchmark_sharpe': 0.9}]
-        conn = _mock_conn(regime_rows=rows)
-        eligible, diag = ea.compute_eligible(conn, 'S_ZZT_test')
-        self.assertEqual(eligible, ['LOW_VOL'])
-
-    def test_benchmark_never_rescues_a_legacy_failure(self):
-        rows = [{'regime_state': 'LOW_VOL', 'sharpe': 5.0, 'trade_count': 5,
-                'max_dd_pct': 10.0, 'benchmark_sharpe': -5.0}]  # trades < 100
-        conn = _mock_conn(regime_rows=rows)
-        eligible, diag = ea.compute_eligible(conn, 'S_ZZT_test')
-        self.assertEqual(eligible, [])
-
-    def test_missing_benchmark_column_fails_open_not_crash(self):
-        """Pre-migration-149 DB: the benchmark_sharpe-augmented SELECT
-        raises. Must not crash the caller -- rolls back and retries without
-        the column; the legacy-only verdict stands."""
-        rows = [{'regime_state': 'LOW_VOL', 'sharpe': 1.2, 'trade_count': 150, 'max_dd_pct': 10.0}]
-        conn, cur = _mock_conn_failopen(regime_rows=rows)
-        eligible, diag = ea.compute_eligible(conn, 'S_ZZT_test')
-        self.assertEqual(eligible, ['LOW_VOL'])
-        conn.rollback.assert_called_once()
-        self.assertEqual(cur.execute.call_count, 3)  # run_id, raising query, fallback retry
 
 
 if __name__ == '__main__':
