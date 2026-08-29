@@ -1,14 +1,11 @@
 """benchmark_baseline.py — regime-conditioned benchmark (SPY) Sharpe baseline.
 
-Task R1 (five-repo-adoptions, 2026-08-24): the candidate->live promotion gate
-adds an excess-Sharpe-over-benchmark criterion (see
-src/strategies/lifecycle.py MIN_EXCESS_SHARPE_VS_BENCHMARK,
-src/backtest/regime_qualification.py qualifies_regime, and
-src/lib/promotion_service.js judgeRegimeSleeve). This module computes the
-benchmark side of that comparison: the benchmark's own annualized Sharpe,
-computed SEPARATELY over each regime's tagged days within a date window, so
-a sleeve is judged against "how the market actually did in the regimes THIS
-sleeve traded", not one blended full-window market Sharpe.
+The module computes the benchmark's (SPY) annualized Sharpe over days tagged
+with each regime. Since 2026-08-29 (spec docs/specs/2026-08-29-benchmark-
+relative-sizing-spec.md D1/§2.5), its ONLY consumer is sizing: the per-ticker
+hurdle `S_adj − S_m` in execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing,
+plus the informational `strategy_backtest_regimes.benchmark_sharpe` column written
+by unified_backtest.py. It gates nothing (pre-2026-08-29 promotion gate removed).
 
 Data sources (inspected 2026-08-24):
   - data/master/historical_regimes.parquet — columns: date (date32[day]),
