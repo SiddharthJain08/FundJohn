@@ -1,6 +1,6 @@
 # Benchmark-relative sizing (beta sleeve + `S_adj − S_m`) — design spec
 
-**Date:** 2026-08-29 · **Status:** DRAFT for operator review · **Owner:** BotJohn
+**Date:** 2026-08-29 · **Status:** IMPLEMENTING — code landed 2026-08-29 (tasks 1–13, `67afceb..ecaad15`; plan `docs/superpowers/plans/2026-08-29-benchmark-relative-sizing.md`); rollout §3 steps 3–4 pending (sleeve backtest/promotion, shadow soak, flag flip) · **Owner:** BotJohn
 **Supersedes (partially):** R1 benchmark-relative promotion criterion (five-repo adoptions, 2026-08-24) and R1-assigners (2026-08-25).
 
 ## 0. Decisions this spec encodes (operator, 2026-08-29)
