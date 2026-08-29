@@ -1455,16 +1455,19 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.warning('size_scalar: load failed (%s); treating all as 1.0', e)
         _size_scalars = {}
     eff_weight_by_strat = _apply_size_scalars(weight_by_strat, _size_scalars, _size_scalar_on)
-    # Trade-count weight factor (DEFAULT-ON; operator directive 2026-07-16).
+    # Trade-count weight factor — DEFAULT-OFF as of spec D3 (2026-08-29); set
+    # OPENCLAW_TRADE_WEIGHT_FACTOR=1 to restore it (trade_weight_factor_enabled()).
+    # History: introduced DEFAULT-ON by operator directive 2026-07-16, REPLACING
+    # the regime-independent √(ln N_universe) breadth factor. When enabled,
     # √(ln n / ln anchor) upweights strategies whose per-regime Sharpe rests on more
-    # backtest trades (realized breadth + estimation confidence). REPLACES the
-    # regime-independent √(ln N_universe) breadth factor. Applied ONLY inside the
-    # corr cum-Sharpe calc below (both gate + sizing weights), NOT to the global
+    # backtest trades (realized breadth + estimation confidence). Applied ONLY inside
+    # the corr cum-Sharpe calc below (both gate + sizing weights), NOT to the global
     # weight_by_strat/eff_weight_by_strat — FOLD + bracket-leader stay on raw
     # conviction (mirrors the breadth factor's old scope). n per (strategy,regime)
     # comes from strategy_weights_by_regime.bt_n (loaded above); missing → 1.0.
     # Anchor is dashboard-tunable (pipeline_config, default ≈ median regime count);
-    # it is the scale knob paired with a conviction-floor recheck.
+    # it is the scale knob paired with a conviction-floor recheck — it only matters
+    # when the flag is on.
     _trade_factor_anchor = _load_trade_factor_anchor()
     # Effective leverage = global λ × per-regime liquidity_param.
     # liquidity_param is a per-regime DAMPENER (∈ [0, 1.0]); paired with
@@ -1628,8 +1631,10 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # SELECTION is the acting-strategy gate below (2026-08-22) — S_adj no longer
     # gates anything.
     _sim = (_ortho_groups or {}).get('matrix') or {}
-    # Trade-count-scale the weights fed to the corr calc (DEFAULT-ON). Scoped here
-    # so only the corr sizing sees the √(ln n) factor; FOLD/bracket stay raw.
+    # Trade-count-scale the weights fed to the corr calc — DEFAULT-OFF (spec D3,
+    # 2026-08-29); OPENCLAW_TRADE_WEIGHT_FACTOR=1 restores the pre-D3 (2026-07-16)
+    # behaviour. Scoped here so only the corr sizing sees the √(ln n) factor when
+    # enabled; FOLD/bracket stay raw either way.
     # Folding f into the weight vector makes the existing quadratic form correct
     # with NO special-casing: num = Σ f²w²d, q = Σ fᵢfⱼwᵢwⱼdᵢdⱼρ — i.e. (f∘w) in
     # the same form. A missing bt_n → factor 1.0 (neutral), never 0.
