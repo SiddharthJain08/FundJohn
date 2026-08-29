@@ -64,6 +64,7 @@ class BetaSpy(BaseStrategy):
         try:
             px = float(px)
         except (TypeError, ValueError):
+            print('[debug] signals=0 (SPY last close not numeric)', file=sys.stderr)
             return []
         if not (px == px and px > 0):
             print('[debug] signals=0 (SPY last close missing)', file=sys.stderr)

@@ -45,3 +45,14 @@ def test_no_spy_column_or_bad_price_is_silent():
     p = _panel(); p.loc[p.index[-1], 'SPY'] = np.nan
     assert s.generate_signals(p, {'state': 'LOW_VOL'}, ['SPY']) == []
     assert s.generate_signals(pd.DataFrame(), {'state': 'LOW_VOL'}, ['SPY']) == []
+
+
+def test_non_numeric_spy_close_logs_debug_message(capsys):
+    s = BetaSpy()
+    idx = pd.bdate_range('2026-01-02', periods=30)
+    cols = {'ZZTA': np.linspace(50, 60, 30), 'SPY': np.linspace(500, 520, 29).tolist() + ['n/a']}
+    p = pd.DataFrame(cols, index=idx)
+    out = s.generate_signals(p, {'state': 'LOW_VOL'}, ['SPY', 'ZZTA'])
+    assert out == []
+    captured = capsys.readouterr()
+    assert 'not numeric' in captured.err
