@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 """bench_relative_sizing_replay.py — size today's book twice, flag OFF and ON,
 and print the per-ticker diff. READ-ONLY: no DB writes, no broker calls, no
-Discord posts (all posting hooks are stubbed; broker positions are stubbed to
-{} so orders == targets). Spec §2.5.2 — this is the parity artefact for rule C.
+Discord posts, no Redis mutation. Six sizer names are stubbed to no-ops —
+`_load_broker_positions_usd` (broker positions -> {} so orders == targets),
+`_post_corr_cumsharpe_log`, `_post_flatten_alert`, `_post_ops_alert`,
+`_maybe_flatten_zero_conviction`, and `_check_force_fire_flag` (the sizer's
+real implementation does a Redis GET+DELETE of the one-shot
+regime:transition:fresh key; stubbed to always return False so a replay run
+never steals that bypass from the next live cycle). The only external reads
+are Postgres (weights/signals/regime params, read-only SELECTs) and an Alpaca
+spot-quote fetch. The sizing lane taken (SP-6 EOD-register vs legacy/same-day
+cadence-gate) follows the live `.env` exactly — this script does not pin
+OPENCLAW_EOD_RECONCILE, so it mirrors whatever OPENCLAW_SAMEDAY_SIGNAL_TARGET
+says in production. Spec §2.5.2 — this is the parity artefact for rule C.
 
 Run outside 13:00–20:15 UTC. Usage:
     python3 scripts/bench_relative_sizing_replay.py --nav 152000 [--regime LOW_VOL]
@@ -57,7 +67,11 @@ def _current_regime() -> str:
 def _size(nav: float, regime: str, flag_on: bool) -> dict:
     import execution.regime_blended_sizer as _sizer
     from execution import benchmark_sizing as bz
-    os.environ['OPENCLAW_EOD_RECONCILE'] = '1'
+    # OPENCLAW_EOD_RECONCILE is intentionally left as whatever _load_env()
+    # pulled from the live .env (via setdefault) — do NOT pin it here. The
+    # sizer's lane choice (_eod_signal_register_lane -> eod_register_on(),
+    # the inverse of sameday_signal_target_on()/OPENCLAW_SAMEDAY_SIGNAL_TARGET)
+    # must mirror production, not a hardcoded EOD-only replay assumption.
     os.environ['OPENCLAW_INTRADAY_REDEPLOY'] = '0'
     os.environ['OPENCLAW_CLOSE_PROXY_SNAPSHOT'] = '0'
     if flag_on: os.environ[bz.BENCH_SIZING_ENV] = '1'
@@ -67,8 +81,20 @@ def _size(nav: float, regime: str, flag_on: bool) -> dict:
     _sizer._post_flatten_alert = lambda *a, **k: None
     _sizer._post_ops_alert = lambda *a, **k: None
     _sizer._maybe_flatten_zero_conviction = lambda *a, **k: None
+    _sizer._check_force_fire_flag = lambda: False  # never consume the one-shot Redis key
     account = {'equity': nav, 'regt_buying_power': 2 * nav, 'long_market_value': 0, 'cash': nav}
-    orders = _sizer.size_positions(signals=[], account_state=account, regime={'state': regime},
+    # In the legacy (non-EOD-register) lane, size_positions runs the cadence
+    # gate over `signals` before it ever reaches the DB-backed book load in
+    # _sharpe_cadence_path (which queries the real active-window/approved-
+    # carried signals independent of this argument). An empty `signals=[]`
+    # would make filter_by_cadence return nothing and size_positions would
+    # return [] early, producing a useless empty diff. This one-element
+    # sentinel plus an empty strategy_state (unknown strategy -> "bootstrap
+    # daily, always pass" in filter_by_cadence) clears that gate without ever
+    # being used as real book content.
+    signals = [{'strategy_id': '__replay__', 'ticker': 'SPY', 'direction': 'LONG',
+                'entry_price': 0.0, 'signal_params': {}}]
+    orders = _sizer.size_positions(signals=signals, account_state=account, regime={'state': regime},
                                    run_date=date.today(), strategy_state={},
                                    regime_params=_regime_params(regime), confirmer=lambda p: {})
     return {o['ticker']: float(o['target_usd']) for o in orders
