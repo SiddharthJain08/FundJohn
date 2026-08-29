@@ -129,9 +129,15 @@ def adaptive_alpha(n_obs: int) -> float:
 
 def blend_similarity(overlap: dict[str, dict[str, float]],
                      return_corr: dict[str, dict[str, float]],
-                     n_obs_per_pair: dict[tuple, int]) -> dict[str, dict[str, float]]:
+                     n_obs_per_pair: dict[tuple, int],
+                     bench_ids: set | None = None) -> dict[str, dict[str, float]]:
     """Per-pair convex blend: (1-alpha)*overlap + alpha*return_corr, alpha=adaptive_alpha(n_obs).
-    Overlap LEADS; return-corr enters only as joint history accrues. Diagonal 1.0."""
+    Overlap LEADS; return-corr enters only as joint history accrues. Diagonal 1.0.
+    bench_ids (spec 2026-08-29 D9): for a pair with a benchmark sleeve on either
+    side and n_obs >= ALPHA_FULL_OBS, the similarity is the return-correlation
+    ALONE — the co-firing leg reads a single-ticker beta sleeve as near-orthogonal
+    to everything and would over-credit diversification on the SPY long side."""
+    bench_ids = set(bench_ids or ())
     strats = sorted(overlap.keys())
     out: dict[str, dict[str, float]] = {s: {} for s in strats}
     for a in strats:
@@ -141,7 +147,11 @@ def blend_similarity(overlap: dict[str, dict[str, float]],
                 continue
             o = overlap.get(a, {}).get(b, 0.0)
             r = return_corr.get(a, {}).get(b, SPARSE_DEFAULT)
-            al = adaptive_alpha(n_obs_per_pair.get((a, b), 0))
+            n = n_obs_per_pair.get((a, b), 0)
+            if bench_ids and (a in bench_ids or b in bench_ids) and n >= ALPHA_FULL_OBS:
+                out[a][b] = r
+                continue
+            al = adaptive_alpha(n)
             out[a][b] = (1.0 - al) * o + al * r
     return out
 
@@ -352,7 +362,8 @@ def _eff_sharpe_by_strat(regime_state: str) -> dict[str, float]:
 
 
 def similarity_for_regime(regime_state: str, window_days: int = DEFAULT_WINDOW_DAYS,
-                          cofiring=None, returns=None) -> dict[str, dict[str, float]]:
+                          cofiring=None, returns=None,
+                          bench_ids=None) -> dict[str, dict[str, float]]:
     """Blended similarity matrix for one regime's strategy set (union of co-firing + returns keys)."""
     cofiring = cofiring if cofiring is not None else _cofiring_sets_by_regime(window_days).get(regime_state, {})
     returns = returns if returns is not None else _returns_by_regime(window_days).get(regime_state, {})
@@ -364,13 +375,14 @@ def similarity_for_regime(regime_state: str, window_days: int = DEFAULT_WINDOW_D
     return blend_similarity(
         {a: {b: overlap.get(a, {}).get(b, 1.0 if a == b else 0.0) for b in strats} for a in strats},
         {a: {b: retcorr.get(a, {}).get(b, 1.0 if a == b else SPARSE_DEFAULT) for b in strats} for a in strats},
-        n_obs)
+        n_obs, bench_ids=bench_ids)
 
 
 def similarity_for_regime_backtest(regime_state: str,
                                    window_days: int = DEFAULT_WINDOW_DAYS,
                                    live_cofiring=None, bt_cofiring=None,
-                                   bt_universes=None, bt_returns=None
+                                   bt_universes=None, bt_returns=None,
+                                   bench_ids=None
                                    ) -> dict[str, dict[str, float]]:
     """Backtest-sourced similarity (spec 2026-08-05 §3.1): replace ONE leg, not both.
 
@@ -414,7 +426,7 @@ def similarity_for_regime_backtest(regime_state: str,
     return blend_similarity(
         {a: {b: _pair_overlap(a, b) for b in strats} for a in strats},
         {a: {b: retcorr.get(a, {}).get(b, 1.0 if a == b else SPARSE_DEFAULT) for b in strats} for a in strats},
-        n_obs)
+        n_obs, bench_ids=bench_ids)
 
 
 def resolve_source(source: Optional[str] = None) -> str:
@@ -513,6 +525,8 @@ def rebuild(trigger: str = 'manual', window_days: int = DEFAULT_WINDOW_DAYS,
     OPENCLAW_SIMILARITY_SOURCE so the cutover is an .env flip."""
     import json
     src = resolve_source(source)
+    from execution.benchmark_sleeve import load_benchmark_sleeve_ids
+    bench_ids = load_benchmark_sleeve_ids()
     cof = _cofiring_sets_by_regime(window_days)
     rets = _returns_by_regime(window_days) if src == 'live' else None
     bt_sets = bt_unis = bt_rets = None
@@ -540,14 +554,16 @@ def rebuild(trigger: str = 'manual', window_days: int = DEFAULT_WINDOW_DAYS,
                 if src == 'live':
                     sim = similarity_for_regime(regime, window_days,
                                                 cofiring=cof.get(regime, {}),
-                                                returns=rets.get(regime, {}))
+                                                returns=rets.get(regime, {}),
+                                                bench_ids=bench_ids)
                 else:
                     sim = similarity_for_regime_backtest(
                         regime, window_days,
                         live_cofiring=cof.get(regime, {}),
                         bt_cofiring=bt_sets.get(regime, {}),
                         bt_universes=bt_unis.get(regime, {}),
-                        bt_returns=bt_rets.get(regime, {}))
+                        bt_returns=bt_rets.get(regime, {}),
+                        bench_ids=bench_ids)
                 if not sim:
                     summary[regime] = {'strategies': 0}
                     continue
@@ -805,6 +821,7 @@ def shadow_report(window_days: int = DEFAULT_WINDOW_DAYS, sadj_days: int = 7) ->
     """Spec 2026-08-05 §3.3 — compare the LIVE current matrix (what the sizer
     uses today) against the backtest-sourced build, per regime. WRITES NOTHING.
     The comparison is the deliverable; §3.5 gates the cutover on it."""
+    from execution.benchmark_sleeve import load_benchmark_sleeve_ids
     live_cof = _cofiring_sets_by_regime(window_days)
     bt_sets, bt_unis = _cofiring_sets_by_regime_backtest()
     bt_rets = _returns_by_regime_backtest()
@@ -816,7 +833,8 @@ def shadow_report(window_days: int = DEFAULT_WINDOW_DAYS, sadj_days: int = 7) ->
             live_cofiring=live_cof.get(regime, {}),
             bt_cofiring=bt_sets.get(regime, {}),
             bt_universes=bt_unis.get(regime, {}),
-            bt_returns=bt_rets.get(regime, {}))
+            bt_returns=bt_rets.get(regime, {}),
+            bench_ids=load_benchmark_sleeve_ids())
         weights = _current_weight_rows(regime)
         weighted = sorted(set(weights))
 
