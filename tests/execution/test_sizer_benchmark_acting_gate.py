@@ -48,7 +48,8 @@ def run(monkeypatch, rows, carried, bench_ids, params=None):
     monkeypatch.setattr(_sizer, '_post_corr_cumsharpe_log', lambda line: None)
     monkeypatch.setattr(_sizer, '_maybe_flatten_zero_conviction', lambda *a, **k: None)
     with _mock.patch('execution.strategy_weights.load_current', return_value=list(rows)), \
-         _mock.patch('execution.benchmark_sleeve.load_benchmark_sleeve_ids', return_value=set(bench_ids)):
+         _mock.patch('execution.benchmark_sleeve.load_benchmark_sleeve_ids', return_value=set(bench_ids)), \
+         _mock.patch('execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing', return_value=None):
         return _sizer.size_positions(signals=[], account_state=_account(), regime={'state': 'LOW_VOL'},
                                      run_date=date(2026, 8, 29), strategy_state={},
                                      regime_params=params or _params(), confirmer=lambda p: {})

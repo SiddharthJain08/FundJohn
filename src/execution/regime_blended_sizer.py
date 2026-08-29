@@ -1711,6 +1711,26 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.info('bench_sleeve: %d benchmark ticker(s) %s from sleeves %s',
                     len(_bench_tkrs), sorted(_bench_tkrs), sorted(_bench_ids))
 
+    # Rule C — benchmark-relative sizing (spec 2026-08-29 §2.5). Alpha tickers
+    # are sized on |S_adj| − S_m (sign preserved), benchmark tickers keep S_adj.
+    # SHADOW unless OPENCLAW_BENCH_RELATIVE_SIZING=1. Whole block fail-open.
+    try:
+        from execution import benchmark_sizing as _bsz
+        _s_m = _bsz.regime_benchmark_sharpe_for_sizing(regime_state, date.today())
+        _hurdled, _bench_dropped = _bsz.apply_benchmark_hurdle(dict(ticker_w), _s_m, _bench_tkrs)
+        _bench_on = _bsz.bench_relative_sizing_enabled()
+        _bline = _bsz.shadow_line(regime_state, _s_m, dict(ticker_w), _hurdled, _bench_dropped,
+                                  _bench_tkrs, lam * nav, mode='apply' if _bench_on else 'shadow')
+        logger.info(_bline)
+        if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
+            _post_corr_cumsharpe_log(_bline)
+        if _bench_on:
+            for _t in _bench_dropped:
+                ticker_meta.pop(_t, None)
+            ticker_w = defaultdict(float, _hurdled)
+    except Exception as e:
+        logger.warning('bench_sizing: failed (%s: %s); sizing on raw S_adj', type(e).__name__, e)
+
     # Acting-strategy gate: drop tickers fewer than `min_acting` distinct
     # strategies act on in the net direction. At the floor setting (1) the
     # block is skipped — every ticker with a contributor already has ≥1 acting

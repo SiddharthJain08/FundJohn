@@ -47,7 +47,8 @@ def _run(monkeypatch, rows, carried):
     monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: {})
     monkeypatch.setattr(_sizer, '_apply_asset_corr_cap', lambda t, *a, **k: t)
     monkeypatch.setattr(_sizer, '_post_corr_cumsharpe_log', lambda line: None)
-    with _mock.patch('execution.strategy_weights.load_current', return_value=list(rows)):
+    with _mock.patch('execution.strategy_weights.load_current', return_value=list(rows)), \
+         _mock.patch('execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing', return_value=None):
         return _sizer.size_positions(signals=[], account_state=_account(), regime={'state': 'LOW_VOL'},
                                      run_date=date(2026, 8, 29), strategy_state={},
                                      regime_params=_params(), confirmer=lambda p: {})
