@@ -134,6 +134,13 @@ class BaseStrategy(ABC):
     # update_pnl call should_exit() ONLY when this is True. Overriding
     # should_exit without setting the flag is inert by design.
     exit_hook:        bool = False
+    # Benchmark (beta) sleeve — spec docs/specs/2026-08-29-benchmark-relative-
+    # sizing-spec.md §2.4. True marks a strategy whose conviction IS the
+    # market's own regime Sharpe (e.g. S_beta_spy). The sizer reads the
+    # mirrored strategy_registry.parameters.benchmark_sleeve to exempt the
+    # sleeve's tickers from the acting-strategy gate, the S_adj − S_m hurdle
+    # and both caps. Mirroring is done at registration (Task 15 runbook).
+    benchmark_sleeve: bool = False
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
