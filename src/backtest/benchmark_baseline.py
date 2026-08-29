@@ -1,10 +1,11 @@
 """benchmark_baseline.py — regime-conditioned benchmark (SPY) Sharpe baseline.
 
-The module computes the benchmark's (SPY) annualized Sharpe over days tagged
-with each regime. Since 2026-08-29 (spec docs/specs/2026-08-29-benchmark-
-relative-sizing-spec.md D1/§2.5), its ONLY consumer is sizing: the per-ticker
-hurdle `S_adj − S_m` in execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing,
-plus the informational `strategy_backtest_regimes.benchmark_sharpe` column written
+The module computes the benchmark's (SPY) forward, entry-tagged excess Sharpe
+(rf 5 %) per regime and holding horizon — the engine's own sleeve estimator
+applied to synthetic benchmark lots (Amendment 1, 2026-08-29). Since
+2026-08-29 its ONLY consumer is sizing: the per-ticker hurdle `S_adj − S_m`
+in execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing, plus the
+informational `strategy_backtest_regimes.benchmark_sharpe` column written
 by unified_backtest.py. It gates nothing (pre-2026-08-29 promotion gate removed).
 
 Data sources (inspected 2026-08-24):
@@ -55,6 +56,16 @@ TRADING_DAYS_PER_YEAR = 252
 # holidays mean a handful of trading days can span >7 calendar days).
 _LOOKBACK_CALENDAR_DAYS = 10
 
+# Amendment 1 (spec docs/specs/2026-08-29-bench-sizing-amendment-1-spec.md D-A1..A3).
+# rf mirrors unified_backtest.RISK_FREE_DAILY (declared locally: this module is
+# deliberately import-free of the backtest engine; equality is unit-tested).
+RISK_FREE_ANNUAL = 0.05
+RISK_FREE_DAILY = RISK_FREE_ANNUAL / TRADING_DAYS_PER_YEAR
+# Horizon grid (trading days a synthetic benchmark lot is held). The sizer
+# selects one column via pipeline_config['benchmark_horizon_days'] (default 1).
+BENCH_HORIZONS = (1, 2, 3, 5, 10, 21)
+DEFAULT_HORIZON = 1
+
 
 def _to_date_str(d) -> str:
     """Normalize a date-like (str / datetime.date / datetime.datetime /
@@ -102,19 +113,43 @@ def load_benchmark_closes(start_date, end_date, benchmark: str) -> dict[str, flo
     return dict(zip(df["date"].astype(str), df["close"].astype(float)))
 
 
-def regime_benchmark_sharpe(start_date, end_date,
-                            benchmark: str = "SPY",
-                            min_obs: int = 40) -> dict[str, float | None]:
-    """Annualized Sharpe (mean/std * sqrt(252), rf=0) of the benchmark's
-    close-to-close daily returns computed separately over the days tagged
-    with each regime in [start_date, end_date].
+def _excess_sharpe(rets: list[float], min_obs: int) -> float | None:
+    """(mean − rf_daily) / std(ddof=1) · √252 — the estimator
+    unified_backtest.aggregate_metrics applies to a sleeve's daily-marks
+    equity curve. None when thin (< min_obs) or degenerate (zero variance)."""
+    n = len(rets)
+    if n < max(min_obs, 2):
+        return None
+    mean = sum(rets) / n
+    var = sum((x - mean) ** 2 for x in rets) / (n - 1)
+    std = math.sqrt(var)
+    if std <= 1e-9:
+        return None
+    return (mean - RISK_FREE_DAILY) / std * math.sqrt(TRADING_DAYS_PER_YEAR)
 
-    Regime tags: data/master/historical_regimes.parquet. Prices:
-    data/master/prices.parquet sliced via pyarrow filters. Regimes with
-    < min_obs tagged days (i.e. fewer than min_obs usable close-to-close
-    returns falling on that regime's tagged days) -> None.
 
-    Returns {} on any load failure (logged) — callers fail open.
+def regime_benchmark_sharpe_by_horizon(start_date, end_date,
+                                       benchmark: str = "SPY",
+                                       min_obs: int = 40,
+                                       horizons=BENCH_HORIZONS) -> dict[str, dict[int, float | None]]:
+    """Forward, entry-tagged benchmark Sharpe per (regime, horizon).
+
+    For each canonical regime and each H in `horizons`: a synthetic lot of
+    `benchmark` is entered at the close of EVERY day tagged with that regime
+    and held exactly H trading days (no stop/target/cost). The statistic is
+    the engine's sleeve estimator (see _excess_sharpe) over the benchmark's
+    close-to-close return on every trading day on which at least one such
+    lot is open (the equal-weight daily-marks union — identical lots make the
+    equal-weight average the plain return). For H = 1 the day set is exactly
+    {t+1 : regime(t) = R}: the return a close-of-day decision can capture.
+
+    Pre-amendment this module scored the return ON the tagged day (same-day
+    VIX tag ⇒ selection on the outcome, corr(SPY ret, ΔVIX) ≈ −0.79) with
+    rf = 0; that statistic (LOW_VOL ≈ 2.0) is not tradeable and is gone.
+
+    Returns {} on any load failure (logged) — callers fail open. Every
+    canonical regime is present in the result; a (regime, H) with fewer than
+    `min_obs` mark-days (or zero variance) is None.
     """
     try:
         tags = load_regime_tags(start_date, end_date)
@@ -128,24 +163,40 @@ def regime_benchmark_sharpe(start_date, end_date,
         return {}
 
     dates = sorted(closes)
-    by_regime: dict[str, list[float]] = {r: [] for r in CANONICAL_REGIMES}
-    for i in range(1, len(dates)):
-        d0, d1 = dates[i - 1], dates[i]
-        p0, p1 = closes[d0], closes[d1]
-        if not (p0 and p0 == p0 and p1 == p1):     # skip zero/NaN closes
-            continue
-        regime = tags.get(d1)
-        if regime in by_regime:
-            by_regime[regime].append(p1 / p0 - 1.0)
+    n = len(dates)
+    # rets[i] = close-to-close return INTO dates[i]; None for the first day / bad closes.
+    rets: list[float | None] = [None] * n
+    for i in range(1, n):
+        p0, p1 = closes[dates[i - 1]], closes[dates[i]]
+        if p0 and p0 == p0 and p1 == p1 and p0 > 0:
+            rets[i] = p1 / p0 - 1.0
 
-    out: dict[str, float | None] = {}
-    for regime, rets in by_regime.items():
-        n = len(rets)
-        if n < min_obs:
-            out[regime] = None
-            continue
-        mean = sum(rets) / n
-        var = sum((x - mean) ** 2 for x in rets) / (n - 1) if n > 1 else 0.0
-        std = math.sqrt(var)
-        out[regime] = (mean / std * math.sqrt(TRADING_DAYS_PER_YEAR)) if std > 1e-9 else None
+    hs = sorted({int(h) for h in horizons if int(h) >= 1})
+    out: dict[str, dict[int, float | None]] = {r: {} for r in CANONICAL_REGIMES}
+    for regime in CANONICAL_REGIMES:
+        entries = [i for i, d in enumerate(dates) if tags.get(d) == regime]
+        for h in hs:
+            marked: set[int] = set()
+            for i in entries:
+                for k in range(1, h + 1):
+                    j = i + k
+                    if j >= n:
+                        break
+                    marked.add(j)
+            xs = [rets[j] for j in sorted(marked) if rets[j] is not None]
+            out[regime][h] = _excess_sharpe(xs, min_obs)
     return out
+
+
+def regime_benchmark_sharpe(start_date, end_date,
+                            benchmark: str = "SPY",
+                            min_obs: int = 40) -> dict[str, float | None]:
+    """Flat {regime: Sharpe | None} = the DEFAULT_HORIZON (H = 1) column of
+    regime_benchmark_sharpe_by_horizon. Signature and shape unchanged for
+    unified_backtest's informational strategy_backtest_regimes.benchmark_sharpe
+    write. {} on load failure."""
+    by_h = regime_benchmark_sharpe_by_horizon(start_date, end_date, benchmark=benchmark,
+                                              min_obs=min_obs, horizons=(DEFAULT_HORIZON,))
+    if not by_h:
+        return {}
+    return {r: (by_h.get(r) or {}).get(DEFAULT_HORIZON) for r in CANONICAL_REGIMES}

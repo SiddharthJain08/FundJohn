@@ -1401,18 +1401,13 @@ def run_backtest(strategy_id: str, *,
         except Exception as _e:
             _log(f'[tail_stats] skipped: {type(_e).__name__}: {_e}')
 
-        # Benchmark-relative promotion criterion (task R1, 2026-08-24
-        # five-repo-adoptions): regime-conditioned SPY Sharpe baseline,
-        # computed ONCE per run (cached in this dict, not per-regime-row) via
-        # src/backtest/benchmark_baseline.py. Feeds
-        # strategy_backtest_regimes.benchmark_sharpe (migration 149), read by
-        # regime_qualification.qualifies_regime (python) and
-        # promotion_service.js judgeRegimeSleeve (JS) as the excess-Sharpe-
-        # over-benchmark gate leg. try/except non-fatal — a missing/broken
-        # benchmark must never fail a backtest run (fail-open contract; see
-        # benchmark_baseline module docstring). regime_benchmark_sharpe
-        # itself also fails open (returns {} / per-regime None), so this
-        # try/except only guards the import + call plumbing.
+        # strategy_backtest_regimes.benchmark_sharpe (migration 149) — INFORMATIONAL
+        # since 2026-08-29 (the R1 gate leg was removed from promotion/activation;
+        # nothing reads it as a gate). Value = benchmark_baseline.regime_benchmark_sharpe
+        # = SPY's next-day (H=1) excess Sharpe after closes tagged with the regime,
+        # over this run's window (Amendment 1 spec D-A2). Computed ONCE per run.
+        # try/except non-fatal — a missing/broken benchmark must never fail a
+        # backtest run (fail-open contract; see benchmark_baseline module docstring).
         _benchmark_sharpe_by_regime: dict[str, float] = {}
         try:
             from backtest.benchmark_baseline import regime_benchmark_sharpe
