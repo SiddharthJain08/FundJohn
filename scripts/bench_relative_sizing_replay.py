@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """bench_relative_sizing_replay.py — size today's book twice, flag OFF and ON,
-and print the per-ticker diff. READ-ONLY: no DB writes, no broker calls, no
-Discord posts, no Redis mutation. Six sizer names are stubbed to no-ops —
+and print the per-ticker diff. READ-ONLY: no broker calls, no Discord posts,
+no Redis mutation; the ONLY DB write is the idempotent
+`pipeline_config.benchmark_regime_sharpe` day-cache the live sizer writes
+anyway (all four regimes, keyed on today's date — the `--regime` override
+cannot corrupt it). Six sizer names are stubbed to no-ops —
 `_load_broker_positions_usd` (broker positions -> {} so orders == targets),
 `_post_corr_cumsharpe_log`, `_post_flatten_alert`, `_post_ops_alert`,
 `_maybe_flatten_zero_conviction`, and `_check_force_fire_flag` (the sizer's

@@ -32,10 +32,15 @@ def _row(sid, eff):
     return {'strategy_id': sid, 'daily_weight': eff, 'effective_sharpe': eff, 'cadence_days': 21.0, 'bt_n': 600}
 
 
-def run(monkeypatch, rows, carried, corr_spy=None):
+def run(monkeypatch, rows, carried, corr_spy=None, bench_flag='1'):
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
     monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')
-    monkeypatch.setenv(bz.BENCH_SIZING_ENV, '1')
+    # B3 (final fix wave, 2026-08-29): the cap/cluster-cap exemptions are
+    # gated on this flag; bench_flag=None exercises them OFF (test below).
+    if bench_flag is None:
+        monkeypatch.delenv(bz.BENCH_SIZING_ENV, raising=False)
+    else:
+        monkeypatch.setenv(bz.BENCH_SIZING_ENV, bench_flag)
     for g in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_CORR_WEIGHT', 'OPENCLAW_STRATEGY_ORTHO_SHADOW',
               'OPENCLAW_STRATEGY_BRACKET_STACK', 'OPENCLAW_OPTION_DELTA_HEDGE', 'OPENCLAW_TRADE_WEIGHT_FACTOR',
               'OPENCLAW_INTRADAY_REDEPLOY'):
@@ -77,6 +82,23 @@ def test_cluster_cap_receives_exclude_set(monkeypatch):
     run(monkeypatch, [_row('S_beta_spy', 2.0), _row('S_hi', 2.6)],
         [_carried('S_beta_spy', 'SPY'), _carried('S_hi', 'ZZTA')], corr_spy=spy)
     assert seen['exclude'] == {'SPY'}
+
+
+def test_cap_exemptions_inert_with_flag_off(monkeypatch):
+    # B3: OPENCLAW_BENCH_RELATIVE_SIZING unset -> _bench_exempt is empty even
+    # though SPY is still a registered, net-direction-qualified benchmark
+    # ticker (bench_sleeve mock unchanged) -> SPY IS capped like any alpha
+    # ticker, and the cluster cap receives an empty exclude set.
+    seen = {}
+    def spy(target_usd, conviction, nav, lam=1.0, exclude=None):
+        seen['exclude'] = set(exclude or ()); return target_usd
+    t = targets(run(monkeypatch, [_row('S_beta_spy', 2.0), _row('S_hi', 2.6)],
+                    [_carried('S_beta_spy', 'SPY'), _carried('S_hi', 'ZZTA')],
+                    corr_spy=spy, bench_flag=None))
+    # No hurdle applied either (flag off): raw S_adj shares 2.0:2.6, gross 4.6.
+    # Raw SPY share = LAM*NAV*2.0/4.6 ≈ 86,957 > cap of CAP*(2+1)*LAM*NAV = 60,000.
+    assert abs(t['SPY'] - CAP * (2.0 + 1.0) * LAM * NAV) < 1e-6
+    assert seen['exclude'] == set()
 
 
 def test_apply_asset_corr_cap_reinserts_excluded_untouched(monkeypatch):

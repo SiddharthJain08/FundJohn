@@ -37,3 +37,17 @@ def test_no_bench_ids_is_byte_identical():
     a = ss.blend_similarity(OVERLAP, RET, _nobs(200))
     b = ss.blend_similarity(OVERLAP, RET, _nobs(200), bench_ids=set())
     assert a == b
+
+
+def test_bench_ids_for_rebuild_gated_on_flag(monkeypatch):
+    # B3 (final fix wave, 2026-08-29): rebuild()/shadow_report() must not
+    # pass real bench_ids into the D9 similarity rule until rule C itself is
+    # live (OPENCLAW_BENCH_RELATIVE_SIZING=1) -- otherwise the similarity
+    # exemption goes live ahead of the hurdle flip.
+    monkeypatch.delenv('OPENCLAW_BENCH_RELATIVE_SIZING', raising=False)
+    assert ss._bench_ids_for_rebuild() == set()
+
+    monkeypatch.setattr('execution.benchmark_sleeve.load_benchmark_sleeve_ids',
+                        lambda conn=None: {'S_beta_spy'})
+    monkeypatch.setenv('OPENCLAW_BENCH_RELATIVE_SIZING', '1')
+    assert ss._bench_ids_for_rebuild() == {'S_beta_spy'}

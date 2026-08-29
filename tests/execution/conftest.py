@@ -32,3 +32,14 @@ def _deterministic_sizer_gates(monkeypatch):
     # pure legacy-flag semantics for the suite; §8's own tests set both
     # explicitly.
     monkeypatch.delenv('OPENCLAW_SAMEDAY_SIGNAL_TARGET', raising=False)
+    # A1 (final fix wave, 2026-08-29): _sharpe_cadence_path now calls these
+    # two on every cycle. The S_m provider (regime_benchmark_sharpe_for_sizing)
+    # opens its own psycopg2.connect(POSTGRES_URI) on a cache miss and does an
+    # INSERT ... ON CONFLICT DO UPDATE + commit() on pipeline_config; the
+    # sleeve loader (load_benchmark_sleeve_ids) also opens a connection. Stub
+    # both so sizer tests that don't already patch them stay DB-free and
+    # deterministic (no benchmark tickers, no hurdle). Tests that need the
+    # real behaviour patch these explicitly (`with _mock.patch(...)`), which
+    # overrides this fixture for the duration of the `with` block.
+    monkeypatch.setattr('execution.benchmark_sleeve.load_benchmark_sleeve_ids', lambda conn=None: set())
+    monkeypatch.setattr('execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing', lambda *a, **k: None)

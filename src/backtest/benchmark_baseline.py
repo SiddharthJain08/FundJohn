@@ -26,10 +26,13 @@ data/master/*.parquet files.
 Fail-open contract (binding, per task brief): every failure mode here
 resolves to either `{}` (whole-window load failure — logged) or `None` for
 an individual regime (thin/no data for that regime), NEVER a raised
-exception past regime_benchmark_sharpe. Callers (regime_qualification.py /
+exception past regime_benchmark_sharpe. Callers
+(execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing /
 unified_backtest.py) MUST treat both as "skip the benchmark criterion for
-this regime" — a sleeve with no benchmark value never blocks on infra
-absence.
+this regime": regime_benchmark_sharpe_for_sizing returns None (the sizer
+sizes on raw S_adj) and unified_backtest.py writes a NULL
+strategy_backtest_regimes.benchmark_sharpe column — a sleeve with no
+benchmark value never blocks on infra absence.
 """
 from __future__ import annotations
 
@@ -117,10 +120,10 @@ def regime_benchmark_sharpe(start_date, end_date,
         tags = load_regime_tags(start_date, end_date)
         closes = load_benchmark_closes(start_date, end_date, benchmark)
     except Exception as e:
-        logger.warning("[bench_gate] benchmark load failed: %s: %s", type(e).__name__, e)
+        logger.warning("[bench_baseline] benchmark load failed: %s: %s", type(e).__name__, e)
         return {}
     if not tags or not closes:
-        logger.warning("[bench_gate] benchmark load returned no data "
+        logger.warning("[bench_baseline] benchmark load returned no data "
                         "(regime_tags=%d benchmark_closes=%d)", len(tags), len(closes))
         return {}
 

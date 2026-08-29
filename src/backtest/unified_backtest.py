@@ -1418,7 +1418,7 @@ def run_backtest(strategy_id: str, *,
             from backtest.benchmark_baseline import regime_benchmark_sharpe
             _benchmark_sharpe_by_regime = regime_benchmark_sharpe(start_dt, end_dt) or {}
         except Exception as _e:
-            _log(f'[bench_gate] persist skipped: {_e}')
+            _log(f'[bench_baseline] persist skipped: {_e}')
 
         # 2026-05-19: always write a row per canonical regime, even when
         # the strategy produced 0 trades in that regime. The dashboard's

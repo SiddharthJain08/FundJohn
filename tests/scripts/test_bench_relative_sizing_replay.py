@@ -35,6 +35,24 @@ def test_size_wiring(monkeypatch):
     monkeypatch.setattr(_sizer, 'size_positions', _spy)
     monkeypatch.setenv('OPENCLAW_SAMEDAY_SIGNAL_TARGET', '1')
 
+    # A3 (final fix wave, 2026-08-29): _size() rebinds these six sizer attrs
+    # and sets os.environ directly (not via monkeypatch), and this test calls
+    # _size() twice — so without priming monkeypatch here, the stubs/env
+    # written by the FIRST call leak into the rest of the pytest process.
+    # `monkeypatch.setattr(_sizer, name, getattr(_sizer, name))` records the
+    # CURRENT attribute (the real function, since _size hasn't run yet) so
+    # monkeypatch restores it at teardown regardless of what _size() later
+    # assigns directly; same trick for the env vars _size() writes with
+    # `os.environ[...] = ...`.
+    for _name in ('_load_broker_positions_usd', '_post_corr_cumsharpe_log', '_post_flatten_alert',
+                  '_post_ops_alert', '_maybe_flatten_zero_conviction', '_check_force_fire_flag'):
+        monkeypatch.setattr(_sizer, _name, getattr(_sizer, _name))
+    for _env in ('OPENCLAW_BENCH_RELATIVE_SIZING', 'OPENCLAW_INTRADAY_REDEPLOY', 'OPENCLAW_CLOSE_PROXY_SNAPSHOT'):
+        if _env in os.environ:
+            monkeypatch.setenv(_env, os.environ[_env])
+        else:
+            monkeypatch.delenv(_env, raising=False)
+
     result = mod._size(100_000.0, 'LOW_VOL', False)
 
     assert result == {'SPY': 1.0}

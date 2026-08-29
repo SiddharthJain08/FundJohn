@@ -1705,29 +1705,54 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # the loader). Used by the acting gate below, the S_adj − S_m hurdle and
     # both caps further down.
     from execution import benchmark_sleeve as _bsl
+    from execution import benchmark_sizing as _bsz
     _bench_ids = _bsl.load_benchmark_sleeve_ids()
     _bench_tkrs = _bsl.benchmark_tickers(ticker_meta, _bench_ids, net_sign=_net_sign)
     if _bench_tkrs:
         logger.info('bench_sleeve: %d benchmark ticker(s) %s from sleeves %s',
                     len(_bench_tkrs), sorted(_bench_tkrs), sorted(_bench_ids))
+    # B3 (final fix wave, 2026-08-29): the per-ticker cap exemption and the
+    # cluster-cap exclude= below must NOT go live before rule C itself does —
+    # otherwise the promotion of S_beta_spy silently uncaps the beta sleeve
+    # while the hurdle is still SHADOW. The acting-gate exemption (below) is
+    # deliberately EXCLUDED from this gate (ungated, by ruling): the promoted
+    # sleeve should appear, cap-bounded, ahead of the flip.
+    _bench_exempt = _bench_tkrs if _bsz.bench_relative_sizing_enabled() else set()
 
     # Rule C — benchmark-relative sizing (spec 2026-08-29 §2.5). Alpha tickers
     # are sized on |S_adj| − S_m (sign preserved), benchmark tickers keep S_adj.
     # SHADOW unless OPENCLAW_BENCH_RELATIVE_SIZING=1. Whole block fail-open.
+    # _bench_applied_dropped defaults to 0 here (not inside the try) so the
+    # name always exists for the "no tickers cleared the acting-strategy gate"
+    # branch below, even if this block raises before assigning it.
+    _bench_applied_dropped = 0
     try:
-        from execution import benchmark_sizing as _bsz
         _s_m = _bsz.regime_benchmark_sharpe_for_sizing(regime_state, date.today())
-        _hurdled, _bench_dropped = _bsz.apply_benchmark_hurdle(dict(ticker_w), _s_m, _bench_tkrs)
+        _before = dict(ticker_w)
+        _hurdled, _bench_dropped = _bsz.apply_benchmark_hurdle(_before, _s_m, _bench_tkrs)
         _bench_on = _bsz.bench_relative_sizing_enabled()
-        _bline = _bsz.shadow_line(regime_state, _s_m, dict(ticker_w), _hurdled, _bench_dropped,
-                                  _bench_tkrs, lam * nav, mode='apply' if _bench_on else 'shadow')
+        # B1 (final fix wave, controller ruling — D5's premise is beta as the
+        # base): flag ON with NO net-direction-qualified benchmark ticker this
+        # cycle (sleeve silent, or net-cancelled) must NOT apply the hurdle —
+        # a healthy day where every alpha sits at/below S_m would otherwise
+        # empty ticker_w straight into the ARMED zero-conviction flatten with
+        # no beta base to fall back on. Only apply when both the flag is ON
+        # AND there is at least one qualified benchmark ticker.
+        _apply_hurdle = _bench_on and bool(_bench_tkrs)
+        _bline = _bsz.shadow_line(regime_state, _s_m, _before, _hurdled, _bench_dropped,
+                                  _bench_tkrs, lam * nav, mode='apply' if _apply_hurdle else 'shadow')
         logger.info(_bline)
         if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
             _post_corr_cumsharpe_log(_bline)
-        if _bench_on:
+        if _bench_on and not _bench_tkrs:
+            logger.warning('bench_sizing: flag ON but no net-direction-qualified benchmark ticker '
+                           'this cycle; rule C NOT applied (sized on raw S_adj) — '
+                           'dropped-if-applied=%d/%d', len(_bench_dropped), len(_before))
+        if _apply_hurdle:
             for _t in _bench_dropped:
                 ticker_meta.pop(_t, None)
             ticker_w = defaultdict(float, _hurdled)
+            _bench_applied_dropped = len(_bench_dropped)
     except Exception as e:
         logger.warning('bench_sizing: failed (%s: %s); sizing on raw S_adj', type(e).__name__, e)
 
@@ -1736,7 +1761,10 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # block is skipped — every ticker with a contributor already has ≥1 acting
     # strategy, so the book is byte-identical to the pre-gate behaviour.
     # Benchmark tickers that are net-direction-qualified (spec §2.4 i) are
-    # exempt (their conviction is the market's own).
+    # exempt (their conviction is the market's own). Deliberately UNGATED on
+    # OPENCLAW_BENCH_RELATIVE_SIZING (B3 ruling, unlike the two caps below and
+    # the D9 similarity rule): the promoted sleeve should appear here,
+    # cap-bounded, ahead of the rule-C flip.
     if min_acting > MIN_ACTING_STRATEGIES_LO:
         gated_out = [tkr for tkr in list(ticker_w.keys())
                      if acting_n.get(tkr, 0) < min_acting and tkr not in _bench_tkrs]
@@ -1750,7 +1778,14 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
 
     if not ticker_w:
         logger.info('regime_blended_sizer.sharpe_cadence: no tickers cleared the '
-                    'acting-strategy gate (min_acting_strategies=%d)', min_acting)
+                    'acting-strategy gate (min_acting_strategies=%d) bench_dropped=%d',
+                    min_acting, _bench_applied_dropped)
+        # B2 (final fix wave, 2026-08-29): when rule C itself is what emptied
+        # the book (as opposed to the acting-strategy gate above), say so —
+        # otherwise this log + the flatten it triggers misattribute the cause.
+        if _bench_applied_dropped > 0:
+            logger.warning('bench_sizing: rule C emptied the book (dropped %d, bench_tickers=%s) — '
+                           'zero-conviction path follows', _bench_applied_dropped, sorted(_bench_tkrs))
         # FLATTEN-ON-ZERO-CONVICTION (daily lanes only, default-OFF kill-switch). A
         # HEALTHY carried set that is FULLY rejected by the acting-strategy gate
         # means the book has no conviction behind it — go flat rather than silently
@@ -1838,8 +1873,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1' or os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1':
         _capped = []
         for _tkr, _usd in list(target_usd.items()):
-            if _tkr in _bench_tkrs:
-                continue            # spec D6: no beta cap
+            if _tkr in _bench_exempt:
+                continue            # spec D6: no beta cap, gated on OPENCLAW_BENCH_RELATIVE_SIZING (B3)
             _gs = gate_net_sharpe.get(_tkr)
             if _gs is None:
                 continue
@@ -1868,8 +1903,11 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # 2026-08-12), NOT the regime-dampened effective lam used for gross
     # scaling above — the per-regime liquidity_param is a separate de-leverage
     # control, unrelated to λ, and must not shrink the cluster cap.
+    # exclude=_bench_exempt (not the raw _bench_tkrs, B3): the cluster-cap
+    # exemption is gated on OPENCLAW_BENCH_RELATIVE_SIZING like the per-ticker
+    # cap exemption above — both are inert while rule C itself is SHADOW.
     target_usd = _apply_asset_corr_cap(target_usd, gate_net_sharpe, nav,
-                                       lam=lam_global, exclude=_bench_tkrs)
+                                       lam=lam_global, exclude=_bench_exempt)
 
     # SP-5.1b-ii: inject option delta-hedge targets ON TOP of the normalized
     # equity target_usd (post-normalization, cap-exempt). Gate default-OFF:

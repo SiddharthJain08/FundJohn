@@ -516,6 +516,21 @@ def _build_matrix_trigger(trigger: str, lw_g: Optional[float]) -> str:
     return trigger if lw_g is None else f'{trigger}+lw_gamma={lw_g:.6f}'
 
 
+def _bench_ids_for_rebuild() -> set:
+    """B3 (final fix wave, 2026-08-29): the D9 similarity rule — pairs
+    containing a benchmark sleeve use return-correlation only — must not go
+    live before rule C itself does, so gate it on the same env var. Duplicates
+    the 'OPENCLAW_BENCH_RELATIVE_SIZING' literal (see
+    execution.benchmark_sizing.BENCH_SIZING_ENV) rather than importing the
+    sizer stack into the similarity module; the benchmark_sleeve import stays
+    function-local so a similarity rebuild never pays for it while the flag
+    is off."""
+    if os.environ.get('OPENCLAW_BENCH_RELATIVE_SIZING') != '1':
+        return set()
+    from execution.benchmark_sleeve import load_benchmark_sleeve_ids
+    return load_benchmark_sleeve_ids()
+
+
 def rebuild(trigger: str = 'manual', window_days: int = DEFAULT_WINDOW_DAYS,
             verbose: bool = False, source: Optional[str] = None) -> dict:
     """Build per-regime similarity + clusters; persist matrix, fold-groups, factor-blocks, audit.
@@ -525,8 +540,7 @@ def rebuild(trigger: str = 'manual', window_days: int = DEFAULT_WINDOW_DAYS,
     OPENCLAW_SIMILARITY_SOURCE so the cutover is an .env flip."""
     import json
     src = resolve_source(source)
-    from execution.benchmark_sleeve import load_benchmark_sleeve_ids
-    bench_ids = load_benchmark_sleeve_ids()
+    bench_ids = _bench_ids_for_rebuild()
     cof = _cofiring_sets_by_regime(window_days)
     rets = _returns_by_regime(window_days) if src == 'live' else None
     bt_sets = bt_unis = bt_rets = None
@@ -821,7 +835,6 @@ def shadow_report(window_days: int = DEFAULT_WINDOW_DAYS, sadj_days: int = 7) ->
     """Spec 2026-08-05 §3.3 — compare the LIVE current matrix (what the sizer
     uses today) against the backtest-sourced build, per regime. WRITES NOTHING.
     The comparison is the deliverable; §3.5 gates the cutover on it."""
-    from execution.benchmark_sleeve import load_benchmark_sleeve_ids
     live_cof = _cofiring_sets_by_regime(window_days)
     bt_sets, bt_unis = _cofiring_sets_by_regime_backtest()
     bt_rets = _returns_by_regime_backtest()
@@ -834,7 +847,7 @@ def shadow_report(window_days: int = DEFAULT_WINDOW_DAYS, sadj_days: int = 7) ->
             bt_cofiring=bt_sets.get(regime, {}),
             bt_universes=bt_unis.get(regime, {}),
             bt_returns=bt_rets.get(regime, {}),
-            bench_ids=load_benchmark_sleeve_ids())
+            bench_ids=_bench_ids_for_rebuild())
         weights = _current_weight_rows(regime)
         weighted = sorted(set(weights))
 
