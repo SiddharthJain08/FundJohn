@@ -1725,9 +1725,11 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # _bench_applied_dropped defaults to 0 here (not inside the try) so the
     # name always exists for the "no tickers cleared the acting-strategy gate"
     # branch below, even if this block raises before assigning it.
+    # Amendment 1: S_m is forward/entry-tagged at horizon pipeline_config.benchmark_horizon_days (default 1).
     _bench_applied_dropped = 0
     try:
-        _s_m = _bsz.regime_benchmark_sharpe_for_sizing(regime_state, date.today())
+        _h = _bsz.load_benchmark_horizon()
+        _s_m = _bsz.regime_benchmark_sharpe_for_sizing(regime_state, date.today(), horizon=_h)
         _before = dict(ticker_w)
         _hurdled, _bench_dropped = _bsz.apply_benchmark_hurdle(_before, _s_m, _bench_tkrs)
         _bench_on = _bsz.bench_relative_sizing_enabled()
@@ -1740,7 +1742,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         # AND there is at least one qualified benchmark ticker.
         _apply_hurdle = _bench_on and bool(_bench_tkrs)
         _bline = _bsz.shadow_line(regime_state, _s_m, _before, _hurdled, _bench_dropped,
-                                  _bench_tkrs, lam * nav, mode='apply' if _apply_hurdle else 'shadow')
+                                  _bench_tkrs, lam * nav, mode='apply' if _apply_hurdle else 'shadow', h=_h)
         logger.info(_bline)
         if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
             _post_corr_cumsharpe_log(_bline)

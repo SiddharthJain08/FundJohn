@@ -62,29 +62,67 @@ class _Conn:
     def close(self): pass
 
 
-def test_computes_persists_and_reuses_cache():
+def _grid(**cols):
+    """{regime: {H: v}} from per-regime lists over the grid (1,2,3,5,10,21)."""
+    hs = (1, 2, 3, 5, 10, 21)
+    return {r: dict(zip(hs, vals)) for r, vals in cols.items()}
+
+
+def test_computes_persists_schema2_and_reuses_cache():
     calls = []
     def compute(start, end, benchmark='SPY', min_obs=40):
         calls.append((start, end, benchmark))
-        return {'LOW_VOL': 2.03, 'TRANSITIONING': 0.55, 'HIGH_VOL': 0.6, 'CRISIS': None}
+        return _grid(LOW_VOL=[0.80, 0.60, 0.51, 0.57, 0.34, 0.26],
+                     TRANSITIONING=[0.41, 0.25, 0.29, 0.42, 0.52, 0.20],
+                     HIGH_VOL=[0.49, 0.59, 0.87, 1.11, 0.63, 0.73],
+                     CRISIS=[None] * 6)
     store = {}
     conn = _Conn(store)
-    v = bz.regime_benchmark_sharpe_for_sizing('LOW_VOL', date(2026, 8, 29), conn=conn, compute=compute)
-    assert v == 2.03 and calls == [('2016-04-11', '2026-08-29', 'SPY')]
+    v = bz.regime_benchmark_sharpe_for_sizing('LOW_VOL', date(2026, 8, 31), conn=conn, compute=compute)
+    assert v == 0.80 and calls == [('2016-04-11', '2026-08-31', 'SPY')]
     payload = json.loads(store[bz.CONFIG_KEY])
-    assert payload['as_of'] == '2026-08-29' and payload['by_regime']['CRISIS'] is None
-    # second call same day: cache hit, no recompute
-    v2 = bz.regime_benchmark_sharpe_for_sizing('HIGH_VOL', date(2026, 8, 29), conn=conn, compute=compute)
-    assert v2 == 0.6 and len(calls) == 1
+    assert payload['schema'] == bz.CACHE_SCHEMA == 2
+    assert payload['horizons'] == [1, 2, 3, 5, 10, 21]
+    assert payload['by_regime']['LOW_VOL']['5'] == 0.57 and payload['by_regime']['CRISIS']['1'] is None
+    # same day: cache hit, no recompute; explicit horizon selects a column
+    assert bz.regime_benchmark_sharpe_for_sizing('HIGH_VOL', date(2026, 8, 31), conn=conn,
+                                                 compute=compute, horizon=5) == 1.11
+    assert len(calls) == 1
     # a new day recomputes
-    bz.regime_benchmark_sharpe_for_sizing('LOW_VOL', date(2026, 8, 30), conn=conn, compute=compute)
+    bz.regime_benchmark_sharpe_for_sizing('LOW_VOL', date(2026, 9, 1), conn=conn, compute=compute)
     assert len(calls) == 2
+
+
+def test_schema1_cache_is_a_miss_and_is_rewritten():
+    calls = []
+    def compute(start, end, benchmark='SPY', min_obs=40):
+        calls.append(1)
+        return _grid(LOW_VOL=[0.80] * 6, TRANSITIONING=[0.41] * 6, HIGH_VOL=[0.49] * 6, CRISIS=[1.54] * 6)
+    store = {bz.CONFIG_KEY: json.dumps({'as_of': '2026-08-31', 'benchmark': 'SPY', 'start': '2016-04-11',
+                                        'by_regime': {'LOW_VOL': 2.01, 'TRANSITIONING': 0.6,
+                                                      'HIGH_VOL': 0.6, 'CRISIS': 0.73}})}
+    conn = _Conn(store)
+    assert bz.regime_benchmark_sharpe_for_sizing('LOW_VOL', date(2026, 8, 31), conn=conn, compute=compute) == 0.80
+    assert calls == [1]
+    assert json.loads(store[bz.CONFIG_KEY])['schema'] == 2
+
+
+def test_horizon_config_selects_column_and_falls_back_to_1():
+    compute = lambda *a, **k: _grid(LOW_VOL=[0.80, 0.60, 0.51, 0.57, 0.34, 0.26], TRANSITIONING=[None] * 6,
+                                    HIGH_VOL=[None] * 6, CRISIS=[None] * 6)
+    for raw, expected in [('5', 0.57), ('21', 0.26), (None, 0.80), ('7', 0.80), ('abc', 0.80), ('1.0', 0.80)]:
+        store = {}
+        if raw is not None:
+            store[bz.HORIZON_KEY] = raw
+        conn = _Conn(store)
+        assert bz.load_benchmark_horizon(conn=conn) == (int(float(raw)) if raw in ('5', '21', '1.0') else 1)
+        assert bz.regime_benchmark_sharpe_for_sizing('LOW_VOL', date(2026, 8, 31), conn=conn, compute=compute) == expected
 
 
 def test_thin_regime_and_failures_return_none():
     conn = _Conn({})
     assert bz.regime_benchmark_sharpe_for_sizing('CRISIS', date(2026, 8, 29), conn=conn,
-                                                 compute=lambda *a, **k: {'CRISIS': None}) is None
+                                                 compute=lambda *a, **k: _grid(CRISIS=[None] * 6)) is None
     assert bz.regime_benchmark_sharpe_for_sizing('LOW_VOL', date(2026, 8, 29), conn=conn,
                                                  compute=lambda *a, **k: {}) is None
     def boom(*a, **k): raise RuntimeError('parquet gone')
@@ -103,3 +141,13 @@ def test_shadow_line_reports_shares_and_moves():
         'bench_sizing.shadow[LOW_VOL]: S_m=None')
     assert bz.shadow_line('LOW_VOL', 2.0, before, after, dropped, {'SPY'}, 100_000.0, mode='apply').startswith(
         'bench_sizing.apply[')
+
+
+def test_shadow_line_carries_horizon():
+    before = {'SPY': 2.0, 'ZZTA': 2.6, 'ZZTB': 1.5}
+    after, dropped = bz.apply_benchmark_hurdle(before, 0.8, {'SPY'})
+    line = bz.shadow_line('LOW_VOL', 0.8, before, after, dropped, {'SPY'}, lam_nav=100_000.0, h=1)
+    assert line.startswith("bench_sizing.shadow[LOW_VOL]: S_m=0.80 h=1 bench=['SPY']")
+    # h omitted -> byte-identical to the pre-amendment format
+    assert bz.shadow_line('LOW_VOL', 0.8, before, after, dropped, {'SPY'}, 100_000.0).startswith(
+        "bench_sizing.shadow[LOW_VOL]: S_m=0.80 bench=['SPY']")

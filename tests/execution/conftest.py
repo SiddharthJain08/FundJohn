@@ -46,6 +46,9 @@ def _deterministic_sizer_gates(request, monkeypatch):
     # cache-hit/miss, registry parsing); stubbing the subject-under-function
     # out from under its own unit tests would make every one of them
     # vacuously pass/fail against the stub instead of the real body.
+    # load_benchmark_horizon (Amendment 1) also opens a connection on the
+    # 5-min lane; stubbed to 1.
     if request.path.name not in ('test_benchmark_sleeve.py', 'test_benchmark_sizing.py'):
         monkeypatch.setattr('execution.benchmark_sleeve.load_benchmark_sleeve_ids', lambda conn=None: set())
         monkeypatch.setattr('execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing', lambda *a, **k: None)
+        monkeypatch.setattr('execution.benchmark_sizing.load_benchmark_horizon', lambda *a, **k: 1)
