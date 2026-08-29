@@ -9979,8 +9979,12 @@ async function _stPaintExpand(sid) {
     const sharpe = b.sharpe != null ? parseFloat(b.sharpe) : null;
     const winPct = b.hit_rate != null ? Math.round(b.hit_rate * 100) : null;
     // Additional per-regime risk metrics (operator 2026-07-27): effective
-    // Sharpe (matches the By-Regime cells + row Eff.Sharpe), Calmar (the
-    // DD-gate escape-hatch metric) and Max DD (the ceiling it escapes).
+    // Sharpe — since 2026-08-29 (spec D2) the three sources (this cell,
+    // blendScope's row Eff.Sharpe, strategy_weights.daily_weight) agree
+    // again: all raw sleeve Sharpe by default, all reverting to sharpe /
+    // sqrt(avg holding days) together under
+    // OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM=1 — Calmar (the DD-gate
+    // escape-hatch metric) and Max DD (the ceiling it escapes).
     const effSh  = _effSharpeOf(b);
     const calmar = b.calmar != null ? parseFloat(b.calmar) : null;
     const maxDd  = b.max_dd_pct != null ? parseFloat(b.max_dd_pct) : null;

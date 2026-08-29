@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'src'))
 
 from execution.oue_classifier import classify          # noqa: E402
+from execution.strategy_weights import CADENCE_WEIGHT_NORM_ENV  # noqa: E402
 from strategies import historical_regimes               # noqa: E402
 
 PRICES_PARQUET = ROOT / 'data' / 'master' / 'prices.parquet'
@@ -55,10 +56,16 @@ from backtest.unified_backtest import _portfolio_daily_returns   # noqa: E402
 
 
 def effective_sharpe(total_sharpe: Optional[float], cadence_days: Optional[float]) -> Optional[float]:
-    """Sharpe / sqrt(cadence). cadence floored at 1 day."""
+    """Raw total_sharpe by default (cadence normalization retired 2026-08-29,
+    spec D2 — see execution.strategy_weights.CADENCE_WEIGHT_NORM_ENV and
+    ._regime_weight, the sizer's equivalent). Only under
+    OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM=1 does this divide by sqrt(cadence)
+    (cadence floored at 1 day) to restore the legacy formula."""
     if total_sharpe is None:
         return None
-    return float(total_sharpe) / math.sqrt(max(1.0, float(cadence_days or 1.0)))
+    if os.environ.get(CADENCE_WEIGHT_NORM_ENV) == '1':
+        return float(total_sharpe) / math.sqrt(max(1.0, float(cadence_days or 1.0)))
+    return float(total_sharpe)
 
 
 def build_equity_curve(trades: list[dict],

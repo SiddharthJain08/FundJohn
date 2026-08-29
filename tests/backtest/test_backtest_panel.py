@@ -32,9 +32,19 @@ from backtest.backtest_panel import effective_sharpe, build_equity_curve
 
 
 def test_effective_sharpe():
-    assert math.isclose(effective_sharpe(2.0, 4.0), 1.0)
+    # Default since 2026-08-29 (spec D2): cadence normalization retired ->
+    # raw total_sharpe, no sqrt(cadence) divisor.
+    assert math.isclose(effective_sharpe(2.0, 4.0), 2.0)
     assert math.isclose(effective_sharpe(1.5, 0.0), 1.5)
     assert effective_sharpe(None, 4.0) is None
+
+
+def test_effective_sharpe_revert_flag_restores_sqrt_cadence(monkeypatch):
+    """OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM=1 restores the legacy
+    sharpe/sqrt(cadence) divisor (cadence floored at 1 day)."""
+    monkeypatch.setenv('OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM', '1')
+    assert math.isclose(effective_sharpe(2.0, 4.0), 1.0)
+    assert math.isclose(effective_sharpe(1.5, 0.0), 1.5)
 
 
 def test_build_equity_curve_normalizes_and_tags_regime():

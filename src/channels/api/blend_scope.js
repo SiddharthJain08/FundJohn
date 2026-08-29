@@ -11,7 +11,10 @@
 //   arr_pct             : trade-count-weighted mean of avg_pnl_pct * 100.
 //   act_days            : trade-count-weighted mean of avg_holding_days.
 //   adr_pct             : arr_pct / max(1, act_days).
-//   effective_sharpe    : sharpe / sqrt(act_days)  (matches backtest_panel).
+//   effective_sharpe    : raw sharpe by default (cadence normalization
+//                         retired 2026-08-29, spec D2); sharpe / sqrt(act_days)
+//                         only under OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM=1
+//                         (matches backtest_panel — both raw by default).
 //   return_pct          : day-freq-weighted mean of return_pct (informational).
 //
 // breakdown: { REGIME: { sharpe, max_dd_pct, return_pct, hit_rate, avg_pnl_pct,
@@ -60,8 +63,10 @@ function blendScope(breakdown, regimeKeys) {
   const avg_pnl = closed_count > 0 ? tradeWeighted('avg_pnl_pct') : null;
   const arr_pct = avg_pnl != null ? avg_pnl * 100 : null;
   const adr_pct = (arr_pct != null && act_days) ? (arr_pct / Math.max(1, act_days)) : null;
-  const effective_sharpe = (sharpe != null && act_days && act_days > 0)
-    ? (sharpe / Math.sqrt(act_days)) : null;
+  const effective_sharpe = sharpe != null
+    ? (process.env.OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM === '1' && act_days && act_days > 0
+        ? sharpe / Math.sqrt(act_days) : sharpe)
+    : null;
 
   return {
     sharpe, effective_sharpe, return_pct, max_dd_pct,

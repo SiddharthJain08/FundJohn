@@ -26,7 +26,8 @@ const BD = {
   assert.ok(Math.abs(m.act_days - 4) < 1e-9);
   assert.ok(Math.abs(m.adr_pct - 0.3) < 1e-9, 'adr = arr/max(1,act)');
   assert.ok(Math.abs(m.max_dd_pct - 10) < 1e-9);
-  assert.ok(Math.abs(m.effective_sharpe - (2.0 / Math.sqrt(4))) < 1e-9, 'eff = sharpe/sqrt(act)');
+  // Default since 2026-08-29 (spec D2): cadence normalization retired -> raw sharpe.
+  assert.ok(Math.abs(m.effective_sharpe - 2.0) < 1e-9, 'eff = raw sharpe by default');
 }
 
 // 2. Two-regime eligible blend (LOW_VOL + TRANSITIONING)
@@ -46,8 +47,8 @@ const BD = {
   assert.ok(Math.abs(m.act_days - 4.4) < 1e-9, `act got ${m.act_days}`);
   // adr = 1.04 / max(1,4.4)
   assert.ok(Math.abs(m.adr_pct - (1.04 / 4.4)) < 1e-9);
-  // eff = 1.6 / sqrt(4.4)
-  assert.ok(Math.abs(m.effective_sharpe - (1.6 / Math.sqrt(4.4))) < 1e-9);
+  // eff = raw sharpe by default (cadence normalization retired 2026-08-29, spec D2)
+  assert.ok(Math.abs(m.effective_sharpe - 1.6) < 1e-9);
 }
 
 // 3. Null-sharpe regime is skipped in sharpe blend but counts in closed
@@ -75,6 +76,24 @@ const BD = {
   assert.strictEqual(m.arr_pct, null);
   assert.strictEqual(m.act_days, null);
   assert.strictEqual(m.effective_sharpe, null);
+}
+
+// 6. Revert flag (OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM=1) restores the
+// legacy sharpe / sqrt(act_days) divisor.
+{
+  const prev = process.env.OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM;
+  process.env.OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM = '1';
+  try {
+    const m1 = blendScope(BD, ['LOW_VOL']);
+    assert.ok(Math.abs(m1.effective_sharpe - (2.0 / Math.sqrt(4))) < 1e-9,
+              'revert flag: eff = sharpe/sqrt(act) single-regime');
+    const m2 = blendScope(BD, ['LOW_VOL', 'TRANSITIONING']);
+    assert.ok(Math.abs(m2.effective_sharpe - (1.6 / Math.sqrt(4.4))) < 1e-9,
+              'revert flag: eff = sharpe/sqrt(act) blended scope');
+  } finally {
+    if (prev === undefined) delete process.env.OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM;
+    else process.env.OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM = prev;
+  }
 }
 
 console.log('ok test_blend_scope');

@@ -764,7 +764,11 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                     'strategy_id': s['strategy_id'],
                     'cadence_days': s['cadence_days'],
                     # Per-regime sleeve holding days — the daily_weight divisor
-                    # (operator 2026-07-27). None → cadence_days fallback below.
+                    # ONLY under OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM=1
+                    # (operator 2026-07-27; cadence normalization retired from
+                    # the default path 2026-08-29, spec D2). cadence_days is
+                    # still persisted as the sizer's signal window regardless.
+                    # None → cadence_days fallback below.
                     'regime_holding_days': (bt.get((s['strategy_id'], R)) or {}).get('avg_holding_days'),
                     'bt_sharpe': bt_s, 'bt_n': bt_n,
                     'live_sharpe': lv_s, 'live_n': lv_n,
@@ -786,13 +790,16 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                 # scale = λ·NAV / Σ|ticker_w|, so per-cycle allocation
                 # is invariant to scale.
                 # ONE per-(strategy, regime) time quantity (operator 2026-07-27
-                # v2): the REGIME sleeve's avg holding days is BOTH the
-                # daily_weight divisor (dw == per-regime Eff.Sharpe) AND the
-                # persisted cadence_days (the sizer's signal window — how long
-                # a signal stays in the carried set). The strategy-level
-                # resolution (run-level backtest avg → live avg → static
-                # declaration) is only the fallback for sleeves without a
-                # holding-days figure.
+                # v2, REVERT PATH ONLY — cadence normalization retired from the
+                # default path 2026-08-29, spec D2): under
+                # OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM=1, the REGIME sleeve's
+                # avg holding days is BOTH the daily_weight divisor (dw ==
+                # per-regime Eff.Sharpe under the flag) AND the persisted
+                # cadence_days (the sizer's signal window — how long a signal
+                # stays in the carried set, unconditionally). The
+                # strategy-level resolution (run-level backtest avg → live avg
+                # → static declaration) is only the fallback for sleeves
+                # without a holding-days figure.
                 _hold = e.get('regime_holding_days')
                 if not (_hold and _hold > 0):
                     _hold = e['cadence_days']
