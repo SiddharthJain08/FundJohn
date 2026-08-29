@@ -1838,6 +1838,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1' or os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1':
         _capped = []
         for _tkr, _usd in list(target_usd.items()):
+            if _tkr in _bench_tkrs:
+                continue            # spec D6: no beta cap
             _gs = gate_net_sharpe.get(_tkr)
             if _gs is None:
                 continue
@@ -1867,7 +1869,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # scaling above — the per-regime liquidity_param is a separate de-leverage
     # control, unrelated to λ, and must not shrink the cluster cap.
     target_usd = _apply_asset_corr_cap(target_usd, gate_net_sharpe, nav,
-                                       lam=lam_global)
+                                       lam=lam_global, exclude=_bench_tkrs)
 
     # SP-5.1b-ii: inject option delta-hedge targets ON TOP of the normalized
     # equity target_usd (post-normalization, cap-exempt). Gate default-OFF:
@@ -2671,7 +2673,7 @@ def _load_asset_corr_cfg(default_thr: float = _ASSET_CORR_THR_DEFAULT,
             max(_ASSET_CORR_CAP_PCT_MIN, min(_ASSET_CORR_CAP_PCT_MAX, cap_pct)))
 
 
-def _apply_asset_corr_cap(target_usd, conviction, nav, lam=1.0):
+def _apply_asset_corr_cap(target_usd, conviction, nav, lam=1.0, exclude=None):
     """Asset-correlation cluster cap (gated, post λ×NAV scaling, dollar terms).
     Enable + threshold resolve via _load_asset_corr_cfg (pipeline_config slider →
     env → default). Per-cluster cap = cap_pct·λ·NAV where λ is the GLOBAL
@@ -2680,29 +2682,42 @@ def _apply_asset_corr_cap(target_usd, conviction, nav, lam=1.0):
     unrelated to λ — callers must NOT pass the blended effective lam).
     OPENCLAW_ASSET_CORR_CAP_SHADOW=1 logs the would-be cap without
     changing targets. Disabled (and no shadow) -> identity (no correlation work).
-    Fail-open: any error returns target_usd unchanged."""
+    Fail-open: any error returns target_usd unchanged.
+
+    exclude (spec 2026-08-29 D6): tickers removed from the set BEFORE
+    clustering and re-inserted untouched after — benchmark tickers never
+    consume cluster budget and never cause alpha releases."""
     apply_on, corr_thr, cap_pct = _load_asset_corr_cfg()
     shadow_on = os.environ.get('OPENCLAW_ASSET_CORR_CAP_SHADOW') == '1'
     if not (apply_on or shadow_on):
+        return target_usd
+    exclude = set(exclude or ())
+    kept = {t: v for t, v in target_usd.items() if t in exclude}
+    work = {t: v for t, v in target_usd.items() if t not in exclude}
+    if not work:
         return target_usd
     try:
         from execution import asset_correlation as _ac
         from execution import asset_correlation_filter as _acf
         window = int(os.environ.get('OPENCLAW_ASSET_CORR_WINDOW', '63'))
-        corr = _ac.price_return_corr(list(target_usd), window=window)
+        corr = _ac.price_return_corr(list(work), window=window)
         capped, audit = _acf.cap_correlated_clusters(
-            target_usd, conviction, corr, nav, cap_pct=cap_pct, corr_thr=corr_thr,
+            work, conviction, corr, nav, cap_pct=cap_pct, corr_thr=corr_thr,
             lam=lam)
         logger.info(
-            'asset_corr_cap.%s: thr=%.2f cap_pct=%.2f lam=%.2f cap_usd=%.0f '
+            'asset_corr_cap.%s: thr=%.2f cap_pct=%.2f lam=%.2f cap_usd=%.0f excluded=%s '
             'clusters>=2=%d gross %.0f->%.0f released=%.0f %s',
             'apply' if apply_on else 'shadow', corr_thr, cap_pct, lam,
-            cap_pct * lam * nav,
+            cap_pct * lam * nav, sorted(exclude),
             sum(1 for c in audit['clusters'] if len(c['members']) >= 2),
             audit['total_gross_before'], audit['total_gross_after'], audit['released_usd'],
             [(c['members'], round(c['gross_before']), round(c['gross_after']))
              for c in audit['clusters'] if c['released'] or c['trimmed']][:10])
-        return capped if apply_on else target_usd
+        if not apply_on:
+            return target_usd
+        out = dict(capped)
+        out.update(kept)
+        return out
     except Exception as e:
         logger.warning('asset_corr_cap failed (%s); fail-open', e)
         return target_usd

@@ -229,7 +229,7 @@ class TestClusterCapLambdaWiring:
         still receive LAM."""
         seen = {}
 
-        def spy(target_usd, conviction, nav, lam=1.0):
+        def spy(target_usd, conviction, nav, lam=1.0, **kw):
             seen['lam'] = lam
             return target_usd
 
