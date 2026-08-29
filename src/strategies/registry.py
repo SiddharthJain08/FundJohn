@@ -374,6 +374,8 @@ _IMPL_MAP = {
     'S_evar_tempered_stable_sector_etf': ('strategies.implementations.S_evar_tempered_stable_sector_etf', 'EvarTemperedStableSectorEtf'),
     # Varadi / Allocate Smartly 2026: monthly growth x inflation macro-quadrant sector rotation (XLE/XLK/XLU/IEF)
     'S_inflation_compass_sector_rotation': ('strategies.implementations.S_inflation_compass_sector_rotation', 'InflationCompassSectorRotation'),
+    # Beta sleeve: long SPY every bar, hold 21; sized on the market regime Sharpe (spec §2.4)
+    'S_beta_spy': ('strategies.implementations.S_beta_spy', 'BetaSpy'),
 }
 
 
