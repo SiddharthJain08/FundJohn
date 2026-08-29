@@ -17,7 +17,7 @@ rbs = importlib.import_module("execution.regime_blended_sizer")
 
 
 @pytest.fixture(autouse=True)
-def _deterministic_sizer_gates(monkeypatch):
+def _deterministic_sizer_gates(request, monkeypatch):
     # Asset gate: lookup-failure semantics (None → fail-open), matching a box
     # with no DB. Tests that exercise the gate pass `eligibility=` directly.
     monkeypatch.setattr(rbs, '_load_asset_eligibility', lambda symbols: None)
@@ -40,6 +40,12 @@ def _deterministic_sizer_gates(monkeypatch):
     # both so sizer tests that don't already patch them stay DB-free and
     # deterministic (no benchmark tickers, no hurdle). Tests that need the
     # real behaviour patch these explicitly (`with _mock.patch(...)`), which
-    # overrides this fixture for the duration of the `with` block.
-    monkeypatch.setattr('execution.benchmark_sleeve.load_benchmark_sleeve_ids', lambda conn=None: set())
-    monkeypatch.setattr('execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing', lambda *a, **k: None)
+    # overrides this fixture for the duration of the `with` block. SKIPPED for
+    # test_benchmark_sleeve.py / test_benchmark_sizing.py themselves — those
+    # ARE the unit tests for these two functions (connection-lifecycle,
+    # cache-hit/miss, registry parsing); stubbing the subject-under-function
+    # out from under its own unit tests would make every one of them
+    # vacuously pass/fail against the stub instead of the real body.
+    if request.path.name not in ('test_benchmark_sleeve.py', 'test_benchmark_sizing.py'):
+        monkeypatch.setattr('execution.benchmark_sleeve.load_benchmark_sleeve_ids', lambda conn=None: set())
+        monkeypatch.setattr('execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing', lambda *a, **k: None)
