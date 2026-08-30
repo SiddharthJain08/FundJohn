@@ -151,3 +151,51 @@ def test_shadow_line_carries_horizon():
     # h omitted -> byte-identical to the pre-amendment format
     assert bz.shadow_line('LOW_VOL', 0.8, before, after, dropped, {'SPY'}, 100_000.0).startswith(
         "bench_sizing.shadow[LOW_VOL]: S_m=0.80 bench=['SPY']")
+
+
+# ── apply_beta_budget (spec 2026-08-30 §3.1) ────────────────────────────────
+def test_beta_budget_conserves_conviction_and_redirects_to_benchmark():
+    import pytest
+    before = {'SPY': 2.0, 'ZZTA': 2.6, 'ZZTB': 1.5, 'ZZTC': -2.5, 'ZZTD': -1.0}
+    hurdled, dropped = bz.apply_benchmark_hurdle(before, 2.0, {'SPY'})
+    out, pool = bz.apply_beta_budget(before, hurdled, 2.0, {'SPY'})
+    # survivors hand exactly S_m, dropped hand their whole |S|: 2.0 + 1.5 + 2.0 + 1.0
+    assert pool == pytest.approx(6.5)
+    assert out['SPY'] == pytest.approx(2.0 + 6.5)          # own raw weight + pool
+    assert out['ZZTA'] == pytest.approx(0.6) and out['ZZTC'] == pytest.approx(-0.5)
+    assert 'ZZTB' not in out and 'ZZTD' not in out
+    assert sum(abs(v) for v in out.values()) == pytest.approx(sum(abs(v) for v in before.values()))
+
+
+def test_beta_budget_none_s_m_or_no_bench_is_identity():
+    before = {'SPY': 2.0, 'ZZTA': 2.6}
+    hurdled, _ = bz.apply_benchmark_hurdle(before, None, {'SPY'})
+    out, pool = bz.apply_beta_budget(before, hurdled, None, {'SPY'})
+    assert out == hurdled and out is not hurdled and pool == 0.0
+    hurdled2, _ = bz.apply_benchmark_hurdle(before, 2.0, set())
+    out2, pool2 = bz.apply_beta_budget(before, hurdled2, 2.0, set())
+    assert out2 == hurdled2 and pool2 == 0.0
+
+
+def test_beta_budget_splits_pool_across_benchmark_tickers_and_keeps_inputs():
+    import pytest
+    before = {'SPY': 2.0, 'IVV': 1.0, 'ZZTA': 3.0}
+    hurdled, _ = bz.apply_benchmark_hurdle(before, 1.0, {'SPY', 'IVV'})
+    snap_b, snap_h = dict(before), dict(hurdled)
+    out, pool = bz.apply_beta_budget(before, hurdled, 1.0, {'SPY', 'IVV'})
+    assert pool == pytest.approx(1.0)
+    assert out['SPY'] == pytest.approx(2.5) and out['IVV'] == pytest.approx(1.5)
+    assert before == snap_b and hurdled == snap_h
+
+
+def test_beta_budget_flag_and_nav_frac_reader(monkeypatch):
+    monkeypatch.setenv(bz.BETA_BUDGET_ENV, '0'); assert bz.beta_budget_enabled() is False
+    monkeypatch.setenv(bz.BETA_BUDGET_ENV, '1'); assert bz.beta_budget_enabled() is True
+    store = {}
+    assert bz.benchmark_max_nav_frac(conn=_Conn(store)) == 1.0          # unset -> default
+    store[bz.MAX_NAV_FRAC_KEY] = '0.5'
+    assert bz.benchmark_max_nav_frac(conn=_Conn(store)) == 0.5
+    store[bz.MAX_NAV_FRAC_KEY] = 'garbage'
+    assert bz.benchmark_max_nav_frac(conn=_Conn(store)) == 1.0          # garbage -> default
+    store[bz.MAX_NAV_FRAC_KEY] = '-2'
+    assert bz.benchmark_max_nav_frac(conn=_Conn(store)) == 1.0          # non-positive -> default

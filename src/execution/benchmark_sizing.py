@@ -32,6 +32,8 @@ import os
 logger = logging.getLogger(__name__)
 
 BENCH_SIZING_ENV = 'OPENCLAW_BENCH_RELATIVE_SIZING'
+BETA_BUDGET_ENV = 'OPENCLAW_BENCH_BETA_BUDGET'   # spec 2026-08-30: '1' = redirect rule C's removed conviction to the benchmark
+MAX_NAV_FRAC_KEY = 'benchmark_max_nav_frac'       # pipeline_config: benchmark ticker |target| <= frac * NAV under the budget (D-4)
 CONFIG_KEY = 'benchmark_regime_sharpe'
 CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
 
@@ -42,6 +44,40 @@ DEFAULT_HORIZON = 1
 
 def bench_relative_sizing_enabled() -> bool:
     return os.environ.get(BENCH_SIZING_ENV) == '1'
+
+
+def beta_budget_enabled() -> bool:
+    return os.environ.get(BETA_BUDGET_ENV) == '1'
+
+
+def benchmark_max_nav_frac(default: float = 1.0, conn=None) -> float:
+    """pipeline_config.benchmark_max_nav_frac as a positive float; anything
+    missing/garbage/non-positive -> default (logged). Own connection when
+    conn is None."""
+    own = conn is None
+    try:
+        if own:
+            import psycopg2
+            conn = psycopg2.connect(os.environ['POSTGRES_URI'])
+        with conn.cursor() as cur:
+            cur.execute('SELECT value FROM pipeline_config WHERE key = %s', (MAX_NAV_FRAC_KEY,))
+            row = cur.fetchone()
+        if not row or row[0] is None:
+            return float(default)
+        v = float(str(row[0]).strip())
+        if not math.isfinite(v) or v <= 0:
+            logger.warning('[bench_sizing] %s=%r not positive; using %s', MAX_NAV_FRAC_KEY, row[0], default)
+            return float(default)
+        return v
+    except Exception as e:
+        logger.warning('[bench_sizing] %s unreadable (%s: %s); using %s', MAX_NAV_FRAC_KEY, type(e).__name__, e, default)
+        return float(default)
+    finally:
+        if own and conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def apply_benchmark_hurdle(ticker_w: dict, s_m, bench_tickers: set) -> tuple[dict, list]:
@@ -63,6 +99,27 @@ def apply_benchmark_hurdle(ticker_w: dict, s_m, bench_tickers: set) -> tuple[dic
         else:
             dropped.append(tkr)
     return out, dropped
+
+
+def apply_beta_budget(before: dict, hurdled: dict, s_m, bench_tickers: set) -> tuple[dict, float]:
+    """Pure (spec 2026-08-30 §3.1). Redirect the conviction rule C removed to
+    the benchmark tickers so Σ|w| is conserved: every alpha ticker hands
+    min(|S_i|, S_m) to the pool (a survivor exactly S_m, a dropped ticker its
+    whole |S_i|; shorts too, D-2); the pool is split equally across
+    bench_tickers (D-3) on top of their own raw weight.
+    before  = the ticker_w handed to apply_benchmark_hurdle
+    hurdled = its first return value
+    Returns (budgeted_weights, pool). s_m None or no bench_tickers ->
+    (dict(hurdled), 0.0). Never mutates its inputs."""
+    if s_m is None or not bench_tickers:
+        return dict(hurdled), 0.0
+    s_m = float(s_m)
+    pool = sum(min(abs(float(s)), s_m) for t, s in before.items() if t not in bench_tickers)
+    out = dict(hurdled)
+    share = pool / len(bench_tickers)
+    for b in bench_tickers:
+        out[b] = out.get(b, 0.0) + share
+    return out, pool
 
 
 def _read_cache(cur) -> dict | None:
