@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_g3m_band_rebalancing_target_weight",
+  "required": ["prices"],
+  "optional": []
+}

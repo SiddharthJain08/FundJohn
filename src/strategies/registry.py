@@ -156,6 +156,8 @@ _IMPL_MAP = {
     'S_growth_inflation_sector_timing':  ('strategies.implementations.S_growth_inflation_sector_timing',  'GrowthInflationSectorTiming'),
     # SP-3: commodity ETP momentum — reference strategy for instrument_class='etp' rails
     'S_commodity_etp_momentum':          ('strategies.implementations.S_commodity_etp_momentum',          'CommodityEtpMomentum'),
+    # TradeQuantiX 2026 — pre-holiday drift in energy ETFs (USO/UGA/XLE/XOP)
+    'S_holiday_seasonality_energy_etf':  ('strategies.implementations.S_holiday_seasonality_energy_etf',  'HolidaySeasonalityEnergyEtf'),
     # Volkova 2025 — linear regression channel mean-reversion on SPY
     'S_linreg_channel_trend':            ('strategies.implementations.S_linreg_channel_trend',            'LinRegChannelTrend'),
     # SP-3.1: BTC momentum — reference strategy for instrument_class='crypto' rails
@@ -352,6 +354,8 @@ _IMPL_MAP = {
     'S_gold_donchian_breakout_ema_filter': ('strategies.implementations.S_gold_donchian_breakout_ema_filter', 'GoldDonchianBreakoutEmaFilter'),
     # Ryan 2026: conformal prediction intervals as the scale in fractional Kelly sizing across 8 ETFs
     'S_conformal_kelly_etp_sizing': ('strategies.implementations.S_conformal_kelly_etp_sizing', 'ConformalKellyEtpSizing'),
+    # Feinstein/Florescu/O'Leary 2026: G3M-invariant band-rebalancing of an equal-weight target-weight mandate
+    'S_g3m_band_rebalancing_target_weight': ('strategies.implementations.S_g3m_band_rebalancing_target_weight', 'G3mBandRebalancingTargetWeight'),
     # Johnson 2026: RSI(3)<10 oversold bounce on top-half ATRP(63) Nasdaq 100 names, 1.75% profit target
     'S_nasdaq100_rsi3_mean_reversion': ('strategies.implementations.S_nasdaq100_rsi3_mean_reversion', 'Nasdaq100Rsi3MeanReversion'),
     # Trading & Investing Strategies 2026: 2-day consecutive pullback > 1 ATR + 200-SMA uptrend on SPY/QQQ
@@ -376,6 +380,14 @@ _IMPL_MAP = {
     'S_inflation_compass_sector_rotation': ('strategies.implementations.S_inflation_compass_sector_rotation', 'InflationCompassSectorRotation'),
     # Beta sleeve: long SPY every bar, hold 21; sized on the market regime Sharpe (spec §2.4)
     'S_beta_spy': ('strategies.implementations.S_beta_spy', 'BetaSpy'),
+    # Jakub 2026: monthly-refresh Granger-causal lead-lag pairs, LONG/SHORT the follower in the leader's prior-move direction
+    'S_lead_lag_granger_causality': ('strategies.implementations.S_lead_lag_granger_causality', 'LeadLagGrangerCausality'),
+    # Jakub 2026 (variant 2): weekly-refresh Granger-causal lead-lag pairs on low-vol candidates, full 2yr estimation window
+    'S_lead_lag_granger_causality_v2': ('strategies.implementations.S_lead_lag_granger_causality_v2', 'LeadLagGrangerCausalityV2'),
+    # Deng/Zhang 2026: MiniRocket-KMeans lead-lag clustering, monthly refresh, LONG/SHORT followers on cluster leader's prior return (variant 1 of 2)
+    'S_leadlag_cluster_minirocket': ('strategies.implementations.S_leadlag_cluster_minirocket', 'LeadLagClusterMinirocket'),
+    # Deng/Zhang 2026 (variant 2): liquidity-prefiltered MiniRocket-KMeans clusters, weekly refresh, multi-lag out-strength centrality leader
+    'S_leadlag_cluster_minirocket_v2': ('strategies.implementations.S_leadlag_cluster_minirocket_v2', 'LeadLagClusterMinirocketV2'),
 }
 
 

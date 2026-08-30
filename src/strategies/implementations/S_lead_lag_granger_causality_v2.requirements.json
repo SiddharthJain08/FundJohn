@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_lead_lag_granger_causality_v2",
+  "required": ["prices"],
+  "optional": []
+}

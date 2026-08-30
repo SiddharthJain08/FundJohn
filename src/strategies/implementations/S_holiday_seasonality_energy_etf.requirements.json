@@ -1,0 +1,7 @@
+{
+  "strategy_id": "S_holiday_seasonality_energy_etf",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}
