@@ -101,7 +101,7 @@ def compute(nav_by_date: dict, spy_by_date: dict, run_date, anchor: str):
     nav_r = [nav[i] / nav[i - 1] - 1.0 for i in range(1, len(nav))]
     spy_r = [spy[i] / spy[i - 1] - 1.0 for i in range(1, len(spy))]
     return {
-        'anchor': anchor, 'n_common': len(dates), 'run_date': dates[-1],
+        'anchor': anchor, 'since': dates[i0], 'n_common': len(dates), 'run_date': dates[-1],
         'book_since': book_since, 'spy_since': spy_since, 'gap_pp': (book_since - spy_since) * 100.0,
         'book_20d': _window_return(nav, 20), 'spy_20d': _window_return(spy, 20),
         'book_60d': _window_return(nav, 60), 'spy_60d': _window_return(spy, 60),
@@ -118,8 +118,9 @@ def _sh(v):
 
 
 def format_line(st: dict, regime, s_m) -> str:
-    return (f"bench_realized: since={st['anchor']} book={_pct(st['book_since'])} spy={_pct(st['spy_since'])} "
-            f"gap={st['gap_pp']:+.1f}pp | 20d book={_pct(st['book_20d'])} spy={_pct(st['spy_20d'])} | "
+    short_note = '' if st['since'] == st['anchor'] else f" (anchor {st['anchor']}, history short)"
+    return (f"bench_realized: since={st['since']} book={_pct(st['book_since'])} spy={_pct(st['spy_since'])} "
+            f"gap={st['gap_pp']:+.1f}pp{short_note} | 20d book={_pct(st['book_20d'])} spy={_pct(st['spy_20d'])} | "
             f"60d book={_pct(st['book_60d'])} spy={_pct(st['spy_60d'])} | "
             f"regime={regime or 'n/a'} book_sharpe_20d={_sh(st['book_sharpe_20d'])} "
             f"spy_sharpe_20d={_sh(st['spy_sharpe_20d'])} S_m={'n/a' if s_m is None else f'{float(s_m):.3f}'}")

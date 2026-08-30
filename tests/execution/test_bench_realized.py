@@ -71,9 +71,18 @@ def test_compute_too_short_returns_none():
     assert br.compute(nav, spy, max(nav), anchor='2026-06-01') is None
 
 
+def test_compute_anchor_predates_history_reports_actual_since():
+    nav = _series(100_000.0, -0.001, 30, first='2026-07-22')
+    spy = _series(500.0, 0.001, 30, first='2026-07-22')
+    st = br.compute(nav, spy, max(nav), anchor='2026-06-23')
+    assert st['anchor'] == '2026-06-23'
+    assert st['since'] == '2026-07-22'
+    assert st['book_since'] == pytest.approx(nav[max(nav)] / nav['2026-07-22'] - 1)
+
+
 def test_format_line_shape():
-    st = {'anchor': '2026-06-23', 'n_common': 48, 'book_since': -0.29, 'spy_since': 0.049, 'gap_pp': -33.9,
-          'book_20d': -0.05, 'spy_20d': 0.02, 'book_60d': -0.2, 'spy_60d': 0.04,
+    st = {'anchor': '2026-06-23', 'since': '2026-06-23', 'n_common': 48, 'book_since': -0.29, 'spy_since': 0.049,
+          'gap_pp': -33.9, 'book_20d': -0.05, 'spy_20d': 0.02, 'book_60d': -0.2, 'spy_60d': 0.04,
           'book_sharpe_20d': -3.1, 'spy_sharpe_20d': 1.2}
     line = br.format_line(st, 'LOW_VOL', 0.805)
     assert line.startswith('bench_realized: since=2026-06-23 book=-29.0% spy=+4.9% gap=-33.9pp')
@@ -81,6 +90,9 @@ def test_format_line_shape():
     assert 'regime=LOW_VOL book_sharpe_20d=-3.10 spy_sharpe_20d=+1.20 S_m=0.805' in line
     assert br.format_line(dict(st, book_sharpe_20d=None, spy_sharpe_20d=None), 'CRISIS', None).endswith(
         'regime=CRISIS book_sharpe_20d=n/a spy_sharpe_20d=n/a S_m=n/a')
+    short_line = br.format_line(dict(st, since='2026-07-22'), 'LOW_VOL', 0.805)
+    assert short_line.startswith(
+        'bench_realized: since=2026-07-22 book=-29.0% spy=+4.9% gap=-33.9pp (anchor 2026-06-23, history short) | 20d')
 
 
 def test_load_nav_history_reads_close(tmp_path):
