@@ -18,7 +18,7 @@ OPENCLAW_EOD_RECONCILE, so it mirrors whatever OPENCLAW_SAMEDAY_SIGNAL_TARGET
 says in production. Spec §2.5.2 — this is the parity artefact for rule C.
 
 Run outside 13:00–20:15 UTC. Usage:
-    python3 scripts/bench_relative_sizing_replay.py --nav 152000 [--regime LOW_VOL]
+    python3 scripts/bench_relative_sizing_replay.py --nav 152000 [--regime LOW_VOL] [--beta-budget] [--max-nav-frac FLOAT]
 --nav is required (read it with: /root/go/bin/alpaca account get --jq .equity).
 """
 from __future__ import annotations
@@ -67,7 +67,7 @@ def _current_regime() -> str:
             return row[0] if row else 'LOW_VOL'
 
 
-def _size(nav: float, regime: str, flag_on: bool) -> dict:
+def _size(nav: float, regime: str, flag_on: bool, *, budget=False, max_nav_frac=None) -> dict:
     import execution.regime_blended_sizer as _sizer
     from execution import benchmark_sizing as bz
     # OPENCLAW_EOD_RECONCILE is intentionally left as whatever _load_env()
@@ -79,6 +79,10 @@ def _size(nav: float, regime: str, flag_on: bool) -> dict:
     os.environ['OPENCLAW_CLOSE_PROXY_SNAPSHOT'] = '0'
     if flag_on: os.environ[bz.BENCH_SIZING_ENV] = '1'
     else:       os.environ.pop(bz.BENCH_SIZING_ENV, None)
+    if flag_on and budget: os.environ[bz.BETA_BUDGET_ENV] = '1'
+    else:                  os.environ.pop(bz.BETA_BUDGET_ENV, None)
+    if max_nav_frac is not None:
+        bz.benchmark_max_nav_frac = lambda default=1.0, conn=None, _v=float(max_nav_frac): _v
     _sizer._load_broker_positions_usd = lambda: {}
     _sizer._post_corr_cumsharpe_log = lambda line: None
     _sizer._post_flatten_alert = lambda *a, **k: None
@@ -109,18 +113,23 @@ def main(argv=None) -> int:
     ap.add_argument('--nav', type=float, required=True)
     ap.add_argument('--regime', default=None)
     ap.add_argument('--top', type=int, default=25)
+    ap.add_argument('--beta-budget', action='store_true')
+    ap.add_argument('--max-nav-frac', type=float, default=None)
     a = ap.parse_args(argv)
     _load_env()
     from execution import benchmark_sleeve as bsl
     regime = a.regime or _current_regime()
     bench_ids = bsl.load_benchmark_sleeve_ids()
     off = _size(a.nav, regime, False)
-    on = _size(a.nav, regime, True)
+    on = _size(a.nav, regime, True, budget=a.beta_budget, max_nav_frac=a.max_nav_frac)
     # Benchmark tickers = the beta sleeve's ticker when the registry flags it.
     bench = ({'SPY'} & (set(off) | set(on))) if 'S_beta_spy' in bench_ids else set()
     d = diff_books(off, on, bench)
+    beta_usd = sum(abs(v) for t, v in on.items() if t in bench)
     print(f'regime={regime} nav={a.nav:.0f} bench_ids={sorted(bench_ids)} bench_tickers={sorted(bench)}')
     print(f"gross OFF={d['gross_off']:.0f} ON={d['gross_on']:.0f}  beta_share OFF={d['beta_off']:.3f} ON={d['beta_on']:.3f}")
+    print(f"beta_usd_on={beta_usd:.0f} ({beta_usd / a.nav * 100:.1f}% NAV) alpha_gross_on={d['gross_on'] - beta_usd:.0f} "
+          f"mode={'rule C + beta budget' if a.beta_budget else 'rule C'}")
     print(f"dropped ({len(d['dropped'])}): {d['dropped']}")
     print(f"added   ({len(d['added'])}): {d['added']}")
     print(f"{'ticker':10s} {'OFF':>12s} {'ON':>12s} {'delta':>12s}")
