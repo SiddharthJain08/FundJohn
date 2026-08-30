@@ -298,6 +298,11 @@ budget together rather than two churn events — **D-5**.
 5. Kill switch: `OPENCLAW_BENCH_BETA_BUDGET=0` + restart returns to rule C
    alone; `OPENCLAW_BENCH_RELATIVE_SIZING=0` returns to raw `S_adj`.
 
+**Queued 2026-08-30 11:45 UTC (operator directive):** step 3 is automated by
+`scripts/bench_flip_after_shadow.sh --apply` on the transient timer
+`openclaw-bench-flip-20260901` (Tue 2026-09-01 21:20 UTC); it flips only if
+the Mon + Tue shadow lines are clean per its header, and posts either way.
+
 ---
 
 ## 6. Monitoring — "we should always beat this" made visible (**D-6**)
