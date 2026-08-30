@@ -46,10 +46,35 @@ at 0.805):
 | rule C ON (today's code) | 273 | 2,102 | 2.3 % | 1.5 % | 137,389 |
 
 Σ|S_adj| = 433.6 before the hurdle, 214.3 after: rule C removes **half of the
-book's conviction and hands none of it to the benchmark**. A book whose every
-alpha sits exactly at `S_m` is emptied into the zero-conviction flatten (or, with
-the sleeve qualified, into a 100 %-gross SPY position only by accident of
-normalization). That is not "an equivalent system".
+book's conviction and hands none of it to the benchmark**.
+
+**Correction (operator, 09:52 UTC):** the *endpoint* is already right under
+rule C — with a qualified benchmark ticker, a book whose every alpha sits at or
+below `S_m` leaves SPY as the only survivor and normalization puts the whole
+gross on it (`λ·NAV` = 151 % NAV today, 185 % at LOW_VOL λ; §3.4's cap is
+needed either way). What rule C gets wrong is the **path** to that endpoint:
+SPY's share is `S_spy / (S_spy + Σ excess)`, so it stays negligible until
+nearly every alpha ticker has been dropped — a cliff, not a slope. Today's
+alpha vector scaled down toward the hurdle (LOW_VOL, `S_m` 0.805, SPY raw
+3.23 incl. the sleeve):
+
+| alpha scale | median \|S\| / S_m | dropped | rule C: SPY % gross / % NAV | budget: SPY % gross / % NAV |
+|---|---|---|---|---|
+| 1.00 (today) | 1.95 | 3 | 1.5 % / 2.3 % | 51 % / 78 % |
+| 0.80 | 1.56 | 21 | 2.5 % / 3.8 % | 64 % / 97 % |
+| 0.60 | 1.17 | 88 | 5.8 % / 8.8 % | 80 % / 100 % (capped) |
+| 0.51 | **1.00** (median AT the hurdle) | 182 | **12 % / 18 %** | 90 % / 100 % |
+| 0.45 | 0.88 | 184 | 22 % / 33 % | 94 % / 100 % |
+| 0.30 | 0.59 | 268 | 79 % / 119 % | 99 % / 100 % |
+
+With the *median* alpha exactly at `S_m` — half the fleet no better than the
+benchmark — rule C still holds 82 % of NAV in alpha names, because the
+surviving half's excess dominates a single SPY row. The budget makes SPY's
+share the fraction of conviction the benchmark accounts for
+(`(S_spy + Σ min(|S_i|, S_m)) / Σ|S|`), continuous from today's 51 % up to
+the endpoint. The zero-conviction flatten is not reachable through rule C
+either way (a qualified benchmark ticker is never dropped; with none, B1
+skips rule C).
 
 **F4 — realized.** Since 2026-06-23 the book went $130k → $92.3k (−29 %);
 buy-and-hold SPY did +4.9 % (+4.1 % since 07-24). Nothing in the system
@@ -77,7 +102,9 @@ benchmark ticker b:
 
 Endpoints: alpha far above `S_m` → today's book; every alpha at or below `S_m`
 → the whole conviction sits on SPY → 100 % of NAV in SPY (capped, §3.4) —
-*the equivalent system*.
+*the equivalent system*. Rule C already reaches the second endpoint (F3); the
+budget fixes the interior so SPY's share rises continuously with the share of
+conviction the benchmark accounts for, instead of only at the cliff.
 
 ---
 
@@ -187,13 +214,14 @@ off the benchmark keeps today's uncapped D6 treatment.
 ### 3.5 Zero-conviction flatten interaction
 
 `_maybe_flatten_zero_conviction` is reached only when `ticker_w` is empty
-after the acting gate. Under the budget with a qualified benchmark ticker
-`ticker_w` always contains that ticker (it carries the pool), so the
-"rule C emptied the book" WARN (B2) and the flatten can no longer be triggered
-by rule C — the book becomes 100 % SPY instead. With **no** qualified
-benchmark ticker nothing changes (B1 path → today's flatten). Reword the B2
-message to `rule C moved the whole book to beta (pool=…)` at INFO when the
-budget applies.
+after the acting gate. That is already unreachable through rule C: a qualified
+benchmark ticker is never dropped, and with none qualified B1 skips rule C
+entirely (B2 is a defensive log for an impossible branch). The budget keeps
+that: the benchmark ticker always carries the pool. When the budget applies
+and every alpha ticker was dropped, log at INFO
+`bench_sizing: rule C moved the whole book to beta (pool=…, dropped=N)` so the
+100 %-SPY day is attributed correctly. No change to the flatten's data-absence
+branches.
 
 ### 3.6 Lanes, fail-open, determinism
 
