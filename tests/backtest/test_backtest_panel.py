@@ -209,7 +209,7 @@ def test_rebuild_single_strategy_reads_only_its_trade_tickers(monkeypatch):
         seen['tickers'] = tickers
         return pd.DataFrame({'ticker': ['AAA', '^GSPC'], 'date': ['2025-01-02', '2025-01-02'], 'close': [1.0, 2.0]})
     monkeypatch.setattr(_bp2, 'load_prices', fake_load)
-    monkeypatch.setattr(_bp2, 'build_panel', lambda sid, conn, prices, hv, br: {'strategy_id': sid})
+    monkeypatch.setattr(_bp2, 'build_panel', lambda sid, conn, prices, hv, br, **kw: {'strategy_id': sid})
     monkeypatch.setattr(_bp2, 'persist_panel', lambda conn, panel: None)
     class _Conn:
         def close(self): pass
@@ -219,3 +219,85 @@ def test_rebuild_single_strategy_reads_only_its_trade_tickers(monkeypatch):
     stats = _bp2.rebuild('S_x')
     assert stats == {'built': 1, 'skipped': 0, 'failed': 0}
     assert seen['tickers'] == {'AAA', 'BBB', _bp2.BENCHMARK_TICKER}
+
+
+# ── 2026-08-30: true close-path marks + SPY total-return benchmark ───────────
+# The legacy smear laid each trade's pnl over `holding_days` (a TRADING-day
+# count) as CALENDAR days, compressing lots into ~70 % of their real span and
+# inflating every dashboard curve (S_beta_spy: 6.3× vs 4.44× buy-and-hold).
+from backtest import backtest_panel as _bp3
+
+
+def _closes(start='2025-01-06', vals=(100.0, 101.0, 102.0, 103.0, 104.0)):
+    idx = pd.bdate_range(start, periods=len(vals))
+    return pd.Series(list(vals), index=idx, dtype=float)
+
+
+def test_trade_daily_marks_follow_close_path_and_scale_to_pnl():
+    s = _closes()
+    t = {'ticker': 'ZZT', 'direction': 'LONG', 'entry_date': '2025-01-06',
+         'exit_date': '2025-01-09', 'pnl_pct': 0.02, 'holding_days': 3}
+    marks = _bp3.trade_daily_marks(t, s)
+    assert [d.strftime('%Y-%m-%d') for d, _ in marks] == ['2025-01-07', '2025-01-08', '2025-01-09']
+    assert marks[0][1] == pytest.approx(0.01) and marks[1][1] == pytest.approx(0.01 / 1.01 * 1.0 + 0.0, rel=1e-3)
+    prod = float(np.prod([1 + r for _, r in marks]))
+    assert prod == pytest.approx(1.02)             # cost/fill residual lands on the exit day
+
+
+def test_trade_daily_marks_short_are_sign_flipped():
+    s = _closes()
+    t = {'ticker': 'ZZT', 'direction': 'SHORT', 'entry_date': '2025-01-06',
+         'exit_date': '2025-01-08', 'pnl_pct': -0.025, 'holding_days': 2}
+    marks = _bp3.trade_daily_marks(t, s)
+    assert marks[0][1] == pytest.approx(-0.01)
+    assert float(np.prod([1 + r for _, r in marks])) == pytest.approx(0.975)
+
+
+def test_trade_daily_marks_none_when_unusable():
+    s = _closes()
+    base = {'ticker': 'ZZT', 'direction': 'LONG', 'entry_date': '2025-01-06',
+            'exit_date': '2025-01-09', 'pnl_pct': 0.02, 'holding_days': 3}
+    assert _bp3.trade_daily_marks(base, None) is None                      # no close path
+    assert _bp3.trade_daily_marks(dict(base, exit_date=None), s) is None    # no exit date
+    assert _bp3.trade_daily_marks(dict(base, pnl_pct=-1.0), s) is None      # wiped out: smear instead
+    assert _bp3.trade_daily_marks(dict(base, entry_date='2025-01-09'), s) is None   # zero trading days
+
+
+def test_prepare_trades_marks_or_calendar_span_fallback():
+    s = _closes()
+    trades = [
+        {'ticker': 'ZZT', 'direction': 'LONG', 'entry_date': '2025-01-06', 'exit_date': '2025-01-09',
+         'pnl_pct': 0.02, 'holding_days': 3},
+        {'ticker': 'NOPX', 'direction': 'LONG', 'entry_date': '2025-01-06', 'exit_date': '2025-01-20',
+         'pnl_pct': 0.05, 'holding_days': 10},
+    ]
+    out = _bp3.prepare_trades_for_curve(trades, closes_for=lambda tkr: s if tkr == 'ZZT' else None)
+    assert len(out[0]['daily_marks']) == 3
+    assert 'daily_marks' not in out[1] or not out[1]['daily_marks']
+    assert out[1]['holding_days'] == 14                                   # calendar span, not the trading count
+    assert trades[1]['holding_days'] == 10                                # inputs untouched
+
+
+def test_equity_curve_from_marks_matches_buy_and_hold_for_a_pure_holder():
+    """Overlapping lots that each track the ticker exactly must reproduce the
+    ticker's own path (the S_beta_spy invariant the smear violated)."""
+    vals = [100 * (1.001 ** i) for i in range(60)]
+    s = _closes('2025-01-06', vals)
+    trades = []
+    dates = list(s.index)
+    for i in range(0, 50):
+        e, x = dates[i], dates[min(i + 5, 59)]
+        trades.append({'ticker': 'ZZT', 'direction': 'LONG', 'entry_date': e.strftime('%Y-%m-%d'),
+                       'exit_date': x.strftime('%Y-%m-%d'), 'pnl_pct': float(s[x] / s[e] - 1),
+                       'holding_days': 5})
+    bench = s.pct_change().fillna(0.0)
+    def regime_for(idx):
+        return pd.Series(['LOW_VOL'] * len(list(idx)), index=list(idx))
+    curve = _bp3.build_equity_curve(trades, bench_daily_ret=bench, regime_series_fn=regime_for,
+                                    weekly=False, closes_for=lambda tkr: s)
+    last = curve[-1]
+    assert last['strat_equity'] == pytest.approx(last['spx_equity'], rel=1e-9)
+
+
+def test_benchmark_is_spy_total_return():
+    assert _bp3.BENCHMARK_TICKER == 'SPY'

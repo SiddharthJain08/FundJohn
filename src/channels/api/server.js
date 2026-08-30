@@ -2953,7 +2953,7 @@ app.get('/api/portfolio/regime-history', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── Precomputed backtest equity curve (vs SP500, regime-tagged) ──────────────
+// ── Precomputed backtest equity curve (vs SPY total return, regime-tagged; was ^GSPC price-only until 2026-08-30) ──────────────
 // Returns strategy_backtest_panel.equity_curve JSONB for the expansion-panel
 // chart. Each element: { date, strat_equity, spx_equity, regime }.
 // Returns { rows: [] } for strategies without a panel row.
@@ -10073,7 +10073,7 @@ async function _stPaintExpand(sid) {
         </div>
       </div>
       <div class="st-expand-section st-arr-wrap">
-        <div class="st-expand-section-title"><span>Backtest equity vs SP500</span><span style="color:var(--dim);font-size:9px">regime-shaded</span></div>
+        <div class="st-expand-section-title"><span>Backtest equity vs SPY (total return)</span><span style="color:var(--dim);font-size:9px">regime-shaded</span></div>
         <div class="st-arr-canvas-wrap"><canvas id="st-eq-chart-\${sid}"></canvas></div>
         <div class="st-flow-row">
           <div class="st-flow-meta"><span style="color:var(--dim);font-size:9.5px">Backtest positions closed per regime</span><span></span></div>
@@ -10126,7 +10126,7 @@ function _stRenderEquityChart(sid, payload) {
     data: { labels, datasets: [
       { label:'strategy', data:strat, borderColor:'#58a6ff', backgroundColor:'rgba(88,166,255,0.10)',
         borderWidth:1.6, pointRadius:0, fill:true, tension:0.15 },
-      { label:'SP500', data:spx, borderColor:'#8b949e', borderWidth:1.2, pointRadius:0,
+      { label:'SPY (total return)', data:spx, borderColor:'#8b949e', borderWidth:1.2, pointRadius:0,
         borderDash:[4,3], fill:false, tension:0.15 },
     ]},
     options: {
