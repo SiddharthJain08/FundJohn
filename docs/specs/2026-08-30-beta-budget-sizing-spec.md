@@ -1,9 +1,11 @@
 # Spec — Beta budget: the book degrades to buy-and-hold SPY, never to re-normalized alpha
 
-**Status:** DRAFT for operator review 2026-08-30 09:40 UTC. Amends
+**Status:** LANDED 2026-08-30 (`bf1d1d10..b7ce03b5`; flag
+`OPENCLAW_BENCH_BETA_BUDGET` unset = shadow; flip per §5 after two clean
+shadow cycles). Amends
 `docs/specs/2026-08-29-benchmark-relative-sizing-spec.md` §2.5 (rule C) and
 follows amendment 1 (`docs/specs/2026-08-29-bench-sizing-amendment-1-spec.md`).
-Not planned, not implemented. Operator directive (chat, 2026-08-30 09:11 UTC):
+Operator directive (chat, 2026-08-30 09:11 UTC):
 "we want to benchmark our system against simply putting the full portfolio
 into SPY directly and holding indefinitely and we should always beat this or
 have an equivalent system."
@@ -301,6 +303,9 @@ nothing. The anchor date is `pipeline_config.bench_realized_anchor`
 uses the same regime-of-record stamps the rollup already keeps
 (`strategy_regime_live_pnl_rollup`); if that join proves awkward the line ships
 without the regime clause first.
+
+Implementation note: the line is appended to the #trade-reports digest by
+send_report (same daily post), not posted separately to #botjohn-log.
 
 ---
 
