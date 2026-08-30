@@ -632,6 +632,18 @@ def main() -> int:
     closed_rows = _load_closed_positions(run_date)
     summary, file_text = _fmt_closed_positions_digest(run_date, closed_rows)
 
+    # Spec 2026-08-30 D-6: book-vs-buy-and-hold-SPY realized line. Report-only,
+    # fail-open; appended to the #trade-reports digest (controller ruling: same
+    # daily post, no separate webhook).
+    try:
+        from execution.bench_realized import bench_realized_line
+        _br = bench_realized_line(run_date)
+        if _br:
+            summary = f'{summary}\n{_br}'
+            print(f'[send_report] {_br}')
+    except Exception as e:
+        print(f'[send_report] bench_realized skipped: {e}')
+
     if dry_run or (not wh_signals and not wh_reports):
         msg = '[send_report] DRY-RUN — printing post bodies to stdout' if dry_run \
               else '[send_report] no webhooks available — printing to stdout only'
