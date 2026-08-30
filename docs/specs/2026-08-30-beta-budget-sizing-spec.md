@@ -9,6 +9,9 @@ Operator directive (chat, 2026-08-30 09:11 UTC):
 "we want to benchmark our system against simply putting the full portfolio
 into SPY directly and holding indefinitely and we should always beat this or
 have an equivalent system."
+§4's figures are the pre-implementation replay; the §5.2 `--beta-budget`
+replay against a live `S_beta_spy` signal (first possible Mon 2026-08-31 after
+15:00 ET) is the outstanding parity gate.
 
 **Grounding:** every symbol below was verified against the working tree at
 `d8dccc1a` on 2026-08-30. Line numbers drift; symbol names are the stable
@@ -187,8 +190,12 @@ target therefore equals `(S_b + pool/|B|) / Σ|w| · λ·NAV` before §3.4.
 
 ### 3.3 Shadow line
 
-`shadow_line` gains three fields after `gross_moved_frac=`:
-`beta_budget=shadow|apply pool=<Σ base_i, 1 dp> beta_share_budget=<SPY share of Σ|w| under the budget, 3 dp> beta_usd_budget=<that share × λ·NAV, 0 dp>`.
+`shadow_line` gains four fields after `gross_moved_frac=`:
+`beta_budget=shadow|apply pool=<Σ base_i, 1 dp> beta_share_budget=<SPY share of Σ|w| under the budget, 3 dp> beta_usd_budget=<that share × λ·NAV, 0 dp> beta_usd_budget_capped=<min(that, benchmark_max_nav_frac × NAV), 0 dp>`.
+`beta_usd_budget` is PRE-cap (it is the §3.1 arithmetic); `beta_usd_budget_capped`
+is what the book would actually carry after §3.4 and is the figure to read when
+the two differ — the sizer supplies the cap via `shadow_line(..., beta_usd_cap=…)`
+from inside rule C's fail-open `try` (final review fix wave, 2026-08-30).
 Emitted every cycle in both lanes exactly like today's line (same
 `_post_corr_cumsharpe_log` expiry gating). Existing fields keep their names so
 the two owed "clean rule-C cycles" remain readable.
@@ -221,7 +228,7 @@ benchmark ticker is never dropped, and with none qualified B1 skips rule C
 entirely (B2 is a defensive log for an impossible branch). The budget keeps
 that: the benchmark ticker always carries the pool. When the budget applies
 and every alpha ticker was dropped, log at INFO
-`bench_sizing: rule C moved the whole book to beta (pool=…, dropped=N)` so the
+`bench_sizing: beta budget moved the whole book to beta (pool=…, dropped=N)` so the
 100 %-SPY day is attributed correctly. No change to the flatten's data-absence
 branches.
 
@@ -273,8 +280,9 @@ budget together rather than two churn events — **D-5**.
    every cycle.
 2. Two clean shadow cycles (first Mon 2026-08-31 15:00 ET) with the sleeve
    emitting its first live signal — check `bench=['SPY']`, `h=1`,
-   `beta_usd_budget` in the $60–80k range for LOW_VOL and the replay's
-   `--beta-budget` diff agreeing with the line.
+   `beta_usd_budget` in the $60–80k range for LOW_VOL, **`beta_usd_budget_capped`**
+   (the post-§3.4 figure the book will actually carry — read this one when the
+   two differ) and the replay's `--beta-budget` diff agreeing with the line.
 3. Operator flips **both** `OPENCLAW_BENCH_RELATIVE_SIZING=1` and
    `OPENCLAW_BENCH_BETA_BUDGET=1` in `.env`, user-scope johnbot restart
    (`XDG_RUNTIME_DIR=/run/user/0 systemctl --user restart johnbot`), outside
