@@ -244,10 +244,12 @@ def _shares(w: dict, bench: set) -> tuple[float, float]:
 
 def shadow_line(regime_state: str, s_m, before: dict, after: dict, dropped: list,
                 bench_tickers: set, lam_nav: float, *, mode: str = 'shadow',
-                h: int | None = None) -> str:
+                h: int | None = None, budgeted: dict | None = None,
+                beta_pool: float = 0.0, budget_mode: str = 'shadow') -> str:
     """One line per cycle. Dollar moves are computed by normalizing BOTH books
     to lam_nav (the sizer's Σ|target| = λ·NAV rule) so the diff is in the units
-    the book will actually move."""
+    the book will actually move. `budgeted` (spec 2026-08-30 §3.3) appends the
+    beta-budget fields; omitted -> byte-identical to the pre-budget format."""
     g0, beta0 = _shares(before, bench_tickers)
     g1, beta1 = _shares(after, bench_tickers)
     usd0 = {t: (v / g0) * lam_nav for t, v in before.items()} if g0 > 0 else {}
@@ -257,6 +259,11 @@ def shadow_line(regime_state: str, s_m, before: dict, after: dict, dropped: list
     moved = sum(abs(m) for _, m in moves) / (2.0 * lam_nav) if lam_nav > 0 else 0.0
     s_m_txt = 'None' if s_m is None else f'{float(s_m):.2f}'
     h_txt = '' if h is None else f' h={int(h)}'
+    budget_txt = ''
+    if budgeted is not None:
+        _, beta_b = _shares(budgeted, bench_tickers)
+        budget_txt = (f' beta_budget={budget_mode} pool={float(beta_pool):.1f} '
+                      f'beta_share_budget={beta_b:.3f} beta_usd_budget={beta_b * lam_nav:.0f}')
     return (f'bench_sizing.{mode}[{regime_state}]: S_m={s_m_txt}{h_txt} bench={sorted(bench_tickers)} '
             f'dropped={len(dropped)}/{len(before)} beta_share_before={beta0:.3f} beta_share_after={beta1:.3f} '
-            f'gross_moved_frac={moved:.3f} dropped_tickers={sorted(dropped)[:15]} top_moves={moves[:10]}')
+            f'gross_moved_frac={moved:.3f}{budget_txt} dropped_tickers={sorted(dropped)[:15]} top_moves={moves[:10]}')

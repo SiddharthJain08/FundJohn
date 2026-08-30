@@ -199,3 +199,17 @@ def test_beta_budget_flag_and_nav_frac_reader(monkeypatch):
     assert bz.benchmark_max_nav_frac(conn=_Conn(store)) == 1.0          # garbage -> default
     store[bz.MAX_NAV_FRAC_KEY] = '-2'
     assert bz.benchmark_max_nav_frac(conn=_Conn(store)) == 1.0          # non-positive -> default
+
+
+def test_shadow_line_reports_beta_budget_fields():
+    before = {'SPY': 2.0, 'ZZTA': 2.6, 'ZZTB': 1.5}
+    after, dropped = bz.apply_benchmark_hurdle(before, 2.0, {'SPY'})
+    budgeted, pool = bz.apply_beta_budget(before, after, 2.0, {'SPY'})
+    line = bz.shadow_line('LOW_VOL', 2.0, before, after, dropped, {'SPY'}, lam_nav=100_000.0, h=1,
+                          budgeted=budgeted, beta_pool=pool, budget_mode='shadow')
+    # pool = 2.0 (ZZTA) + 1.5 (ZZTB) = 3.5; budgeted SPY = 5.5 of Σ 6.1
+    assert ' beta_budget=shadow pool=3.5 beta_share_budget=0.902 beta_usd_budget=90164 ' in line + ' '
+    assert bz.shadow_line('LOW_VOL', 2.0, before, after, dropped, {'SPY'}, 100_000.0, h=1,
+                          budgeted=budgeted, beta_pool=pool, budget_mode='apply').count('beta_budget=apply') == 1
+    # budgeted omitted -> byte-identical to the pre-budget format
+    assert 'beta_budget=' not in bz.shadow_line('LOW_VOL', 2.0, before, after, dropped, {'SPY'}, 100_000.0, h=1)
