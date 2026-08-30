@@ -291,8 +291,7 @@ without the regime clause first.
 - `tests/execution/test_sizer_benchmark_cap_exemptions.py` — NAV cap clamps
   the benchmark at `benchmark_max_nav_frac·NAV`, no redistribution; alpha
   untouched; cap inert with the budget off.
-- `tests/execution/test_sizer_flatten_zero_conviction.py` (existing flatten
-  tests file if present, else new) — all alpha ≤ `S_m` with a qualified
+- `tests/execution/test_sizer_flatten_zero_conviction.py` (existing) — all alpha ≤ `S_m` with a qualified
   benchmark ticker → 100 % NAV SPY, no flatten; without one → today's flatten.
 - `scripts/bench_relative_sizing_replay.py --beta-budget` run once as the
   parity artefact before the flip (§5.2).
