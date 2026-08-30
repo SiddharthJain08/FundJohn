@@ -150,3 +150,72 @@ def test_equity_curve_sanitizes_nonfinite_to_none_and_is_json_safe(monkeypatch):
     # The real bug: this must not raise / must not emit a bare NaN token.
     dumped = _json.dumps(curve)
     assert 'NaN' not in dumped and 'Infinity' not in dumped
+
+
+# ── 2026-08-30: single-strategy rebuild must not load / vol the whole master ──
+# Root cause of the 2026-08-29 research-finisher OOM loop: rebuild() read all
+# 19M rows of prices.parquet and built 21-day vol for all 12.5k tickers inside
+# every backtest process (post-commit hook), peaking ~3.1 GB on top of the sim.
+import numpy as np
+import pytest
+from backtest import backtest_panel as _bp2
+
+
+def _write_prices(path, tickers, n=40):
+    dates = pd.date_range('2025-01-01', periods=n, freq='B')
+    rows = []
+    for i, t in enumerate(tickers):
+        px = 100.0 * (1 + i) * np.cumprod(1 + np.linspace(0.001, 0.003, n))
+        rows.append(pd.DataFrame({'ticker': t, 'date': dates.strftime('%Y-%m-%d'), 'close': px}))
+    pd.concat(rows).to_parquet(path, index=False)
+    return dates
+
+
+def test_load_prices_filters_to_requested_tickers(tmp_path, monkeypatch):
+    p = tmp_path / 'prices.parquet'
+    _write_prices(p, ['AAA', 'BBB', 'CCC', '^GSPC'])
+    monkeypatch.setattr(_bp2, 'PRICES_PARQUET', p)
+    sub = _bp2.load_prices({'BBB', '^GSPC', ''})
+    assert sorted(sub['ticker'].unique()) == ['BBB', '^GSPC']
+    assert list(sub.columns) == ['ticker', 'date', 'close']
+    full = _bp2.load_prices(None)
+    assert sorted(full['ticker'].unique()) == ['AAA', 'BBB', 'CCC', '^GSPC']
+    assert len(_bp2.load_prices(set())) == len(full)          # empty set == unfiltered
+
+
+def test_hv21_lookup_is_lazy_and_matches_eager_values():
+    dates = pd.date_range('2025-01-01', periods=60, freq='B')
+    frames = []
+    for i, t in enumerate(['AAA', 'BBB']):
+        frames.append(pd.DataFrame({'ticker': t, 'date': dates,
+                                    'close': 100 * (i + 1) * np.cumprod(1 + np.linspace(0.001, 0.002, 60))}))
+    px = pd.concat(frames)
+    hv = _bp2.build_hv21_lookup(px)
+    assert hv.cache == {}                                       # nothing computed up front
+    d = dates[40].strftime('%Y-%m-%d')
+    v = hv('AAA', d)
+    assert set(hv.cache) == {'AAA'}                             # only the ticker asked for
+    # reference: eager per-ticker computation
+    s = px[px.ticker == 'AAA'].set_index('date')['close'].astype(float)
+    ref = (np.log(s).diff().rolling(21).std() * math.sqrt(252)).dropna().loc[:pd.Timestamp(d)].iloc[-1]
+    assert v == pytest.approx(ref)
+    assert hv('MISSING', d) is None and hv.cache['MISSING'] is None
+
+
+def test_rebuild_single_strategy_reads_only_its_trade_tickers(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(_bp2, '_trade_tickers', lambda conn, sid: {'AAA', 'BBB'})
+    def fake_load(tickers=None):
+        seen['tickers'] = tickers
+        return pd.DataFrame({'ticker': ['AAA', '^GSPC'], 'date': ['2025-01-02', '2025-01-02'], 'close': [1.0, 2.0]})
+    monkeypatch.setattr(_bp2, 'load_prices', fake_load)
+    monkeypatch.setattr(_bp2, 'build_panel', lambda sid, conn, prices, hv, br: {'strategy_id': sid})
+    monkeypatch.setattr(_bp2, 'persist_panel', lambda conn, panel: None)
+    class _Conn:
+        def close(self): pass
+        def rollback(self): pass
+    monkeypatch.setattr(_bp2.psycopg2, 'connect', lambda *a, **k: _Conn())
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://stub')
+    stats = _bp2.rebuild('S_x')
+    assert stats == {'built': 1, 'skipped': 0, 'failed': 0}
+    assert seen['tickers'] == {'AAA', 'BBB', _bp2.BENCHMARK_TICKER}

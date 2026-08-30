@@ -115,21 +115,70 @@ def build_equity_curve(trades: list[dict],
 TRADING_DAYS = 252
 
 
+BENCHMARK_TICKER = '^GSPC'
+
+
+def load_prices(tickers=None) -> pd.DataFrame:
+    """Long [ticker, date, close] frame from the master prices parquet.
+
+    With `tickers` (any non-empty collection) the read is a pyarrow predicate
+    pushdown over just those symbols — a single-strategy rebuild touches the
+    strategy's own trade tickers (avg ~340) plus BENCHMARK_TICKER, i.e. a few
+    MB. None / empty ⇒ the full panel (the all-strategies weekend rebuild).
+
+    2026-08-30: the bare full read + eager 21-day vol over all 12.5k tickers
+    peaked ~3.1 GB and, running in-process after every backtest's commit
+    (unified_backtest's panel hook), pushed every candidate backtest past the
+    research finisher's 5 GB cgroup cap — four OOM kills on 2026-08-29, all
+    AFTER `wrote run_id`. Filtered, the same rebuild peaks ~0.3 GB.
+    """
+    import pyarrow.parquet as pq
+    cols = ['ticker', 'date', 'close']
+    wanted = sorted({str(t) for t in (tickers or ()) if t})
+    if not wanted:
+        return pd.read_parquet(PRICES_PARQUET, columns=cols)
+    return pq.read_table(str(PRICES_PARQUET), columns=cols,
+                         filters=[('ticker', 'in', wanted)]).to_pandas()
+
+
+def _trade_tickers(conn, strategy_id: str) -> set[str]:
+    """Distinct tickers traded in the strategy's latest primary_window run
+    (empty when it has no run — build_panel then returns None as before)."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT ticker FROM strategy_backtest_trades
+             WHERE run_id = (SELECT run_id FROM strategy_backtest_runs
+                              WHERE strategy_id=%s AND primary_window=TRUE
+                              ORDER BY run_at DESC LIMIT 1)
+        """, (strategy_id,))
+        return {r[0] for r in cur.fetchall()}
+
+
 def build_hv21_lookup(prices: pd.DataFrame):
-    """From a long prices frame [ticker, date, close], build a per-ticker
-    21-day annualized realized-vol series and return hv21(ticker, date) →
-    Optional[float] (asof nearest prior date)."""
+    """From a long prices frame [ticker, date, close], return
+    hv21(ticker, date) → Optional[float]: the ticker's 21-day annualized
+    realized vol as of the nearest prior date. The per-ticker series is
+    computed LAZILY on first lookup and cached (`lookup.cache`), so a
+    strategy that touches 300 tickers never pays for the other 12k."""
     prices = prices[['ticker', 'date', 'close']].dropna()
-    prices = prices.assign(date=pd.to_datetime(prices['date']))
-    hv_by_ticker: dict[str, pd.Series] = {}
-    for tkr, g in prices.sort_values('date').groupby('ticker'):
-        s = g.set_index('date')['close'].astype(float)
-        logret = np.log(s).diff()
-        hv = logret.rolling(21).std() * math.sqrt(TRADING_DAYS)
-        hv_by_ticker[tkr] = hv.dropna()
+    prices = prices.assign(date=pd.to_datetime(prices['date'])).sort_values(['ticker', 'date'])
+    groups = prices.groupby('ticker', sort=False)
+    cache: dict[str, Optional[pd.Series]] = {}
+
+    def _series(tkr: str) -> Optional[pd.Series]:
+        if tkr not in cache:
+            try:
+                g = groups.get_group(tkr)
+            except KeyError:
+                cache[tkr] = None
+                return None
+            s = g.set_index('date')['close'].astype(float)
+            logret = np.log(s).diff()
+            cache[tkr] = (logret.rolling(21).std() * math.sqrt(TRADING_DAYS)).dropna()
+        return cache[tkr]
 
     def lookup(ticker: str, entry_date: str) -> Optional[float]:
-        s = hv_by_ticker.get(ticker)
+        s = _series(ticker)
         if s is None or s.empty:
             return None
         ts = pd.Timestamp(entry_date)
@@ -138,6 +187,7 @@ def build_hv21_lookup(prices: pd.DataFrame):
             return None
         v = float(prior.iloc[-1])
         return v if math.isfinite(v) and v > 0 else None
+    lookup.cache = cache
     return lookup
 
 
@@ -150,7 +200,7 @@ def _sigma_gate(cur) -> float:
         return 2.0
 
 
-def _benchmark_daily_returns(prices: pd.DataFrame, ticker: str = '^GSPC') -> pd.Series:
+def _benchmark_daily_returns(prices: pd.DataFrame, ticker: str = BENCHMARK_TICKER) -> pd.Series:
     g = prices[prices['ticker'] == ticker][['date', 'close']].dropna()
     g = g.assign(date=pd.to_datetime(g['date'])).sort_values('date').set_index('date')
     return g['close'].astype(float).pct_change().fillna(0.0)
@@ -218,11 +268,16 @@ def persist_panel(conn, panel: dict) -> None:
 def rebuild(strategy_id: Optional[str] = None) -> dict:
     """Build + persist panels. If strategy_id is None, rebuild all strategies
     that have a primary_window run."""
-    prices = pd.read_parquet(PRICES_PARQUET, columns=['ticker', 'date', 'close'])
-    hv21_for = build_hv21_lookup(prices)
-    bench_ret = _benchmark_daily_returns(prices, '^GSPC')
     conn = psycopg2.connect(os.environ['POSTGRES_URI'])
     try:
+        if strategy_id:
+            # Single strategy: read only its trade tickers + the benchmark
+            # (see load_prices) — this path runs inside every backtest process.
+            prices = load_prices(_trade_tickers(conn, strategy_id) | {BENCHMARK_TICKER})
+        else:
+            prices = load_prices(None)
+        hv21_for = build_hv21_lookup(prices)
+        bench_ret = _benchmark_daily_returns(prices, BENCHMARK_TICKER)
         if strategy_id:
             sids = [strategy_id]
         else:
