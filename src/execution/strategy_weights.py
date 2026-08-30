@@ -5,6 +5,10 @@ docs/archive/superpowers/specs/2026-05-14-position-sizing-rewrite-design.md.
 
 Per regime R, for each active strategy s with R ∈ eligible_regimes:
     effective_sharpe = bt_sharpe        # BACKTEST ONLY — see below
+                     = S_m[R]           # benchmark sleeves ONLY (registry
+                                        # benchmark_sleeve=true): the forward H=1
+                                        # SPY excess Sharpe, 2026-08-30 — see
+                                        # _benchmark_sleeve_effective_sharpe
     weight        = effective_sharpe                  # no OUE multiplier (removed 2026-05-29)
     cadence_days  = avg_holding_days(s, R)                  # ONE time quantity
     daily_weight  = weight     # cadence normalization retired 2026-08-29;
@@ -78,6 +82,7 @@ import psycopg2.extras
 import math
 
 from execution.cadence import cadence_days
+from execution.benchmark_sleeve import load_benchmark_sleeve_ids
 
 logger = logging.getLogger(__name__)
 
@@ -702,6 +707,50 @@ def _effective_sharpe(bt: dict | None, live: dict | None):
     return eff, bt_s, bt_n, lv_s, lv_n
 
 
+def _benchmark_sleeve_effective_sharpe(strategy_id: str, regime: str, eff,
+                                       bench_ids: set, s_m_by_regime: dict):
+    """Benchmark sleeves are weighted on S_m, not on their own backtest sleeve.
+
+    Operator ruling 2026-08-30: the beta sleeve must BE the buy-and-hold SPY
+    benchmark. Its backtest sleeves equal S_m exactly before cost (verified
+    from run 540e3def's trades: 0.805/0.422/0.487/1.539) and sit 0.10-0.13
+    below it only because unified_backtest charges a spread on every lot
+    round trip (2,604 of them: regime exits + hold-cap rolls), which a real
+    buy-and-hold never pays. So for every registry benchmark sleeve the
+    persisted effective_sharpe is S_m[regime] — the forward H=1 excess Sharpe
+    the sizer's hurdle already uses (execution.benchmark_sizing) — and the
+    sleeve is, by construction, the same number it is hurdled against.
+    bt_sharpe keeps the backtest value (dashboard shows both).
+
+    Pure. Returns (effective_sharpe, overridden). Fail-open: a sleeve whose
+    regime has no S_m keeps its backtest value."""
+    if strategy_id not in bench_ids:
+        return eff, False
+    v = s_m_by_regime.get(regime)
+    if v is None or not math.isfinite(float(v)):
+        return eff, False
+    return float(v), True
+
+
+def _load_benchmark_regime_sharpe(conn, regimes) -> dict:
+    """{regime: S_m or None} for the given regimes, via the sizer's provider
+    (schema-2 pipeline_config cache; computes + persists the grid once per
+    run_date if stale). Any failure -> {} (the sleeve keeps its backtest
+    value; logged)."""
+    try:
+        from datetime import date as _date
+        from execution.benchmark_sizing import (regime_benchmark_sharpe_for_sizing,
+                                                load_benchmark_horizon)
+        h = load_benchmark_horizon(conn=conn)
+        today = _date.today()
+        return {R: regime_benchmark_sharpe_for_sizing(R, today, conn=conn, horizon=h)
+                for R in regimes}
+    except Exception as e:
+        logger.warning('strategy_weights: S_m unavailable for benchmark sleeves (%s: %s); '
+                       'sleeves keep their backtest sharpe', type(e).__name__, e)
+        return {}
+
+
 def _is_sizeable_sharpe(eff: Optional[float]) -> bool:
     """A (strategy, regime) is sized ONLY when its effective Sharpe is a
     finite positive number.
@@ -731,6 +780,16 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
         regime_by_date = _load_regime_by_date()
         live = _load_live_sharpe(conn, sids, regime_by_date)
         oue  = _load_oue_by_strategy_regime(conn, sids)
+        # Benchmark sleeves (registry parameters.benchmark_sleeve=true) are
+        # weighted on S_m[regime] rather than their own cost-charged backtest
+        # sleeve — see _benchmark_sleeve_effective_sharpe. Loaded once; the
+        # S_m provider is never touched when there are no sleeves.
+        bench_ids = load_benchmark_sleeve_ids(conn)
+        s_m_by_regime = {}
+        if bench_ids:
+            _bench_regimes = sorted({R for s in active if s['strategy_id'] in bench_ids
+                                     for R in s['eligible_regimes']})
+            s_m_by_regime = _load_benchmark_regime_sharpe(conn, _bench_regimes)
 
         if verbose:
             print(f'active strategies: {len(active)}, backtest rows: {len(bt)}, '
@@ -748,6 +807,12 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
             for R in s['eligible_regimes']:
                 eff, bt_s, bt_n, lv_s, lv_n = _effective_sharpe(bt.get((s['strategy_id'], R)),
                                                                 live.get((s['strategy_id'], R)))
+                eff, _bench_override = _benchmark_sleeve_effective_sharpe(
+                    s['strategy_id'], R, eff, bench_ids, s_m_by_regime)
+                if _bench_override:
+                    logger.info('strategy_weights: %s/%s benchmark sleeve weighted on S_m=%.3f '
+                                '(backtest sleeve %s)', s['strategy_id'], R, eff,
+                                'n/a' if bt_s is None else f'{bt_s:.3f}')
                 if not _is_sizeable_sharpe(eff):
                     continue
                 # OUE counts are still loaded + persisted for the dashboard
