@@ -120,27 +120,30 @@ def trade_daily_marks(trade: dict, closes: Optional[pd.Series]):
         return None
     if not math.isfinite(pnl) or pnl <= -1.0:
         return None
-    e = pd.Timestamp(trade['entry_date'])
-    x = pd.Timestamp(trade['exit_date'])
+    # O(log n): the series index is ascending datetime64; slice (entry, exit]
+    # with searchsorted instead of per-trade boolean masks (a 100k-trade
+    # strategy would otherwise spend minutes in pandas).
+    idx = closes.index.values
+    vals_all = closes.values
+    e = np.datetime64(pd.Timestamp(trade['entry_date']).to_datetime64())
+    x = np.datetime64(pd.Timestamp(trade['exit_date']).to_datetime64())
     if x <= e:
         return None
-    path = closes.loc[(closes.index > e) & (closes.index <= x)]
-    if len(path) == 0:
-        return None
-    prev = closes.loc[closes.index <= e]
-    if len(prev) == 0:
-        return None
+    lo = int(np.searchsorted(idx, e, side='right'))   # first date > entry
+    hi = int(np.searchsorted(idx, x, side='right'))   # first date > exit
+    if hi <= lo or lo == 0:
+        return None                                    # no trading day in window / no prior close
+    seq = vals_all[lo - 1:hi].astype(float)
     sign = -1.0 if str(trade.get('direction') or 'LONG').upper() == 'SHORT' else 1.0
-    seq = pd.concat([prev.iloc[-1:], path])
-    rets = (seq.pct_change().iloc[1:] * sign).astype(float)
-    if not np.all(np.isfinite(rets.values)):
+    with np.errstate(divide='ignore', invalid='ignore'):
+        vals = (seq[1:] / seq[:-1] - 1.0) * sign
+    if not np.all(np.isfinite(vals)):
         return None
-    vals = rets.values.copy()
     head = float(np.prod(1.0 + vals[:-1])) if len(vals) > 1 else 1.0
     if head <= 0.0:
         return None
     vals[-1] = (1.0 + pnl) / head - 1.0
-    return [(d, float(r)) for d, r in zip(path.index, vals)]
+    return [(pd.Timestamp(d), float(r)) for d, r in zip(idx[lo:hi], vals)]
 
 
 def prepare_trades_for_curve(trades: list[dict], closes_for=None) -> list[dict]:
