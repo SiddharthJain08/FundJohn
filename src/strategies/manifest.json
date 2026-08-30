@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-08-30T01:49:11.681Z",
+  "updated_at": "2026-08-30T07:24:01.716Z",
   "strategies": {
     "S_leadlag_cluster_minirocket": {
       "state": "candidate",
@@ -27,7 +27,6 @@
     "S_beta_spy": {
       "state": "live",
       "state_since": "2026-08-29T20:30:18.301Z",
-      "instrument_class": "etp",
       "metadata": {
         "canonical_file": "S_beta_spy.py",
         "class": "BetaSpy",
@@ -48,7 +47,8 @@
           "to_state": "candidate",
           "timestamp": "2026-08-29T19:40:00.000Z",
           "actor": "botjohn",
-          "reason": "benchmark-relative sizing spec §2.4: beta sleeve minted as candidate (operator directive 2026-08-29 19:27 UTC)"
+          "reason": "benchmark-relative sizing spec §2.4: beta sleeve minted as candidate (operator directive 2026-08-29 19:27 UTC)",
+          "metadata": {}
         },
         {
           "from_state": "candidate",
@@ -65,7 +65,8 @@
             "eligible_regimes_source": "gate_auto_qualifying"
           }
         }
-      ]
+      ],
+      "instrument_class": "etp"
     },
     "S_transitioning_overbought_revert": {
       "state": "deprecated",
@@ -6604,12 +6605,14 @@
       "instrument_class": "etp"
     },
     "S_inflation_compass_sector_rotation": {
-      "state": "staging",
-      "state_since": "2026-08-22T22:27:22.820Z",
+      "state": "candidate",
+      "state_since": "2026-08-30T07:24:01.569113+00:00",
       "metadata": {
         "canonical_file": "S_inflation_compass_sector_rotation.py",
         "class": "InflationCompassSectorRotation",
-        "description": "Monthly sector-ETF rotation (XLE/XLK/XLU/IEF) driven by a dual growth-inflation compass — SP500 trend vs SMA(200) for the growth axis and a sector-implied cyclical/defensive spread for the inflation axis (T5YIE not in macro.parquet; strategy is self-sufficient on prices only)"
+        "description": "Monthly sector-ETF rotation (XLE/XLK/XLU/IEF) driven by a dual growth-inflation compass — SP500 trend vs SMA(200) for the growth axis and a sector-implied cyclical/defensive spread for the inflation axis (T5YIE not in macro.parquet; strategy is self-sufficient on prices only)",
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
+        "universe_filter_source": "fused_approval_default"
       },
       "history": [
         {
@@ -6641,6 +6644,14 @@
             },
             "candidate_id": "37eb3499-7a6d-4043-922e-71fbe911a65f"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-08-30T07:24:01.569113+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 1.64, DD 16.0%, trades 100",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -6659,7 +6670,6 @@
     "S_holiday_seasonality_energy_etf": {
       "state": "candidate",
       "state_since": "2026-08-29T00:00:00.000Z",
-      "instrument_class": "etp",
       "metadata": {
         "canonical_file": "S_holiday_seasonality_energy_etf.py",
         "class": "HolidaySeasonalityEnergyEtf",
@@ -6693,7 +6703,8 @@
           "CRISIS"
         ]
       },
-      "history": []
+      "history": [],
+      "instrument_class": "etp"
     }
   },
   "decommissioned": {
