@@ -1,6 +1,6 @@
 # Spec — Beta budget: the book degrades to buy-and-hold SPY, never to re-normalized alpha
 
-**Status:** LANDED 2026-08-30 (`bf1d1d10..b7ce03b5`; flag
+**Status:** LANDED 2026-08-30 (`bf1d1d10..99eb1ade`, final review + one fix wave clean; flag
 `OPENCLAW_BENCH_BETA_BUDGET` unset = shadow; flip per §5 after two clean
 shadow cycles). Amends
 `docs/specs/2026-08-29-benchmark-relative-sizing-spec.md` §2.5 (rule C) and
@@ -157,12 +157,17 @@ def apply_beta_budget(before: dict, hurdled: dict, s_m, bench_tickers: set) -> t
   survivor it is exactly `S_m`. Shorts contribute `min(|S_i|, S_m)` like longs
   (D7 already hurdles shorts; the alternative use of that capital is the
   benchmark) — **D-2**.
-- A benchmark ticker whose raw `S_b` is negative (net short, e.g. index-short
-  strategies outweigh the sleeve) is not in `bench_tickers` (net-direction
-  qualification, base spec §2.4 i) and receives nothing; with no qualified
-  benchmark ticker the whole block falls back to rule C's B1 guard (sized on
-  raw `S_adj`, WARN) — unchanged. Several qualified benchmark tickers split
-  the pool equally — **D-3** (only SPY exists today).
+- A benchmark ticker whose raw `S_b` is negative in the GATE map (net short,
+  e.g. index-short strategies outweigh the sleeve) is not in `bench_tickers`
+  (net-direction qualification, base spec §2.4 i) and receives nothing; with no
+  qualified benchmark ticker the whole block falls back to rule C's B1 guard
+  (sized on raw `S_adj`, WARN) — unchanged. Qualification reads the gate map
+  while `before` is the SIZE map, and under `OPENCLAW_STRATEGY_SIZE_SCALAR=1`
+  the two can disagree in sign — so `apply_beta_budget` itself guards (final
+  review fix wave, `7b347667`): any qualified benchmark ticker with
+  `before[b] < 0` ⇒ WARN and the budget is skipped that cycle (rule C
+  unchanged, pool 0). Several qualified benchmark tickers split the pool
+  equally — **D-3** (only SPY exists today).
 - `s_m ≤ 0` (never observed; CRISIS is the smallest-n at 150 d): the hurdle is
   0, the pool is 0, the book is today's — the benchmark is not worth holding
   in that regime and nothing is redirected to it. No special case.
