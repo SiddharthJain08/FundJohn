@@ -37,7 +37,7 @@ ROWS = [_row('S_beta_spy', 2.0), _row('S_hi', 2.6), _row('S_lo', 1.5)]
 CARRIED = [_carried('S_beta_spy', 'SPY'), _carried('S_hi', 'ZZTA'), _carried('S_lo', 'ZZTB')]
 
 
-def run(monkeypatch, flag, s_m=2.0, lines=None):
+def run(monkeypatch, flag, s_m=2.0, lines=None, budget=False, max_nav_frac=1.0):
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
     monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')
     for g in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_CORR_WEIGHT', 'OPENCLAW_STRATEGY_ORTHO_SHADOW',
@@ -46,6 +46,8 @@ def run(monkeypatch, flag, s_m=2.0, lines=None):
         monkeypatch.delenv(g, raising=False)
     if flag: monkeypatch.setenv(bz.BENCH_SIZING_ENV, '1')
     else:    monkeypatch.setenv(bz.BENCH_SIZING_ENV, '0')
+    monkeypatch.setenv(bz.BETA_BUDGET_ENV, '1' if budget else '0')
+    monkeypatch.setattr(bz, 'benchmark_max_nav_frac', lambda default=1.0, conn=None: max_nav_frac)
     monkeypatch.setattr(_sizer, '_load_approved_carried_signals',
                         lambda weight_by_strat, cadence_by_strat=None, **_kw: list(CARRIED))
     monkeypatch.setattr(_sizer, '_load_lambda', lambda default=2.0, *, intraday=False: LAM)
@@ -92,3 +94,51 @@ def test_on_applies_hurdle(monkeypatch):
 def test_on_with_no_s_m_falls_back_to_raw(monkeypatch):
     t = targets(run(monkeypatch, flag=True, s_m=None))
     assert set(t) == {'SPY', 'ZZTA', 'ZZTB'}
+
+
+def test_budget_applies_only_with_both_flags(monkeypatch):
+    lines = []
+    # max_nav_frac lifted out of the way (like PER_TICKER_CAP_SHARPE_FRAC=10.0
+    # in run()): this fixture's SPY share is 5.5/6.1 of a 2x-levered gross, i.e.
+    # 180.3% of NAV — the §3.4 NAV cap (default frac=1.0) would otherwise bind
+    # here too, which is not this test's subject (see test_budget_nav_cap_*
+    # below for the dedicated cap coverage).
+    t = targets(run(monkeypatch, flag=True, budget=True, max_nav_frac=10.0, lines=lines))
+    gross = LAM * NAV
+    # pool = 2.0 (ZZTA hands S_m) + 1.5 (ZZTB dropped, whole |S|) = 3.5; SPY = 2.0 + 3.5 = 5.5 of Σ 6.1
+    assert 'ZZTB' not in t
+    assert abs(t['ZZTA'] - gross * 0.6 / 6.1) < 1e-6
+    assert abs(t['SPY'] - gross * 5.5 / 6.1) < 1e-6
+    assert any('bench_sizing.apply[LOW_VOL]' in l and 'beta_budget=apply pool=3.5' in l for l in lines)
+
+
+def test_budget_flag_alone_is_rule_c_shadow_and_prints_budget_shadow(monkeypatch):
+    lines = []
+    t = targets(run(monkeypatch, flag=False, budget=True, lines=lines))
+    gross = LAM * NAV
+    assert abs(t['SPY'] - gross * 2.0 / 6.1) < 1e-6           # raw S_adj book, byte-identical to today
+    assert any('bench_sizing.shadow[LOW_VOL]' in l and 'beta_budget=shadow pool=3.5' in l for l in lines)
+
+
+def test_rule_c_on_budget_off_is_unchanged(monkeypatch):
+    t = targets(run(monkeypatch, flag=True, budget=False))
+    gross = LAM * NAV
+    assert abs(t['SPY'] - gross * 2.0 / 2.6) < 1e-6           # Task-wiring behaviour from 2026-08-29
+
+
+def test_budget_with_no_s_m_falls_back_to_raw(monkeypatch):
+    t = targets(run(monkeypatch, flag=True, budget=True, s_m=None))
+    assert set(t) == {'SPY', 'ZZTA', 'ZZTB'}
+
+
+def test_budget_nav_cap_clamps_benchmark_without_redistribution(monkeypatch):
+    t = targets(run(monkeypatch, flag=True, budget=True, max_nav_frac=0.5))
+    gross = LAM * NAV
+    assert abs(t['SPY'] - 0.5 * NAV) < 1e-6                    # 5.5/6.1 * 200k = 180k -> clamped to 50k
+    assert abs(t['ZZTA'] - gross * 0.6 / 6.1) < 1e-6           # alpha untouched (no renorm-up)
+
+
+def test_nav_cap_inert_when_budget_off(monkeypatch):
+    t = targets(run(monkeypatch, flag=True, budget=False, max_nav_frac=0.5))
+    gross = LAM * NAV
+    assert abs(t['SPY'] - gross * 2.0 / 2.6) < 1e-6           # 153.8k > 50k, NOT clamped

@@ -45,6 +45,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'src'))
 
 import execution.regime_blended_sizer as _sizer  # noqa: E402
+from execution import benchmark_sizing as bz      # noqa: E402
 
 NAV = 100_000.0
 LAM = 2.0
@@ -392,3 +393,27 @@ def test_k_flatten_of_attributed_positions_uses_reserved_sid(monkeypatch):
         assert o['contributing_strategies'], (
             'contributing_strategies must keep the real attribution, got %r' % o)
     assert len(alerts) == 1
+
+
+# ---------------------------------------------------------------------------
+# (l) Spec 2026-08-30 §3.5: every alpha ≤ S_m + a qualified benchmark ticker
+#     -> the beta budget redirects the whole book to SPY, capped at
+#     benchmark_max_nav_frac·NAV. No flatten (a beta base beats an empty book).
+# ---------------------------------------------------------------------------
+
+def test_e_all_alpha_below_hurdle_with_benchmark_becomes_100pct_spy_not_flatten(monkeypatch):
+    """Spec 2026-08-30 §3.5: every alpha ≤ S_m + a qualified benchmark ticker
+    -> the book is SPY at min(λ·NAV, benchmark_max_nav_frac·NAV); no flatten."""
+    weights_rows = [_weights_row('S_beta_spy', 0.8)] + [_weights_row('S%d' % i, 0.5) for i in range(10)]
+    carried_rows = [_carried('S_beta_spy', 'SPY')] + [_carried('S%d' % i, 'T%d' % i) for i in range(10)]
+    monkeypatch.setenv(bz.BENCH_SIZING_ENV, '1')
+    monkeypatch.setenv(bz.BETA_BUDGET_ENV, '1')
+    with _mock.patch('execution.benchmark_sleeve.load_benchmark_sleeve_ids', return_value={'S_beta_spy'}), \
+         _mock.patch('execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing', return_value=0.8), \
+         _mock.patch('execution.benchmark_sizing.benchmark_max_nav_frac', return_value=1.0):
+        orders, alerts = _run(monkeypatch, weights_rows=weights_rows, carried_rows=carried_rows,
+                              broker={}, min_acting_strategies=1, eod=True, flatten_flag='1')
+    opens = {o['ticker']: o['target_usd'] for o in orders if not _is_close(o)}
+    assert set(opens) == {'SPY'}
+    assert abs(opens['SPY'] - NAV * 1.0) < 1e-6      # λ·NAV would exceed NAV -> capped at 1.0·NAV
+    assert alerts == []

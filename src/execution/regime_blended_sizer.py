@@ -13,6 +13,7 @@ module they used live in git history only.
 from __future__ import annotations
 import json
 import logging
+import math
 import os
 import re
 from datetime import date
@@ -1727,12 +1728,19 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # branch below, even if this block raises before assigning it.
     # Amendment 1: S_m is forward/entry-tagged at horizon pipeline_config.benchmark_horizon_days (default 1).
     _bench_applied_dropped = 0
+    _beta_budget_applied = False
     try:
         _h = _bsz.load_benchmark_horizon()
         _s_m = _bsz.regime_benchmark_sharpe_for_sizing(regime_state, date.today(), horizon=_h)
         _before = dict(ticker_w)
         _hurdled, _bench_dropped = _bsz.apply_benchmark_hurdle(_before, _s_m, _bench_tkrs)
+        # Beta budget (spec 2026-08-30 §3.1/§3.2): the conviction rule C removed
+        # is redirected to the benchmark ticker(s) so Σ|w| is conserved and the
+        # book degrades toward buy-and-hold SPY instead of re-normalized alpha.
+        # Applies ONLY when rule C applies AND OPENCLAW_BENCH_BETA_BUDGET=1.
+        _budgeted, _beta_pool = _bsz.apply_beta_budget(_before, _hurdled, _s_m, _bench_tkrs)
         _bench_on = _bsz.bench_relative_sizing_enabled()
+        _budget_on = _bsz.beta_budget_enabled()
         # B1 (final fix wave, controller ruling — D5's premise is beta as the
         # base): flag ON with NO net-direction-qualified benchmark ticker this
         # cycle (sleeve silent, or net-cancelled) must NOT apply the hurdle —
@@ -1741,8 +1749,11 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         # no beta base to fall back on. Only apply when both the flag is ON
         # AND there is at least one qualified benchmark ticker.
         _apply_hurdle = _bench_on and bool(_bench_tkrs)
+        _apply_budget = _apply_hurdle and _budget_on
         _bline = _bsz.shadow_line(regime_state, _s_m, _before, _hurdled, _bench_dropped,
-                                  _bench_tkrs, lam * nav, mode='apply' if _apply_hurdle else 'shadow', h=_h)
+                                  _bench_tkrs, lam * nav, mode='apply' if _apply_hurdle else 'shadow', h=_h,
+                                  budgeted=_budgeted, beta_pool=_beta_pool,
+                                  budget_mode='apply' if _apply_budget else 'shadow')
         logger.info(_bline)
         if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
             _post_corr_cumsharpe_log(_bline)
@@ -1753,8 +1764,12 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         if _apply_hurdle:
             for _t in _bench_dropped:
                 ticker_meta.pop(_t, None)
-            ticker_w = defaultdict(float, _hurdled)
+            ticker_w = defaultdict(float, _budgeted if _apply_budget else _hurdled)
             _bench_applied_dropped = len(_bench_dropped)
+            _beta_budget_applied = _apply_budget
+            if _apply_budget and _bench_applied_dropped and _bench_applied_dropped == len(_before) - len(_bench_tkrs):
+                logger.info('bench_sizing: rule C moved the whole book to beta (pool=%.1f, dropped=%d)',
+                            _beta_pool, _bench_applied_dropped)
     except Exception as e:
         logger.warning('bench_sizing: failed (%s: %s); sizing on raw S_adj', type(e).__name__, e)
 
@@ -1910,6 +1925,20 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # cap exemption above — both are inert while rule C itself is SHADOW.
     target_usd = _apply_asset_corr_cap(target_usd, gate_net_sharpe, nav,
                                        lam=lam_global, exclude=_bench_exempt)
+
+    # Benchmark NAV cap (spec 2026-08-30 §3.4, D-4): under the beta budget the
+    # reference portfolio is UNLEVERED, so a benchmark ticker never exceeds
+    # benchmark_max_nav_frac × NAV (default 1.0). Shaved, never redistributed
+    # (same philosophy as the two caps above). Inert unless the budget applied
+    # this cycle. Fail-open: an unreadable frac falls back to 1.0 in the reader.
+    if _beta_budget_applied:
+        _max_bench = _bsz.benchmark_max_nav_frac() * nav
+        for _t in _bench_tkrs:
+            _usd = target_usd.get(_t)
+            if _usd is not None and abs(_usd) > _max_bench:
+                logger.info('bench_sizing: benchmark %s clamped %.0f -> %.0f (%.2f×NAV)',
+                            _t, _usd, math.copysign(_max_bench, _usd), _max_bench / nav)
+                target_usd[_t] = math.copysign(_max_bench, _usd)
 
     # SP-5.1b-ii: inject option delta-hedge targets ON TOP of the normalized
     # equity target_usd (post-normalization, cap-exempt). Gate default-OFF:
