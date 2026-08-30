@@ -1729,6 +1729,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # Amendment 1: S_m is forward/entry-tagged at horizon pipeline_config.benchmark_horizon_days (default 1).
     _bench_applied_dropped = 0
     _beta_budget_applied = False
+    _beta_pool = 0.0            # same reason as _bench_applied_dropped: read at the emission tail
     try:
         _h = _bsz.load_benchmark_horizon()
         _s_m = _bsz.regime_benchmark_sharpe_for_sizing(regime_state, date.today(), horizon=_h)
@@ -1750,10 +1751,15 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         # AND there is at least one qualified benchmark ticker.
         _apply_hurdle = _bench_on and bool(_bench_tkrs)
         _apply_budget = _apply_hurdle and _budget_on
+        # Final fix wave (2026-08-30) #3: beta_usd_budget is PRE-cap; pass the §3.4
+        # dollar cap so the line also carries the figure the book would actually
+        # carry. Inside rule C's try -> the reader's own fail-open (1.0) applies
+        # and a raise here still lands on "sized on raw S_adj".
         _bline = _bsz.shadow_line(regime_state, _s_m, _before, _hurdled, _bench_dropped,
                                   _bench_tkrs, lam * nav, mode='apply' if _apply_hurdle else 'shadow', h=_h,
                                   budgeted=_budgeted, beta_pool=_beta_pool,
-                                  budget_mode='apply' if _apply_budget else 'shadow')
+                                  budget_mode='apply' if _apply_budget else 'shadow',
+                                  beta_usd_cap=_bsz.benchmark_max_nav_frac() * nav)
         logger.info(_bline)
         if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
             _post_corr_cumsharpe_log(_bline)
@@ -1768,7 +1774,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             _bench_applied_dropped = len(_bench_dropped)
             _beta_budget_applied = _apply_budget
             if _apply_budget and _bench_applied_dropped and _bench_applied_dropped == len(_before) - len(_bench_tkrs):
-                logger.info('bench_sizing: rule C moved the whole book to beta (pool=%.1f, dropped=%d)',
+                logger.info('bench_sizing: beta budget moved the whole book to beta (pool=%.1f, dropped=%d)',
                             _beta_pool, _bench_applied_dropped)
     except Exception as e:
         logger.warning('bench_sizing: failed (%s: %s); sizing on raw S_adj', type(e).__name__, e)
@@ -1981,10 +1987,31 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                            len(active), SIGNAL_SET_MIN_FLOOR, SIGNAL_SET_MIN_FRAC*100, _baseline)
             return []
 
-    return _emit_orders_from_targets(
+    _orders = _emit_orders_from_targets(
         target_usd, ticker_meta, nav, confirmer, _ortho_groups,
         sharpe_by_strat, eff_weight_by_strat, opt_active, weight_by_strat,
         scale, account_state, gate_net_sharpe=gate_net_sharpe)
+
+    # Final fix wave (2026-08-30) #2: under the beta budget the benchmark ticker
+    # carries the conviction rule C took off ~every alpha name (≈78 % of NAV on
+    # the 08-30 replay). _emit_orders_from_targets then runs the asset-
+    # eligibility, entry-hygiene and net-exposure gates, any of which can drop or
+    # shrink that one ticker — which silently destroys the whole redirected pool
+    # and leaves a book that is neither rule C's nor the budget's. Never silent.
+    if _beta_budget_applied and _beta_pool > 0:
+        _bench_survived = any(o.get('ticker') in _bench_tkrs
+                              and o.get('action') not in ('close_long', 'close_short')
+                              for o in _orders)
+        if not _bench_survived:
+            _shed_line = ('bench_sizing: beta budget applied but no benchmark ticker survived to '
+                          'the emitted orders (bench=%s) — redirected pool NOT deployed'
+                          % (sorted(_bench_tkrs),))
+            logger.warning(_shed_line)
+            try:
+                _post_ops_alert('⚠️ ' + _shed_line)
+            except Exception as _e:      # belt-and-braces: an alert must never abort sizing
+                logger.warning('bench_sizing: shed-benchmark alert post skipped (%s)', _e)
+    return _orders
 
 
 # ── Asset-eligibility execution gate (operator directive 2026-07-23) ─────────

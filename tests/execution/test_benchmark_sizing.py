@@ -209,7 +209,41 @@ def test_shadow_line_reports_beta_budget_fields():
                           budgeted=budgeted, beta_pool=pool, budget_mode='shadow')
     # pool = 2.0 (ZZTA) + 1.5 (ZZTB) = 3.5; budgeted SPY = 5.5 of Σ 6.1
     assert ' beta_budget=shadow pool=3.5 beta_share_budget=0.902 beta_usd_budget=90164 ' in line + ' '
+    # Final fix wave #3: the raw beta_usd_budget is PRE-cap; beta_usd_cap makes the
+    # §3.4-capped figure the operator will actually see on the flip day explicit.
+    capped = bz.shadow_line('LOW_VOL', 2.0, before, after, dropped, {'SPY'}, lam_nav=100_000.0, h=1,
+                            budgeted=budgeted, beta_pool=pool, budget_mode='shadow',
+                            beta_usd_cap=50_000.0)
+    assert 'beta_usd_budget=90164 beta_usd_budget_capped=50000' in capped
+    # kwarg omitted -> the field is absent (byte-identical to the pre-fix format)
+    assert 'beta_usd_budget_capped' not in line
     assert bz.shadow_line('LOW_VOL', 2.0, before, after, dropped, {'SPY'}, 100_000.0, h=1,
                           budgeted=budgeted, beta_pool=pool, budget_mode='apply').count('beta_budget=apply') == 1
     # budgeted omitted -> byte-identical to the pre-budget format
     assert 'beta_budget=' not in bz.shadow_line('LOW_VOL', 2.0, before, after, dropped, {'SPY'}, 100_000.0, h=1)
+
+
+def test_beta_budget_skipped_when_a_benchmark_ticker_is_net_short_in_the_size_map(caplog):
+    """Final fix wave #1: _bench_tkrs is qualified on the GATE map's sign while
+    `before` is the SIZE map; under OPENCLAW_STRATEGY_SIZE_SCALAR=1 the two can
+    disagree, so a benchmark ticker can be net-SHORT here. Adding the unsigned
+    pool on top would flip it long. Skip the budget (rule C unchanged)."""
+    import logging
+    before = {'SPY': -1.0, 'A': 3.0, 'B': 0.5}
+    hurdled, dropped = bz.apply_benchmark_hurdle(before, 2.0, {'SPY'})
+    assert hurdled['SPY'] == -1.0                       # rule C keeps the benchmark's raw weight
+    with caplog.at_level(logging.WARNING, logger='execution.benchmark_sizing'):
+        out, pool = bz.apply_beta_budget(before, hurdled, 2.0, {'SPY'})
+    assert out == hurdled and out is not hurdled        # copy, not the same object
+    assert pool == 0.0
+    assert out['SPY'] == -1.0                           # NOT flipped long by the pool
+    assert 'net-short' in caplog.text and 'SPY' in caplog.text
+
+
+def test_max_nav_frac_above_one_is_kept_but_warned(caplog):
+    """Final fix wave #6: spec §8 allows a levered reference portfolio as a
+    config value; it must not pass silently."""
+    import logging
+    with caplog.at_level(logging.WARNING, logger='execution.benchmark_sizing'):
+        assert bz.benchmark_max_nav_frac(conn=_Conn({bz.MAX_NAV_FRAC_KEY: '1.5'})) == 1.5
+    assert '> 1.0' in caplog.text

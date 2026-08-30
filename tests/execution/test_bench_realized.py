@@ -81,15 +81,19 @@ def test_compute_anchor_predates_history_reports_actual_since():
 
 
 def test_format_line_shape():
-    st = {'anchor': '2026-06-23', 'since': '2026-06-23', 'n_common': 48, 'book_since': -0.29, 'spy_since': 0.049,
+    st = {'anchor': '2026-06-23', 'since': '2026-06-23', 'n_common': 48, 'run_date': '2026-08-28',
+          'book_since': -0.29, 'spy_since': 0.049,
           'gap_pp': -33.9, 'book_20d': -0.05, 'spy_20d': 0.02, 'book_60d': -0.2, 'spy_60d': 0.04,
           'book_sharpe_20d': -3.1, 'spy_sharpe_20d': 1.2}
     line = br.format_line(st, 'LOW_VOL', 0.805)
     assert line.startswith('bench_realized: since=2026-06-23 book=-29.0% spy=+4.9% gap=-33.9pp')
     assert '| 20d book=-5.0% spy=+2.0% | 60d book=-20.0% spy=+4.0% |' in line
     assert 'regime=LOW_VOL book_sharpe_20d=-3.10 spy_sharpe_20d=+1.20 S_m=0.805' in line
+    # Final fix wave #5: the line must say WHICH day it describes and on how many
+    # aligned observations — a stale NAV file otherwise reads as today's book.
+    assert line.endswith('S_m=0.805 asof=2026-08-28 n=48')
     assert br.format_line(dict(st, book_sharpe_20d=None, spy_sharpe_20d=None), 'CRISIS', None).endswith(
-        'regime=CRISIS book_sharpe_20d=n/a spy_sharpe_20d=n/a S_m=n/a')
+        'regime=CRISIS book_sharpe_20d=n/a spy_sharpe_20d=n/a S_m=n/a asof=2026-08-28 n=48')
     short_line = br.format_line(dict(st, since='2026-07-22'), 'LOW_VOL', 0.805)
     assert short_line.startswith(
         'bench_realized: since=2026-07-22 book=-29.0% spy=+4.9% gap=-33.9pp (anchor 2026-06-23, history short) | 20d')
@@ -115,3 +119,66 @@ def test_bench_realized_line_end_to_end(monkeypatch):
     monkeypatch.setattr(br, '_load_regime_and_s_m', lambda conn, run_date: ('LOW_VOL', 0.805))
     line = br.bench_realized_line(max(nav), conn=object())
     assert line.startswith('bench_realized: since=2026-06-23 book=-') and 'S_m=0.805' in line
+
+
+# ── final fix wave (2026-08-30) ─────────────────────────────────────────────
+class _FakeCur:
+    def __init__(self, row, boom=False): self._row = row; self._boom = boom
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def execute(self, sql, params=None):
+        if self._boom:
+            raise RuntimeError('connection reset')
+    def fetchone(self): return self._row
+
+
+class _FakeConn:
+    def __init__(self, row=None, boom=False): self._row = row; self._boom = boom
+    def cursor(self): return _FakeCur(self._row, self._boom)
+
+
+def test_load_regime_and_s_m_never_triggers_the_s_m_grid_compute(monkeypatch):
+    """Final fix wave #4: the 16:15 collect step must never do the sizer's
+    parquet-wide S_m grid compute (nor write its day cache) just to print a
+    report line — a cache miss has to return None."""
+    from execution import benchmark_sizing as bzs
+    seen = {}
+
+    def _recorder(regime_state, run_date, *, benchmark='SPY', conn=None, compute=None, horizon=None):
+        seen['regime'] = regime_state
+        seen['compute'] = compute
+        return None
+
+    monkeypatch.setattr(bzs, 'regime_benchmark_sharpe_for_sizing', _recorder)
+    regime, s_m = br._load_regime_and_s_m(_FakeConn(('LOW_VOL',)), '2026-08-28')
+    assert regime == 'LOW_VOL' and s_m is None
+    assert seen['regime'] == 'LOW_VOL'
+    assert callable(seen['compute']) and seen['compute']('2016-04-11', '2026-08-28', benchmark='SPY') == {}
+
+
+def test_sharpe_needs_twenty_observations():
+    """Final fix wave #9: a "20d Sharpe" printed off 5 observations is noise."""
+    import random
+    random.seed(0)
+    rets = [random.gauss(0.001, 0.01) for _ in range(25)]
+    assert br.SHARPE_MIN_OBS == 20
+    assert br._sharpe(rets[:19]) is None
+    assert br._sharpe(rets[:20]) is not None
+    assert br.MIN_COMMON == 5          # the since-anchor floor is unchanged
+
+
+def test_load_anchor_warns_only_on_present_but_invalid_or_db_error(caplog):
+    """Final fix wave #10: a never-seeded key is normal; garbage or a dead
+    connection silently reverting to the default is not."""
+    import logging
+    with caplog.at_level(logging.WARNING, logger='execution.bench_realized'):
+        assert br._load_anchor(_FakeConn(('2026-07-01',))) == '2026-07-01'
+        assert br._load_anchor(_FakeConn(None)) == br.DEFAULT_ANCHOR          # missing row: silent
+    assert caplog.text == ''
+    with caplog.at_level(logging.WARNING, logger='execution.bench_realized'):
+        assert br._load_anchor(_FakeConn(('not-a-date',))) == br.DEFAULT_ANCHOR
+    assert 'not-a-date' in caplog.text and br.ANCHOR_KEY in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger='execution.bench_realized'):
+        assert br._load_anchor(_FakeConn(boom=True)) == br.DEFAULT_ANCHOR
+    assert 'connection reset' in caplog.text

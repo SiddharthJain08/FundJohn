@@ -142,3 +142,45 @@ def test_nav_cap_inert_when_budget_off(monkeypatch):
     t = targets(run(monkeypatch, flag=True, budget=False, max_nav_frac=0.5))
     gross = LAM * NAV
     assert abs(t['SPY'] - gross * 2.0 / 2.6) < 1e-6           # 153.8k > 50k, NOT clamped
+
+
+def test_alert_when_the_benchmark_is_shed_downstream_of_the_budget(monkeypatch, caplog):
+    """Final fix wave #2: the budget redirects ~78 % of NAV to the benchmark
+    ticker, but the emission tail's asset-eligibility / entry-hygiene /
+    net-exposure gates can still drop it. That silently destroys the redirected
+    pool, so it must WARN + alert."""
+    import logging
+    alerts = []
+    monkeypatch.setattr(_sizer, '_post_ops_alert', lambda line: alerts.append(line))
+    # Drop SPY inside _emit_orders_from_targets (bare module-level call there).
+    monkeypatch.setattr(_sizer, '_apply_asset_eligibility_gate',
+                        lambda t, broker, eligibility=None: {k: v for k, v in t.items() if k != 'SPY'})
+    with caplog.at_level(logging.WARNING, logger='execution.regime_blended_sizer'):
+        t = targets(run(monkeypatch, flag=True, budget=True, max_nav_frac=10.0))
+    assert 'SPY' not in t
+    assert len(alerts) == 1 and 'redirected pool NOT deployed' in alerts[0]
+    assert ('bench_sizing: beta budget applied but no benchmark ticker survived to the '
+            "emitted orders (bench=['SPY'])") in caplog.text
+
+
+def test_no_shed_alert_on_the_normal_budget_path(monkeypatch, caplog):
+    """The benchmark survives -> silence (the alert must not be a per-cycle noise source)."""
+    import logging
+    alerts = []
+    monkeypatch.setattr(_sizer, '_post_ops_alert', lambda line: alerts.append(line))
+    with caplog.at_level(logging.WARNING, logger='execution.regime_blended_sizer'):
+        t = targets(run(monkeypatch, flag=True, budget=True, max_nav_frac=10.0))
+    assert 'SPY' in t and alerts == []
+    assert 'redirected pool NOT deployed' not in caplog.text
+
+
+def test_no_shed_alert_when_the_budget_did_not_apply(monkeypatch, caplog):
+    """Budget OFF: even a shed benchmark ticker is not this alert's business."""
+    import logging
+    alerts = []
+    monkeypatch.setattr(_sizer, '_post_ops_alert', lambda line: alerts.append(line))
+    monkeypatch.setattr(_sizer, '_apply_asset_eligibility_gate',
+                        lambda t, broker, eligibility=None: {k: v for k, v in t.items() if k != 'SPY'})
+    with caplog.at_level(logging.WARNING, logger='execution.regime_blended_sizer'):
+        targets(run(monkeypatch, flag=True, budget=False))
+    assert alerts == [] and 'redirected pool NOT deployed' not in caplog.text

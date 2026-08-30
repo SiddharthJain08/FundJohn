@@ -20,6 +20,13 @@ says in production. Spec §2.5.2 — this is the parity artefact for rule C.
 Run outside 13:00–20:15 UTC. Usage:
     python3 scripts/bench_relative_sizing_replay.py --nav 152000 [--regime LOW_VOL] [--beta-budget] [--max-nav-frac FLOAT]
 --nav is required (read it with: /root/go/bin/alpaca account get --jq .equity).
+--max-nav-frac only has an effect together with --beta-budget: the spec §3.4
+benchmark NAV cap is applied by the sizer ONLY when the budget applied that
+cycle (`_beta_budget_applied`), so passing it alone changes nothing. Negative
+values are floored at 0.0 (a 0 cap = "no benchmark exposure" what-if); the LIVE
+reader instead treats a non-positive pipeline_config value as garbage and falls
+back to 1.0 — this override is an explicit operator instruction, not a config
+read.
 """
 from __future__ import annotations
 import argparse
@@ -82,7 +89,10 @@ def _size(nav: float, regime: str, flag_on: bool, *, budget=False, max_nav_frac=
     if flag_on and budget: os.environ[bz.BETA_BUDGET_ENV] = '1'
     else:                  os.environ.pop(bz.BETA_BUDGET_ENV, None)
     if max_nav_frac is not None:
-        bz.benchmark_max_nav_frac = lambda default=1.0, conn=None, _v=float(max_nav_frac): _v
+        # Final fix wave (2026-08-30) #12: a negative override would make the
+        # sizer's cap flip the benchmark's SIGN (math.copysign(_max, _usd) with
+        # _max < 0), silently replacing the beta base with a short. Floor at 0.
+        bz.benchmark_max_nav_frac = lambda default=1.0, conn=None, _v=max(0.0, float(max_nav_frac)): _v
     _sizer._load_broker_positions_usd = lambda: {}
     _sizer._post_corr_cumsharpe_log = lambda line: None
     _sizer._post_flatten_alert = lambda *a, **k: None
@@ -114,7 +124,9 @@ def main(argv=None) -> int:
     ap.add_argument('--regime', default=None)
     ap.add_argument('--top', type=int, default=25)
     ap.add_argument('--beta-budget', action='store_true')
-    ap.add_argument('--max-nav-frac', type=float, default=None)
+    ap.add_argument('--max-nav-frac', type=float, default=None,
+                    help='override the §3.4 benchmark NAV cap (fraction of NAV); '
+                         'floored at 0.0 and only effective together with --beta-budget')
     a = ap.parse_args(argv)
     _load_env()
     from execution import benchmark_sleeve as bsl

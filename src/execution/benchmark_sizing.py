@@ -68,6 +68,12 @@ def benchmark_max_nav_frac(default: float = 1.0, conn=None) -> float:
         if not math.isfinite(v) or v <= 0:
             logger.warning('[bench_sizing] %s=%r not positive; using %s', MAX_NAV_FRAC_KEY, row[0], default)
             return float(default)
+        if v > 1.0:
+            # Spec §8 allows this as a config value (it is not a code path), but
+            # it silently un-does the "the reference portfolio is UNLEVERED"
+            # rationale of the §3.4 cap — never let it pass unannounced.
+            logger.warning('[bench_sizing] %s=%.3f > 1.0: the reference portfolio is being levered',
+                           MAX_NAV_FRAC_KEY, v)
         return v
     except Exception as e:
         logger.warning('[bench_sizing] %s unreadable (%s: %s); using %s', MAX_NAV_FRAC_KEY, type(e).__name__, e, default)
@@ -112,6 +118,17 @@ def apply_beta_budget(before: dict, hurdled: dict, s_m, bench_tickers: set) -> t
     Returns (budgeted_weights, pool). s_m None or no bench_tickers ->
     (dict(hurdled), 0.0). Never mutates its inputs."""
     if s_m is None or not bench_tickers:
+        return dict(hurdled), 0.0
+    # Final fix wave (2026-08-30) #1: `bench_tickers` is qualified on the sizer's
+    # GATE map sign (_net_signs(gate_net_sharpe, ...)) while `before` is the SIZE
+    # map (_size_adj); with OPENCLAW_STRATEGY_SIZE_SCALAR=1 the two can disagree,
+    # so a "net-long-qualified" benchmark ticker can be net-SHORT here. The pool
+    # is unsigned and would then flip it long — a silent sign inversion of the
+    # beta base. Skip the budget for the cycle instead (rule C unchanged).
+    _short = sorted(b for b in bench_tickers if float(before.get(b, 0.0)) < 0.0)
+    if _short:
+        logger.warning('[bench_sizing] benchmark ticker net-short in the size map (%s); '
+                       'beta budget skipped this cycle (rule C unchanged)', _short)
         return dict(hurdled), 0.0
     s_m = float(s_m)
     pool = sum(min(abs(float(s)), s_m) for t, s in before.items() if t not in bench_tickers)
@@ -245,11 +262,15 @@ def _shares(w: dict, bench: set) -> tuple[float, float]:
 def shadow_line(regime_state: str, s_m, before: dict, after: dict, dropped: list,
                 bench_tickers: set, lam_nav: float, *, mode: str = 'shadow',
                 h: int | None = None, budgeted: dict | None = None,
-                beta_pool: float = 0.0, budget_mode: str = 'shadow') -> str:
+                beta_pool: float = 0.0, budget_mode: str = 'shadow',
+                beta_usd_cap: float | None = None) -> str:
     """One line per cycle. Dollar moves are computed by normalizing BOTH books
     to lam_nav (the sizer's Σ|target| = λ·NAV rule) so the diff is in the units
     the book will actually move. `budgeted` (spec 2026-08-30 §3.3) appends the
-    beta-budget fields; omitted -> byte-identical to the pre-budget format."""
+    beta-budget fields; omitted -> byte-identical to the pre-budget format.
+    `beta_usd_cap` (final fix wave, 2026-08-30) is the §3.4 NAV cap in dollars
+    (benchmark_max_nav_frac × NAV): given, the capped figure the book will
+    actually carry is printed beside the pre-cap one; omitted -> field absent."""
     g0, beta0 = _shares(before, bench_tickers)
     g1, beta1 = _shares(after, bench_tickers)
     usd0 = {t: (v / g0) * lam_nav for t, v in before.items()} if g0 > 0 else {}
@@ -264,6 +285,8 @@ def shadow_line(regime_state: str, s_m, before: dict, after: dict, dropped: list
         _, beta_b = _shares(budgeted, bench_tickers)
         budget_txt = (f' beta_budget={budget_mode} pool={float(beta_pool):.1f} '
                       f'beta_share_budget={beta_b:.3f} beta_usd_budget={beta_b * lam_nav:.0f}')
+        if beta_usd_cap is not None:
+            budget_txt += f' beta_usd_budget_capped={min(beta_b * lam_nav, float(beta_usd_cap)):.0f}'
     return (f'bench_sizing.{mode}[{regime_state}]: S_m={s_m_txt}{h_txt} bench={sorted(bench_tickers)} '
             f'dropped={len(dropped)}/{len(before)} beta_share_before={beta0:.3f} beta_share_after={beta1:.3f} '
             f'gross_moved_frac={moved:.3f}{budget_txt} dropped_tickers={sorted(dropped)[:15]} top_moves={moves[:10]}')

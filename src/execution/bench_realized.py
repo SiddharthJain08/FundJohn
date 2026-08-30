@@ -6,7 +6,9 @@ NAV history = logs/pnl_daily_ohlc.json (`days[date].close`, the live sampler's
 end-of-day NAV); SPY = prices.parquet via benchmark_baseline.load_benchmark_closes
 (pyarrow pushdown). Returns are computed on the COMMON dates of both series.
 Sharpe over the trailing 20 common dates: (mean − rf/252)/std·√252, rf 5 %
-(unified_backtest's convention); zero variance or < 5 obs -> None.
+(unified_backtest's convention); zero variance or fewer than SHARPE_MIN_OBS
+(20) observations -> None. MIN_COMMON (5) remains the floor for the
+since-anchor return, which needs no distributional estimate.
 """
 from __future__ import annotations
 import json
@@ -24,6 +26,10 @@ ANCHOR_KEY = 'bench_realized_anchor'
 DEFAULT_ANCHOR = '2026-06-23'
 RISK_FREE_DAILY = 0.05 / 252
 MIN_COMMON = 5
+# Final fix wave (2026-08-30) #9: a "20d Sharpe" must rest on 20 observations.
+# MIN_COMMON (5) still gates the since-anchor return — a ratio of two prices
+# needs no distributional estimate; an annualized Sharpe does.
+SHARPE_MIN_OBS = 20
 # Floor below which stdev is treated as float noise from repeated compounding
 # (observed ~1e-16..1e-17 on a nominally-constant daily return), not real
 # variance (real daily-return sd is >=1e-4). Keeps "constant returns -> None"
@@ -43,15 +49,26 @@ def _load_spy_closes(start: str, end: str) -> dict[str, float]:
 
 
 def _load_anchor(conn) -> str:
+    """pipeline_config[ANCHOR_KEY] as an ISO date, else DEFAULT_ANCHOR.
+    Final fix wave (2026-08-30) #10: an ABSENT row is normal (migration 152 seeds
+    it on johnbot's next restart) and stays silent; a present-but-invalid value
+    or a DB error must not silently re-anchor the whole since= column."""
     try:
         with conn.cursor() as cur:
             cur.execute('SELECT value FROM pipeline_config WHERE key = %s', (ANCHOR_KEY,))
             row = cur.fetchone()
-        v = str(row[0]).strip() if row and row[0] else ''
+    except Exception as e:
+        logger.warning('[bench_realized] %s unreadable/invalid (%r); using %s', ANCHOR_KEY, e, DEFAULT_ANCHOR)
+        return DEFAULT_ANCHOR
+    if not row or row[0] is None:
+        return DEFAULT_ANCHOR
+    try:
         import datetime as _dt
+        v = str(row[0]).strip()
         _dt.date.fromisoformat(v)
         return v
     except Exception:
+        logger.warning('[bench_realized] %s unreadable/invalid (%r); using %s', ANCHOR_KEY, row[0], DEFAULT_ANCHOR)
         return DEFAULT_ANCHOR
 
 
@@ -64,14 +81,24 @@ def _load_regime_and_s_m(conn, run_date):
             regime = row[0] if row else None
         if regime:
             from execution.benchmark_sizing import regime_benchmark_sharpe_for_sizing
-            s_m = regime_benchmark_sharpe_for_sizing(regime, run_date, conn=conn)
+            # Final fix wave (2026-08-30) #4: CACHE-ONLY read. Without a compute
+            # override a cache miss (a run_date the sizer has not stamped — e.g.
+            # a back-dated report, or the 16:15 collect running before the day's
+            # sizing cycle) would send this report-only line into the sizer's
+            # full parquet-wide S_m grid compute AND make it write the day cache.
+            # An empty grid makes the provider return None, so the line just
+            # prints `S_m=n/a` — the intended degradation. (The provider logs its
+            # own '[bench_sizing] S_m compute returned no regimes' WARN on that
+            # path; it is the cache miss, not a failure.)
+            s_m = regime_benchmark_sharpe_for_sizing(regime, run_date, conn=conn,
+                                                     compute=lambda *a, **k: {})
     except Exception as e:
         logger.warning('[bench_realized] regime/S_m unavailable: %s', e)
     return regime, s_m
 
 
 def _sharpe(rets: list[float]):
-    if len(rets) < MIN_COMMON:
+    if len(rets) < SHARPE_MIN_OBS:
         return None
     sd = statistics.stdev(rets)
     if not math.isfinite(sd) or sd < ZERO_VAR_EPS:
@@ -123,7 +150,8 @@ def format_line(st: dict, regime, s_m) -> str:
             f"gap={st['gap_pp']:+.1f}pp{short_note} | 20d book={_pct(st['book_20d'])} spy={_pct(st['spy_20d'])} | "
             f"60d book={_pct(st['book_60d'])} spy={_pct(st['spy_60d'])} | "
             f"regime={regime or 'n/a'} book_sharpe_20d={_sh(st['book_sharpe_20d'])} "
-            f"spy_sharpe_20d={_sh(st['spy_sharpe_20d'])} S_m={'n/a' if s_m is None else f'{float(s_m):.3f}'}")
+            f"spy_sharpe_20d={_sh(st['spy_sharpe_20d'])} S_m={'n/a' if s_m is None else f'{float(s_m):.3f}'} "
+            f"asof={st['run_date']} n={st['n_common']}")
 
 
 def bench_realized_line(run_date, *, nav_path=None, conn=None):
