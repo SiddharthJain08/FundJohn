@@ -583,9 +583,11 @@ async function _phaseCodeAndBacktest(job, ctx) {
     // per-regime eligibility from the CHOSEN tier's sleeves. Never fatal.
     try {
       const { spawnSync } = require('child_process');
-      const r = spawnSync('python3',
+      const { wrapCapped } = require('../../lib/capped_spawn');   // 2026-08-30: MemoryMax scope
+      const shrinkCmd = wrapCapped('python3',
         ['scripts/run_universe_shrink.py', '--strategy', job.strategy_id,
-         '--adopt', '--reassign'],
+         '--adopt', '--reassign']);
+      const r = spawnSync(shrinkCmd.cmd, shrinkCmd.args,
         { cwd: OPENCLAW_DIR, timeout: 900_000, encoding: 'utf8',
           env: { ...process.env, PYTHONPATH: 'src' } });
       const tail = String(r.stdout || '').trim().split('\n').slice(-2).join(' | ');

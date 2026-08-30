@@ -18,6 +18,7 @@
 const fs   = require('fs');
 const path = require('path');
 const { spawn, execSync, spawnSync } = require('child_process');
+const { wrapCapped } = require('../../lib/capped_spawn');
 const { spawnWithTimeout } = require('../../lib/spawn_timeout');
 const { emitGateDecision, paperIdForCandidate } = require('./gate-decisions');
 const { redteamStrategy } = require('../curators/strategy_redteam');
@@ -230,9 +231,13 @@ function buildCoderContext(strategySpec, variantDirective = null) {
 // If opts.onChild is provided, it's invoked synchronously with the spawned
 // ChildProcess so the caller can SIGTERM it later (used by Cancel).
 function _spawnPython(args, opts = {}) {
-  const { cwd, timeoutMs = 600_000, onChild, env } = opts;
+  const { cwd, timeoutMs = 600_000, onChild, env, memoryMax } = opts;
+  // 2026-08-30: MemoryMax-capped transient scope when running as root (johnbot
+  // approval jobs) — see src/lib/capped_spawn.js. Passes through untouched in
+  // the research finisher (claudebot, already inside its own 5G unit cgroup).
+  const wrapped = wrapCapped('python3', args, { memoryMax });
   return new Promise((resolve) => {
-    const child = spawn('python3', args, { cwd, env: env || process.env });
+    const child = spawn(wrapped.cmd, wrapped.args, { cwd, env: env || process.env });
     if (typeof onChild === 'function') { try { onChild(child); } catch (_) {} }
     let stdout = '', stderr = '';
     const killTimer = setTimeout(() => {

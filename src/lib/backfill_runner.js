@@ -15,6 +15,7 @@
  */
 
 const { spawn } = require('child_process');
+const { wrapCapped } = require('./capped_spawn');
 const path      = require('path');
 
 const OPENCLAW_DIR = path.resolve(__dirname, '..', '..');
@@ -35,7 +36,8 @@ function runBackfill(requestId, opts = {}) {
     const args = ['-m', 'src.pipeline.backfillers', String(requestId)];
     if (dryRun) args.push('--dry-run');
 
-    const child = spawn('python3', args, {
+    const wrapped = wrapCapped('python3', args);   // 2026-08-30: MemoryMax scope when root
+    const child = spawn(wrapped.cmd, wrapped.args, {
       cwd: OPENCLAW_DIR,
       env: { ...process.env, PYTHONPATH: OPENCLAW_DIR },
     });

@@ -2210,9 +2210,12 @@ app.post('/api/strategies/:id/rerun_backtest', async (req, res) => {
   const cwd     = path.resolve(__dirname, '../../..');
   const env     = { ...process.env, PYTHONPATH: 'src' };
 
+  // 2026-08-30: MemoryMax-capped transient scope (src/lib/capped_spawn.js) —
+  // an uncapped dashboard-triggered backtest can take the whole box to OOM.
+  const btCmd = require('../../lib/capped_spawn').wrapCapped(
+    'python3', ['-m', 'backtest.unified_backtest', '--strategy-id', sid]);
   const child = spawn(
-    process.execPath.endsWith('/node') ? 'python3' : 'python3',  // explicit
-    ['-m', 'backtest.unified_backtest', '--strategy-id', sid],
+    btCmd.cmd, btCmd.args,
     { cwd, env, detached: true, stdio: ['ignore', logFd, logFd] }
   );
   child.unref();
