@@ -263,6 +263,29 @@ app.get('/api/db/cycles', async (req, res) => {
 
 // ── Portfolio API ──────────────────────────────────────────────────────────────
 
+// Benchmark sleeve tickers (SPY) from the registry — literal universe entries
+// of strategies flagged benchmark_sleeve=true, mirroring the sizer's mapping.
+// Cached 10 min; fail-open empty set (positions render as plain tiles).
+let _benchTickersCache = null;
+async function _benchmarkTickersCached() {
+  const now = Date.now();
+  if (_benchTickersCache && now - _benchTickersCache.ts < 10 * 60_000) {
+    return _benchTickersCache.val;
+  }
+  let val = new Set();
+  try {
+    const r = await dbQuery(
+      `SELECT universe FROM strategy_registry WHERE (parameters ->> 'benchmark_sleeve') = 'true'`);
+    for (const row of (r.rows || [])) {
+      for (const item of (row.universe || [])) {
+        if (typeof item === 'string' && /^[A-Z][A-Z0-9.\-]{0,9}$/.test(item)) val.add(item);
+      }
+    }
+  } catch (_) { /* fail-open */ }
+  _benchTickersCache = { ts: now, val };
+  return val;
+}
+
 app.get('/api/portfolio/positions', async (req, res) => {
   try {
     // No LIMIT: the prior cap of 500 (by signal_date DESC) was squeezing
@@ -325,10 +348,12 @@ app.get('/api/portfolio/positions', async (req, res) => {
     // summed intents and produced > 100% NAV on multi-strategy tickers
     // (WBD hit 409% across 17 strategies).
     const brokerPositions = {};
+    let brokerFetchOk = false;   // ok + parseable — an EMPTY list is still truth
     try {
       const positionsResp = await runAlpaca(['position', 'list'], { timeout: 10_000 });
-      const list = positionsResp && positionsResp.ok && Array.isArray(positionsResp.payload)
-        ? positionsResp.payload : [];
+      brokerFetchOk = Boolean(positionsResp && positionsResp.ok
+        && Array.isArray(positionsResp.payload));
+      const list = brokerFetchOk ? positionsResp.payload : [];
       for (const p of list) {
         if (!p || !p.symbol) continue;
         const qty  = parseFloat(p.qty);
@@ -469,16 +494,23 @@ app.get('/api/portfolio/positions', async (req, res) => {
       for (const r of contribRes.rows) contribByTicker[r.ticker] = r.contributions;
     } catch (_) { /* column may predate migration 143 on a fresh clone */ }
 
+    // Benchmark tickers (2026-09-04): the beta sleeve's holdings (SPY) render
+    // in their own section above the LONG/SHORT tiles, not as a tile. The set
+    // comes from the registry's benchmark sleeves' literal universes — same
+    // source the sizer uses. Best-effort, cached 10 min; empty set = every
+    // ticker renders as a tile (old behaviour).
+    const benchTickers = await _benchmarkTickersCached();
+
     // Active positions = broker truth. execution_signals carries every
     // strategy's *intent*, including stale rows the reconcile sweep hasn't
     // closed yet (phantoms). The dashboard's "Active Positions" panel must
     // reflect what we actually hold, so we drop any row whose ticker the
-    // broker isn't carrying. Degraded-mode fallback: if the broker fetch
-    // failed (brokerPositions empty AND we caught earlier), ship every row
-    // so the operator still sees something rather than a blank panel.
-    const brokerHasAny = Object.keys(brokerPositions).length > 0;
+    // broker isn't carrying. Degraded-mode fallback ONLY when the broker
+    // fetch actually FAILED: a successful fetch returning zero positions is
+    // truth (the 2026-09-04 fresh-account cutover surfaced this — the old
+    // empty-map heuristic shipped 345 stale intent rows as "positions").
     const enriched = result.rows
-      .filter(r => !brokerHasAny || brokerPositions[r.ticker])
+      .filter(r => !brokerFetchOk || brokerPositions[r.ticker])
       .map(r => ({
         ...r,
         day_pnl_usd: computeDayPnlUsd({
@@ -500,6 +532,7 @@ app.get('/api/portfolio/positions', async (req, res) => {
         corr_cum_sharpe_asof: sadjByTicker[r.ticker]
           ? sadjByTicker[r.ticker].corr_cum_sharpe_asof : null,
         sizer_contributions: contribByTicker[r.ticker] || null,
+        benchmark: benchTickers.has(r.ticker),
       }));
 
     if (req.query.group_by === 'strategy') {
@@ -4216,6 +4249,13 @@ body.rs-chat-locked{overflow:hidden}
    any column width. Closed-trade history still uses the legacy
    variable-area heatmap (renderHistory). */
 .pf-pos-twocol{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:10px}
+/* Benchmark sleeve section (2026-09-04): SPY above the LONG/SHORT treemaps,
+   advanced metrics always inline, no tile. */
+.pf-bench-section{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:10px}
+.pf-bench-header{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px 14px;padding:2px 4px 8px;border-bottom:1px solid var(--border2);margin-bottom:6px}
+.pf-bench-title{font-size:10px;text-transform:uppercase;letter-spacing:.1em;font-weight:600;color:var(--blue)}
+.pf-bench-meta{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums}
+.pf-bench-stat b{color:var(--text);font-weight:600}
 .pf-poscol{min-width:0;background:var(--bg);border-radius:6px;padding:8px}
 .pf-poscol-header{display:flex;justify-content:space-between;align-items:baseline;padding:2px 4px 8px;font-size:10px;text-transform:uppercase;letter-spacing:.1em;font-weight:600;border-bottom:1px solid var(--border2);margin-bottom:8px}
 .pf-poscol-long .pf-poscol-header{color:var(--green)}
@@ -7957,6 +7997,38 @@ function _squarifyStep(items, row, rect, output) {
   }
 }
 
+// Benchmark sleeve section (2026-09-04): the SPY beta position renders ABOVE
+// the LONG/SHORT treemaps with its advanced metrics permanently inline — the
+// same panel a tile click would open (_buildAlphaBarsHtml) plus the topline
+// broker numbers — and no tile, so the alpha book keeps the full canvas.
+function _buildBenchSectionHtml(g) {
+  const b = g.broker || {};
+  const mv   = b.market_value != null ? Math.abs(parseFloat(b.market_value)) : null;
+  const qty  = b.qty != null ? parseFloat(b.qty) : null;
+  const navP = g.total_size_pct != null ? g.total_size_pct * 100 : null;
+  const pnlP = g.net_pnl != null ? g.net_pnl * 100 : null;
+  const pnlD = b.unrealized_pl != null ? parseFloat(b.unrealized_pl) : null;
+  const side = (b.side || g.net_dir || '—').toString().toUpperCase();
+  const sadj = g.corr_cum_sharpe != null ? g.corr_cum_sharpe.toFixed(2) : '—';
+  const stat = (label, val, cls) =>
+    \`<span class="pf-bench-stat">\${label} <b class="\${cls || ''}">\${val}</b></span>\`;
+  const meta = [
+    stat('side', side, side === 'LONG' ? 'pf-pnl-pos' : (side === 'SHORT' ? 'pf-pnl-neg' : '')),
+    stat('qty', qty != null ? qty.toLocaleString() : '—'),
+    stat('value', mv != null ? _fmtDollar(mv, false) : '—'),
+    stat('% NAV', navP != null ? navP.toFixed(1) + '%' : '—'),
+    stat('P&L', \`\${_fmtPctSigned(pnlP, true)}\${pnlD != null ? ' (' + _fmtDollar(pnlD, true) + ')' : ''}\`, pnlCls(pnlP)),
+    stat('S_adj', sadj),
+  ].join('');
+  return \`<div class="pf-bench-section">
+      <div class="pf-bench-header">
+        <span class="pf-bench-title">BENCHMARK — \${escapeHtml(g.ticker)}</span>
+        <span class="pf-bench-meta">\${meta}</span>
+      </div>
+      \${_buildAlphaBarsHtml(g)}
+    </div>\`;
+}
+
 function _buildPositionsTwoColumnHtml(groups, selectedTicker, nav) {
   const longs  = groups.filter(g => g.broker && g.broker.side === 'long');
   const shorts = groups.filter(g => g.broker && g.broker.side === 'short');
@@ -8665,26 +8737,36 @@ function renderPositions(rows) {
   if (toggle && toggle.value === 'strategy') {
     return _renderPositionsByStrategy(el, rows);
   }
-  const groups = _groupByTicker(rows, 'open');
+  const allGroups = _groupByTicker(rows, 'open');
+  // Benchmark sleeve (2026-09-04): SPY renders in its own section ABOVE the
+  // LONG/SHORT treemaps with its advanced metrics inline (what a tile click
+  // would show) — no tile, so the alpha tiles get the full canvas.
+  const benchSet = new Set(rows.filter(r => r.benchmark).map(r => r.ticker));
+  const benchGroups = allGroups.filter(g => benchSet.has(g.ticker));
+  const groups = allGroups.filter(g => !benchSet.has(g.ticker));
   // Count = actual broker positions (consolidated per ticker), NOT the
   // per-strategy intent rows. A 56-position book with ~6 strategies per
   // ticker has ~343 intent rows behind it; showing "343 positions" is
   // misleading — the operator wants the broker-truth count.
   const longCnt  = groups.filter(g => g.broker && g.broker.side === 'long').length;
   const shortCnt = groups.filter(g => g.broker && g.broker.side === 'short').length;
+  const benchNote = benchGroups.length
+    ? \` · \${benchGroups.map(g => g.ticker).join('+')} benchmark\` : '';
   document.getElementById('pf-pos-count').textContent =
-    groups.length ? \`\${groups.length} open · \${longCnt} long · \${shortCnt} short\` : '';
-  if (!groups.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
+    allGroups.length ? \`\${groups.length} open · \${longCnt} long · \${shortCnt} short\${benchNote}\` : '';
+  if (!allGroups.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
   const selectedTicker = _heatmapSelected['pf-positions'] || null;
   // Re-validate selection — if the operator's previously-selected ticker
-  // dropped out of the recent slice (closed, fell past the 90d window),
-  // clear it instead of rendering a stale bar chart.
+  // dropped out of the recent slice (closed, fell past the 90d window) or is
+  // the benchmark (whose metrics are always inline above), clear it instead
+  // of rendering a stale bar chart.
   const selectedGroup = selectedTicker ? groups.find(g => g.ticker === selectedTicker) : null;
   if (!selectedGroup) _heatmapSelected['pf-positions'] = null;
 
+  const benchHtml = benchGroups.map(g => _buildBenchSectionHtml(g)).join('');
   const twocol = _buildPositionsTwoColumnHtml(groups, selectedGroup ? selectedGroup.ticker : null, _navCache);
   const bars   = selectedGroup ? _buildAlphaBarsHtml(selectedGroup) : '';
-  el.innerHTML = twocol + bars;
+  el.innerHTML = benchHtml + twocol + bars;
 
   // Populate each treemap container now that its width is measurable.
   // Re-run on resize so the layout stays squarified at any column width.
