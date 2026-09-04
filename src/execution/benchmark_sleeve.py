@@ -14,10 +14,15 @@ conservative failure (less beta), never an unbounded one.
 from __future__ import annotations
 import logging
 import os
+import re
 
 logger = logging.getLogger(__name__)
 
 PARAM_KEY = 'benchmark_sleeve'
+
+# Literal ticker shape (SPY, BRK.B, BRK-B). Registry `universe` entries that
+# are free-text descriptions ("FixedETFlist:...") never match.
+_TICKER_RE = re.compile(r'^[A-Z][A-Z0-9.\-]{0,9}$')
 
 
 def load_benchmark_sleeve_ids(conn=None) -> set[str]:
@@ -33,6 +38,45 @@ def load_benchmark_sleeve_ids(conn=None) -> set[str]:
             return {r[0] for r in cur.fetchall()}
     except Exception as e:
         logger.warning('[bench_sleeve] registry read failed (%s); no benchmark sleeves this cycle', e)
+        return set()
+    finally:
+        if own and conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def benchmark_sleeve_universe_tickers(conn=None) -> set[str]:
+    """Tickers named literally in the benchmark sleeves' registry universes.
+
+    Benchmark sleeves are operator-authored with literal universes
+    (S_beta_spy -> ['SPY']), so the registry list IS the sleeve->ticker
+    mapping — no signal/sizer context needed. The premarket news gate uses
+    this to exempt the buy-and-hold sleeve from news vetoes: the sleeve's
+    contract is to hold the benchmark through ALL news (a market ETF absorbs
+    every macro headline, so a panic gate judges it on the market's mood,
+    which the sleeve exists to ignore — first live firing 2026-09-04 ejected
+    the whole 104-share SPY sleeve at the open). Fail-open EMPTY: on any
+    error the benchmark ticker is judged like any other holding.
+    """
+    own = conn is None
+    try:
+        if own:
+            import psycopg2
+            conn = psycopg2.connect(os.environ['POSTGRES_URI'])
+        with conn.cursor() as cur:
+            cur.execute("SELECT universe FROM strategy_registry WHERE (parameters ->> %s) = 'true'",
+                        (PARAM_KEY,))
+            out: set[str] = set()
+            for (universe,) in cur.fetchall():
+                for item in (universe or []):
+                    if isinstance(item, str) and _TICKER_RE.match(item):
+                        out.add(item)
+            return out
+    except Exception as e:
+        logger.warning('[bench_sleeve] universe read failed (%s); no benchmark ticker '
+                       'news-veto exemptions this run', e)
         return set()
     finally:
         if own and conn is not None:
