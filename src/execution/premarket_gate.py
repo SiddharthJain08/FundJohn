@@ -32,7 +32,6 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'src'))
 
-from execution.benchmark_sleeve import benchmark_sleeve_universe_tickers  # noqa: E402
 from ingestion.news_finbert_scorer import score_news_for_tickers  # noqa: E402
 from sentiment.premarket_scorer import ScoreInputs, panic_score  # noqa: E402
 from sentiment.sonnet_premarket_confirmer import (  # noqa: E402
@@ -364,25 +363,6 @@ def run_gate(conn=None, broker_loader=None) -> dict:
         if signals:
             tickers = list({s['ticker'] for s in signals})
 
-            # ── Benchmark sleeve exemption (2026-09-04) ─────────────────────
-            # The buy-and-hold beta sleeve (S_beta_spy -> SPY) exists to hold
-            # the benchmark through ALL news: a market ETF inherits every
-            # macro headline, so it runs panic 70-85 daily and one bearish
-            # confirmer call ejects the whole sleeve at the open (happened
-            # live 2026-09-04: 104 SPY sold, the beta budget stranded).
-            # Benchmark tickers are still SCORED (audit keeps the real panic
-            # number) but can never be REJECTED. Fail-open empty set = judged
-            # like any other holding.
-            bench_exempt: set = set()
-            try:
-                bench_exempt = benchmark_sleeve_universe_tickers(conn)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning('premarket_gate: benchmark sleeve lookup failed '
-                               '(%s) — no news-veto exemptions', exc)
-            if bench_exempt & set(tickers):
-                logger.info('premarket_gate: benchmark sleeve ticker(s) exempt '
-                            'from news veto: %s', sorted(bench_exempt & set(tickers)))
-
             # ── Batch-fetch and FinBERT-score news (fail-open) ──────────────
             news_by_ticker: dict = {}
             try:
@@ -458,13 +438,7 @@ def run_gate(conn=None, broker_loader=None) -> dict:
                 # (treated as always-on; future OPENCLAW_PREMARKET_CONFIRMER gate
                 # not wired here since we can only veto on confirmed evidence).
                 # Confirmer errors → fail-open (APPROVED).
-                if ps >= advisory_threshold and ticker in bench_exempt:
-                    model_label = 'benchmark_sleeve_exempt'
-                    logger.info(
-                        'premarket_gate: %s panic=%.0f >= %.0f but the ticker is a '
-                        'benchmark sleeve holding — buy-and-hold beta is exempt '
-                        'from news vetoes; APPROVED', ticker, ps, advisory_threshold)
-                elif ps >= advisory_threshold:
+                if ps >= advisory_threshold:
                     model_label = 'sonnet_premarket_confirmer'
                     try:
                         headline_tuples: list[tuple[str, float, str]] = []
@@ -510,8 +484,6 @@ def run_gate(conn=None, broker_loader=None) -> dict:
                     'finbert_neg_ratio': float(finbert_neg_ratio),
                     'threshold': advisory_threshold,
                 }
-                if ticker in bench_exempt:
-                    gate_meta['benchmark_exempt'] = True
                 # A held position (signal_id None) is audited under its own gate
                 # type; a carried signal keeps the original one.
                 is_hold = signal_id is None
