@@ -29,7 +29,7 @@ const assert = require('node:assert');
 const path = require('node:path');
 const Module = require('module');
 
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(__dirname, '..', '..');
 
 // ── Module stubs: no real Postgres / parquet / Redis / Discord ──────────────
 const origLoad = Module._load;

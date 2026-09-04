@@ -24,7 +24,7 @@ const assert = require('node:assert');
 const path = require('node:path');
 const Module = require('module');
 
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(__dirname, '..', '..');
 
 // ── Module stubs: no real Postgres / parquet / Discord ──────────────────────
 const sqlCalls = []; // { text, values }
@@ -148,6 +148,64 @@ const collector = require(path.join(ROOT, 'src/pipeline/collector.js'));
     maxAttempts: 1,
   });
   assert.deepStrictEqual(res.stale, ['T97', 'T98', 'T99'], 'straggler tail reported, not fatal');
+
+  // ── 4. dormancy carve-out (2026-09-04) ────────────────────────────────────
+  // Names with a KNOWN-old last bar (SPAC units/warrants that go days without
+  // a trade) leave the DENOMINATOR — they have no bar to fetch, and counting
+  // them made the 95% floor unreachable (halted 6 of 8 cycles since 08-26).
+
+  // (e) dormant names excluded → 94/94 passes where 94/100 would abort
+  const wide = Array.from({ length: 100 }, (_, i) => `T${i}`);
+  const covMap = new Map(wide.map(t => [t, '2026-06-03']));           // active
+  for (let i = 94; i < 100; i++) covMap.set(`T${i}`, '2026-05-01');   // dormant
+  res = await collector._verifyEquityFreshness(wide, '2026-06-04', {
+    queryFreshFn: async () => wide.slice(0, 94),
+    queryCoverageFn: async () => covMap,
+    refetchFn: async () => {},
+    sleepFn: async () => {},
+    maxAttempts: 1,
+  });
+  assert.strictEqual(res.stale.length, 0, 'dormant names leave the denominator entirely');
+
+  // (f) a real outage still trips the gate: everyone traded yesterday
+  threw = false;
+  try {
+    await collector._verifyEquityFreshness(wide, '2026-06-04', {
+      queryFreshFn: async () => [],
+      queryCoverageFn: async () => new Map(wide.map(t => [t, '2026-06-03'])),
+      refetchFn: async () => {},
+      sleepFn: async () => {},
+      maxAttempts: 1,
+    });
+  } catch (e) { threw = true; }
+  assert.ok(threw, 'recent-active names all stale = real outage → still aborts');
+
+  // (g) dormantDays: 0 disables the carve-out (old strict behavior)
+  threw = false;
+  try {
+    await collector._verifyEquityFreshness(wide, '2026-06-04', {
+      queryFreshFn: async () => wide.slice(0, 94),
+      queryCoverageFn: async () => covMap,
+      refetchFn: async () => {},
+      sleepFn: async () => {},
+      maxAttempts: 1,
+      dormantDays: 0,
+    });
+  } catch (e) { threw = true; }
+  assert.ok(threw, 'dormantDays=0 keeps the full denominator (94% < 95% → abort)');
+
+  // (h) coverage lookup failure → full denominator, loud old behavior
+  threw = false;
+  try {
+    await collector._verifyEquityFreshness(wide, '2026-06-04', {
+      queryFreshFn: async () => wide.slice(0, 94),
+      queryCoverageFn: async () => { throw new Error('db down'); },
+      refetchFn: async () => {},
+      sleepFn: async () => {},
+      maxAttempts: 1,
+    });
+  } catch (e) { threw = true; }
+  assert.ok(threw, 'dormancy lookup failure must never widen the gate');
 
   console.log('collector-eod-freshness-smoke: ALL PASS');
   process.exit(0);

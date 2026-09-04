@@ -2241,15 +2241,64 @@ async function _queryFreshCoverage(tickers, todayEt) {
   return (res?.rows || []).map(r => r.ticker);
 }
 
+// Last stored bar date per ticker, for the dormancy carve-out below.
+async function _queryCoverageDates(tickers) {
+  const { query: dbQuery } = require('../database/postgres');
+  const res = await dbQuery(
+    `SELECT ticker, date_to FROM data_coverage
+      WHERE data_type='prices' AND ticker = ANY($1::text[])`,
+    [tickers]
+  );
+  const out = new Map();
+  for (const r of (res?.rows || [])) out.set(r.ticker, r.date_to);
+  return out;
+}
+
 async function _verifyEquityFreshness(equityTickers, todayEt, {
   queryFreshFn = _queryFreshCoverage,
+  queryCoverageFn = _queryCoverageDates,
   refetchFn = null,
   sleepFn = sleep,
   maxAttempts = parseInt(process.env.OPENCLAW_EOD_FRESHNESS_MAX_ATTEMPTS || '3', 10),
   minFrac = parseFloat(process.env.OPENCLAW_EOD_FRESHNESS_MIN_FRAC || '0.95'),
+  dormantDays = parseInt(process.env.OPENCLAW_EOD_FRESHNESS_DORMANT_DAYS || '7', 10),
   retryDelayMs = 45_000,
 } = {}) {
   if (!equityTickers || equityTickers.length === 0) return { fresh: [], stale: [] };
+  // Dormancy carve-out (2026-09-04): the live-strategy union drags in listed-
+  // but-dormant instruments (SPAC units, warrants, rights, preferred lines —
+  // ~600 names via S_ast_roa_effect_within_stocks' no_otc predicate) that can
+  // go days with zero trades. No daily bar EXISTS for them, so counting them
+  // in the denominator makes the 95% floor unreachable — measured 94.4–95.1%
+  // daily, halting 6 of 8 cycles since 08-26. A name with no stored bar in
+  // `dormantDays` calendar days has nothing fresh to fetch: it leaves the
+  // DENOMINATOR, not just the failure list. A real feed outage still trips
+  // the gate — yesterday's actives all carry a recent date_to and stay
+  // counted. 0 disables the carve-out; a failed lookup keeps the full
+  // denominator (loud, old behavior).
+  if (dormantDays > 0) {
+    try {
+      const cov = await queryCoverageFn(equityTickers);
+      const cutoff = new Date(Date.parse(`${todayEt}T00:00:00Z`) - dormantDays * 86_400_000);
+      // Only a KNOWN-old last bar marks dormancy; a missing/unreadable
+      // coverage date keeps the name counted (strict — never widens the gate
+      // on absent evidence).
+      const dormant = equityTickers.filter(t => {
+        const dt = cov.get(t);
+        if (!dt) return false;
+        const parsed = new Date(dt);
+        return !isNaN(parsed) && parsed < cutoff;
+      });
+      if (dormant.length > 0) {
+        const dormantSet = new Set(dormant);
+        equityTickers = equityTickers.filter(t => !dormantSet.has(t));
+        notify(`⏸️ EOD freshness: ${dormant.length} dormant name(s) excluded from the gate denominator (no bar stored in ${dormantDays}d): ${dormant.slice(0, 8).join(', ')}…`);
+        if (equityTickers.length === 0) return { fresh: [], stale: [] };
+      }
+    } catch (e) {
+      console.warn(`[collector] freshness dormancy lookup failed (${e.message}) — gating on the full denominator`);
+    }
+  }
   let fresh = await queryFreshFn(equityTickers, todayEt);
   let stale = equityTickers.filter(t => !fresh.includes(t));
   let attempt = 1;
