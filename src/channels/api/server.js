@@ -509,6 +509,28 @@ app.get('/api/portfolio/positions', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── Account epoch (2026-09-04 paper-account cutover) ─────────────────────────
+// The DB ledgers (signal_pnl, execution_signals, …) are append-only across
+// broker-account cutovers, but the portfolio page reports THE CURRENT
+// ACCOUNT: closed-trade stats, win rates, and P&L marks filter at
+// pipeline_config.account_epoch — the date of the most recent cutover.
+// Missing/unreadable key = 1970-01-01 (no filtering). Cached 5 min.
+let _accountEpochCache = null;
+async function _accountEpoch() {
+  const now = Date.now();
+  if (_accountEpochCache && now - _accountEpochCache.ts < 5 * 60_000) {
+    return _accountEpochCache.val;
+  }
+  let val = '1970-01-01';
+  try {
+    const r = await dbQuery(`SELECT value FROM pipeline_config WHERE key = 'account_epoch'`);
+    const v = (r.rows[0]?.value || '').toString().trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(v)) val = v;
+  } catch (_) { /* fail-open: lifetime stats */ }
+  _accountEpochCache = { ts: now, val };
+  return val;
+}
+
 app.get('/api/portfolio/history', async (req, res) => {
   try {
     // Tie-breaker on signal_id is critical: closed_at is a date column, so
@@ -518,8 +540,11 @@ app.get('/api/portfolio/history', async (req, res) => {
     // visible — with ~230 closed rows total today this comfortably covers
     // the live history.
     const sid = (req.query.strategy_id || '').toString().trim();
-    const params = [];
-    let where = `WHERE sp.status = 'closed'`;
+    // Epoch semantics: a trade belongs to the CURRENT account iff its signal
+    // OPENED at/after account_epoch — late closes of old-account leftovers
+    // (stale-tracker sweeps, orphan closes) never leak into the new era.
+    const params = [await _accountEpoch()];
+    let where = `WHERE sp.status = 'closed' AND es.signal_date >= $1::date`;
     if (sid) { params.push(sid); where += ` AND es.strategy_id = $${params.length}`; }
     const result = await dbQuery(`
       SELECT es.strategy_id, es.ticker, es.direction, es.entry_price,
@@ -1120,23 +1145,29 @@ app.get('/api/portfolio/summary', async (req, res) => {
     // approximation (~30 trading days when weekends + 1 holiday are
     // averaged out) and mark the source field so the operator sees it.
     const threshold30Td = await _last30TradingDayThreshold();
+    // Account cutover: "lifetime" = since the current account's epoch, and
+    // the 30d window is clamped to it too (old-account closes inside the
+    // last 30 sessions must not count).
+    const epoch = await _accountEpoch();
     const fallback30TdInterval = "CURRENT_DATE - INTERVAL '42 days'";
     // rolled_continuation rows are roll segments of an ongoing position
     // (SP-6 D1), not trades; excluded from stats (NULL-safe).
     const win30dSql = threshold30Td
       ? `SELECT COUNT(*) AS closed_count,
                 COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins
-           FROM signal_pnl
-          WHERE status='closed' AND realized_pnl_pct IS NOT NULL
-            AND close_reason IS DISTINCT FROM 'rolled_continuation'
-            AND closed_at >= $1::date`
+           FROM signal_pnl sp
+           JOIN execution_signals es ON es.id = sp.signal_id
+          WHERE sp.status='closed' AND sp.realized_pnl_pct IS NOT NULL
+            AND sp.close_reason IS DISTINCT FROM 'rolled_continuation'
+            AND sp.closed_at >= $1::date AND es.signal_date >= $2::date`
       : `SELECT COUNT(*) AS closed_count,
                 COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins
-           FROM signal_pnl
-          WHERE status='closed' AND realized_pnl_pct IS NOT NULL
-            AND close_reason IS DISTINCT FROM 'rolled_continuation'
-            AND closed_at >= ${fallback30TdInterval}`;
-    const win30dArgs = threshold30Td ? [threshold30Td] : [];
+           FROM signal_pnl sp
+           JOIN execution_signals es ON es.id = sp.signal_id
+          WHERE sp.status='closed' AND sp.realized_pnl_pct IS NOT NULL
+            AND sp.close_reason IS DISTINCT FROM 'rolled_continuation'
+            AND sp.closed_at >= ${fallback30TdInterval} AND es.signal_date >= $1::date`;
+    const win30dArgs = threshold30Td ? [threshold30Td, epoch] : [epoch];
     // Broker-truth open position count via Alpaca. The previous DB-only
     // count (SELECT COUNT(*) FROM execution_signals WHERE status='open')
     // included phantom intent rows the reconcile sweep hadn't cleaned —
@@ -1158,22 +1189,27 @@ app.get('/api/portfolio/summary', async (req, res) => {
       dbQuery(`
         -- rolled_continuation rows are roll segments of an ongoing position
         -- (SP-6 D1), not trades; excluded from stats (NULL-safe).
-        SELECT ROUND(AVG(realized_pnl_pct)::numeric, 4) AS avg_pnl,
-               ROUND(MAX(realized_pnl_pct)::numeric, 4) AS best,
-               ROUND(MIN(realized_pnl_pct)::numeric, 4) AS worst,
-               ROUND(AVG(NULLIF(days_held, 0))::numeric, 2) AS avg_days_held
-          FROM signal_pnl WHERE status = 'closed'
-            AND close_reason IS DISTINCT FROM 'rolled_continuation'
-      `),
+        SELECT ROUND(AVG(sp.realized_pnl_pct)::numeric, 4) AS avg_pnl,
+               ROUND(MAX(sp.realized_pnl_pct)::numeric, 4) AS best,
+               ROUND(MIN(sp.realized_pnl_pct)::numeric, 4) AS worst,
+               ROUND(AVG(NULLIF(sp.days_held, 0))::numeric, 2) AS avg_days_held
+          FROM signal_pnl sp
+          JOIN execution_signals es ON es.id = sp.signal_id
+         WHERE sp.status = 'closed'
+           AND sp.close_reason IS DISTINCT FROM 'rolled_continuation'
+           AND es.signal_date >= $1::date
+      `, [epoch]),
       dbQuery(`
         -- rolled_continuation rows are roll segments of an ongoing position
         -- (SP-6 D1), not trades; excluded from stats (NULL-safe).
         SELECT COUNT(*) AS closed_count,
-               COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins
-          FROM signal_pnl
-         WHERE status = 'closed' AND realized_pnl_pct IS NOT NULL
-           AND close_reason IS DISTINCT FROM 'rolled_continuation'
-      `),
+               COUNT(*) FILTER (WHERE sp.realized_pnl_pct > 0) AS wins
+          FROM signal_pnl sp
+          JOIN execution_signals es ON es.id = sp.signal_id
+         WHERE sp.status = 'closed' AND sp.realized_pnl_pct IS NOT NULL
+           AND sp.close_reason IS DISTINCT FROM 'rolled_continuation'
+           AND es.signal_date >= $1::date
+      `, [epoch]),
       dbQuery(win30dSql, win30dArgs),
     ]);
     const open       = openRes.rows[0];
@@ -1219,13 +1255,15 @@ app.get('/api/portfolio/pnl-curve', async (req, res) => {
     // decimals so the client's ×100 multiplication lands at 2 decimal-
     // places of percent without pre-rounding artifacts.
     const result = await dbQuery(`
-      SELECT pnl_date,
-             ROUND(AVG(unrealized_pnl_pct)::numeric, 4) AS avg_unrealized,
+      SELECT sp.pnl_date,
+             ROUND(AVG(sp.unrealized_pnl_pct)::numeric, 4) AS avg_unrealized,
              COUNT(*) AS open_count
-      FROM signal_pnl
-      WHERE pnl_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
-      GROUP BY pnl_date ORDER BY pnl_date
-    `, [days]);
+      FROM signal_pnl sp
+      JOIN execution_signals es ON es.id = sp.signal_id
+      WHERE sp.pnl_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
+        AND es.signal_date >= $2::date
+      GROUP BY sp.pnl_date ORDER BY sp.pnl_date
+    `, [days, await _accountEpoch()]);
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
