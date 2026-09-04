@@ -1932,6 +1932,16 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     target_usd = _apply_asset_corr_cap(target_usd, gate_net_sharpe, nav,
                                        lam=lam_global, exclude=_bench_exempt)
 
+    # Benchmark-correlation removal (operator directive 2026-09-04): with the
+    # beta budget holding the market through SPY, an alpha name highly
+    # correlated with the benchmark is redundant beta — remove it outright
+    # instead of leaving it to the 20% cluster budget, which can no longer see
+    # SPY (benchmark tickers are excluded from clustering, D6 above). Gated on
+    # the same _bench_exempt set (empty while rule C is shadow); skipped when
+    # the benchmark is premarket-vetoed or carries no target (no replacement
+    # beta to hold that day). Fail-open: targets unchanged.
+    target_usd = _apply_benchmark_corr_removal(target_usd, _bench_exempt, nav)
+
     # Benchmark NAV cap (spec 2026-08-30 §3.4, D-4): under the beta budget the
     # reference portfolio is UNLEVERED, so a benchmark ticker never exceeds
     # benchmark_max_nav_frac × NAV (default 1.0). Shaved, never redistributed
@@ -2767,6 +2777,62 @@ def _load_asset_corr_cfg(default_thr: float = _ASSET_CORR_THR_DEFAULT,
     return (enabled,
             max(_ASSET_CORR_THR_MIN, min(_ASSET_CORR_THR_MAX, thr)),
             max(_ASSET_CORR_CAP_PCT_MIN, min(_ASSET_CORR_CAP_PCT_MAX, cap_pct)))
+
+
+def _apply_benchmark_corr_removal(target_usd, bench_tickers, nav):
+    """Benchmark-correlation removal (operator directive 2026-09-04). Every
+    alpha ticker with |corr(t, bench)| >= pipeline_config
+    benchmark_corr_removal_thr (default 0.60, same trailing-63d construction
+    as the cluster cap) is REMOVED from the targets — held names orphan-close
+    downstream, conviction is NOT redirected. Runs only when a benchmark
+    ticker carries a nonzero target and is not premarket-vetoed this morning
+    (on a veto day the replacement beta is absent, so correlated names are
+    kept). Kill: OPENCLAW_BENCH_CORR_REMOVAL=0, or thr outside (0, 1).
+    Fail-open: any error returns target_usd unchanged."""
+    if os.environ.get('OPENCLAW_BENCH_CORR_REMOVAL', '1') == '0':
+        return target_usd
+    bench = sorted(t for t in (bench_tickers or ()) if target_usd.get(t))
+    if not bench:
+        return target_usd
+    try:
+        from execution import asset_correlation as _ac
+        from execution import benchmark_sizing as _bsz
+        thr = _bsz.bench_corr_removal_thr()
+        if not (0.0 < thr < 1.0):
+            return target_usd
+        vetoed = _load_premarket_vetoes()
+        if any(b in vetoed for b in bench):
+            logger.info('bench_corr_removal: benchmark %s premarket-vetoed — '
+                        'correlated names kept this cycle',
+                        sorted(set(bench) & vetoed))
+            return target_usd
+        window = int(os.environ.get('OPENCLAW_ASSET_CORR_WINDOW', '63'))
+        alpha = [t for t in target_usd if t not in set(bench) and target_usd[t]]
+        # Element-wise max |rho| across benchmark tickers (one today: SPY).
+        rho: dict = {}
+        for b in bench:
+            for t, r in _ac.benchmark_corr(alpha, b, window=window).items():
+                if abs(r) > abs(rho.get(t, 0.0)):
+                    rho[t] = r
+        out, removed = _bsz.remove_benchmark_correlated(target_usd, bench[0], rho, thr)
+        # remove_benchmark_correlated treats one bench name; re-insert any
+        # other benchmark tickers untouched (they are never removal subjects).
+        for b in bench:
+            if b in target_usd:
+                out[b] = target_usd[b]
+                removed.pop(b, None)
+        gross_removed = sum(abs(v) for v in removed.values())
+        logger.info(
+            'bench_corr_removal.%s: thr=%.2f bench=%s removed=%d/%d '
+            'gross_removed=%.0f (%.1f%% NAV) top=%s',
+            'apply', thr, bench, len(removed), len(alpha), gross_removed,
+            100.0 * gross_removed / nav if nav else 0.0,
+            sorted(((t, round(abs(v)), round(rho.get(t, 0.0), 2))
+                    for t, v in removed.items()), key=lambda x: -x[1])[:10])
+        return out
+    except Exception as e:
+        logger.warning('bench_corr_removal failed (%s); fail-open', e)
+        return target_usd
 
 
 def _apply_asset_corr_cap(target_usd, conviction, nav, lam=1.0, exclude=None):

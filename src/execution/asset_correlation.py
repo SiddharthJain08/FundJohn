@@ -52,6 +52,36 @@ def _pearson(xs, ys):
     return num / (dx * dy)
 
 
+def benchmark_corr(tickers, bench, window=63, as_of=None) -> dict[str, float]:
+    """corr(t, bench) per ticker — ONE row of the pairwise matrix, O(n) not
+    O(n²) (the benchmark-correlation removal step runs it every cycle beside
+    the full cluster matrix). Same construction as corr_from_returns: trailing
+    `window` daily close-to-close returns, thin pairs (< MIN_OBS overlap) ->
+    0.0 so a name is never removed on thin evidence. Fail-open: {} on any
+    load error or when the benchmark itself has no returns."""
+    try:
+        returns = _load_returns(sorted(set(tickers) | {bench}), window, as_of)
+    except Exception:
+        return {}
+    db = returns.get(bench)
+    if not db:
+        return {}
+    out: dict[str, float] = {}
+    for t in tickers:
+        if t == bench:
+            continue
+        da = returns.get(t)
+        if not da:
+            continue
+        common = sorted(set(da) & set(db))
+        if len(common) < MIN_OBS:
+            out[t] = 0.0
+            continue
+        r = _pearson([da[d] for d in common], [db[d] for d in common])
+        out[t] = 0.0 if r is None else max(-1.0, min(1.0, r))
+    return out
+
+
 def corr_from_returns(returns: dict[str, dict[str, float]]) -> dict[str, dict[str, float]]:
     """Pairwise Pearson on {ticker: {date: ret}}. Diagonal 1.0; symmetric.
     Pairs with < MIN_OBS overlapping dates -> 0.0 (never cluster on thin evidence)."""

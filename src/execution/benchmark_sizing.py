@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 BENCH_SIZING_ENV = 'OPENCLAW_BENCH_RELATIVE_SIZING'
 BETA_BUDGET_ENV = 'OPENCLAW_BENCH_BETA_BUDGET'   # spec 2026-08-30: '1' = redirect rule C's removed conviction to the benchmark
 MAX_NAV_FRAC_KEY = 'benchmark_max_nav_frac'       # pipeline_config: benchmark ticker |target| <= frac * NAV under the budget (D-4)
+CORR_REMOVAL_ENV = 'OPENCLAW_BENCH_CORR_REMOVAL'  # '0' kills the benchmark-correlation removal (operator directive 2026-09-04)
+CORR_REMOVAL_THR_KEY = 'benchmark_corr_removal_thr'  # pipeline_config: |corr(t, SPY)| >= thr => remove t outright; <=0 or >=1 disables
 CONFIG_KEY = 'benchmark_regime_sharpe'
 CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
 
@@ -84,6 +86,53 @@ def benchmark_max_nav_frac(default: float = 1.0, conn=None) -> float:
                 conn.close()
             except Exception:
                 pass
+
+
+def bench_corr_removal_thr(default: float = 0.60, conn=None) -> float:
+    """pipeline_config.benchmark_corr_removal_thr as a float in (0, 1);
+    missing/garbage -> default. A stored value <= 0 or >= 1 is an explicit
+    OPERATOR DISABLE and is returned as-is (the caller treats it as off)."""
+    own = conn is None
+    try:
+        if own:
+            import psycopg2
+            conn = psycopg2.connect(os.environ['POSTGRES_URI'])
+        with conn.cursor() as cur:
+            cur.execute('SELECT value FROM pipeline_config WHERE key = %s', (CORR_REMOVAL_THR_KEY,))
+            row = cur.fetchone()
+        if not row or row[0] is None:
+            return float(default)
+        v = float(str(row[0]).strip())
+        if not math.isfinite(v):
+            logger.warning('[bench_sizing] %s=%r not finite; using %s', CORR_REMOVAL_THR_KEY, row[0], default)
+            return float(default)
+        return v
+    except Exception as e:
+        logger.warning('[bench_sizing] %s unreadable (%s: %s); using %s', CORR_REMOVAL_THR_KEY, type(e).__name__, e, default)
+        return float(default)
+    finally:
+        if own and conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def remove_benchmark_correlated(target_usd: dict, bench: str, corr: dict, thr: float) -> tuple[dict, dict]:
+    """Pure (operator directive 2026-09-04). With the beta budget holding the
+    market through the benchmark ticker, an alpha name highly correlated with
+    it is redundant beta, not diversification — and since benchmark tickers
+    are excluded from the correlation clustering (spec 2026-08-29 D6), the
+    20% cluster budget can no longer see that redundancy. So: remove every
+    alpha ticker with |corr(t, bench)| >= thr OUTRIGHT (held names become
+    orphan-closes downstream; conviction is NOT redirected). corr is the
+    {ticker: rho-vs-bench} map from asset_correlation.benchmark_corr — a
+    ticker absent from it (no return history) is never removed.
+    Returns (kept_targets, removed_targets). Never mutates its input."""
+    removed = {t: v for t, v in target_usd.items()
+               if t != bench and v and abs(corr.get(t, 0.0)) >= thr}
+    kept = {t: v for t, v in target_usd.items() if t not in removed}
+    return kept, removed
 
 
 def apply_benchmark_hurdle(ticker_w: dict, s_m, bench_tickers: set) -> tuple[dict, list]:
