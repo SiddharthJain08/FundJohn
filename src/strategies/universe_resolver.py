@@ -3,9 +3,23 @@ from dataclasses import dataclass
 from datetime import date as _date
 from typing import Callable, Iterable, Protocol
 import importlib
+import logging
+import os
 
 from src.strategies.universe_meta import TickerMetadata
-from src.strategies.universe_default import DEFAULT_UNIVERSE_FILTER
+from src.strategies.universe_default import DEFAULT_UNIVERSE_FILTER, tier_liquid
+
+logger = logging.getLogger(__name__)
+
+
+def _liquid_cap_enabled() -> bool:
+    """Operator ruling 2026-09-04: tier_liquid is the LARGEST universe any
+    strategy may resolve — live, union, envelope, or backtest. A predicate
+    wider than the ladder's top tier (no_otc matched 12,124 names including
+    SPAC units/warrants via S_ast_roa_effect_within_stocks) is intersected
+    down to it, so there is no path to going live — or backtesting — on
+    names outside tier_liquid. Kill switch: OPENCLAW_UNIVERSE_LIQUID_CAP=0."""
+    return os.environ.get('OPENCLAW_UNIVERSE_LIQUID_CAP', '1') != '0'
 
 
 class AsOfInFutureError(ValueError):
@@ -54,17 +68,27 @@ class UniverseResolver:
             return self._cache[key]
         predicate = self._load_predicate(strategy_id)
         rows = self._db.fetch_metadata_as_of(as_of)
+        cap_on = _liquid_cap_enabled()
+        capped = 0
         out = []
         for row in rows:
             meta = row.metadata if hasattr(row, "metadata") else TickerMetadata.from_row(row)
             try:
-                if predicate(meta, as_of) and (
-                        not apply_floor or self._coverage.has_floor(meta.symbol, as_of)):
-                    out.append(meta.symbol)
+                if not predicate(meta, as_of):
+                    continue
+                if cap_on and not tier_liquid(meta, as_of):
+                    capped += 1
+                    continue
+                if apply_floor and not self._coverage.has_floor(meta.symbol, as_of):
+                    continue
+                out.append(meta.symbol)
             except Exception:
                 # Defensive: a broken predicate skips the ticker; lifecycle
                 # sandbox check should have caught this earlier.
                 continue
+        if capped:
+            logger.info('universe_resolver: liquid cap dropped %d name(s) for %s @ %s '
+                        '(predicate wider than tier_liquid)', capped, strategy_id, as_of)
         out.sort()
         self._cache[key] = out
         return out

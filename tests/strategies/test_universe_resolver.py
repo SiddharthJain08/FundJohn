@@ -98,3 +98,79 @@ def test_union_universe_writes_audit(db, monkeypatch):
     assert a["union_size"] == 1
     assert a["per_strategy_sizes"] == {"S5": 1}
     assert a["alpaca_universe_size"] == 8421
+
+
+# ── Liquid cap (operator ruling 2026-09-04) ──────────────────────────────────
+# tier_liquid is the LARGEST universe any strategy may resolve — a predicate
+# wider than the ladder's top tier (no_otc matched the whole tape, 12,124
+# names incl. SPAC units/warrants) is intersected down to it, live AND
+# backtest. Kill switch: OPENCLAW_UNIVERSE_LIQUID_CAP=0.
+
+def _row(symbol, **kw):
+    base = dict(
+        symbol=symbol, asset_class="us_equity", exchange="NASDAQ",
+        status="active", tradable=True, shortable=True,
+        fractionable=True, easy_to_borrow=True,
+        market_cap=1e9, adv_usd_20d=1e7,
+        sector="IT", industry="CE",
+        options_eligible=False, in_sp500=False, in_r1000=False, in_r3000=False,
+        listed_date=date(2020, 1, 1), delisted_date=None,
+    )
+    base.update(kw)
+    r = type("Row", (), {})()
+    r.snapshot_date = date(2026, 1, 1)
+    r.metadata = TickerMetadata(**base)
+    r.symbol = symbol
+    return r
+
+
+@pytest.fixture
+def db_with_warrant():
+    """AAPL (index member) + a warrant-shaped listing: active, tradable, NOT
+    OTC — passes no_otc — but neither fractionable, easy-to-borrow, nor an
+    index member, so it fails tier_liquid."""
+    from src.strategies.universe_default import no_otc  # noqa: F401 (doc)
+    return FakeDB([
+        _row("AAPL", market_cap=3.5e12, adv_usd_20d=1.8e10,
+             options_eligible=True, in_sp500=True, in_r1000=True, in_r3000=True),
+        _row("AACOW", fractionable=False, easy_to_borrow=False, shortable=False,
+             market_cap=None, adv_usd_20d=1e4),
+    ])
+
+
+def test_liquid_cap_binds_wide_predicates(db_with_warrant, monkeypatch):
+    from src.strategies.universe_default import no_otc
+    monkeypatch.delenv("OPENCLAW_UNIVERSE_LIQUID_CAP", raising=False)
+    resolver = UniverseResolver(db=db_with_warrant, coverage=FakeCoverage({}),
+                                today_fn=lambda: _FIXED_TODAY)
+    monkeypatch.setattr(resolver, "_load_predicate", lambda sid: no_otc)
+    assert resolver.resolve("S_wide", as_of=date(2026, 6, 1)) == ["AAPL"]
+
+
+def test_liquid_cap_applies_to_envelope_too(db_with_warrant, monkeypatch):
+    from src.strategies.universe_default import no_otc
+    monkeypatch.delenv("OPENCLAW_UNIVERSE_LIQUID_CAP", raising=False)
+    resolver = UniverseResolver(db=db_with_warrant, coverage=FakeCoverage({}),
+                                today_fn=lambda: _FIXED_TODAY)
+    monkeypatch.setattr(resolver, "_load_predicate", lambda sid: no_otc)
+    monkeypatch.setattr(resolver, "_live_strategy_ids", lambda states: ["S_wide"])
+    assert resolver.envelope_universe(date(2026, 6, 1)) == ["AAPL"]
+
+
+def test_liquid_cap_never_shrinks_nested_index_predicates(db_with_warrant, monkeypatch):
+    """sp500 ⊂ tier_r3000 ⊂ tier_liquid by construction — the cap is a no-op
+    for every ladder-nested predicate."""
+    monkeypatch.delenv("OPENCLAW_UNIVERSE_LIQUID_CAP", raising=False)
+    resolver = UniverseResolver(db=db_with_warrant, coverage=FakeCoverage({}),
+                                today_fn=lambda: _FIXED_TODAY)
+    monkeypatch.setattr(resolver, "_load_predicate", lambda sid: sp500)
+    assert resolver.resolve("S5", as_of=date(2026, 6, 1)) == ["AAPL"]
+
+
+def test_liquid_cap_kill_switch(db_with_warrant, monkeypatch):
+    from src.strategies.universe_default import no_otc
+    monkeypatch.setenv("OPENCLAW_UNIVERSE_LIQUID_CAP", "0")
+    resolver = UniverseResolver(db=db_with_warrant, coverage=FakeCoverage({}),
+                                today_fn=lambda: _FIXED_TODAY)
+    monkeypatch.setattr(resolver, "_load_predicate", lambda sid: no_otc)
+    assert resolver.resolve("S_wide", as_of=date(2026, 6, 1)) == ["AACOW", "AAPL"]
