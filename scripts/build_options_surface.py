@@ -30,13 +30,14 @@ for p in (ROOT, ROOT / 'src'):
 from src.data.parquet_store import SURFACE_KEYS, SURFACE_PATH, append_dedup  # noqa: E402
 from strategies.options_surface import (SCALAR_KEYS, OPTIONS_FEATURES_VERSION,  # noqa: E402
                                         features_for_day, prepare_chain)
+from strategies.options_oi import OI_KEYS  # noqa: E402 — Part B (task 13); landed, no longer optional
 
 OPTS_PATH = ROOT / 'data' / 'master' / 'options_eod.parquet'
 PRICES_PATH = ROOT / 'data' / 'master' / 'prices.parquet'
 COLS = ['ticker', 'date', 'expiry', 'strike', 'option_type', 'implied_volatility',
         'delta', 'gamma', 'theta', 'vega', 'volume']
 CHUNK_DAYS = 5
-OUT_COLS = ['ticker', 'date'] + SCALAR_KEYS + ['built_at']
+OUT_COLS = ['ticker', 'date'] + SCALAR_KEYS + OI_KEYS + ['built_at']
 
 
 def _read_range(start: pd.Timestamp, end: pd.Timestamp, tickers=None) -> pd.DataFrame:
@@ -77,14 +78,21 @@ def build_rows(chain: pd.DataFrame, spots: dict, oi_lookup=None) -> pd.DataFrame
         row = features_for_day(prepared, spots.get((ticker, day)), day)
         if oi_lookup is not None:
             row.update(oi_lookup(ticker, day) or {})
+        # OI_KEYS are always written — present (None when no lookup was supplied,
+        # or the lookup found no CBOE session/rows) so the surface master carries
+        # every OI column from now on, never only when a session happened to exist.
         rows.append({'ticker': ticker, 'date': day.date(), **{k: row.get(k) for k in SCALAR_KEYS},
-                     **{k: v for k, v in row.items() if k.startswith(('gex', 'pcr_oi', 'max_pain', 'contracts_liquid',
-                                                                       'iv_centroid_delta', 'surface_premium', 'oi_session'))},
+                     **{k: row.get(k) for k in OI_KEYS},
                      'built_at': stamp})
     df = pd.DataFrame(rows)
     if df.empty:
         return pd.DataFrame(columns=OUT_COLS)
     df['options_features_version'] = OPTIONS_FEATURES_VERSION
+    # Keep OI_KEYS as object dtype so a genuinely-missing feature stays `None`
+    # rather than being upcast to NaN alongside another row's real float value
+    # in the same column (pandas' default when a column mixes None and float).
+    for k in OI_KEYS:
+        df[k] = pd.Series([r.get(k) for r in rows], index=df.index, dtype=object)
     return df
 
 

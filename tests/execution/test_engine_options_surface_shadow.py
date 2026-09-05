@@ -1,4 +1,5 @@
 from __future__ import annotations
+import datetime as dt
 import json, logging
 from pathlib import Path
 import numpy as np
@@ -47,6 +48,32 @@ def test_master_row_precedence(tmp_path):
     m.to_parquet(master / 'options_surface.parquet', index=False)
     out = v2.build(chain, ['SPY'], pd.Timestamp('2026-09-03'), master, px)
     assert out['SPY']['iv30'] == pytest.approx(0.777)
+
+
+def test_build_populates_oi_from_cboe_session(tmp_path, monkeypatch):
+    """Task 14 note 3: options_aux_v2.build() threads oi_features_for_ticker
+    through, resolving master_dir/cboe_chains when OPENCLAW_CBOE_CHAINS_ROOT
+    is unset (spec 2026-09-04 Part B)."""
+    from execution import options_aux_v2 as v2
+    from strategies import options_oi as oi
+    chain, px, master = _inputs(tmp_path)
+    root = master / 'cboe_chains'; root.mkdir()
+    rows = [{'date': dt.date(2026, 9, 2), 'underlying': 'SPY', 'expiry': dt.date(2026, 9, 18), 'option_type': t,
+             'strike': k, 'open_interest': o, 'iv': 0.12, 'delta': d, 'gamma': 0.01, 'vega': 0.5, 'underlying_price': 640.0}
+            for k, o, d, t in ((630.0, 1000.0, 0.6, 'C'), (640.0, 2000.0, 0.5, 'C'), (650.0, 500.0, 0.4, 'C'),
+                               (630.0, 900.0, -0.4, 'P'), (640.0, 2200.0, -0.5, 'P'), (650.0, 300.0, -0.6, 'P'))]
+    pd.DataFrame(rows).to_parquet(root / 'date=2026-09-02.parquet', index=False)
+    monkeypatch.delenv('OPENCLAW_CBOE_CHAINS_ROOT', raising=False)
+    oi.clear_cache()
+    try:
+        out = v2.build(chain, ['SPY', 'AAPL', 'XOM'], pd.Timestamp('2026-09-03'), master, px)
+        spy = out['SPY']
+        assert spy['oi_session'] == '2026-09-02' and spy['max_pain'] == 640.0 and spy['gex'] is not None
+        assert spy['open_interest_by_strike']
+        aapl = out['AAPL']                                  # no CBOE rows for AAPL in this fixture
+        assert aapl['gex'] is None and aapl['open_interest_by_strike'] == {}
+    finally:
+        oi.clear_cache()
 
 
 def test_shadow_summary_line():

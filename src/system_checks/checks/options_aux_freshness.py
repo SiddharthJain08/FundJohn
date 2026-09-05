@@ -69,3 +69,39 @@ def _options_aux_freshness():
     return Status.PASS, (
         f'newest {latest.date()} ({lag_days}d), {newest["ticker"].nunique()} '
         f'tickers; OI-derived fields NULL (feed has no open_interest)')
+
+
+_OI_MIN_TICKERS = int(os.environ.get('OPTIONS_OI_MIN_TICKERS', '400'))
+
+
+def oi_coverage(min_tickers: int = _OI_MIN_TICKERS):
+    """FAIL when the latest panel date carries CBOE open interest for fewer than
+    `min_tickers` tickers while a CBOE session for the prior day exists
+    (spec 2026-09-04 B.4). PASS when OI is present; WARN when no CBOE session
+    is available yet (the stream started 2026-08-21).
+
+    On the latest real session (2026-09-03-ish, 11 CBOE sessions landed since
+    2026-08-21) ~553 tickers carry non-null pcr_oi — the `min_tickers=400`
+    default documents that headroom rather than pinning the exact count.
+    """
+    import pandas as pd
+    from strategies.options_oi import cboe_session_for
+    panel = Path(os.environ.get('OPTIONS_ENRICHED_PANEL', str(_PANEL)))
+    try:
+        df = pd.read_parquet(panel, columns=['ticker', 'date', 'pcr_oi'])
+    except Exception as e:  # noqa: BLE001
+        return Status.WARN, f'panel unreadable: {e}'
+    if df.empty:
+        return Status.FAIL, 'enriched options panel is empty'
+    latest = pd.to_datetime(df['date']).max()
+    if cboe_session_for(latest) is None:
+        return Status.WARN, f'no CBOE session before {latest.date()} — OI features legitimately NULL'
+    n = int(df[pd.to_datetime(df['date']) == latest]['pcr_oi'].notna().sum())
+    if n < min_tickers:
+        return Status.FAIL, f'only {n} tickers carry CBOE open interest on {latest.date()} (need ≥ {min_tickers})'
+    return Status.PASS, f'{n} tickers carry CBOE open interest on {latest.date()}'
+
+
+@check(name='options_oi_coverage', tags=['strategies', 'storage'], requires=[])
+def _check_oi_coverage():
+    return oi_coverage()

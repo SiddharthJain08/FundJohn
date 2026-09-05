@@ -30,6 +30,7 @@ import pyarrow.parquet as pq
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'src'))
 from strategies.options_surface import SCALAR_KEYS, SERIES_KEYS, series_frame, rv_series_from_closes  # noqa: E402
+from strategies.options_oi import OI_KEYS  # noqa: E402 — Part B (task 13); landed, no longer optional
 
 log = logging.getLogger('compute_rolling_options_fields')
 
@@ -78,9 +79,8 @@ def build_panel(surface: pd.DataFrame, closes: pd.DataFrame) -> pd.DataFrame:
     # A real surface master (build_options_surface.py::build_rows) always writes
     # every SCALAR_KEYS column, so a gap here is a regression signal, not an
     # expected state — default to None (never fabricate) but warn once per call.
-    # Part-B CBOE-OI columns (contracts_liquid, gex, ...) are deliberately NOT in
-    # SCALAR_KEYS — they stay silent below, since their absence is the current,
-    # expected pre-task-13 state, not a defect.
+    # Since task 14, the builder also always writes OI_KEYS (contracts_liquid,
+    # gex, ...) — so a gap there is folded into the same single warning below.
     missing_scalar = [k for k in SCALAR_KEYS if k not in out.columns]
     for k in missing_scalar:
         out[k] = None
@@ -89,13 +89,14 @@ def build_panel(surface: pd.DataFrame, closes: pd.DataFrame) -> pd.DataFrame:
     for alias, src in LEGACY_ALIASES.items():
         out[alias] = out[src]
     out['unusual_flow'] = (pd.to_numeric(out['pc_ratio'], errors='coerce') > 1.5).astype(int)
-    for c in ('contracts_liquid', 'gex', 'iv_centroid_delta', 'surface_premium', 'max_pain', 'pcr_oi', 'oi_session'):
-        if c not in out.columns:
-            out[c] = None
-    if missing_alias_srcs or missing_other_scalar_cols:
+    missing_oi = [k for k in OI_KEYS if k not in out.columns]
+    for k in missing_oi:
+        out[k] = None
+    if missing_alias_srcs or missing_other_scalar_cols or missing_oi:
         log.warning('build_panel: surface frame lacks SCALAR_KEYS column(s) %s (legacy-alias sources, defaulted '
-                    'to None) and %s (other scalar columns, defaulted to None) — a real surface master carries '
-                    'every SCALAR_KEYS column; investigate the builder', missing_alias_srcs, missing_other_scalar_cols)
+                    'to None), %s (other scalar columns, defaulted to None), and OI_KEYS column(s) %s (defaulted '
+                    'to None) — a real surface master carries every SCALAR_KEYS + OI_KEYS column; investigate '
+                    'the builder', missing_alias_srcs, missing_other_scalar_cols, missing_oi)
     return out
 
 
