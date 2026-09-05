@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_gold_ibit_dual_momentum_vol_capped",
+  "required": ["prices"],
+  "optional": []
+}

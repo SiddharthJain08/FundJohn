@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_kalman_laguerre_trend_crossover",
+  "required": ["prices"],
+  "optional": []
+}

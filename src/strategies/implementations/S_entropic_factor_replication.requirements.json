@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_entropic_factor_replication",
+  "required": ["prices"],
+  "optional": []
+}

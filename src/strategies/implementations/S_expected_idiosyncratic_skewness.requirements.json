@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_expected_idiosyncratic_skewness",
-  "required": ["prices"],
-  "optional": ["financials", "macro"]
-}

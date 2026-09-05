@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_bayes_stein_shrinkage_mvo",
-  "required": ["prices"],
-  "optional": []
-}

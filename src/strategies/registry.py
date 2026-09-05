@@ -259,6 +259,12 @@ _IMPL_MAP = {
     'S_ast_return_asymmetry_effect_in_commodity_futures': ('strategies.implementations.S_ast_return_asymmetry_effect_in_commodity_futures', 'ReturnAsymmetryEffectInCommodityFutures'),
     # Quantpedia: Rebalancing Premium in Cryptocurrencies — daily equal-weight rebalancing BTC-USD + ETH-USD
     'S_ast_rebalancing_premium_in_cryptocurrencies': ('strategies.implementations.S_ast_rebalancing_premium_in_cryptocurrencies', 'RebalancingPremiumInCryptocurrencies'),
+    # quantish.io 2021: Kalman/Laguerre/EMA trend-alignment crossover, LONG-only on BTC-USD + ETH-USD
+    'S_kalman_laguerre_trend_crossover': ('strategies.implementations.S_kalman_laguerre_trend_crossover', 'KalmanLaguerreTrendCrossover'),
+    # Arratia & Gzyl 2026 (arXiv 2609.03552): Fermi-Dirac entropic two-stage factor replication, long-only tracking basket
+    'S_entropic_factor_replication': ('strategies.implementations.S_entropic_factor_replication', 'EntropicFactorReplication'),
+    # aligrithm.com 2026: dual momentum rotation between GLD/IBIT, 8-week lookback, 20% vol-targeted sizing
+    'S_gold_ibit_dual_momentum_vol_capped': ('strategies.implementations.S_gold_ibit_dual_momentum_vol_capped', 'GoldIbitDualMomentumVolCapped'),
     # Quantpedia: Payday Anomaly — long SPY on monthly payday (15th or prior Friday), exit next day
     'S_ast_payday_anomaly': ('strategies.implementations.S_ast_payday_anomaly', 'AstPaydayAnomaly'),
     # Quantpedia: Pairs Trading with Country ETFs — mean-reversion long/short across 23 MSCI country ETFs + SPY
