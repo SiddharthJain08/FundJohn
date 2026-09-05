@@ -67,8 +67,10 @@ from strategies.historical_regimes import (
     CANONICAL_REGIMES,
 )
 
+from backtest.risk_free import RISK_FREE_ANNUAL_CONST as _RF_CONST, excess_sharpe as _rf_excess_sharpe
+
 TRADING_DAYS    = 252
-RISK_FREE_DAILY = 0.05 / TRADING_DAYS
+RISK_FREE_DAILY = _RF_CONST / TRADING_DAYS
 
 # ── Regime-stratified windowing parameters ───────────────────────────────────
 #
@@ -436,8 +438,11 @@ def _run_regime_window(strategy_cls,
             'oos_days': oos_days,
         }
 
-    excess = daily_ret - RISK_FREE_DAILY
-    sharpe  = float(excess.mean() / (excess.std() + 1e-9) * np.sqrt(TRADING_DAYS))
+    # The legacy `excess.std() + 1e-9` denominator epsilon is replaced by the
+    # shared estimator's `sd < 1e-9 -> None` floor; at realistic daily-return
+    # std (>=1e-4) the two differ by ppm, well below rounding — ruled
+    # acceptable 2026-09-05 (task 6 review).
+    sharpe  = _rf_excess_sharpe(daily_ret.values, daily_ret.index) or 0.0
 
     roll_max = eq.cummax()
     dd       = (eq - roll_max) / (roll_max + 1e-9)

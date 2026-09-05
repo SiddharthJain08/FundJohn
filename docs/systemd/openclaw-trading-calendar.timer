@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh the NYSE session master monthly (1st, 06:00 UTC)
+
+[Timer]
+# ~60 small calls (one per year 1970..today+3). Persistent=true so the first
+# enable builds the master immediately and a missed month catches up on boot.
+OnCalendar=*-*-01 06:00:00 UTC
+Persistent=true
+Unit=openclaw-trading-calendar.service
+
+[Install]
+WantedBy=timers.target

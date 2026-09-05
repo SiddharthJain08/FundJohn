@@ -259,3 +259,45 @@ Each task is TDD (tests first), committed on `main` with the task id in the mess
 ## F. Out of scope
 
 Solving IV from quotes for the 39 % of contracts Alpaca leaves null (F1b), F5 synthetic-engine upgrades, F6 model-free variance, F7 risk-neutral density: after this lands. Nothing in this spec installs or vendors financepy.
+
+---
+
+## Amendments 2026-09-05 (final review)
+
+Rulings from the final whole-branch review, recorded here rather than by
+rewriting the sections above.
+
+1. **`config_json['rf']` is nested.** C.4 says "the backtest writes both into
+   `config_json`"; the shape is a nested object, not flattened keys:
+   `config_json['rf'] = {source, const, macro, rf_mean_annual, n}` (written by
+   `unified_backtest` from `aggregate_metrics`'s `rf_shadow`). Queries
+   distinguishing populations use `config_json->'rf'->>'source'`.
+
+2. **The live `spot` is the last known close, and `rv_20` is mapped as-of.**
+   A.4/A.5 left the live spot's date implicit. It is the last `prices.parquet`
+   close at or before the chain date — T−1 at the 15:00 ET compute (the day's
+   close does not exist yet) and T after the 16:15 collect. Two consequences,
+   both now in the code:
+   - `options_aux_v2.build` records `spot_date` per ticker, and the shadow line
+     reports `spot_stale` (the share of tickers priced off a close older than
+     the surface date). A high `spot_stale` at the intraday compute is EXPECTED,
+     not a defect.
+   - `series_features` maps `rv_20` **as-of** — the last realized-vol value at
+     or before the frame date, tolerance 7 calendar days
+     (`options_surface.RV_ASOF_TOLERANCE`) — not by exact date. Under the
+     production intraday overlay the chain rows are dated today while
+     `prices.parquet` ends at T−1, so the exact-date map returned NaN and
+     silently dropped `rv_20`/`vrp`/`vrp_zscore` from the live v2 dict. The
+     panel side (`build_panel`) is unaffected: every surface date there has a
+     same-day close, and with a same-day close the as-of result is identical to
+     the exact-date one (pinned by `test_options_surface_parity.py`).
+
+3. **The surface master's version column is `options_features_version`.** A.6
+   calls it `features_version`; the builder writes, and every consumer reads,
+   `options_features_version` (the name in `options_surface.SCALAR_KEYS`).
+
+4. **Shadow-mode cost budget.** `options_aux_v2.build` takes a per-run wall-clock
+   budget, `OPENCLAW_OPTIONS_SURFACE_BUDGET_S` (default 240 s). With the flag OFF
+   the dict is diagnostic only, so the loop stops at the budget and returns the
+   partial dict with a WARNING; with the flag ON the dict is load-bearing, so it
+   runs to completion and warns once. The shadow line carries `dur=<s>s`.

@@ -246,6 +246,10 @@ OPTIONS_KEYS      = ['ticker', 'date', 'expiry', 'strike', 'option_type']
 FUNDAMENTALS_KEYS = ['ticker', 'period']
 INSIDER_KEYS      = ['ticker', 'filing_date', 'insider_name', 'transaction_type', 'shares']
 MACRO_KEYS        = ['date', 'series']
+CALENDAR_PATH     = MASTER_DIR / 'trading_calendar.parquet'
+CALENDAR_KEYS     = ['date']
+SURFACE_PATH      = MASTER_DIR / 'options_surface.parquet'
+SURFACE_KEYS      = ['ticker', 'date']
 
 
 def write_prices(rows: Iterable[dict]) -> int:

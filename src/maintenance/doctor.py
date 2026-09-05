@@ -651,8 +651,9 @@ def check_intraday_features_freshness():
     intraday_features.parquet at least every 15 min. Stale parquet
     means the cron is not firing or the collector is failing silently.
 
-    Outside RTH (or weekends), no-op — the cron only runs Mon-Fri 9-16
-    ET, so a stale parquet at 6 PM is expected behaviour.
+    Outside RTH (or on a non-session day — weekend or NYSE holiday), no-op —
+    the cron only runs on NYSE sessions 9-16 ET, so a stale parquet at 6 PM
+    is expected behaviour.
     """
     try:
         from datetime import datetime as _dt
@@ -661,8 +662,9 @@ def check_intraday_features_freshness():
         return _ok('intraday_features_freshness',
                    'zoneinfo unavailable — skipped')
     now_et = _dt.now(ZoneInfo('America/New_York'))
-    if now_et.weekday() >= 5:
-        return _ok('intraday_features_freshness', 'weekend — skipped')
+    from lib.trading_calendar import is_session
+    if not is_session(now_et.date()):
+        return _ok('intraday_features_freshness', 'non-session day (weekend/holiday) — skipped')
     rth_start = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
     rth_end   = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
     if now_et < rth_start or now_et > rth_end:

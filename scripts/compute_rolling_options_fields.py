@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """
-Post-processes data/master/options_aggregates/*.parquet to add rolling fields:
+Builds `data/master/options_aggregates_enriched.parquet` — the ONLY options
+source the backtest's `aux_data_loader._day_slice` reads — from the
+`strategies.options_surface` master (`data/master/options_surface.parquet`)
+plus `prices.parquet` closes.
 
-    iv_rank       : percentile of iv_front over trailing 252 trading days per ticker (0..100)
-    rv_20         : 20-day realized vol (annualized stdev of log returns) from prices.parquet
-    vrp           : iv_front - rv_20
-    vrp_zscore    : zscore of vrp over trailing 60 days per ticker
-    pc_ratio      : put_call_vol_ratio (alias for naming consistency with strategies)
-    iv_spread     : term_slope (alias)
-    ts_ratio      : iv_back / iv_front
-    near_iv       : iv_front (alias)
-    far_iv        : iv_back (alias)
-    iv30          : iv_front (alias)
+    iv_rank       : 252-session percentile of iv30 per ticker (0..100, None below 20 obs)
+    rv_20         : 20-session log-return vol (annualized) from prices.parquet
+    vrp           : iv30 - rv_20
+    vrp_zscore    : zscore of vrp over trailing 60 sessions per ticker
+    iv_rank_history, hv20_history, vrp_history, pc_ratio_history : trailing-20 lists
+    Legacy aliases (LEGACY_ALIASES): iv_front=iv30, iv_back=iv90,
+      otm_put_iv=iv_25d_put_30d, otm_call_iv=iv_25d_call_30d, skew=skew_25d_30d,
+      skew_20d=skew_25d_30d, put_call_vol_ratio=pc_ratio, near_iv=iv30, far_iv=iv90
+    unusual_flow  : int(pc_ratio > 1.5)
 
-The output is a single `options_aggregates_enriched.parquet` ready for aux_data_loader.
+All feature math (iv_rank/vrp/vrp_zscore/history lists) lives in
+strategies.options_surface.series_frame — the single implementation shared
+with the live per-ticker call (engine.load_aux_data).
 """
 from __future__ import annotations
-import sys, time
+import logging, os, sys, time
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -24,128 +28,90 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parent.parent
-IN_DIR  = ROOT / 'data' / 'master' / 'options_aggregates'
+sys.path.insert(0, str(ROOT / 'src'))
+from strategies.options_surface import SCALAR_KEYS, SERIES_KEYS, series_frame, rv_series_from_closes  # noqa: E402
+from strategies.options_oi import OI_KEYS  # noqa: E402 — Part B (task 13); landed, no longer optional
+
+log = logging.getLogger('compute_rolling_options_fields')
+
+SURFACE_PATH = ROOT / 'data' / 'master' / 'options_surface.parquet'
 OUT_PATH = ROOT / 'data' / 'master' / 'options_aggregates_enriched.parquet'
 PRICES_PATH = ROOT / 'data' / 'master' / 'prices.parquet'
 
+LEGACY_ALIASES = {'iv_front': 'iv30', 'iv_back': 'iv90', 'otm_put_iv': 'iv_25d_put_30d',
+                  'otm_call_iv': 'iv_25d_call_30d', 'skew': 'skew_25d_30d', 'skew_20d': 'skew_25d_30d',
+                  'put_call_vol_ratio': 'pc_ratio', 'near_iv': 'iv30', 'far_iv': 'iv90'}
 
-def load_all_aggregates() -> pd.DataFrame:
-    frames = [pd.read_parquet(p) for p in sorted(IN_DIR.glob('*.parquet'))]
-    if not frames:
-        raise SystemExit(f'No aggregates in {IN_DIR}')
-    df = pd.concat(frames, ignore_index=True)
+
+def load_surface() -> pd.DataFrame:
+    if not SURFACE_PATH.exists():
+        raise SystemExit(f'No surface master at {SURFACE_PATH} — run scripts/build_options_surface.py first')
+    df = pd.read_parquet(SURFACE_PATH)
     df['date'] = pd.to_datetime(df['date'])
     return df.sort_values(['ticker', 'date']).reset_index(drop=True)
 
 
-def compute_rv_20(prices: pd.DataFrame) -> pd.DataFrame:
-    prices = prices.copy()
-    prices['date'] = pd.to_datetime(prices['date'])
-    prices = prices.sort_values(['ticker', 'date'])
-    prices['log_ret'] = prices.groupby('ticker')['close'].transform(lambda s: np.log(s / s.shift(1)))
-    # 20-day realized vol, annualized
-    prices['rv_20'] = prices.groupby('ticker')['log_ret'].transform(
-        lambda s: s.rolling(20).std() * np.sqrt(252)
-    )
-    return prices[['ticker', 'date', 'rv_20']]
+def load_closes(tickers: set, floor: pd.Timestamp) -> pd.DataFrame:
+    tbl = pq.read_table(PRICES_PATH, columns=['ticker', 'date', 'close'], read_dictionary=['ticker', 'date'],
+                        filters=(pc.field('date') >= pc.scalar(floor.strftime('%Y-%m-%d'))))
+    px = tbl.to_pandas(); del tbl
+    px['ticker'] = px['ticker'].astype(str)
+    px = px[px['ticker'].isin(tickers)]
+    px['date'] = pd.to_datetime(px['date'])
+    return px[['ticker', 'date', 'close']]
 
 
-HIST_LEN = 20   # trailing history length required by HV7/HV9/HV12
-
-
-def add_rolling(df: pd.DataFrame) -> pd.DataFrame:
-    # iv_rank: rolling percentile of iv_front over 252-day window
-    def pct_rank(s: pd.Series) -> pd.Series:
-        return s.rolling(252, min_periods=20).rank(pct=True) * 100.0
-
-    df['iv_rank'] = df.groupby('ticker')['iv_front'].transform(pct_rank)
-
-    # vrp_zscore over trailing 60 days
-    def zscore(s: pd.Series) -> pd.Series:
-        mean = s.rolling(60, min_periods=10).mean()
-        std  = s.rolling(60, min_periods=10).std()
-        return (s - mean) / std.replace(0, np.nan)
-
-    df['vrp_zscore'] = df.groupby('ticker')['vrp'].transform(zscore)
-
-    # Trailing history lists — list of last HIST_LEN values per ticker-day.
-    # These are consumed by HV7 (iv_rank_history), HV9 (hv20_history), HV12 (vrp_history).
-    def build_history(source_col: str, target_col: str, window: int = HIST_LEN):
-        # For each (ticker, date) row, collect the prior `window` values (inclusive of
-        # the current date) as a Python list. Use a rolling window on the grouped
-        # Series and extract the raw values.
-        def _per_group(s: pd.Series) -> pd.Series:
-            vals = s.tolist()
-            out = [None] * len(vals)
-            for i in range(len(vals)):
-                start = max(0, i - window + 1)
-                hist = [v for v in vals[start:i + 1] if v is not None and not (isinstance(v, float) and np.isnan(v))]
-                if len(hist) >= 5:   # need at least 5 entries for strategies to accept
-                    out[i] = hist
-                else:
-                    out[i] = None
-            return pd.Series(out, index=s.index)
-
-        df[target_col] = df.groupby('ticker', group_keys=False)[source_col].apply(_per_group)
-
-    build_history('iv_rank', 'iv_rank_history', HIST_LEN)
-    build_history('rv_20',   'hv20_history',    HIST_LEN)
-    build_history('vrp',     'vrp_history',     HIST_LEN)
-
-    # Total volume column consumed by HV7 (liquidity gate).
-    df['volume'] = df['call_volume'].fillna(0) + df['put_volume'].fillna(0)
-    return df
+def build_panel(surface: pd.DataFrame, closes: pd.DataFrame) -> pd.DataFrame:
+    """Enriched backtest panel: surface scalars + series features + legacy aliases."""
+    surf = surface.copy()
+    surf['date'] = pd.to_datetime(surf['date'])
+    closes = closes.copy(); closes['date'] = pd.to_datetime(closes['date'])
+    rv_parts = []
+    for ticker, g in closes.sort_values(['ticker', 'date']).groupby('ticker'):
+        rv_parts.append(pd.DataFrame({'ticker': g['ticker'].values, 'date': g['date'].values,
+                                      'rv_20': rv_series_from_closes(g.set_index('date')['close']).values}))
+    rv = pd.concat(rv_parts, ignore_index=True) if rv_parts else pd.DataFrame(columns=['ticker', 'date', 'rv_20'])
+    surf = surf.merge(rv, on=['ticker', 'date'], how='left')
+    parts = []
+    for _, g in surf.groupby('ticker', sort=True):
+        parts.append(series_frame(g))
+    out = pd.concat(parts, ignore_index=True)
+    # A real surface master (build_options_surface.py::build_rows) always writes
+    # every SCALAR_KEYS column, so a gap here is a regression signal, not an
+    # expected state — default to None (never fabricate) but warn once per call.
+    # Since task 14, the builder also always writes OI_KEYS (contracts_liquid,
+    # gex, ...) — so a gap there is folded into the same single warning below.
+    missing_scalar = [k for k in SCALAR_KEYS if k not in out.columns]
+    for k in missing_scalar:
+        out[k] = None
+    missing_alias_srcs = sorted({src for src in LEGACY_ALIASES.values() if src in missing_scalar})
+    missing_other_scalar_cols = sorted(set(missing_scalar) - set(missing_alias_srcs))
+    for alias, src in LEGACY_ALIASES.items():
+        out[alias] = out[src]
+    out['unusual_flow'] = (pd.to_numeric(out['pc_ratio'], errors='coerce') > 1.5).astype(int)
+    missing_oi = [k for k in OI_KEYS if k not in out.columns]
+    for k in missing_oi:
+        out[k] = None
+    if missing_alias_srcs or missing_other_scalar_cols or missing_oi:
+        log.warning('build_panel: surface frame lacks SCALAR_KEYS column(s) %s (legacy-alias sources, defaulted '
+                    'to None), %s (other scalar columns, defaulted to None), and OI_KEYS column(s) %s (defaulted '
+                    'to None) — a real surface master carries every SCALAR_KEYS + OI_KEYS column; investigate '
+                    'the builder', missing_alias_srcs, missing_other_scalar_cols, missing_oi)
+    return out
 
 
 def main():
     t0 = time.time()
-    print(f'Loading aggregates from {IN_DIR}...')
-    df = load_all_aggregates()
-    print(f'  rows: {len(df):,}  tickers: {df["ticker"].nunique():,}  dates: {df["date"].nunique()}')
-
-    print(f'Loading prices from {PRICES_PATH}...')
-    # Memory-bounded read (2026-07-29): the bare pd.read_parquet pulled all 10
-    # columns × 18.8M rows and OOM-killed this script (rc=137) once options_eod
-    # coverage widened the aggregate panel — the "never load whole
-    # prices.parquet" rule. rv_20 needs only ticker/date/close, and only for
-    # tickers present in the aggregates over a window covering their dates plus
-    # the 20-bar warm-up.
-    _tickers = set(df['ticker'].unique())
-    _floor = (df['date'].min() - pd.Timedelta(days=90)).to_pydatetime()
-    _tbl = pq.read_table(PRICES_PATH, columns=['ticker', 'date', 'close'],
-                         read_dictionary=['ticker', 'date'],
-                         filters=(pc.field('date') >= pc.scalar(_floor.strftime('%Y-%m-%d'))))
-    prices = _tbl.to_pandas()
-    del _tbl
-    prices = prices[prices['ticker'].astype(str).isin(_tickers)]
-    print(f'  price rows: {len(prices):,} (pruned to {len(_tickers):,} aggregate tickers '
-          f'from {_floor.date()})')
-    rv = compute_rv_20(prices)
-    del prices
-    print(f'  rv_20 rows: {len(rv):,}')
-
-    df = df.merge(rv, on=['ticker', 'date'], how='left')
-    df['vrp'] = df['iv_front'] - df['rv_20']
-
-    print('Computing rolling iv_rank + vrp_zscore...')
-    df = add_rolling(df)
-
-    # Alias columns so strategies with varied naming both work
-    df['pc_ratio']  = df['put_call_vol_ratio']
-    df['iv_spread'] = df['term_slope']
-    df['ts_ratio']  = df['iv_back'] / df['iv_front']
-    df['near_iv']   = df['iv_front']
-    df['far_iv']    = df['iv_back']
-    df['iv30']      = df['iv_front']
-
-    # Unusual-flow heuristic: pc_ratio > 1.5 OR bottom 5% of trailing 60d volume
-    df['unusual_flow'] = (df['pc_ratio'] > 1.5).astype(int)
-
-    print(f'Writing {OUT_PATH}...')
-    df.to_parquet(OUT_PATH, index=False)
-    print(f'Done. rows={len(df):,} cols={len(df.columns)} elapsed={time.time()-t0:.1f}s')
-    print(f'columns: {list(df.columns)}')
+    df = load_surface()
+    print(f'surface rows: {len(df):,} tickers: {df["ticker"].nunique():,} dates: {df["date"].nunique()}')
+    closes = load_closes(set(df['ticker'].unique()), df['date'].min() - pd.Timedelta(days=90))
+    panel = build_panel(df, closes)
+    tmp = OUT_PATH.with_suffix('.parquet.tmp')
+    panel.to_parquet(tmp, index=False)
+    os.replace(tmp, OUT_PATH)
+    print(f'wrote {OUT_PATH} rows={len(panel):,} in {time.time() - t0:.0f}s')
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

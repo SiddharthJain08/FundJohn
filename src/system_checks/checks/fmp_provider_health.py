@@ -37,7 +37,8 @@ def evaluate(rows, *, now: datetime | None = None):
     err = sum(int(r.get('error_count') or 0) for r in rows)
     total = ok + err
     if total == 0:
-        weekday = now.weekday() < 5
+        from lib.trading_calendar import is_session
+        weekday = is_session(now.date())
         if weekday and now.hour >= SILENCE_AFTER_UTC_HOUR:
             return Status.WARN, f'no FMP calls recorded in the last {WINDOW_HOURS}h on a weekday — collector fundamentals/insider phases silent?'
         return Status.PASS, f'no FMP calls in the last {WINDOW_HOURS}h (quiet period)'

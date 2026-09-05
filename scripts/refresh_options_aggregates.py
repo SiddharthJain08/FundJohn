@@ -9,9 +9,11 @@ every later bar until the staleness guard landed (1acb7eb). This runner is the
 missing schedule.
 
 Runs both stages, serially, with the same bounded-read builders:
-  1. build_options_aggregates.py --start <T-7> --end <T-1>
-     (incremental per-month append; rebuilding the trailing week daily is
-      idempotent and self-heals short gaps — ~1 chunk, a few minutes)
+  1. build_options_surface.py --start <T-7> --end <T-1>
+     (incremental per-session append to the options_surface master via
+      strategies.options_surface.series_frame/features_for_day; rebuilding
+      the trailing week daily is idempotent and self-heals short gaps —
+      ~1 chunk, a few minutes)
   2. compute_rolling_options_fields.py
      (mandatory FULL rebuild — the 252-day iv_rank window and the rolling
       history lists need full panel history; ~5-10 min, proven to fit RAM)
@@ -41,7 +43,7 @@ def _run(argv: list[str]) -> None:
 def main() -> int:
     end = date.today() - timedelta(days=1)      # options_eod has through T-1
     start = end - timedelta(days=7)
-    _run(['scripts/build_options_aggregates.py',
+    _run(['scripts/build_options_surface.py',
           '--start', start.isoformat(), '--end', end.isoformat()])
     _run(['scripts/compute_rolling_options_fields.py'])
     print('[refresh_options_aggregates] done', flush=True)

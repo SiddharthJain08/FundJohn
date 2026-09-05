@@ -1,19 +1,19 @@
 """SP-2 Phase A: trading-day iterator for resolver-driven backtests.
 
-Yields business days (Mon-Fri) in [start, end]. US market holidays are
-NOT excluded — strategies that need true NYSE calendars should call
-the resolver inside their existing bar-iteration loop with the calendar
-they already use. For Phase A acceptance + the smoke tests, business-day
-granularity is sufficient.
+2026-09-04: yields NYSE SESSIONS from the trading_calendar master
+(lib.trading_calendar), no longer Mon–Fri. Holidays are excluded; when the
+master is absent the library falls back (alpaca CLI, then weekday math with a
+WARNING) so this iterator never raises.
 """
 from __future__ import annotations
-from datetime import date, timedelta
+from datetime import date
 from typing import Iterator
+
+try:
+    from lib.trading_calendar import sessions
+except ModuleNotFoundError:  # ROOT-only sys.path callers
+    from src.lib.trading_calendar import sessions
 
 
 def trading_days(start: date, end: date) -> Iterator[date]:
-    d = start
-    while d <= end:
-        if d.weekday() < 5:  # 0=Mon, 4=Fri
-            yield d
-        d += timedelta(days=1)
+    yield from sessions(start, end)

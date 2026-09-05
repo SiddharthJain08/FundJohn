@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -27,26 +26,12 @@ def _today() -> str:
 def _is_trading_day(d: date) -> bool:
     """True if `d` is an NYSE trading day, per the broker calendar.
 
-    Asks `alpaca calendar --start <d> --end <d>`: a NON-EMPTY JSON array means
-    it's a trading day; `[]` means a holiday/weekend. On any CLI error/timeout
-    (binary missing, non-zero exit, bad JSON) we FALL BACK to a weekday check
-    (Mon-Fri => assume trading day) so the daily-cycle checks still fire on a
-    normal day when the CLI is unavailable. The env (ALPACA_* keys) is
-    inherited from os.environ by subprocess."""
-    iso = d.isoformat()
-    try:
-        r = subprocess.run(
-            [ALPACA_CLI, 'calendar', '--start', iso, '--end', iso],
-            capture_output=True, text=True, timeout=10,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(f'rc={r.returncode}')
-        cal = json.loads(r.stdout)
-        return bool(cal)
-    except (FileNotFoundError, subprocess.TimeoutExpired,
-            json.JSONDecodeError, RuntimeError, OSError):
-        # Fallback: Mon-Fri are trading days, weekends are not.
-        return d.weekday() < 5
+    Asks `alpaca calendar` via lib.trading_calendar (master-first, then one
+    `alpaca calendar --start --end` probe, then weekday arithmetic with a
+    WARNING — the library owns that fallback chain; see
+    src/lib/trading_calendar.py)."""
+    from lib.trading_calendar import is_session
+    return bool(is_session(d))
 
 
 def _pg():

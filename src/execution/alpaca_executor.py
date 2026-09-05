@@ -274,7 +274,7 @@ def _alpaca_session_kind() -> str:
                 # Weekend morning where next_open is the following Monday:
                 # technically "pre-market" of a non-trading day. ECNs are
                 # closed on weekends, so classify as closed to be safe.
-                if now_et.weekday() >= 5:
+                if not _is_session_day(now_et):
                     session = 'closed'
                 else:
                     session = 'premarket'
@@ -291,11 +291,18 @@ def _alpaca_session_kind() -> str:
     return session
 
 
+def _is_session_day(now_et) -> bool:
+    """NYSE session day per the trading_calendar master (weekends AND holidays)."""
+    from lib.trading_calendar import is_session
+    return is_session(now_et.date())
+
+
 def _static_session(now_et, pre_open, rth_open, rth_close, post_end) -> str:
     """Static-fallback session classifier from ET wall clock alone. Used when
-    the alpaca clock CLI is unavailable. Treats Sat/Sun as 'closed' across
-    all hours (ignores holiday-specific closures — best-effort only)."""
-    if now_et.weekday() >= 5:
+    the alpaca clock CLI is unavailable. Treats non-session days (weekends and
+    NYSE holidays, per the trading_calendar master) as 'closed' across all
+    hours."""
+    if not _is_session_day(now_et):
         return 'closed'
     cur_t = now_et.time()
     if rth_open <= cur_t < rth_close:

@@ -5,17 +5,16 @@ bench_realized_line (returns None on any failure, logged).
 NAV history = logs/pnl_daily_ohlc.json (`days[date].close`, the live sampler's
 end-of-day NAV); SPY = prices.parquet via benchmark_baseline.load_benchmark_closes
 (pyarrow pushdown). Returns are computed on the COMMON dates of both series.
-Sharpe over the trailing 20 common dates: (mean − rf/252)/std·√252, rf 5 %
-(unified_backtest's convention); zero variance or fewer than SHARPE_MIN_OBS
-(20) observations -> None. MIN_COMMON (5) remains the floor for the
-since-anchor return, which needs no distributional estimate.
+Sharpe over the trailing 20 common dates: (mean − rf/252)/std·√252, rf from
+backtest.risk_free (const 5 % by default, DGS3MO when OPENCLAW_RF_SOURCE=macro);
+zero variance or fewer than SHARPE_MIN_OBS (20) observations -> None.
+MIN_COMMON (5) remains the floor for the since-anchor return, which needs no
+distributional estimate.
 """
 from __future__ import annotations
 import json
 import logging
-import math
 import os
-import statistics
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -24,17 +23,14 @@ ROOT = Path(__file__).resolve().parents[2]
 NAV_HISTORY_PATH = ROOT / 'logs' / 'pnl_daily_ohlc.json'
 ANCHOR_KEY = 'bench_realized_anchor'
 DEFAULT_ANCHOR = '2026-06-23'
-RISK_FREE_DAILY = 0.05 / 252
+from backtest.risk_free import (RISK_FREE_ANNUAL_CONST as _RF_CONST, excess_sharpe as _rf_excess_sharpe,
+                                shadow_line as _rf_shadow_line)
+RISK_FREE_DAILY = _RF_CONST / 252
 MIN_COMMON = 5
 # Final fix wave (2026-08-30) #9: a "20d Sharpe" must rest on 20 observations.
 # MIN_COMMON (5) still gates the since-anchor return — a ratio of two prices
 # needs no distributional estimate; an annualized Sharpe does.
 SHARPE_MIN_OBS = 20
-# Floor below which stdev is treated as float noise from repeated compounding
-# (observed ~1e-16..1e-17 on a nominally-constant daily return), not real
-# variance (real daily-return sd is >=1e-4). Keeps "constant returns -> None"
-# a real contract instead of an exact-bit-for-bit-zero check.
-ZERO_VAR_EPS = 1e-12
 
 
 def load_nav_history(path=None) -> dict[str, float]:
@@ -97,13 +93,17 @@ def _load_regime_and_s_m(conn, run_date):
     return regime, s_m
 
 
-def _sharpe(rets: list[float]):
+def _sharpe(rets: list[float], dates=None):
     if len(rets) < SHARPE_MIN_OBS:
         return None
-    sd = statistics.stdev(rets)
-    if not math.isfinite(sd) or sd < ZERO_VAR_EPS:
-        return None
-    return (statistics.fmean(rets) - RISK_FREE_DAILY) / sd * math.sqrt(252)
+    # Spec C.4: EVERY rf site emits a shadow line, not just aggregate_metrics.
+    # One line per Sharpe actually computed — two per compute() (book, SPY).
+    # Diagnostics never cost the report-only line, hence the guard.
+    try:
+        logger.info(_rf_shadow_line('bench_realized', rets, dates))
+    except Exception as e:  # noqa: BLE001
+        logger.warning('[bench_realized] rf shadow line skipped (%s: %s)', type(e).__name__, e)
+    return _rf_excess_sharpe(rets, dates, min_obs=SHARPE_MIN_OBS)
 
 
 def _window_return(vals: list[float], n: int):
@@ -132,7 +132,7 @@ def compute(nav_by_date: dict, spy_by_date: dict, run_date, anchor: str):
         'book_since': book_since, 'spy_since': spy_since, 'gap_pp': (book_since - spy_since) * 100.0,
         'book_20d': _window_return(nav, 20), 'spy_20d': _window_return(spy, 20),
         'book_60d': _window_return(nav, 60), 'spy_60d': _window_return(spy, 60),
-        'book_sharpe_20d': _sharpe(nav_r[-20:]), 'spy_sharpe_20d': _sharpe(spy_r[-20:]),
+        'book_sharpe_20d': _sharpe(nav_r[-20:], dates[-20:]), 'spy_sharpe_20d': _sharpe(spy_r[-20:], dates[-20:]),
     }
 
 

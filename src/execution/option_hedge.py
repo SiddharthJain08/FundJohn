@@ -8,14 +8,9 @@ WORKSPACE = os.environ.get('WORKSPACE_ID', 'default')
 
 
 def _next_trading_day(d):
-    """Return the next weekday after d, skipping Saturday (5) and Sunday (6).
-    This is a simple calendar-math fallback; the engine uses Alpaca CLI for
-    holiday-awareness, which is not available in the hedge module context."""
-    import datetime as _dt
-    nd = d + _dt.timedelta(days=1)
-    while nd.weekday() >= 5:
-        nd += _dt.timedelta(days=1)
-    return nd
+    """Next NYSE session after d (lib.trading_calendar; holiday-aware)."""
+    from lib.trading_calendar import next_session
+    return next_session(d)
 
 
 def upsert_hedge_target(cur, strategy_id, underlying, legs, contracts,

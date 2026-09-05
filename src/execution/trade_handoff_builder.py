@@ -34,9 +34,10 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'src'))
 
 from execution.handoff import write_handoff, read_handoff  # noqa: E402
+from backtest.risk_free import RISK_FREE_ANNUAL_CONST as _RF_CONST  # noqa: E402
 
 TRADING_DAYS_PER_YEAR = 252
-RISK_FREE_DAILY       = 0.05 / TRADING_DAYS_PER_YEAR
+RISK_FREE_DAILY       = _RF_CONST / TRADING_DAYS_PER_YEAR  # unused here; kept for the cross-module equality test
 
 # Pre-filter: only signals clearing these gates are sent to TradeJohn.
 # Anything that fails here gets dropped to `prefiltered` with the reason —
@@ -317,14 +318,10 @@ def _get_sigma_gate(uri: str) -> float:
 
 
 def _previous_trading_day(run_date: str) -> str:
-    """Previous weekday in YYYY-MM-DD form. Skips Sat/Sun but not market
-    holidays — missing files on holiday-shifted runs simply return empty
-    lists (callers are defensive)."""
-    from datetime import date as _d, timedelta as _td
-    d = _d.fromisoformat(run_date) - _td(days=1)
-    while d.weekday() >= 5:
-        d -= _td(days=1)
-    return d.isoformat()
+    """Previous NYSE session in YYYY-MM-DD form (holiday-aware since 2026-09-04)."""
+    from datetime import date as _d
+    from lib.trading_calendar import prev_session
+    return prev_session(_d.fromisoformat(run_date)).isoformat()
 
 
 def load_yesterdays_vetoed(run_date: str) -> list[dict]:

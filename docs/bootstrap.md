@@ -109,7 +109,7 @@ installed-but-disabled):
   `openclaw-refresh-universe-sizes`, `openclaw-regime-live-pnl`,
   `openclaw-stop-reattach`, `openclaw-sunday-code-review`,
   `openclaw-sunday-research-{ingest,code}`, `openclaw-tradable-universe-refresh`,
-  `openclaw-vol-indices`, `openclaw-weekend-maintenance-{sat,sun}`,
+  `openclaw-trading-calendar`, `openclaw-vol-indices`, `openclaw-weekend-maintenance-{sat,sun}`,
   `openclaw-weekly-strategy-weights`.
 - *User scope*: `johnbot`, `openclaw-presence`, and the `sp7-ladder`,
   `sp7-overnight-backfill`, `sp7-split-watcher` timers.

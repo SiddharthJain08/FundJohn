@@ -6,13 +6,13 @@ Guards the 2026-07-29 incident class: `options_aggregates_enriched.parquet`
 2026-04-22 when the aggregates collector was retired. `_day_slice` falls back
 to "most recent prior date", so every backtest bar since April was served the
 April slice with no error — while LIVE read `options_eod.parquet` and stayed
-fresh. Rebuild path: `scripts/build_options_aggregates.py` then
-`scripts/compute_rolling_options_fields.py`.
+fresh. Rebuild path (since the 2026-09-04 surface v2 build):
+`scripts/build_options_surface.py` then `scripts/compute_rolling_options_fields.py`.
 
-Second guard: the current provider feed carries NO open_interest, so gex /
-contracts_liquid / iv_centroid_delta / surface_premium must be NULL rather
-than a computed 0.0 (a fabricated "no dealer gamma imbalance"). If a future
-change reintroduces zeros while OI is absent, this FAILs.
+Second guard: OI-derived fields (gex / contracts_liquid / iv_centroid_delta /
+surface_premium) must be NULL when the session behind them carries no open
+interest, never a computed 0.0 (a fabricated "no dealer gamma imbalance").
+If a future change reintroduces zeros while OI is absent, this FAILs.
 """
 from __future__ import annotations
 
@@ -64,8 +64,45 @@ def _options_aux_freshness():
         return Status.FAIL, (
             f'options panel stale {lag_days}d (max {_MAX_LAG_DAYS}d, newest '
             f'{latest.date()}) — backtests are silently reading that slice for '
-            f'every later bar; rebuild via scripts/build_options_aggregates.py '
+            f'every later bar; rebuild via scripts/build_options_surface.py '
             f'+ scripts/compute_rolling_options_fields.py')
     return Status.PASS, (
         f'newest {latest.date()} ({lag_days}d), {newest["ticker"].nunique()} '
-        f'tickers; OI-derived fields NULL (feed has no open_interest)')
+        f'tickers; OI-derived fields honest (NULL when no CBOE session, '
+        f'never a fabricated 0)')
+
+
+_OI_MIN_TICKERS = int(os.environ.get('OPTIONS_OI_MIN_TICKERS', '400'))
+
+
+def oi_coverage(min_tickers: int = _OI_MIN_TICKERS):
+    """FAIL when the latest panel date carries CBOE open interest for fewer than
+    `min_tickers` tickers while a CBOE session for the prior day exists
+    (spec 2026-09-04 B.4). PASS when OI is present; WARN when no CBOE session
+    is available yet (the stream started 2026-08-21).
+
+    On the latest real session (2026-09-03-ish, 11 CBOE sessions landed since
+    2026-08-21) ~553 tickers carry non-null pcr_oi — the `min_tickers=400`
+    default documents that headroom rather than pinning the exact count.
+    """
+    import pandas as pd
+    from strategies.options_oi import cboe_session_for
+    panel = Path(os.environ.get('OPTIONS_ENRICHED_PANEL', str(_PANEL)))
+    try:
+        df = pd.read_parquet(panel, columns=['ticker', 'date', 'pcr_oi'])
+    except Exception as e:  # noqa: BLE001
+        return Status.WARN, f'panel unreadable: {e}'
+    if df.empty:
+        return Status.FAIL, 'enriched options panel is empty'
+    latest = pd.to_datetime(df['date']).max()
+    if cboe_session_for(latest) is None:
+        return Status.WARN, f'no CBOE session before {latest.date()} — OI features legitimately NULL'
+    n = int(df[pd.to_datetime(df['date']) == latest]['pcr_oi'].notna().sum())
+    if n < min_tickers:
+        return Status.FAIL, f'only {n} tickers carry CBOE open interest on {latest.date()} (need ≥ {min_tickers})'
+    return Status.PASS, f'{n} tickers carry CBOE open interest on {latest.date()}'
+
+
+@check(name='options_oi_coverage', tags=['strategies', 'storage'], requires=[])
+def _check_oi_coverage():
+    return oi_coverage()

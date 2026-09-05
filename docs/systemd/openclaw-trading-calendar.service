@@ -1,0 +1,21 @@
+[Unit]
+Description=Refresh NYSE session master (alpaca calendar -> data/master/trading_calendar.parquet)
+After=network-online.target
+Wants=network-online.target
+OnFailure=openclaw-failure-notify@%n.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+Environment=PYTHONPATH=/root/openclaw/src
+ExecStart=/usr/bin/python3 /root/openclaw/src/ingestion/ingest_trading_calendar.py
+StandardOutput=append:/var/log/openclaw-trading-calendar.log
+StandardError=append:/var/log/openclaw-trading-calendar.log
+Nice=19
+TimeoutStartSec=600
+MemoryMax=500M
+
+[Install]
+WantedBy=multi-user.target

@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from datetime import date
@@ -45,6 +46,27 @@ def _load_env():
         load_dotenv(os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
     except Exception:
         pass
+
+
+def _ensure_logging() -> None:
+    """Give the root logger a handler when we're the entry point.
+
+    Same defect and same fix as regime_blended_sizer_live._ensure_logging and
+    premarket_gate._ensure_logging (b464747): this module is the pipeline's
+    `report` step and is spawned as a bare script, so nothing ever configured
+    logging and every logger.info() underneath it went to a handler-less root
+    logger at WARNING and was DISCARDED. That silently swallowed
+    bench_realized's `[rf_shadow]` lines — which the rf flip condition
+    (spec C.4, runbook) tells the operator to count.
+
+    Idempotent: a caller that already configured handlers is left alone, so
+    importing this module from a test or another entry point is unaffected.
+    """
+    if logging.getLogger().handlers:
+        return
+    logging.basicConfig(
+        level=os.environ.get('OPENCLAW_REPORT_LOG_LEVEL', 'INFO').upper(),
+        format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 
 
 def _get_webhook_urls(agent_id: str) -> dict:
@@ -685,4 +707,5 @@ def main() -> int:
 
 if __name__ == '__main__':
     _load_env()
+    _ensure_logging()
     sys.exit(main())

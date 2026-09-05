@@ -21,9 +21,8 @@ import json
 import logging
 import traceback
 import decimal
-import subprocess
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import psycopg2
@@ -139,66 +138,12 @@ def _exit_hook_run_summary(stats: dict):
     return line, err
 
 
-_ALPACA_BIN = '/root/go/bin/alpaca'
-
-
 def _next_trading_day(run_date: date) -> date:
-    """Derive the next trading session date after run_date, respecting US market holidays.
-
-    Uses the Alpaca market calendar CLI (holiday-aware) as the primary source.
-    Queries --start run_date+1 --end run_date+7 and returns the first calendar
-    session date.  Falls back to plain weekday-skip math ONLY if the CLI call
-    fails, and logs a warning in that case.
-
-    The holiday-aware approach is required because the next-session reconcile
-    (Task 3 onwards) queries `target_date = today`.  If target_date were set to
-    a market holiday, the signal would be silently orphaned.
-
-    Example: run_date=2026-07-02 (Thursday before observed July 4)
-      - weekday math → 2026-07-03 (Friday) — WRONG; market is closed
-      - calendar     → 2026-07-06 (Monday) — correct next session
-
-    Args:
-        run_date: The current EOD run date.
-
-    Returns:
-        The next trading session date after run_date.
-    """
-    start = run_date + timedelta(days=1)
-    end = run_date + timedelta(days=7)
-    try:
-        result = subprocess.run(
-            [_ALPACA_BIN, 'calendar',
-             '--start', start.isoformat(),
-             '--end', end.isoformat()],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode != 0:
-            logger.warning(
-                '_next_trading_day: alpaca calendar call failed (rc=%s); '
-                'falling back to weekday-skip math for run_date=%s',
-                result.returncode, run_date,
-            )
-        else:
-            sessions = json.loads(result.stdout) if result.stdout.strip() else []
-            if sessions:
-                return date.fromisoformat(sessions[0]['date'])
-            logger.warning(
-                '_next_trading_day: alpaca calendar returned empty session list; '
-                'falling back to weekday-skip math for run_date=%s',
-                run_date,
-            )
-    except Exception as exc:
-        logger.warning(
-            '_next_trading_day: alpaca calendar exception (%s); '
-            'falling back to weekday-skip math for run_date=%s',
-            exc, run_date,
-        )
-    # Fallback: skip weekends only (no holiday awareness)
-    d = start
-    while d.weekday() >= 5:  # 5=Sat, 6=Sun
-        d += timedelta(days=1)
-    return d
+    """Next NYSE session after run_date. Master-first (lib.trading_calendar),
+    then the alpaca CLI, then weekday math — the library owns that order and
+    logs the fallback."""
+    from lib.trading_calendar import next_session
+    return next_session(run_date)
 
 
 def _eod_signal_register_gate_on() -> bool:
@@ -226,22 +171,12 @@ def _signal_lifecycle_pass_on() -> bool:
 
 
 def _is_trading_session(d: date) -> bool | None:
-    """True/False via `alpaca calendar --start d --end d`; None on probe failure.
-
-    Mirrors _next_trading_day's CLI contract (5s timeout, JSON session list).
-    """
+    """True/False from the session master (alpaca CLI as fallback inside the
+    library). Returns None only when the library itself raises."""
     try:
-        result = subprocess.run(
-            [_ALPACA_BIN, 'calendar', '--start', d.isoformat(), '--end', d.isoformat()],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode != 0:
-            return None
-        sessions = json.loads(result.stdout) if result.stdout.strip() else []
-        if not isinstance(sessions, list):
-            return None
-        return any(s.get('date') == d.isoformat() for s in sessions if isinstance(s, dict))
-    except Exception:
+        from lib.trading_calendar import is_session
+        return bool(is_session(d))
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -259,7 +194,7 @@ def _panel_fresh_required(run_date: date) -> bool:
     now_et = datetime.now(ZoneInfo('America/New_York'))
     if now_et.date() != run_date:
         return False
-    if now_et.weekday() >= 5 or now_et.strftime('%H:%M') < '16:05':
+    if now_et.strftime('%H:%M') < '16:05':
         return False
     trading = _is_trading_session(run_date)
     return trading is not False
@@ -554,6 +489,30 @@ def _inject_intraday_options(opts, today, universe):
     except Exception as e:  # noqa: BLE001 — never lose the EOD panel over an overlay
         logger.warning("intraday options overlay skipped (%s) — EOD panel kept", e)
         return opts
+
+
+def _apply_options_surface(old: dict, opts, universe, today, master_dir, px_window, earnings=None) -> dict:
+    """OPENCLAW_OPTIONS_SURFACE=1 → serve the v2 dict; else serve the legacy
+    dict and log the shadow comparison (spec 2026-09-04 A.7).
+
+    The IMPORT is inside the try with the build: a module-level failure in
+    options_aux_v2 (a bad dependency, a syntax error shipped by a half-applied
+    deploy) must degrade to the legacy dict exactly like a build failure, not
+    propagate out of load_aux_data. `build`/`shadow_summary`/`enabled` are
+    resolved through the module object at call time so tests can monkeypatch
+    them."""
+    t0 = time.monotonic()
+    try:
+        from execution import options_aux_v2 as _v2
+        new = _v2.build(opts, universe, today, master_dir, px_window, earnings)
+    except Exception as exc:  # noqa: BLE001 — the v2 path must never take the legacy path down
+        logger.warning('[options_surface] v2 build failed (%s); serving legacy dict', exc)
+        return old
+    try:
+        logger.info(_v2.shadow_summary(old, new, seconds=time.monotonic() - t0))
+    except Exception as exc:  # noqa: BLE001 — a diagnostics failure must never cost the cycle its options aux
+        logger.warning('[options_surface] shadow summary failed (%s)', exc)
+    return new if _v2.enabled() else old
 
 
 def _intraday_overlay_exists(category: str) -> bool:
@@ -1057,6 +1016,7 @@ def load_aux_data(universe: list, as_of=None) -> dict:
             # Used for rv_20 and vrp fields consumed by S_HV9, S_HV11, S_HV12, S_HV14, S_HV20.
             _hv20_by_ticker = {}
             _hv20_history_by_ticker = {}
+            _px_window = None
             try:
                 _px_path = master_dir / 'prices.parquet'
                 if _px_path.exists():
@@ -1065,6 +1025,7 @@ def load_aux_data(universe: list, as_of=None) -> dict:
                                                _HV20_PRICES_WINDOW_DAYS, today)
                     _px['date'] = pd.to_datetime(_px['date'])
                     _px = _px.sort_values(['ticker', 'date'])
+                    _px_window = _px.copy()
                     for _t, _g in _px.groupby('ticker'):
                         if _t not in universe or len(_g) < 22:
                             continue
@@ -1357,7 +1318,8 @@ def load_aux_data(universe: list, as_of=None) -> dict:
                         _od['last_price'] = _lp.get(_tk)
             except Exception as _lpe:
                 logger.warning(f'last_price load failed: {_lpe}')
-            aux['options'] = opts_dict
+            aux['options'] = _apply_options_surface(opts_dict, opts, universe, today, master_dir,
+                                                    _px_window, _upcoming_earnings)
             logger.info(f"Options loaded: {len(opts_dict)} tickers")
             if _oi_missing_tickers:
                 # LOUD, not silent: OI-derived fields are unavailable, so any
