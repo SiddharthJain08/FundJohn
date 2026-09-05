@@ -37,11 +37,10 @@ def _intraday_features_accumulating():
         return Status.WARN, 'intraday_features.parquet missing'
     mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     age_min = (datetime.now(timezone.utc) - mtime).total_seconds() / 60
-    # Crude RTH check: weekday + ET hour 9.5..16.
-    now_et = datetime.now(tz=timezone.utc)
-    et_hour_offset = -5  # not DST-correct but RTH check tolerates 1h slop
-    et_hour = (now_et.hour + et_hour_offset) % 24
-    in_rth = now_et.weekday() < 5 and 10 <= et_hour <= 16
+    from zoneinfo import ZoneInfo
+    from lib.trading_calendar import is_open
+    now_et = datetime.now(tz=ZoneInfo('America/New_York'))
+    in_rth = is_open(now_et)
     threshold = 60 if in_rth else 1440
     if age_min > threshold:
         sev = Status.FAIL if in_rth else Status.WARN

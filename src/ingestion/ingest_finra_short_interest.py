@@ -54,6 +54,8 @@ import pyarrow.parquet as pq
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:  # invoked as `python3 src/ingestion/…`
     sys.path.insert(0, str(ROOT))
+if str(ROOT / 'src') not in sys.path:
+    sys.path.insert(0, str(ROOT / 'src'))
 
 logger = logging.getLogger(__name__)
 
@@ -94,18 +96,20 @@ _STR_COLS = ['issue_name', 'exchange', 'market_class', 'split_flag', 'revision_f
 # ── settlement-date candidates ───────────────────────────────────────────────
 
 def _roll_back_weekend(d: date) -> date:
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d
+    """Roll d back to the nearest session on or before d (weekends AND holidays)."""
+    from lib.trading_calendar import is_session, prev_session
+    return d if is_session(d) else prev_session(d)
 
 
 def _prev_bday(d: date) -> date:
-    return _roll_back_weekend(d - timedelta(days=1))
+    from lib.trading_calendar import prev_session
+    return prev_session(d)
 
 
 def candidate_settlement_dates(start: date, end: date) -> Iterator[date]:
     """The 15th and the last day of each month in [start, end], each rolled back
-    over weekends (holidays are handled by the fetch loop's fallback)."""
+    to the nearest NYSE session on or before it (weekends AND holidays, since
+    2026-09-04; the fetch loop's fallback still covers any residual gap)."""
     y, m = start.year, start.month
     while (y, m) <= (end.year, end.month):
         for day in (15, calendar.monthrange(y, m)[1]):

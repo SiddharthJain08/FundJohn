@@ -18,8 +18,8 @@ Reports, in order of severity:
   WARN  — coverage below the floor, or acting categories with no adapter yet
   PASS  — every adapter-backed category covered above the floor
 
-Deliberately silent before the ingest slot and on weekends: the job has not
-run yet, which is not a defect.
+Deliberately silent before the ingest slot and on non-session days (weekends
+and NYSE holidays): the job has not run yet, which is not a defect.
 """
 from __future__ import annotations
 
@@ -44,7 +44,8 @@ _MIN_COVERAGE = float(os.environ.get('ACTING_INGEST_MIN_COVERAGE', '0.60'))
 
 
 def _is_due(now: datetime) -> bool:
-    return now.weekday() < 5 and now.hour >= _DUE_HOUR_ET
+    from lib.trading_calendar import is_session
+    return is_session(now.date()) and now.hour >= _DUE_HOUR_ET
 
 
 def _grade(cat: str, adapter: str, res: dict) -> tuple:

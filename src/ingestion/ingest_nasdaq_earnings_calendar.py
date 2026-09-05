@@ -41,7 +41,7 @@ import logging
 import re
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -52,6 +52,8 @@ import pyarrow as pa
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:  # invoked as `python3 src/ingestion/…`
     sys.path.insert(0, str(ROOT))
+if str(ROOT / 'src') not in sys.path:
+    sys.path.insert(0, str(ROOT / 'src'))
 
 logger = logging.getLogger(__name__)
 
@@ -199,23 +201,17 @@ def _http_get(url: str, headers: dict, timeout: int = 30) -> tuple[int, bytes]:
 # ── business days ────────────────────────────────────────────────────────────
 
 def business_days(today: date, *, days_back: int, days_ahead: int) -> list[date]:
-    """`days_back` business days before `today`, `today` itself if a business day,
-    and `days_ahead` business days after. Weekends only (holidays simply return
-    an empty day from the API)."""
-    back: list[date] = []
-    d = today
-    while len(back) < days_back:
-        d -= timedelta(days=1)
-        if d.weekday() < 5:
-            back.append(d)
+    """`days_back` sessions before `today`, `today` itself if a session, and
+    `days_ahead` sessions after (NYSE sessions since 2026-09-04)."""
+    from lib.trading_calendar import is_session, sessions_before, next_session
+    back = sessions_before(today, days_back)
     ahead: list[date] = []
     d = today
     while len(ahead) < days_ahead:
-        d += timedelta(days=1)
-        if d.weekday() < 5:
-            ahead.append(d)
-    mid = [today] if today.weekday() < 5 else []
-    return list(reversed(back)) + mid + ahead
+        d = next_session(d)
+        ahead.append(d)
+    mid = [today] if is_session(today) else []
+    return back + mid + ahead
 
 
 # ── master ───────────────────────────────────────────────────────────────────

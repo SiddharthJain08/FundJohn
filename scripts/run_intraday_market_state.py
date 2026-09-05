@@ -123,18 +123,16 @@ def _is_live_intraday() -> bool:
 
 
 def _is_option_market_open(ts_utc) -> bool:
-    """True when SPY options are trading (9:30-16:15 ET, Mon-Fri).
+    """True when SPY options are trading (9:30-16:15 ET, on an NYSE session).
 
-    Market holidays are NOT modelled (same as the dashboard badge) — a
-    holiday weekday scores frozen quotes exactly as it did before this
-    guard existed; acceptable, since the failure mode is one stale day,
-    not a nightly recurrence.
+    Market holidays come from the trading_calendar master (2026-09-04).
     """
     ts = pd.Timestamp(ts_utc)
     if ts.tzinfo is None:
         ts = ts.tz_localize('UTC')
     et = ts.tz_convert('America/New_York')
-    if et.weekday() >= 5:
+    from lib.trading_calendar import is_session
+    if not is_session(et.date()):
         return False
     minutes = et.hour * 60 + et.minute
     return OPTION_MKT_OPEN_MIN <= minutes <= OPTION_MKT_CLOSE_MIN

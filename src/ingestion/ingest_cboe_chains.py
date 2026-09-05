@@ -56,6 +56,8 @@ import pyarrow.parquet as pq
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(ROOT / 'src') not in sys.path:
+    sys.path.insert(0, str(ROOT / 'src'))
 
 log = logging.getLogger(__name__)
 
@@ -109,18 +111,19 @@ def parse_occ_symbol(sym: str):
 
 
 def _prev_business_day(d: dt.date) -> dt.date:
-    d -= dt.timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= dt.timedelta(days=1)
-    return d
+    """Previous NYSE session (holiday-aware since 2026-09-04)."""
+    from lib.trading_calendar import prev_session
+    return prev_session(d)
 
 
 def session_date_for(timestamp: str) -> dt.date:
     """Last completed session for a CBOE feed timestamp ('YYYY-MM-DD HH:MM:SS').
-    Weekend stamps → Friday; weekday stamps before 09:30 → previous session."""
+    Non-session stamps (weekend, holiday) → the prior session; a session-day
+    stamp before 09:30 → the prior session."""
+    from lib.trading_calendar import is_session
     ts = dt.datetime.strptime(str(timestamp)[:19], '%Y-%m-%d %H:%M:%S')
     d = ts.date()
-    if d.weekday() >= 5:
+    if not is_session(d):
         return _prev_business_day(d)
     if ts.time() < dt.time(9, 30):
         return _prev_business_day(d)
