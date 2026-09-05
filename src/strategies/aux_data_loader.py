@@ -115,12 +115,14 @@ FIELDS = [
     'rv_20', 'vrp', 'iv_rank', 'vrp_zscore',
     'pc_ratio', 'iv_spread', 'ts_ratio', 'near_iv', 'far_iv', 'iv30',
     'unusual_flow',
-    # Greeks + surface metrics (added in v2 backfill)
     'gamma_atm', 'theta_atm', 'gex',
     'iv_centroid_delta', 'surface_premium',
-    # Rolling history lists (added in v2 enrichment)
-    'iv_rank_history', 'hv20_history', 'vrp_history',
+    'iv_rank_history', 'hv20_history', 'vrp_history', 'pc_ratio_history',
     'volume',
+    # options_surface v2 (spec 2026-09-04 A.4/B.2)
+    'iv90', 'iv_25d_put_30d', 'iv_25d_call_30d', 'skew_25d_30d', 'rr_25d_30d', 'skew_20d',
+    'expiry_date', 'n_expiries_fit', 'n_strikes_30d', 'options_features_version',
+    'max_pain', 'pcr_oi', 'oi_session',
 ]
 
 # Any `earnings_dte` beyond this gets suppressed — the earnings parquet
@@ -179,10 +181,7 @@ def _day_slice(date_str: str) -> dict[str, dict]:
             if hasattr(row, f):
                 v = getattr(row, f)
                 if v is not None and not (isinstance(v, float) and pd.isna(v)):
-                    # Map to the aliases strategies use: skew_20d ← skew
                     sid[f] = v
-        if hasattr(row, 'skew') and row.skew is not None and not pd.isna(row.skew):
-            sid['skew_20d'] = row.skew
         if hasattr(row, 'spot') and row.spot is not None and not pd.isna(row.spot):
             sid['last_price'] = row.spot
         dte = earn_map.get(row.ticker)
