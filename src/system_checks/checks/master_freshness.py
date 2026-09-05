@@ -43,6 +43,7 @@ _CADENCES: dict[str, tuple[str | None, int]] = {
     'macro.parquet':              ('date', 7),
     'vol_indices.parquet':        ('date', 7),
     'iv_history.parquet':         ('date', 7),
+    'trading_calendar.parquet':   ('fetched_at', 45),
     'prices_30m.parquet':         ('date', 7),
     'historical_regimes.parquet': ('date', 7),
     'crypto_bars_1h.parquet':     ('ts_utc', 3),    # 24/7 market
