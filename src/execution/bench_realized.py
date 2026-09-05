@@ -5,17 +5,16 @@ bench_realized_line (returns None on any failure, logged).
 NAV history = logs/pnl_daily_ohlc.json (`days[date].close`, the live sampler's
 end-of-day NAV); SPY = prices.parquet via benchmark_baseline.load_benchmark_closes
 (pyarrow pushdown). Returns are computed on the COMMON dates of both series.
-Sharpe over the trailing 20 common dates: (mean − rf/252)/std·√252, rf 5 %
-(unified_backtest's convention); zero variance or fewer than SHARPE_MIN_OBS
-(20) observations -> None. MIN_COMMON (5) remains the floor for the
-since-anchor return, which needs no distributional estimate.
+Sharpe over the trailing 20 common dates: (mean − rf/252)/std·√252, rf from
+backtest.risk_free (const 5 % by default, DGS3MO when OPENCLAW_RF_SOURCE=macro);
+zero variance or fewer than SHARPE_MIN_OBS (20) observations -> None.
+MIN_COMMON (5) remains the floor for the since-anchor return, which needs no
+distributional estimate.
 """
 from __future__ import annotations
 import json
 import logging
-import math
 import os
-import statistics
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -31,11 +30,6 @@ MIN_COMMON = 5
 # MIN_COMMON (5) still gates the since-anchor return — a ratio of two prices
 # needs no distributional estimate; an annualized Sharpe does.
 SHARPE_MIN_OBS = 20
-# Floor below which stdev is treated as float noise from repeated compounding
-# (observed ~1e-16..1e-17 on a nominally-constant daily return), not real
-# variance (real daily-return sd is >=1e-4). Keeps "constant returns -> None"
-# a real contract instead of an exact-bit-for-bit-zero check.
-ZERO_VAR_EPS = 1e-12
 
 
 def load_nav_history(path=None) -> dict[str, float]:

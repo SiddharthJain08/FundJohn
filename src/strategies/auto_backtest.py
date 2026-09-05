@@ -438,6 +438,10 @@ def _run_regime_window(strategy_cls,
             'oos_days': oos_days,
         }
 
+    # The legacy `excess.std() + 1e-9` denominator epsilon is replaced by the
+    # shared estimator's `sd < 1e-9 -> None` floor; at realistic daily-return
+    # std (>=1e-4) the two differ by ppm, well below rounding — ruled
+    # acceptable 2026-09-05 (task 6 review).
     sharpe  = _rf_excess_sharpe(daily_ret.values, daily_ret.index) or 0.0
 
     roll_max = eq.cummax()
