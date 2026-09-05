@@ -21,9 +21,8 @@ import json
 import logging
 import traceback
 import decimal
-import subprocess
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import psycopg2
@@ -137,9 +136,6 @@ def _exit_hook_run_summary(stats: dict):
     if stats.get('hook_raised', 0) > 0:
         err = f"exit_hook: {stats['hook_raised']} hook errors (first: {stats.get('first_hook_raise')})"
     return line, err
-
-
-_ALPACA_BIN = '/root/go/bin/alpaca'
 
 
 def _next_trading_day(run_date: date) -> date:
