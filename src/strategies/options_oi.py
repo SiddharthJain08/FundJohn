@@ -14,7 +14,6 @@ import re
 from pathlib import Path
 
 import pandas as pd
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -76,11 +75,11 @@ def _empty(session) -> dict:
             'oi_session': session.isoformat() if session else None}
 
 
-def oi_features_for_day(rows: pd.DataFrame, as_of) -> dict:
+def oi_features_for_day(rows: pd.DataFrame, as_of, session=None) -> dict:
     """OI features for ONE underlying from ONE CBOE session (spec B.2)."""
     if rows is None or rows.empty:
         return _empty(None)
-    session = cboe_session_for(as_of)
+    session = session if session is not None else cboe_session_for(as_of)
     out = _empty(session)
     r = rows.copy()
     r['open_interest'] = pd.to_numeric(r['open_interest'], errors='coerce').fillna(0.0)
@@ -111,9 +110,10 @@ def oi_features_for_day(rows: pd.DataFrame, as_of) -> dict:
             if best_pay is None or pay < best_pay:
                 best, best_pay = float(s), pay
         out['max_pain'] = best
+    front_oi = float(fr['open_interest'].sum())
     gc = float((pd.to_numeric(calls['gamma'], errors='coerce').fillna(0) * calls['open_interest']).sum())
     gp = float((pd.to_numeric(puts['gamma'], errors='coerce').fillna(0) * puts['open_interest']).sum())
-    out['gex'] = round((gc - gp) * 100, 2) if (coi + poi) > 0 else None
+    out['gex'] = round((gc - gp) * 100, 2) if front_oi > 0 else None
     w = pd.to_numeric(fr['vega'], errors='coerce').abs().fillna(0) * fr['open_interest']
     tw = float(w.sum())
     if tw > 0:
@@ -135,7 +135,7 @@ def oi_features_for_ticker(ticker: str, as_of, master_dir=None) -> dict:
     rows = load_cboe_session(session, [ticker], root)
     if rows.empty:
         return _empty(session)
-    return oi_features_for_day(rows, as_of)
+    return oi_features_for_day(rows, as_of, session=session)
 
 
 def oi_lookup_factory(root: Path | None = None):
@@ -146,6 +146,6 @@ def oi_lookup_factory(root: Path | None = None):
         if session is None:
             return None
         rows = load_cboe_session(session, [ticker], root)
-        f = oi_features_for_day(rows, day) if not rows.empty else _empty(session)
+        f = oi_features_for_day(rows, day, session=session) if not rows.empty else _empty(session)
         return {k: f[k] for k in OI_KEYS}
     return look
