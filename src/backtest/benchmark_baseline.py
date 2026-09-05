@@ -57,9 +57,10 @@ TRADING_DAYS_PER_YEAR = 252
 _LOOKBACK_CALENDAR_DAYS = 10
 
 # Amendment 1 (spec docs/specs/2026-08-29-bench-sizing-amendment-1-spec.md D-A1..A3).
-# rf mirrors unified_backtest.RISK_FREE_DAILY (declared locally: this module is
-# deliberately import-free of the backtest engine; equality is unit-tested).
-RISK_FREE_ANNUAL = 0.05
+# rf goes through backtest.risk_free so every site (engine, S_m, bench_realized,
+# auto_backtest) subtracts the same series; the constants stay exported for the
+# equality test and for callers that only need the number.
+from backtest.risk_free import RISK_FREE_ANNUAL_CONST as RISK_FREE_ANNUAL, excess_sharpe as _rf_excess_sharpe
 RISK_FREE_DAILY = RISK_FREE_ANNUAL / TRADING_DAYS_PER_YEAR
 # Horizon grid (trading days a synthetic benchmark lot is held). The sizer
 # selects one column via pipeline_config['benchmark_horizon_days'] (default 1).
@@ -113,19 +114,15 @@ def load_benchmark_closes(start_date, end_date, benchmark: str) -> dict[str, flo
     return dict(zip(df["date"].astype(str), df["close"].astype(float)))
 
 
-def _excess_sharpe(rets: list[float], min_obs: int) -> float | None:
-    """(mean − rf_daily) / std(ddof=1) · √252 — the estimator
+def _excess_sharpe(rets: list[float], min_obs: int, dates=None) -> float | None:
+    """Annualized excess Sharpe over the daily-marks union — the same estimator
     unified_backtest.aggregate_metrics applies to a sleeve's daily-marks
-    equity curve. None when thin (< min_obs) or degenerate (zero variance)."""
+    equity curve. rf per date from backtest.risk_free (const or DGS3MO).
+    None when thin (< min_obs) or degenerate (zero variance)."""
     n = len(rets)
     if n < max(min_obs, 2):
         return None
-    mean = sum(rets) / n
-    var = sum((x - mean) ** 2 for x in rets) / (n - 1)
-    std = math.sqrt(var)
-    if std <= 1e-9:
-        return None
-    return (mean - RISK_FREE_DAILY) / std * math.sqrt(TRADING_DAYS_PER_YEAR)
+    return _rf_excess_sharpe(rets, dates, min_obs=max(min_obs, 2))
 
 
 def regime_benchmark_sharpe_by_horizon(start_date, end_date,
@@ -183,8 +180,9 @@ def regime_benchmark_sharpe_by_horizon(start_date, end_date,
                     if j >= n:
                         break
                     marked.add(j)
-            xs = [rets[j] for j in sorted(marked) if rets[j] is not None]
-            out[regime][h] = _excess_sharpe(xs, min_obs)
+            js = [j for j in sorted(marked) if rets[j] is not None]
+            xs = [rets[j] for j in js]
+            out[regime][h] = _excess_sharpe(xs, min_obs, dates=[dates[j] for j in js])
     return out
 
 

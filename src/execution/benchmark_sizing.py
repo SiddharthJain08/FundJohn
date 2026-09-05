@@ -29,6 +29,8 @@ import logging
 import math
 import os
 
+from backtest.risk_free import rf_source as _rf_source
+
 logger = logging.getLogger(__name__)
 
 BENCH_SIZING_ENV = 'OPENCLAW_BENCH_RELATIVE_SIZING'
@@ -266,7 +268,8 @@ def regime_benchmark_sharpe_for_sizing(regime_state: str, run_date, *, benchmark
         with conn.cursor() as cur:
             cached = _read_cache(cur)
         if (cached and cached.get('schema') == CACHE_SCHEMA
-                and cached.get('as_of') == as_of and cached.get('benchmark') == benchmark):
+                and cached.get('as_of') == as_of and cached.get('benchmark') == benchmark
+                and cached.get('rf_source') == _rf_source()):
             by_regime = cached.get('by_regime') or {}
         else:
             from backtest.unified_backtest import DEFAULT_START_DATE
@@ -280,7 +283,7 @@ def regime_benchmark_sharpe_for_sizing(regime_state: str, run_date, *, benchmark
             if any(v is not None for hv in by_regime.values() for v in hv.values()):
                 _write_cache(conn, {'schema': CACHE_SCHEMA, 'as_of': as_of, 'benchmark': benchmark,
                                     'start': DEFAULT_START_DATE, 'horizons': list(BENCH_HORIZONS),
-                                    'by_regime': by_regime})
+                                    'by_regime': by_regime, 'rf_source': _rf_source()})
             else:
                 logger.warning('[bench_sizing] S_m compute returned no regimes for %s..%s',
                                DEFAULT_START_DATE, as_of)

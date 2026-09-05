@@ -14,16 +14,25 @@ from py_vollib.black_scholes.greeks import analytical as _greeks
 RISK_FREE = 0.04  # flat annual risk-free; see module docstring
 
 
+def _rate(r, as_of):
+    if as_of is None:
+        return RISK_FREE if r is None else r
+    from backtest.risk_free import rf_annual_asof
+    return rf_annual_asof(as_of) if r is None else r
+
+
 def bs_price(flag: str, S: float, K: float, t: float, sigma: float,
-             r: float = RISK_FREE) -> float:
+             r: float | None = None, as_of=None) -> float:
     """flag 'c'|'p'; t in years. Guards degenerate t/sigma."""
+    r = _rate(r, as_of)
     t = max(float(t), 1e-6)
     sigma = max(float(sigma), 1e-4)
     return float(_bs(flag, float(S), float(K), t, r, sigma))
 
 
 def bs_greeks(flag: str, S: float, K: float, t: float, sigma: float,
-              r: float = RISK_FREE) -> dict:
+              r: float | None = None, as_of=None) -> dict:
+    r = _rate(r, as_of)
     t = max(float(t), 1e-6)
     sigma = max(float(sigma), 1e-4)
     return {
@@ -35,17 +44,19 @@ def bs_greeks(flag: str, S: float, K: float, t: float, sigma: float,
 
 
 def implied_vol(price: float, flag: str, S: float, K: float, t: float,
-                r: float = RISK_FREE) -> float:
+                r: float | None = None, as_of=None) -> float:
+    r = _rate(r, as_of)
     from py_vollib.black_scholes.implied_volatility import implied_volatility
     return float(implied_volatility(float(price), float(S), float(K),
                                     max(float(t), 1e-6), r, flag))
 
 
 def strike_for_target_delta(flag: str, S: float, t: float, sigma: float,
-                            target_delta: float, r: float = RISK_FREE) -> float:
+                            target_delta: float, r: float | None = None, as_of=None) -> float:
     """Solve for the strike whose |delta| == target_delta at (S, t, sigma).
     Calls: strike increases as delta decreases (OTM). Puts: |delta|.
     """
+    r = _rate(r, as_of)
     t = max(float(t), 1e-6)
     sigma = max(float(sigma), 1e-4)
     td = abs(float(target_delta))

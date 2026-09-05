@@ -62,10 +62,11 @@ from strategies.validate_strategy import validate                     # noqa: E4
 from backtest import options_backtest  # SP-4 Phase 0
 from execution import regime_param_override  # noqa: E402  # per-(strategy, regime) bracket override
 from strategies.lifecycle import VALID_INSTRUMENT_CLASSES, _detect_module_instrument_class  # noqa: E402  # SP-4 dispatch
+from backtest.risk_free import RISK_FREE_ANNUAL_CONST as _RF_CONST, excess_sharpe as _excess_sharpe_rf, sharpe_pair as _sharpe_pair_rf, rf_source as _rf_source
 
 # ── Configuration ────────────────────────────────────────────────────────────
 TRADING_DAYS_PER_YEAR = 252
-RISK_FREE_DAILY       = 0.05 / TRADING_DAYS_PER_YEAR
+RISK_FREE_DAILY       = _RF_CONST / TRADING_DAYS_PER_YEAR   # legacy constant; Sharpe now goes through risk_free.excess_sharpe
 DEFAULT_MAX_HOLD_DAYS = 21
 DEFAULT_START_DATE    = '2016-04-11'   # earliest historical_regimes row
 
@@ -589,7 +590,7 @@ def aggregate_metrics(trades: list[dict]) -> dict:
     if not trades:
         return {'sharpe': None, 'max_dd_pct': 0.0, 'return_pct': 0.0,
                 'total_trades': 0, 'hit_rate': None, 'avg_holding_days': None,
-                'avg_pnl_pct': 0.0, 'sortino': None, 'calmar': None}
+                'avg_pnl_pct': 0.0, 'sortino': None, 'calmar': None, 'rf_shadow': None}
 
     # Guard: a single corrupt price bar yields a NaN pnl_pct that would
     # propagate through the equal-weighted daily-return series and null the
@@ -606,7 +607,7 @@ def aggregate_metrics(trades: list[dict]) -> dict:
     if not trades:
         return {'sharpe': None, 'max_dd_pct': 0.0, 'return_pct': 0.0,
                 'total_trades': 0, 'hit_rate': None, 'avg_holding_days': None,
-                'avg_pnl_pct': 0.0, 'sortino': None, 'calmar': None}
+                'avg_pnl_pct': 0.0, 'sortino': None, 'calmar': None, 'rf_shadow': None}
 
     pnl = np.array([t['pnl_pct'] for t in trades], dtype=float)
     avg_hold = float(np.mean([t['holding_days'] for t in trades]) or 1.0)
@@ -626,6 +627,7 @@ def aggregate_metrics(trades: list[dict]) -> dict:
             'avg_pnl_pct':      round(mean_pnl * 100.0, 4),
             'sortino':          None,
             'calmar':           None,
+            'rf_shadow':        None,
         }
 
     eq = np.cumprod(1.0 + daily_returns)
@@ -637,9 +639,19 @@ def aggregate_metrics(trades: list[dict]) -> dict:
     std_dr = float(daily_returns.std(ddof=1)) if len(daily_returns) > 1 else 0.0
     if std_dr < 1e-9:
         sharpe = None
+        rf_shadow = None
     else:
-        sharpe = float((daily_returns.mean() - RISK_FREE_DAILY) / std_dr *
-                       math.sqrt(TRADING_DAYS_PER_YEAR))
+        sharpe = _excess_sharpe_rf(daily_returns, _dates)
+        rf_shadow = _sharpe_pair_rf(daily_returns, _dates)
+        # Round const/macro to the same 4dp as 'sharpe' below — the shadow dict is
+        # meant to be compared against the primary metric, and full float precision
+        # here vs. a rounded 'sharpe' would make an otherwise-identical const value
+        # look mismatched to a caller (or test) doing that comparison.
+        rf_shadow['const'] = None if rf_shadow['const'] is None else round(rf_shadow['const'], 4)
+        rf_shadow['macro'] = None if rf_shadow['macro'] is None else round(rf_shadow['macro'], 4)
+        _log(f"[rf_shadow] site=aggregate_metrics source={_rf_source()} "
+             f"const={rf_shadow['const']:.3f} macro={(rf_shadow['macro'] if rf_shadow['macro'] is not None else float('nan')):.3f} "
+             f"n={rf_shadow['n']} rf_mean={(rf_shadow['rf_mean_annual'] or 0):.4f}")
 
     # Sortino ratio (annualized, target=0).
     # Convention: downside_dev = RMS of negative-only daily returns,
@@ -677,6 +689,7 @@ def aggregate_metrics(trades: list[dict]) -> dict:
         'avg_pnl_pct':      round(mean_pnl * 100.0, 4),
         'sortino':          None if sortino is None else round(sortino, 4),
         'calmar':           None if calmar is None else round(calmar, 4),
+        'rf_shadow':        rf_shadow,
     }
 
 
@@ -1422,6 +1435,7 @@ def run_backtest(strategy_id: str, *,
                                    if resolver is not None and universe_sizes
                                    else len(universe)),
                 'methodology':    'discovery',
+                'rf': {'source': _rf_source(), **(total_metrics.get('rf_shadow') or {})},
                 # Honest-cost provenance (2026-07-27): distinguishes this epoch
                 # from pre-cost canonical rows. spread_v1 = per-ticker half-spread
                 # artifact; flat = INSTRUMENT_COST_BPS fallback.

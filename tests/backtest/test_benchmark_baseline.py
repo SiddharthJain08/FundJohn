@@ -225,7 +225,9 @@ def test_by_horizon_load_failure_returns_empty_dict(monkeypatch):
 def test_risk_free_constant_matches_the_engine():
     from backtest import unified_backtest as ub
     from execution import trade_handoff_builder as thb
+    from backtest.risk_free import RISK_FREE_ANNUAL_CONST
     assert bb.RISK_FREE_ANNUAL == 0.05
     assert bb.RISK_FREE_DAILY == pytest.approx(ub.RISK_FREE_DAILY)
     assert bb.RISK_FREE_DAILY == pytest.approx(thb.RISK_FREE_DAILY)
+    assert bb.RISK_FREE_ANNUAL == RISK_FREE_ANNUAL_CONST
 

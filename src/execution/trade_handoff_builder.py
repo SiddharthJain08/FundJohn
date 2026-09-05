@@ -34,9 +34,10 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'src'))
 
 from execution.handoff import write_handoff, read_handoff  # noqa: E402
+from backtest.risk_free import RISK_FREE_ANNUAL_CONST as _RF_CONST  # noqa: E402
 
 TRADING_DAYS_PER_YEAR = 252
-RISK_FREE_DAILY       = 0.05 / TRADING_DAYS_PER_YEAR
+RISK_FREE_DAILY       = _RF_CONST / TRADING_DAYS_PER_YEAR  # unused here; kept for the cross-module equality test
 
 # Pre-filter: only signals clearing these gates are sent to TradeJohn.
 # Anything that fails here gets dropped to `prefiltered` with the reason —

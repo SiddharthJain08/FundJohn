@@ -24,7 +24,8 @@ ROOT = Path(__file__).resolve().parents[2]
 NAV_HISTORY_PATH = ROOT / 'logs' / 'pnl_daily_ohlc.json'
 ANCHOR_KEY = 'bench_realized_anchor'
 DEFAULT_ANCHOR = '2026-06-23'
-RISK_FREE_DAILY = 0.05 / 252
+from backtest.risk_free import RISK_FREE_ANNUAL_CONST as _RF_CONST, excess_sharpe as _rf_excess_sharpe
+RISK_FREE_DAILY = _RF_CONST / 252
 MIN_COMMON = 5
 # Final fix wave (2026-08-30) #9: a "20d Sharpe" must rest on 20 observations.
 # MIN_COMMON (5) still gates the since-anchor return — a ratio of two prices
@@ -97,13 +98,10 @@ def _load_regime_and_s_m(conn, run_date):
     return regime, s_m
 
 
-def _sharpe(rets: list[float]):
+def _sharpe(rets: list[float], dates=None):
     if len(rets) < SHARPE_MIN_OBS:
         return None
-    sd = statistics.stdev(rets)
-    if not math.isfinite(sd) or sd < ZERO_VAR_EPS:
-        return None
-    return (statistics.fmean(rets) - RISK_FREE_DAILY) / sd * math.sqrt(252)
+    return _rf_excess_sharpe(rets, dates, min_obs=SHARPE_MIN_OBS)
 
 
 def _window_return(vals: list[float], n: int):
@@ -132,7 +130,7 @@ def compute(nav_by_date: dict, spy_by_date: dict, run_date, anchor: str):
         'book_since': book_since, 'spy_since': spy_since, 'gap_pp': (book_since - spy_since) * 100.0,
         'book_20d': _window_return(nav, 20), 'spy_20d': _window_return(spy, 20),
         'book_60d': _window_return(nav, 60), 'spy_60d': _window_return(spy, 60),
-        'book_sharpe_20d': _sharpe(nav_r[-20:]), 'spy_sharpe_20d': _sharpe(spy_r[-20:]),
+        'book_sharpe_20d': _sharpe(nav_r[-20:], dates[-20:]), 'spy_sharpe_20d': _sharpe(spy_r[-20:], dates[-20:]),
     }
 
 
