@@ -3,8 +3,8 @@ Holiday Seasonality — Energy ETFs. Ported from TradeQuantiX "Market Effect
 Research: Holiday Seasonality - Part 2".
 Source: https://www.tradequantixnewsletter.com/p/market-effect-research-holiday-seasonality-8fd
 
-Thesis: energy ETFs drift up in the ~8-trading-day window ahead of each US
-federal holiday, then give the move back in a post-holiday reversal. The
+Thesis: energy ETFs drift up in the ~8-trading-day window ahead of each NYSE
+closure, then give the move back in a post-holiday reversal. The
 paper reports the pre-holiday leg as ~3x stronger than a random equal-length
 holding period, strongest in UGA/USO.
 
@@ -21,8 +21,8 @@ direction are the paper's unambiguous claims and are preserved exactly):
     the post-holiday reversal window). The paper's "exit = h or h+1" language
     is read here as "exit no later than the holiday" rather than "hold one
     day into the reversal."
-  * Holiday set: the full US federal holiday calendar (NYFed/NYSE-observed),
-    not just the subset the paper explicitly names — this gives ~9
+  * Holiday set: the NYSE closure calendar (actual exchange closures per
+    trading_calendar master), not the federal holiday calendar — this gives ~9
     windows/year instead of 2, satisfying the >=20-trades-per-3yr-window
     backtest requirement.
 """
@@ -31,8 +31,6 @@ from __future__ import annotations
 import sys
 import pandas as pd
 from typing import List
-from pandas.tseries.holiday import USFederalHolidayCalendar
-from pandas.tseries.offsets import CustomBusinessDay
 
 from strategies.base import BaseStrategy, Signal, REGIME_POSITION_SCALE
 
@@ -46,30 +44,28 @@ STRATEGY_ID      = 'S_holiday_seasonality_energy_etf'
 BASKET        = ('USO', 'UGA', 'XLE', 'XOP')
 STRONG_NAMES  = ('UGA', 'USO')
 ENTRY_OFFSET  = 8   # trading days before the holiday
-_BDAY_US = CustomBusinessDay(calendar=USFederalHolidayCalendar())
 
 
 def _holidays_near(anchor: pd.Timestamp, window_days: int = 45) -> list:
-    """US federal holidays within +/- window_days calendar days of anchor.
-    Pure calendar lookup — federal holidays are known in advance, so this
-    does NOT depend on which trading days have price data (unlike the price
-    panel, which for a live/backtest call only contains history up to
-    'today')."""
-    cal = USFederalHolidayCalendar()
-    start = anchor - pd.Timedelta(days=window_days)
-    end   = anchor + pd.Timedelta(days=window_days)
-    return list(cal.holidays(start=start, end=end))
+    """Exchange closures (weekdays that are not NYSE sessions) within
+    ±window_days of anchor, from the trading_calendar master. Pure calendar
+    lookup — independent of which sessions have price data."""
+    from lib.trading_calendar import sessions
+    start = (anchor - pd.Timedelta(days=window_days)).date()
+    end = (anchor + pd.Timedelta(days=window_days)).date()
+    open_days = set(sessions(start, end))
+    return [pd.Timestamp(d) for d in pd.bdate_range(start, end).date if d not in open_days]
 
 
 def _entry_exit_for_holiday(h: pd.Timestamp) -> tuple:
-    """For federal holiday h, return (entry_day, exit_day): exit_day is the
-    last valid business session before h (per the US-federal-holiday business
-    calendar); entry_day is ENTRY_OFFSET business sessions before h (i.e. the
-    session ENTRY_OFFSET-1 sessions earlier than exit_day)."""
-    prior_bdays = pd.bdate_range(end=h - pd.Timedelta(days=1), periods=20, freq=_BDAY_US)
-    if len(prior_bdays) < ENTRY_OFFSET:
+    """(entry_day, exit_day): exit_day is the last session before holiday h;
+    entry_day is ENTRY_OFFSET sessions before h (so the window spans
+    ENTRY_OFFSET sessions inclusive of exit_day)."""
+    from lib.trading_calendar import sessions_before
+    prior = sessions_before(h.date(), 20)
+    if len(prior) < ENTRY_OFFSET:
         return None, None
-    return prior_bdays[-ENTRY_OFFSET], prior_bdays[-1]
+    return pd.Timestamp(prior[-ENTRY_OFFSET]), pd.Timestamp(prior[-1])
 
 
 def _entry_and_exit_days(anchor: pd.Timestamp, window_days: int = 45) -> tuple:
@@ -88,8 +84,8 @@ def _entry_and_exit_days(anchor: pd.Timestamp, window_days: int = 45) -> tuple:
 
 class HolidaySeasonalityEnergyEtf(BaseStrategy):
     """LONG the energy-ETF basket (USO/UGA/XLE/XOP) over the 8-trading-day
-    window ahead of each US federal holiday; flat into the holiday and
-    through the post-holiday reversal window.
+    window ahead of each NYSE closure; flat into the closure and
+    through the post-closure reversal window.
     Source: https://www.tradequantixnewsletter.com/p/market-effect-research-holiday-seasonality-8fd
     """
 
@@ -235,8 +231,8 @@ if __name__ == '__main__':
     if price_index.empty:
         holidays = []
     else:
-        cal_ = USFederalHolidayCalendar()
-        holidays = list(cal_.holidays(start=price_index[0], end=price_index[-1]))
+        holidays = _holidays_near(price_index[0] + (price_index[-1] - price_index[0]) / 2,
+                                  window_days=int((price_index[-1] - price_index[0]).days / 2) + 1)
 
     def _nearest_on_or_before(dt: pd.Timestamp):
         pos = price_index.searchsorted(dt, side='right') - 1
