@@ -9,7 +9,7 @@ from scipy.stats import norm
 from strategies import options_surface as osf
 
 
-def _svi_iv(k, a=0.04, b=0.4, rho=-0.4, m=0.0, sig=0.2, t=30 / 365):
+def _svi_iv(k, a=0.002, b=0.03, rho=-0.4, m=0.0, sig=0.1, t=30 / 365):
     w = a + b * (rho * (k - m) + math.sqrt((k - m) ** 2 + sig ** 2))
     return math.sqrt(w / t)
 
