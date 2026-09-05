@@ -97,3 +97,38 @@ def test_out_of_master_range_falls_back(master, monkeypatch):
     monkeypatch.setattr(tc, '_alpaca_sessions', lambda a, b: None)
     # 2030 is beyond the fixture: weekday arithmetic with a warning, never an exception.
     assert tc.next_session('2030-01-04') == dt.date(2030, 1, 7)
+
+
+def test_alpaca_sessions_parses_cli_json_and_handles_failures(tmp_path, monkeypatch):
+    import json, subprocess
+    monkeypatch.setenv(tc.MASTER_PATH_ENV, str(tmp_path / 'absent.parquet'))
+    tc.clear_cache()
+    calls = []
+
+    def fake_run(argv, capture_output, text, timeout):
+        calls.append(argv)
+        payload = [
+            {'close': '16:00', 'date': '2026-04-02', 'open': '09:30',
+             'session_close': '2000', 'session_open': '0400', 'settlement_date': '2026-04-06'},
+            {'close': '16:00', 'date': '2026-04-06', 'open': '09:30',
+             'session_close': '2000', 'session_open': '0400', 'settlement_date': '2026-04-07'},
+        ]
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr='')
+
+    monkeypatch.setattr(tc.subprocess, 'run', fake_run)
+    assert tc._alpaca_sessions(dt.date(2026, 4, 1), dt.date(2026, 4, 7)) == {dt.date(2026, 4, 2), dt.date(2026, 4, 6)}
+    assert tc.is_session('2026-04-03') is False          # Good Friday absent from the CLI payload
+    assert tc.next_session('2026-04-02') == dt.date(2026, 4, 6)
+    assert calls and calls[0][1:2] == ['calendar'] and '--start' in calls[0] and '--end' in calls[0]
+
+    def failing_run(argv, capture_output, text, timeout):
+        return subprocess.CompletedProcess(argv, 1, stdout='', stderr='auth error')
+
+    monkeypatch.setattr(tc.subprocess, 'run', failing_run)
+    assert tc._alpaca_sessions(dt.date(2026, 4, 1), dt.date(2026, 4, 7)) is None
+
+    def raising_run(argv, capture_output, text, timeout):
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    monkeypatch.setattr(tc.subprocess, 'run', raising_run)
+    assert tc._alpaca_sessions(dt.date(2026, 4, 1), dt.date(2026, 4, 7)) is None
