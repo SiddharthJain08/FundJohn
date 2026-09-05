@@ -317,14 +317,10 @@ def _get_sigma_gate(uri: str) -> float:
 
 
 def _previous_trading_day(run_date: str) -> str:
-    """Previous weekday in YYYY-MM-DD form. Skips Sat/Sun but not market
-    holidays — missing files on holiday-shifted runs simply return empty
-    lists (callers are defensive)."""
-    from datetime import date as _d, timedelta as _td
-    d = _d.fromisoformat(run_date) - _td(days=1)
-    while d.weekday() >= 5:
-        d -= _td(days=1)
-    return d.isoformat()
+    """Previous NYSE session in YYYY-MM-DD form (holiday-aware since 2026-09-04)."""
+    from datetime import date as _d
+    from lib.trading_calendar import prev_session
+    return prev_session(_d.fromisoformat(run_date)).isoformat()
 
 
 def load_yesterdays_vetoed(run_date: str) -> list[dict]:
