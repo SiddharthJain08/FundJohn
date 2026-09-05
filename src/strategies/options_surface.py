@@ -226,3 +226,80 @@ def features_for_day(chain: pd.DataFrame, spot, as_of) -> dict:
     })
     row['skew_20d'] = row['skew_25d_30d']
     return row
+
+
+# --- append to src/strategies/options_surface.py ---
+HIST_LEN = 20
+IV_RANK_WINDOW = 252
+IV_RANK_MIN_OBS = 20
+ZSCORE_WINDOW = 60
+ZSCORE_MIN_OBS = 10
+RV_WINDOW = 20
+SERIES_KEYS = ['rv_20', 'vrp', 'iv_rank', 'vrp_zscore', 'iv_rank_history', 'vrp_history',
+               'hv20_history', 'pc_ratio_history']
+
+
+def rv_series_from_closes(closes: pd.Series) -> pd.Series:
+    """20-session std of log returns × √252, indexed like `closes` (spec A.5)."""
+    c = pd.to_numeric(closes, errors='coerce').astype(float)
+    lr = np.log(c / c.shift(1))
+    return lr.rolling(RV_WINDOW).std() * math.sqrt(252)
+
+
+def _pct_rank(s: pd.Series) -> pd.Series:
+    return s.rolling(IV_RANK_WINDOW, min_periods=IV_RANK_MIN_OBS).rank(pct=True) * 100.0
+
+
+def _zscore(s: pd.Series) -> pd.Series:
+    m = s.rolling(ZSCORE_WINDOW, min_periods=ZSCORE_MIN_OBS).mean()
+    sd = s.rolling(ZSCORE_WINDOW, min_periods=ZSCORE_MIN_OBS).std()
+    return (s - m) / sd.replace(0, np.nan)
+
+
+def _history(s: pd.Series, window: int = HIST_LEN, min_len: int = 5) -> pd.Series:
+    vals = s.tolist()
+    out = []
+    for i in range(len(vals)):
+        h = [float(v) for v in vals[max(0, i - window + 1):i + 1] if v is not None and not pd.isna(v)]
+        out.append(h if len(h) >= min_len else None)
+    return pd.Series(out, index=s.index, dtype=object)
+
+
+def _none_if_nan(v):
+    return None if v is None or (isinstance(v, float) and math.isnan(v)) else v
+
+
+def series_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-ticker time-series features over an ascending frame with columns
+    date, iv30, pc_ratio, rv_20 (spec A.5). The single implementation behind
+    both the enriched backtest panel and the live per-ticker call."""
+    out = df.sort_values('date').reset_index(drop=True).copy()
+    for c in ('iv30', 'pc_ratio', 'rv_20'):
+        out[c] = pd.to_numeric(out.get(c), errors='coerce')
+    out['vrp'] = out['iv30'] - out['rv_20']
+    out['iv_rank'] = _pct_rank(out['iv30'])
+    out['vrp_zscore'] = _zscore(out['vrp'])
+    out['iv_rank_history'] = _history(out['iv_rank'])
+    out['vrp_history'] = _history(out['vrp'])
+    out['hv20_history'] = _history(out['rv_20'])
+    out['pc_ratio_history'] = _history(out['pc_ratio'])
+    for c in ('vrp', 'iv_rank', 'vrp_zscore'):
+        out[c] = out[c].astype(object).where(out[c].notna(), None)
+    return out
+
+
+def series_features(today: dict, history: pd.DataFrame, rv: pd.Series) -> dict:
+    """Series features for ONE day given the ticker's prior surface rows and its
+    realized-vol series. Equivalent to the last row of series_frame over
+    history + today — the parity contract with the enriched panel."""
+    cols = ['date', 'iv30', 'pc_ratio']
+    h = history[cols].copy() if history is not None and len(history) else pd.DataFrame(columns=cols)
+    t = pd.DataFrame([{c: today.get(c) for c in cols}])
+    frame = pd.concat([h, t], ignore_index=True)
+    frame['date'] = pd.to_datetime(frame['date']).dt.normalize()
+    frame = frame[frame['date'] <= frame['date'].iloc[-1]].drop_duplicates('date', keep='last')
+    rv_s = pd.to_numeric(rv, errors='coerce') if rv is not None else pd.Series(dtype=float)
+    rv_s.index = pd.to_datetime(rv_s.index).normalize()
+    frame['rv_20'] = frame['date'].map(rv_s.to_dict()).astype(float)
+    last = series_frame(frame).iloc[-1]
+    return {k: (_none_if_nan(last[k]) if not isinstance(last[k], list) else list(last[k])) for k in SERIES_KEYS}
