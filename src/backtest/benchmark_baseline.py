@@ -59,7 +59,8 @@ _LOOKBACK_CALENDAR_DAYS = 10
 # rf goes through backtest.risk_free so every site (engine, S_m, bench_realized,
 # auto_backtest) subtracts the same series; the constants stay exported for the
 # equality test and for callers that only need the number.
-from backtest.risk_free import RISK_FREE_ANNUAL_CONST as RISK_FREE_ANNUAL, excess_sharpe as _rf_excess_sharpe
+from backtest.risk_free import (RISK_FREE_ANNUAL_CONST as RISK_FREE_ANNUAL, excess_sharpe as _rf_excess_sharpe,
+                                sharpe_pair as _rf_sharpe_pair)
 RISK_FREE_DAILY = RISK_FREE_ANNUAL / TRADING_DAYS_PER_YEAR
 # Horizon grid (trading days a synthetic benchmark lot is held). The sizer
 # selects one column via pipeline_config['benchmark_horizon_days'] (default 1).
@@ -111,6 +112,11 @@ def load_benchmark_closes(start_date, end_date, benchmark: str) -> dict[str, flo
     tbl = pq.read_table(PRICES_PARQUET, columns=["ticker", "date", "close"], filters=flt)
     df = tbl.to_pandas()
     return dict(zip(df["date"].astype(str), df["close"].astype(float)))
+
+
+def _fmt_sharpe(v) -> str:
+    """'n/a' for a missing Sharpe — f'{None:.3f}' raises."""
+    return 'n/a' if v is None else f'{v:.3f}'
 
 
 def _excess_sharpe(rets: list[float], min_obs: int, dates=None) -> float | None:
@@ -169,6 +175,7 @@ def regime_benchmark_sharpe_by_horizon(start_date, end_date,
 
     hs = sorted({int(h) for h in horizons if int(h) >= 1})
     out: dict[str, dict[int, float | None]] = {r: {} for r in CANONICAL_REGIMES}
+    default_h: dict[str, tuple[list, list]] = {}
     for regime in CANONICAL_REGIMES:
         entries = [i for i, d in enumerate(dates) if tags.get(d) == regime]
         for h in hs:
@@ -181,7 +188,22 @@ def regime_benchmark_sharpe_by_horizon(start_date, end_date,
                     marked.add(j)
             js = [j for j in sorted(marked) if rets[j] is not None]
             xs = [rets[j] for j in js]
-            out[regime][h] = _excess_sharpe(xs, min_obs, dates=[dates[j] for j in js])
+            ds = [dates[j] for j in js]
+            if h == DEFAULT_HORIZON:
+                default_h[regime] = (xs, ds)
+            out[regime][h] = _excess_sharpe(xs, min_obs, dates=ds)
+    # Spec C.4: this site emits its rf shadow too — ONE line per regime, for
+    # the DEFAULT_HORIZON column only (the one the sizer actually reads).
+    if DEFAULT_HORIZON in hs:
+        for regime in CANONICAL_REGIMES:
+            xs, ds = default_h.get(regime, ([], []))
+            try:
+                pair = _rf_sharpe_pair(xs, ds)
+            except Exception as e:  # noqa: BLE001 — diagnostics never break the grid
+                logger.warning('[bench_baseline] rf shadow skipped for %s: %s: %s', regime, type(e).__name__, e)
+                continue
+            logger.info('[rf_shadow] site=benchmark_baseline regime=%s h=%d const=%s macro=%s n=%d',
+                        regime, DEFAULT_HORIZON, _fmt_sharpe(pair['const']), _fmt_sharpe(pair['macro']), pair['n'])
     return out
 
 

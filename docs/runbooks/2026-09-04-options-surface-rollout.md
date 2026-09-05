@@ -35,8 +35,8 @@ logic everywhere including the holiday strategy.
 ## Flags
 | flag | now | flip when |
 |---|---|---|
-| `OPENCLAW_OPTIONS_SURFACE` | 0 (shadow) | after the first clean `[options_surface] shadow …` line — Tue 2026-09-08 15:00 ET compute (Mon 09-07 is Labor Day, market closed, so no compute that day). Clean = n ≥ 3,000, iv30 old/new median in 1.5–3.5, iv_rank_nonnull ≥ 80 %. Set `=1` in `.env` and `XDG_RUNTIME_DIR=/run/user/0 systemctl --user restart johnbot.service`. Must not flip before Tasks 13/14's OI keys exist in the live dict — they do, on this branch. |
-| `OPENCLAW_RF_SOURCE` | const (shadow) | after ≥ 5 live `[rf_shadow]` lines (bench_realized / aggregate_metrics) and one backtest; set `=macro`, restart johnbot; then schedule the fleet re-backtest below. Risk-free series is DGS3MO (3-month constant-maturity Treasury, FRED, from `macro.parquet`). |
+| `OPENCLAW_OPTIONS_SURFACE` | 0 (shadow) | after the first clean `[options_surface] shadow …` line — Tue 2026-09-08 15:00 ET compute (Mon 09-07 is Labor Day, market closed, so no compute that day). Clean = n ≥ 3,000, iv30 old/new median in 1.5–3.5, iv_rank_nonnull ≥ 80 %, rv20_nonnull ≥ 95 %, vrp_nonnull ≥ 80 %, dur < 180 s (the last three added by the 2026-09-05 final fix wave — `rv20_nonnull`/`vrp_nonnull` would have caught the as-of `rv_20` defect, `dur` guards the shadow-mode cost budget `OPENCLAW_OPTIONS_SURFACE_BUDGET_S`, default 240 s; a `spot_stale` near 100 % is EXPECTED at the 15:00 ET compute and is not a defect). Set `=1` in `.env` and `XDG_RUNTIME_DIR=/run/user/0 systemctl --user restart johnbot.service`. Must not flip before Tasks 13/14's OI keys exist in the live dict — they do, on this branch. |
+| `OPENCLAW_RF_SOURCE` | const (shadow) | after ≥ 5 live `[rf_shadow]` lines and one backtest. Emitting sites: `aggregate_metrics` (backtest, also written to `config_json['rf']`), `bench_realized` (one line per 20-day Sharpe — book and SPY — on every daily report) and `benchmark_baseline` (one line per regime at `h=1`, whenever the S_m grid is computed); set `=macro`, restart johnbot; then schedule the fleet re-backtest below. Risk-free series is DGS3MO (3-month constant-maturity Treasury, FRED, from `macro.parquet`). |
 
 ## Fleet re-backtest under macro rf (operator-triggered, weekend)
 `strategy_backtest_runs.config_json->'rf'->>'source'` distinguishes populations. Run the fleet as serial transient units (`scripts/rebacktest_options_sleeve.sh` pattern over `--all-live`) in a quiet window; the assigners then re-gate. Until then, gate levels mix const (older rows) and macro (newer rows) — the Sharpe delta is ≤ ±0.1 over the 2023-09+ window.
@@ -61,4 +61,11 @@ logic everywhere including the holiday strategy.
 ## Rollback
 - Options: `OPENCLAW_OPTIONS_SURFACE=0` serves the legacy dict; the legacy block is intact in engine.py. The backtest panel can be restored from the v1 copy (`data/derived/options_aggregates_enriched.v1-2026-09-04.parquet`).
 - rf: `OPENCLAW_RF_SOURCE=const`.
-- Calendar: delete/rename `data/master/trading_calendar.parquet` → library falls back (alpaca, then weekday) with a WARNING.
+- Calendar: **rename** `data/master/trading_calendar.parquet` (never delete a master — CLAUDE.md core invariant) or point `OPENCLAW_TRADING_CALENDAR_PATH` at another file → the library falls back (alpaca probe, then weekday) with a WARNING. Expect backtests to SLOW DOWN under the alpaca probe tier: it is a per-session network call, not a parquet lookup.
+
+## Known-transient warning between merge and rollout Step 1
+`master_freshness` WARNs `missing: options_surface.parquet` from the moment
+this branch merges until Step 1 builds the surface master on main. The check
+entry (`('date', 5)`) ships with the code; the file it names is created by the
+rollout. This is expected — do not treat it as a regression, and do not silence
+the check.

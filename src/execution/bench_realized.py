@@ -23,7 +23,8 @@ ROOT = Path(__file__).resolve().parents[2]
 NAV_HISTORY_PATH = ROOT / 'logs' / 'pnl_daily_ohlc.json'
 ANCHOR_KEY = 'bench_realized_anchor'
 DEFAULT_ANCHOR = '2026-06-23'
-from backtest.risk_free import RISK_FREE_ANNUAL_CONST as _RF_CONST, excess_sharpe as _rf_excess_sharpe
+from backtest.risk_free import (RISK_FREE_ANNUAL_CONST as _RF_CONST, excess_sharpe as _rf_excess_sharpe,
+                                shadow_line as _rf_shadow_line)
 RISK_FREE_DAILY = _RF_CONST / 252
 MIN_COMMON = 5
 # Final fix wave (2026-08-30) #9: a "20d Sharpe" must rest on 20 observations.
@@ -95,6 +96,13 @@ def _load_regime_and_s_m(conn, run_date):
 def _sharpe(rets: list[float], dates=None):
     if len(rets) < SHARPE_MIN_OBS:
         return None
+    # Spec C.4: EVERY rf site emits a shadow line, not just aggregate_metrics.
+    # One line per Sharpe actually computed — two per compute() (book, SPY).
+    # Diagnostics never cost the report-only line, hence the guard.
+    try:
+        logger.info(_rf_shadow_line('bench_realized', rets, dates))
+    except Exception as e:  # noqa: BLE001
+        logger.warning('[bench_realized] rf shadow line skipped (%s: %s)', type(e).__name__, e)
     return _rf_excess_sharpe(rets, dates, min_obs=SHARPE_MIN_OBS)
 
 

@@ -75,7 +75,9 @@ def test_gex_is_none_when_front_expiry_has_no_open_interest(root, monkeypatch):
     front = df['expiry'] == df['expiry'].min()
     df.loc[front, 'open_interest'] = 0.0            # front expiry unmeasured; back expiry still has OI
     f = oi.oi_features_for_day(df, '2026-09-03')
-    assert f['gex'] is None and f['max_pain'] is None and f['contracts_liquid'] == 0
+    # contracts_liquid is None, not 0: with no OI on the front expiry the count
+    # is UNMEASURED (final fix wave 2026-09-05 — never a computed zero).
+    assert f['gex'] is None and f['max_pain'] is None and f['contracts_liquid'] is None
     assert f['pcr_oi'] is not None                  # whole-chain ratio still measurable from the back expiry
 
 
@@ -90,3 +92,46 @@ def test_master_dir_root_never_leaks_the_default_root(tmp_path, monkeypatch):
     d = look('ZZZT', pd.Timestamp('2026-09-11'))
     assert d['oi_session'] == '2026-09-10'
     oi.clear_cache()
+
+
+# ── Final fix wave 2026-09-05, F4a: per-underlying dict instead of an isin scan ──
+def test_load_cboe_session_slices_by_underlying(tmp_path, monkeypatch):
+    """Same rows as the old whole-table `isin` scan, for one ticker, several
+    tickers, none, and all."""
+    r = tmp_path / 'cboe_chains'
+    rows = _rows('2026-09-02', underlying='AAAT') + _rows('2026-09-02', underlying='BBBT') \
+        + _rows('2026-09-02', underlying='CCCT')
+    _partition(r, '2026-09-02', rows)
+    monkeypatch.setenv('OPENCLAW_CBOE_CHAINS_ROOT', str(r))
+    oi.clear_cache()
+    try:
+        session = dt.date(2026, 9, 2)
+        one = oi.load_cboe_session(session, ['BBBT'])
+        assert set(one['underlying']) == {'BBBT'} and len(one) == 12
+        two = oi.load_cboe_session(session, ['CCCT', 'AAAT'])
+        assert set(two['underlying']) == {'AAAT', 'CCCT'} and len(two) == 24
+        dupes = oi.load_cboe_session(session, ['AAAT', 'AAAT'])
+        assert len(dupes) == 12                              # a repeat is not a duplication
+        none = oi.load_cboe_session(session, ['ZZZZ'])
+        assert none.empty and list(none.columns) == list(oi._COLS)
+        assert len(oi.load_cboe_session(session)) == 36       # tickers=None -> whole session
+    finally:
+        oi.clear_cache()
+
+
+def test_load_cboe_session_result_is_not_mutated_by_features(tmp_path, monkeypatch):
+    """load_cboe_session hands back a slice of the lru_cached frame; a second
+    call must see the original columns (oi_features_for_day copies first)."""
+    r = tmp_path / 'cboe_chains'
+    _partition(r, '2026-09-02', _rows('2026-09-02', underlying='AAAT'))
+    monkeypatch.setenv('OPENCLAW_CBOE_CHAINS_ROOT', str(r))
+    oi.clear_cache()
+    try:
+        session = dt.date(2026, 9, 2)
+        first = oi.load_cboe_session(session, ['AAAT'])
+        cols_before = list(first.columns)
+        oi.oi_features_for_day(first, '2026-09-03', session=session)
+        second = oi.load_cboe_session(session, ['AAAT'])
+        assert list(second.columns) == cols_before and 'dte' not in second.columns
+    finally:
+        oi.clear_cache()

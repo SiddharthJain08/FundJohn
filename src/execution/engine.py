@@ -493,15 +493,23 @@ def _inject_intraday_options(opts, today, universe):
 
 def _apply_options_surface(old: dict, opts, universe, today, master_dir, px_window, earnings=None) -> dict:
     """OPENCLAW_OPTIONS_SURFACE=1 → serve the v2 dict; else serve the legacy
-    dict and log the shadow comparison (spec 2026-09-04 A.7)."""
-    from execution import options_aux_v2 as _v2
+    dict and log the shadow comparison (spec 2026-09-04 A.7).
+
+    The IMPORT is inside the try with the build: a module-level failure in
+    options_aux_v2 (a bad dependency, a syntax error shipped by a half-applied
+    deploy) must degrade to the legacy dict exactly like a build failure, not
+    propagate out of load_aux_data. `build`/`shadow_summary`/`enabled` are
+    resolved through the module object at call time so tests can monkeypatch
+    them."""
+    t0 = time.monotonic()
     try:
+        from execution import options_aux_v2 as _v2
         new = _v2.build(opts, universe, today, master_dir, px_window, earnings)
     except Exception as exc:  # noqa: BLE001 — the v2 path must never take the legacy path down
         logger.warning('[options_surface] v2 build failed (%s); serving legacy dict', exc)
         return old
     try:
-        logger.info(_v2.shadow_summary(old, new))
+        logger.info(_v2.shadow_summary(old, new, seconds=time.monotonic() - t0))
     except Exception as exc:  # noqa: BLE001 — a diagnostics failure must never cost the cycle its options aux
         logger.warning('[options_surface] shadow summary failed (%s)', exc)
     return new if _v2.enabled() else old

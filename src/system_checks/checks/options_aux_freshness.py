@@ -6,13 +6,13 @@ Guards the 2026-07-29 incident class: `options_aggregates_enriched.parquet`
 2026-04-22 when the aggregates collector was retired. `_day_slice` falls back
 to "most recent prior date", so every backtest bar since April was served the
 April slice with no error — while LIVE read `options_eod.parquet` and stayed
-fresh. Rebuild path: `scripts/build_options_aggregates.py` then
-`scripts/compute_rolling_options_fields.py`.
+fresh. Rebuild path (since the 2026-09-04 surface v2 build):
+`scripts/build_options_surface.py` then `scripts/compute_rolling_options_fields.py`.
 
-Second guard: the current provider feed carries NO open_interest, so gex /
-contracts_liquid / iv_centroid_delta / surface_premium must be NULL rather
-than a computed 0.0 (a fabricated "no dealer gamma imbalance"). If a future
-change reintroduces zeros while OI is absent, this FAILs.
+Second guard: OI-derived fields (gex / contracts_liquid / iv_centroid_delta /
+surface_premium) must be NULL when the session behind them carries no open
+interest, never a computed 0.0 (a fabricated "no dealer gamma imbalance").
+If a future change reintroduces zeros while OI is absent, this FAILs.
 """
 from __future__ import annotations
 
@@ -64,11 +64,12 @@ def _options_aux_freshness():
         return Status.FAIL, (
             f'options panel stale {lag_days}d (max {_MAX_LAG_DAYS}d, newest '
             f'{latest.date()}) — backtests are silently reading that slice for '
-            f'every later bar; rebuild via scripts/build_options_aggregates.py '
+            f'every later bar; rebuild via scripts/build_options_surface.py '
             f'+ scripts/compute_rolling_options_fields.py')
     return Status.PASS, (
         f'newest {latest.date()} ({lag_days}d), {newest["ticker"].nunique()} '
-        f'tickers; OI-derived fields NULL (feed has no open_interest)')
+        f'tickers; OI-derived fields honest (NULL when no CBOE session, '
+        f'never a fabricated 0)')
 
 
 _OI_MIN_TICKERS = int(os.environ.get('OPTIONS_OI_MIN_TICKERS', '400'))

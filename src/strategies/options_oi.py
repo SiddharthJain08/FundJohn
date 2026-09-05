@@ -53,20 +53,38 @@ def cboe_session_for(as_of, root: Path | None = None) -> dt.date | None:
 
 
 @functools.lru_cache(maxsize=2)
-def _load(path_str: str) -> pd.DataFrame:
+def _load(path_str: str) -> tuple:
+    """(whole session frame, {underlying: sub-frame}) — cached together.
+
+    A CBOE session is ~1M rows over ~550 underlyings, and every caller
+    (oi_features_for_ticker, oi_lookup_factory) wants ONE of them. Grouping
+    once per session turns each lookup from a full-table `isin` scan into a
+    dict hit; the builder makes tens of thousands of those per rebuild."""
     df = pq.read_table(path_str, columns=_COLS).to_pandas()
     df['underlying'] = df['underlying'].astype(str)
     df['expiry'] = pd.to_datetime(df['expiry'])
     df['option_type'] = df['option_type'].astype(str).str.upper().str[0]
-    return df
+    by_underlying = {u: g for u, g in df.groupby('underlying', sort=False)}
+    return df, by_underlying
 
 
 def load_cboe_session(session: dt.date, tickers=None, root: Path | None = None) -> pd.DataFrame:
+    """Rows for `tickers` (all of them when None) from ONE CBOE session.
+
+    Callers must not mutate the result — it is a slice of the lru_cached
+    session frame. oi_features_for_day copies before touching anything."""
     path = Path(root or cboe_root()) / f'date={session.isoformat()}.parquet'
     if not path.exists():
         return pd.DataFrame(columns=_COLS)
-    df = _load(str(path))
-    return df[df['underlying'].isin(set(tickers))] if tickers is not None else df
+    df, by_underlying = _load(str(path))
+    if tickers is None:
+        return df
+    want = [t for t in dict.fromkeys(str(t) for t in tickers) if t in by_underlying]
+    if not want:
+        return df.iloc[0:0]                       # empty, right columns/dtypes
+    if len(want) == 1:                            # the hot path: one ticker
+        return by_underlying[want[0]]
+    return pd.concat([by_underlying[t] for t in want])
 
 
 def _empty(session) -> dict:
@@ -96,10 +114,13 @@ def oi_features_for_day(rows: pd.DataFrame, as_of, session=None) -> dict:
     if front.empty:
         front = r
     fr = front[front['dte'] == front['dte'].min()]
+    front_oi = float(fr['open_interest'].sum())
     by_strike = fr.groupby('strike')['open_interest'].sum()
     by_strike = by_strike[by_strike > 0]
     out['open_interest_by_strike'] = {float(k): float(v) for k, v in by_strike.items()}
-    out['contracts_liquid'] = int((fr['open_interest'] > 0).sum())
+    # Never a computed zero: with no OI on the front expiry the count of liquid
+    # contracts is UNMEASURED, not 0 (same rule as gex below).
+    out['contracts_liquid'] = int((fr['open_interest'] > 0).sum()) if front_oi > 0 else None
     calls, puts = fr[fr['option_type'] == 'C'], fr[fr['option_type'] == 'P']
     if len(by_strike):
         ks = sorted(by_strike.index)
@@ -110,7 +131,6 @@ def oi_features_for_day(rows: pd.DataFrame, as_of, session=None) -> dict:
             if best_pay is None or pay < best_pay:
                 best, best_pay = float(s), pay
         out['max_pain'] = best
-    front_oi = float(fr['open_interest'].sum())
     gc = float((pd.to_numeric(calls['gamma'], errors='coerce').fillna(0) * calls['open_interest']).sum())
     gp = float((pd.to_numeric(puts['gamma'], errors='coerce').fillna(0) * puts['open_interest']).sum())
     out['gex'] = round((gc - gp) * 100, 2) if front_oi > 0 else None

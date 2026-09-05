@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -21,12 +22,26 @@ from strategies.options_surface import (OPTIONS_FEATURES_VERSION, features_for_d
 
 logger = logging.getLogger(__name__)
 FLAG = 'OPENCLAW_OPTIONS_SURFACE'
+BUDGET_ENV = 'OPENCLAW_OPTIONS_SURFACE_BUDGET_S'
+DEFAULT_BUDGET_S = 240.0
 HISTORY_DAYS = 400
 _HIST_COLS = ['ticker', 'date', 'iv30', 'pc_ratio']
 
 
 def enabled() -> bool:
     return os.environ.get(FLAG, '0') == '1'
+
+
+def budget_seconds() -> float:
+    """Per-run wall-clock budget for build() (spec 2026-09-04 A.7 fix wave).
+    In shadow mode a slow surface compute is pure cost — the engine serves the
+    legacy dict either way — so the loop stops at the budget and returns what
+    it has. With the flag ON the dict is load-bearing, so the budget only
+    warns."""
+    try:
+        return float(os.environ.get(BUDGET_ENV, DEFAULT_BUDGET_S))
+    except (TypeError, ValueError):
+        return DEFAULT_BUDGET_S
 
 
 def load_history(master_dir: Path, tickers, before: pd.Timestamp) -> dict[str, pd.DataFrame]:
@@ -67,14 +82,26 @@ def build(opts: pd.DataFrame, universe, today, master_dir, px_window: pd.DataFra
     except ImportError:
         oi_features_for_ticker = None
     out: dict[str, dict] = {}
+    t0 = time.monotonic()
+    budget, live, over_warned = budget_seconds(), enabled(), False
+    # `tickers` is already the distinct ticker list, so the budget message can
+    # report k/n without materialising every groupby sub-frame (which would
+    # hold a second copy of the whole chain — a memory regression in a fix
+    # whose whole point is cost).
+    n_total = len(tickers)
     for ticker, grp in opts.groupby(opts['ticker'].astype(str)):
         chain_date = pd.to_datetime(grp['date']).max().normalize()
         chain = grp[pd.to_datetime(grp['date']).dt.normalize() == chain_date]
         closes = closes_by.get(ticker)
-        spot = None
+        spot = spot_date = None
         if closes is not None and len(closes):
+            # LAST KNOWN close at or before the chain date — under the intraday
+            # overlay that is T−1 while the chain is dated today. spot_date is
+            # reported so the shadow line can count the stale ones.
             upto = closes[closes.index <= chain_date]
-            spot = float(upto.iloc[-1]) if len(upto) else None
+            if len(upto):
+                spot = float(upto.iloc[-1])
+                spot_date = pd.Timestamp(upto.index[-1]).date().isoformat()
         hist = history.get(ticker)
         master_today = None
         if hist is not None and (hist['date'] == chain_date).any():
@@ -100,17 +127,48 @@ def build(opts: pd.DataFrame, universe, today, master_dir, px_window: pd.DataFra
             if not e.empty:
                 row['earnings_dte'] = int((pd.to_datetime(e['date']).min() - today).days)
         row['surface_date'] = chain_date.date().isoformat()
+        row['spot_date'] = spot_date
         out[ticker] = row
+        if time.monotonic() - t0 > budget:
+            if not live:
+                logger.warning('[options_surface] budget %.0fs exceeded after %d/%d tickers — partial shadow',
+                               budget, len(out), n_total)
+                break
+            if not over_warned:
+                logger.warning('[options_surface] budget %.0fs exceeded after %d/%d tickers — flag is ON, '
+                               'running to completion', budget, len(out), n_total)
+                over_warned = True
     return out
 
 
-def shadow_summary(old: dict, new: dict) -> str:
+def _pct_of_new(new: dict, predicate) -> int:
+    """Share of the v2 dict's tickers satisfying `predicate`, 0-100. The
+    denominator is always len(new) — every percentage on the shadow line is
+    read against the same base."""
+    return round(100.0 * sum(1 for t in new if predicate(new[t])) / len(new)) if new else 0
+
+
+def shadow_summary(old: dict, new: dict, seconds=None) -> str:
+    """One-line old-vs-new comparison (spec 2026-09-04 A.7).
+
+    `rv20_nonnull` / `vrp_nonnull` catch the F1 regression class — the live
+    path losing rv_20 (and therefore vrp/vrp_zscore) whenever prices.parquet
+    lags the chain date. `spot_stale` is the share of tickers priced off a
+    close OLDER than the surface date (normal at the 15:00 ET compute, since
+    the day's close does not exist yet). `dur` is the build's wall clock, or
+    `n/a` when the caller did not time it."""
     common = [t for t in new if t in old]
     ratios = [old[t]['iv30'] / new[t]['iv30'] for t in common
               if old[t].get('iv30') and new[t].get('iv30')]
-    nonnull = sum(1 for t in new if new[t].get('iv_rank') is not None)
     med = float(np.median(ratios)) if ratios else float('nan')
     p90 = float(np.percentile(ratios, 90)) if ratios else float('nan')
-    pct = round(100.0 * nonnull / len(new)) if new else 0
+    pct = _pct_of_new(new, lambda r: r.get('iv_rank') is not None)
+    rv_pct = _pct_of_new(new, lambda r: r.get('rv_20') is not None)
+    vrp_pct = _pct_of_new(new, lambda r: r.get('vrp') is not None)
+    stale_pct = _pct_of_new(new, lambda r: r.get('spot_date') is not None
+                            and r.get('surface_date') is not None
+                            and r['spot_date'] < r['surface_date'])
+    dur = 'n/a' if seconds is None else f'{float(seconds):.0f}s'
     return (f'[options_surface] shadow n={len(new)} iv30 old/new median={med:.3f} p90={p90:.3f} '
-            f'iv_rank_nonnull={pct}% version={OPTIONS_FEATURES_VERSION}')
+            f'iv_rank_nonnull={pct}% rv20_nonnull={rv_pct}% vrp_nonnull={vrp_pct}% '
+            f'spot_stale={stale_pct}% dur={dur} version={OPTIONS_FEATURES_VERSION}')

@@ -7,6 +7,9 @@
 #     --working-directory=/root/openclaw /bin/bash scripts/rebacktest_options_sleeve.sh
 set -uo pipefail
 cd /root/openclaw
+# `python3 -m backtest.unified_backtest` below resolves out of src/, which is
+# NOT on the path when this script is run outside the systemd unit above.
+export PYTHONPATH=/root/openclaw/src
 IMPL=src/strategies/implementations
 STRATS=(
   "$IMPL/S21_iv_hv_spread.py"

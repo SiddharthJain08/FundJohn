@@ -10,6 +10,7 @@ that they agree on every shared key.
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -235,6 +236,12 @@ IV_RANK_MIN_OBS = 20
 ZSCORE_WINDOW = 60
 ZSCORE_MIN_OBS = 10
 RV_WINDOW = 20
+# series_features maps rv_20 AS-OF, not by exact date: under the production
+# intraday overlay the chain rows are dated today while prices.parquet still
+# ends at T−1, so an exact-date map returned NaN for today's row and silently
+# dropped rv_20/vrp/vrp_zscore from the live v2 dict. Seven calendar days
+# covers a long holiday weekend without ever reaching back a stale fortnight.
+RV_ASOF_TOLERANCE = pd.Timedelta(days=7)
 SERIES_KEYS = ['rv_20', 'vrp', 'iv_rank', 'vrp_zscore', 'iv_rank_history', 'vrp_history',
                'hv20_history', 'pc_ratio_history']
 
@@ -257,11 +264,23 @@ def _zscore(s: pd.Series) -> pd.Series:
 
 
 def _history(s: pd.Series, window: int = HIST_LEN, min_len: int = 5) -> pd.Series:
-    vals = s.tolist()
-    out = []
+    """Trailing-`window` list of the non-null values at each position, oldest
+    first, or None below `min_len`.
+
+    Sliding deque over a vectorised null mask — identical output to the
+    O(n·window) `pd.isna`-per-element loop it replaces (pinned by
+    test_history_matches_reference_loop), without the per-element scalar
+    pandas calls that dominated its cost."""
+    vals = s.to_numpy()
+    isna = pd.isna(vals)
+    out: list = []
+    dq: deque = deque()
     for i in range(len(vals)):
-        h = [float(v) for v in vals[max(0, i - window + 1):i + 1] if v is not None and not pd.isna(v)]
-        out.append(h if len(h) >= min_len else None)
+        if not isna[i]:
+            dq.append((i, float(vals[i])))
+        while dq and dq[0][0] <= i - window:
+            dq.popleft()
+        out.append([v for _, v in dq] if len(dq) >= min_len else None)
     return pd.Series(out, index=s.index, dtype=object)
 
 
@@ -299,7 +318,16 @@ def series_features(today: dict, history: pd.DataFrame, rv: pd.Series) -> dict:
     frame['date'] = pd.to_datetime(frame['date']).dt.normalize()
     frame = frame[frame['date'] <= frame['date'].iloc[-1]].drop_duplicates('date', keep='last')
     rv_s = pd.to_numeric(rv, errors='coerce') if rv is not None else pd.Series(dtype=float)
-    rv_s.index = pd.to_datetime(rv_s.index).normalize()
-    frame['rv_20'] = frame['date'].map(rv_s.to_dict()).astype(float)
+    if len(rv_s):
+        # Normalised, unique, sorted — reindex(method='ffill') requires all three.
+        rv_s = pd.Series(rv_s.to_numpy(dtype=float), index=pd.to_datetime(rv_s.index).normalize())
+        rv_s = rv_s[~rv_s.index.duplicated(keep='last')].sort_index()
+        # .to_numpy(): reindex returns a Series keyed by DATE, while `frame`
+        # carries a RangeIndex — assigning the Series directly would align on
+        # index and yield all-NaN.
+        frame['rv_20'] = rv_s.reindex(frame['date'], method='ffill',
+                                      tolerance=RV_ASOF_TOLERANCE).to_numpy(dtype=float)
+    else:
+        frame['rv_20'] = float('nan')
     last = series_frame(frame).iloc[-1]
     return {k: (_none_if_nan(last[k]) if not isinstance(last[k], list) else list(last[k])) for k in SERIES_KEYS}
