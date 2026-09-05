@@ -500,7 +500,10 @@ def _apply_options_surface(old: dict, opts, universe, today, master_dir, px_wind
     except Exception as exc:  # noqa: BLE001 — the v2 path must never take the legacy path down
         logger.warning('[options_surface] v2 build failed (%s); serving legacy dict', exc)
         return old
-    logger.info(_v2.shadow_summary(old, new))
+    try:
+        logger.info(_v2.shadow_summary(old, new))
+    except Exception as exc:  # noqa: BLE001 — a diagnostics failure must never cost the cycle its options aux
+        logger.warning('[options_surface] shadow summary failed (%s)', exc)
     return new if _v2.enabled() else old
 
 

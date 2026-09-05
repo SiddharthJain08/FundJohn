@@ -68,3 +68,14 @@ def test_engine_flag_selects_dict(monkeypatch, caplog, tmp_path):
     assert any('[options_surface] shadow' in r.message for r in caplog.records)
     monkeypatch.setenv('OPENCLAW_OPTIONS_SURFACE', '1')
     assert engine._apply_options_surface(old, None, [], None, None, None) is new
+
+
+def test_shadow_summary_failure_does_not_drop_options(monkeypatch, caplog):
+    from execution import engine, options_aux_v2 as v2
+    old = {'SPY': {'iv30': 0.4, 'iv_rank': 50.0}}
+    monkeypatch.setattr(v2, 'build', lambda *a, **k: {'SPY': {'iv30': 0.12}})
+    monkeypatch.setattr(v2, 'shadow_summary', lambda o, n: (_ for _ in ()).throw(RuntimeError('boom')))
+    monkeypatch.delenv('OPENCLAW_OPTIONS_SURFACE', raising=False)
+    with caplog.at_level(logging.WARNING):
+        assert engine._apply_options_surface(old, None, [], None, None, None) is old
+    assert any('shadow summary failed' in r.message for r in caplog.records)

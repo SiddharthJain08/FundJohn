@@ -16,7 +16,7 @@ import pandas as pd
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from strategies.options_surface import (OPTIONS_FEATURES_VERSION, SERIES_KEYS, features_for_day,
+from strategies.options_surface import (OPTIONS_FEATURES_VERSION, features_for_day,
                                         prepare_chain, rv_series_from_closes, series_features)
 
 logger = logging.getLogger(__name__)
