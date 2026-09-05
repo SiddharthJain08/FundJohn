@@ -51,3 +51,28 @@ def test_main_writes_master_and_is_idempotent(tmp_path, monkeypatch):
     df = pd.read_parquet(out)
     assert sorted(df['date'].astype(str)) == ['2026-09-04', '2026-09-08']
     assert df['active'].all()
+
+
+def test_main_skips_deactivation_for_a_year_that_returned_no_sessions(tmp_path, monkeypatch, caplog):
+    import logging
+    full_2026 = [{'date': d.strftime('%Y-%m-%d'), 'open': '09:30', 'close': '16:00'}
+                 for d in pd.bdate_range('2026-01-02', '2026-12-31')]
+    out = tmp_path / 'trading_calendar.parquet'
+    monkeypatch.setattr(itc, '_run_cli', _fake_cli({2026: full_2026}))
+    assert itc.main(['--start-year', '2026', '--end-year', '2026', '--path', str(out)]) == 0
+    monkeypatch.setattr(itc, '_run_cli', _fake_cli({2026: []}))
+    with caplog.at_level(logging.WARNING):
+        rc = itc.main(['--start-year', '2026', '--end-year', '2026', '--path', str(out)])
+    assert rc == 1                                   # nothing fetched at all → master untouched
+    df = pd.read_parquet(out)
+    assert df['active'].all() and len(df) == len(full_2026)
+    # one healthy year + one empty year: the empty year is NOT deactivated
+    full_2027 = [{'date': d.strftime('%Y-%m-%d'), 'open': '09:30', 'close': '16:00'}
+                 for d in pd.bdate_range('2027-01-04', '2027-12-31')]
+    monkeypatch.setattr(itc, '_run_cli', _fake_cli({2026: [], 2027: full_2027}))
+    with caplog.at_level(logging.WARNING):
+        assert itc.main(['--start-year', '2026', '--end-year', '2027', '--path', str(out)]) == 0
+    df = pd.read_parquet(out)
+    assert df[pd.to_datetime(df['date']).dt.year == 2026]['active'].all()
+    assert (pd.to_datetime(df['date']).dt.year == 2027).sum() == len(full_2027)
+    assert any('NO deactivation' in r.message for r in caplog.records)

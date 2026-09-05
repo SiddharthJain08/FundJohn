@@ -30,6 +30,7 @@ from src.data.parquet_store import CALENDAR_KEYS, CALENDAR_PATH, append_dedup  #
 
 log = logging.getLogger('ingest_trading_calendar')
 _ALPACA_BIN = os.environ.get('ALPACA_CLI', '/root/go/bin/alpaca')
+MIN_SESSIONS_PER_YEAR = 200
 COLUMNS = ['date', 'open', 'close', 'session_open', 'session_close', 'settlement_date',
            'active', 'source', 'fetched_at']
 
@@ -53,25 +54,36 @@ def fetch_year(year: int, run_cli=_run_cli) -> list[dict]:
     raw = run_cli(f'{year}-01-01', f'{year}-12-31')
     rows = json.loads(raw) if raw.strip() else []
     out = []
+    dropped = 0
     for x in rows:
         d = _d(x.get('date'))
         if d is None:
+            dropped += 1
             continue
         out.append({'date': d, 'open': str(x.get('open') or '09:30'), 'close': str(x.get('close') or '16:00'),
                     'session_open': str(x.get('session_open') or '0400'),
                     'session_close': str(x.get('session_close') or '2000'),
                     'settlement_date': _d(x.get('settlement_date'))})
+    if dropped:
+        log.warning('year %d: dropped %d row(s) with unparseable date', year, dropped)
     return out
 
 
-def build_rows(years: list[int], run_cli=_run_cli) -> pd.DataFrame:
+def _stamp(rows: list[dict]) -> pd.DataFrame:
+    """Stamp a list of (unstamped) rows with active=True, source='alpaca', fetched_at."""
     stamp = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+    stamped = [
+        {**r, 'active': True, 'source': 'alpaca', 'fetched_at': stamp}
+        for r in rows
+    ]
+    return pd.DataFrame(stamped, columns=COLUMNS)
+
+
+def build_rows(years: list[int], run_cli=_run_cli) -> pd.DataFrame:
     rows = []
     for y in years:
-        for r in fetch_year(y, run_cli):
-            rows.append({**r, 'active': True, 'source': 'alpaca', 'fetched_at': stamp})
-    df = pd.DataFrame(rows, columns=COLUMNS)
-    return df
+        rows.extend(fetch_year(y, run_cli))
+    return _stamp(rows)
 
 
 def mark_removed(existing: pd.DataFrame, fetched: pd.DataFrame, years: list[int]) -> pd.DataFrame:
@@ -94,12 +106,28 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     years = list(range(a.start_year, a.end_year + 1))
     path = Path(a.path)
-    fetched = build_rows(years, _run_cli)
-    if fetched.empty:
+
+    # Collect rows by year and track which years were healthy (>= MIN_SESSIONS_PER_YEAR).
+    healthy_years: list[int] = []
+    frames: list[list[dict]] = []
+    for y in years:
+        rows = fetch_year(y, _run_cli)
+        if len(rows) < MIN_SESSIONS_PER_YEAR:
+            log.warning('year %d returned %d session(s) (< %d) — rows upserted, but NO deactivation for that year',
+                        y, len(rows), MIN_SESSIONS_PER_YEAR)
+        else:
+            healthy_years.append(y)
+        frames.append(rows)
+
+    # Flatten frames and stamp.
+    all_rows = [r for frame in frames for r in frame]
+    if not all_rows:
         log.error('no sessions fetched for %s..%s — master untouched', a.start_year, a.end_year)
         return 1
+
+    fetched = _stamp(all_rows)
     existing = pd.read_parquet(path) if path.exists() else pd.DataFrame(columns=COLUMNS)
-    removed = mark_removed(existing, fetched, years)
+    removed = mark_removed(existing, fetched, healthy_years)
     df = pd.concat([fetched, removed], ignore_index=True)
     df['date'] = pd.to_datetime(df['date']).dt.date
     df['settlement_date'] = df['settlement_date'].map(lambda v: _d(v))
