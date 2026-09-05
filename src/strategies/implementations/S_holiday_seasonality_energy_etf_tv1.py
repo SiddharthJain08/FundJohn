@@ -22,9 +22,8 @@ direction are the paper's unambiguous claims and are preserved exactly):
     is read here as "exit no later than the holiday" rather than "hold one
     day into the reversal."
   * Holiday set: the NYSE closure calendar (actual exchange closures per
-    trading_calendar master), not the federal holiday calendar — this gives ~9
-    windows/year instead of 2, satisfying the >=20-trades-per-3yr-window
-    backtest requirement.
+    trading_calendar master) — this gives ~9 windows/year instead of 2,
+    satisfying the >=20-trades-per-3yr-window backtest requirement.
 """
 from __future__ import annotations
 
@@ -69,7 +68,7 @@ def _entry_exit_for_holiday(h: pd.Timestamp) -> tuple:
 
 
 def _entry_and_exit_days(anchor: pd.Timestamp, window_days: int = 45) -> tuple:
-    """entry_set/exit_set of pd.Timestamp for every US federal holiday within
+    """entry_set/exit_set of pd.Timestamp for every NYSE closure within
     window_days of anchor ('today') — calendar-only, safe to call with a
     truncated (trailing-only) price panel."""
     entry_set, exit_set = set(), set()
@@ -93,7 +92,7 @@ class HolidaySeasonalityEnergyEtf(BaseStrategy):
     name              = 'Holiday Seasonality Energy ETF'
     description       = (
         'LONG energy ETF basket (USO/UGA/XLE/XOP) in the 8-trading-day window '
-        'before each US federal holiday; exits at the close before the holiday, '
+        'before each NYSE closure; exits at the close before the holiday, '
         'avoiding the post-holiday reversal.'
     )
     tier              = 3
