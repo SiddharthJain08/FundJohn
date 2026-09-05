@@ -20,7 +20,7 @@ strategies.options_surface.series_frame — the single implementation shared
 with the live per-ticker call (engine.load_aux_data).
 """
 from __future__ import annotations
-import os, sys, time
+import logging, os, sys, time
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -29,7 +29,9 @@ import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'src'))
-from strategies.options_surface import SERIES_KEYS, series_frame, rv_series_from_closes  # noqa: E402
+from strategies.options_surface import SCALAR_KEYS, SERIES_KEYS, series_frame, rv_series_from_closes  # noqa: E402
+
+log = logging.getLogger('compute_rolling_options_fields')
 
 SURFACE_PATH = ROOT / 'data' / 'master' / 'options_surface.parquet'
 OUT_PATH = ROOT / 'data' / 'master' / 'options_aggregates_enriched.parquet'
@@ -73,13 +75,27 @@ def build_panel(surface: pd.DataFrame, closes: pd.DataFrame) -> pd.DataFrame:
     for _, g in surf.groupby('ticker', sort=True):
         parts.append(series_frame(g))
     out = pd.concat(parts, ignore_index=True)
+    # A real surface master (build_options_surface.py::build_rows) always writes
+    # every SCALAR_KEYS column, so a gap here is a regression signal, not an
+    # expected state — default to None (never fabricate) but warn once per call.
+    # Part-B CBOE-OI columns (contracts_liquid, gex, ...) are deliberately NOT in
+    # SCALAR_KEYS — they stay silent below, since their absence is the current,
+    # expected pre-task-13 state, not a defect.
+    missing_scalar = [k for k in SCALAR_KEYS if k not in out.columns]
+    for k in missing_scalar:
+        out[k] = None
+    missing_alias_srcs = sorted({src for src in LEGACY_ALIASES.values() if src in missing_scalar})
+    missing_other_scalar_cols = sorted(set(missing_scalar) - set(missing_alias_srcs))
     for alias, src in LEGACY_ALIASES.items():
-        out[alias] = out[src] if src in out.columns else None
+        out[alias] = out[src]
     out['unusual_flow'] = (pd.to_numeric(out['pc_ratio'], errors='coerce') > 1.5).astype(int)
-    out['contracts_liquid'] = out.get('contracts_liquid')
-    for c in ('gex', 'iv_centroid_delta', 'surface_premium', 'max_pain', 'pcr_oi', 'oi_session'):
+    for c in ('contracts_liquid', 'gex', 'iv_centroid_delta', 'surface_premium', 'max_pain', 'pcr_oi', 'oi_session'):
         if c not in out.columns:
             out[c] = None
+    if missing_alias_srcs or missing_other_scalar_cols:
+        log.warning('build_panel: surface frame lacks SCALAR_KEYS column(s) %s (legacy-alias sources, defaulted '
+                    'to None) and %s (other scalar columns, defaulted to None) — a real surface master carries '
+                    'every SCALAR_KEYS column; investigate the builder', missing_alias_srcs, missing_other_scalar_cols)
     return out
 
 
