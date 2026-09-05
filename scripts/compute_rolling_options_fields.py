@@ -74,7 +74,7 @@ def build_panel(surface: pd.DataFrame, closes: pd.DataFrame) -> pd.DataFrame:
         parts.append(series_frame(g))
     out = pd.concat(parts, ignore_index=True)
     for alias, src in LEGACY_ALIASES.items():
-        out[alias] = out[src]
+        out[alias] = out[src] if src in out.columns else None
     out['unusual_flow'] = (pd.to_numeric(out['pc_ratio'], errors='coerce') > 1.5).astype(int)
     out['contracts_liquid'] = out.get('contracts_liquid')
     for c in ('gex', 'iv_centroid_delta', 'surface_premium', 'max_pain', 'pcr_oi', 'oi_session'):
