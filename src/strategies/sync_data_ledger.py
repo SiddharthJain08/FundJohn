@@ -36,6 +36,7 @@ PARQUET_MAP = {
     'short_interest':           'short_interest',           # FINRA biweekly consolidated SI
     'earnings_calendar_nasdaq': 'earnings_calendar_nasdaq', # Nasdaq keyless calendar (timing cross-check)
     'cboe_chain_aggregates':    'cboe_chain_aggregates',    # CBOE chain OI/IV/PCR/GEX per underlying-day
+    'options_surface':          'options_surface',   # per-(ticker,date) smile-fit features (spec 2026-09-04 A.6)
 }
 
 # Derived columns computable from prices — inherit prices coverage
@@ -82,6 +83,7 @@ PROVIDERS = {
     'short_interest':           'finra',
     'earnings_calendar_nasdaq': 'nasdaq',
     'cboe_chain_aggregates':    'cboe',
+    'options_surface':          'alpaca',   # derived from Alpaca-sourced options_eod
 }
 
 

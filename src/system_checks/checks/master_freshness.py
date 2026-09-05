@@ -38,6 +38,7 @@ _MASTER_DIR = Path(os.environ.get('OPENCLAW_MASTER_DIR',
 _CADENCES: dict[str, tuple[str | None, int]] = {
     'prices.parquet':             ('date', 5),
     'options_eod.parquet':        ('date', 5),
+    'options_surface.parquet':    ('date', 5),
     'sentiment.parquet':          ('date', 5),
     'insider.parquet':            ('date', 7),
     'macro.parquet':              ('date', 7),
