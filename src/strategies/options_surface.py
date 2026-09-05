@@ -165,11 +165,16 @@ def _empty_row(spot, as_of) -> dict:
 
 
 def features_for_day(chain: pd.DataFrame, spot, as_of) -> dict:
-    """Per-(ticker, session) surface features (spec A.4)."""
+    """Per-(ticker, session) surface features (spec A.4).
+
+    The chain is always re-prepared against `as_of`, so a caller's earlier
+    `prepare_chain` is harmless and a mismatched as_of cannot leak into
+    `expiry_date`.
+    """
     row = _empty_row(spot, as_of)
     if chain is None or len(chain) == 0:
         return row
-    ch = chain if 'dte' in chain.columns else prepare_chain(chain, as_of)
+    ch = prepare_chain(chain, as_of)
     if len(ch) == 0:
         return row
     calls = ch[ch['option_type'] == 'CALL']
@@ -212,7 +217,7 @@ def features_for_day(chain: pd.DataFrame, spot, as_of) -> dict:
     near30 = min(fits, key=lambda d: abs(d - 30))
     row.update({
         'iv30': iv30, 'iv90': iv90, 'near_iv': iv30, 'far_iv': iv90,
-        'ts_ratio': (iv30 / iv90) if (iv30 and iv90 and iv90 > 0) else None,
+        'ts_ratio': (iv30 / iv90) if (iv30 is not None and iv90 is not None and iv90 > 0) else None,
         'term_slope': (iv90 - iv30) if (iv30 is not None and iv90 is not None) else None,
         'iv_25d_put_30d': p30, 'iv_25d_call_30d': c30,
         'skew_25d_30d': (p30 - iv30) if (p30 is not None and iv30 is not None) else None,
