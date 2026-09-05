@@ -61,8 +61,11 @@ def strike_for_target_delta(flag: str, S: float, t: float, sigma: float,
 
 
 def nearest_monthly_expiry(as_of: date, dte_target: int) -> date:
-    """Nearest standard monthly expiry (3rd Friday) at least `dte_target`
-    calendar days after as_of."""
+    """Nearest standard monthly expiry at least `dte_target` calendar days after
+    as_of. The listed expiry is the third Friday, or the last session before it
+    when that Friday is an exchange holiday (Good Friday 2019-04-19 → 04-18)."""
+    from lib.trading_calendar import expiry_session
+
     def third_friday(year: int, month: int) -> date:
         d = date(year, month, 1)
         offset = (4 - d.weekday()) % 7
@@ -72,10 +75,10 @@ def nearest_monthly_expiry(as_of: date, dte_target: int) -> date:
     earliest = as_of + timedelta(days=int(dte_target))
     y, m = as_of.year, as_of.month
     for _ in range(18):
-        tf = third_friday(y, m)
+        tf = expiry_session(third_friday(y, m))
         if tf >= earliest:
             return tf
         m += 1
         if m > 12:
             m = 1; y += 1
-    return third_friday(y, m)
+    return expiry_session(third_friday(y, m))
