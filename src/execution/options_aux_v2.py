@@ -25,7 +25,7 @@ FLAG = 'OPENCLAW_OPTIONS_SURFACE'
 BUDGET_ENV = 'OPENCLAW_OPTIONS_SURFACE_BUDGET_S'
 DEFAULT_BUDGET_S = 240.0
 HISTORY_DAYS = 400
-_HIST_COLS = ['ticker', 'date', 'iv30', 'pc_ratio']
+_HIST_COLS = ['ticker', 'date', 'iv30', 'pc_ratio', 'iv30_source']
 
 
 def enabled() -> bool:
@@ -46,20 +46,32 @@ def budget_seconds() -> float:
 
 def load_history(master_dir: Path, tickers, before: pd.Timestamp) -> dict[str, pd.DataFrame]:
     """Surface-master rows per ticker with date < before (last HISTORY_DAYS calendar days),
-    plus the row dated `before` itself when the master already holds it."""
+    plus the row dated `before` itself when the master already holds it.
+
+    `iv30_source` (amendment 2026-09-06 §H) is read when the master carries it; an
+    older master vintage without the column still loads (schema-checked first),
+    with `iv30_source` filled `None` for every row so the precedence block in
+    `build()` always finds the key."""
     path = Path(os.environ.get('OPENCLAW_OPTIONS_SURFACE_PATH') or (Path(master_dir) / 'options_surface.parquet'))
     if not path.exists():
         logger.warning('[options_surface] master %s missing — iv_rank/histories unavailable this run', path)
         return {}
+    try:
+        schema_cols = set(pq.read_schema(path).names)
+    except Exception:  # unreadable schema — fall back to requesting everything and let the read below fail loud
+        schema_cols = set(_HIST_COLS)
+    cols = [c for c in _HIST_COLS if c in schema_cols]
     floor = (before - pd.Timedelta(days=HISTORY_DAYS)).strftime('%Y-%m-%d')
     flt = (pc.field('date') >= pc.scalar(pd.Timestamp(floor).date())) & (pc.field('date') <= pc.scalar(before.date())) \
         & pc.field('ticker').isin(list(tickers))
     try:
-        df = pq.read_table(path, columns=_HIST_COLS, filters=flt).to_pandas()
+        df = pq.read_table(path, columns=cols, filters=flt).to_pandas()
     except Exception:  # date stored as string in some vintages
         flt = (pc.field('date') >= pc.scalar(floor)) & (pc.field('date') <= pc.scalar(before.strftime('%Y-%m-%d'))) \
             & pc.field('ticker').isin(list(tickers))
-        df = pq.read_table(path, columns=_HIST_COLS, filters=flt).to_pandas()
+        df = pq.read_table(path, columns=cols, filters=flt).to_pandas()
+    if 'iv30_source' not in df.columns:
+        df['iv30_source'] = None
     df['date'] = pd.to_datetime(df['date']).dt.normalize()
     return {t: g.sort_values('date') for t, g in df.groupby('ticker')}
 
@@ -109,7 +121,12 @@ def build(opts: pd.DataFrame, universe, today, master_dir, px_window: pd.DataFra
             hist = hist[hist['date'] < chain_date]
         row = features_for_day(prepare_chain(chain, chain_date), spot, chain_date)
         if master_today is not None:                       # precedence: the official record wins
-            row['iv30'] = float(master_today['iv30']) if master_today['iv30'] == master_today['iv30'] else row['iv30']
+            if master_today['iv30'] == master_today['iv30']:
+                row['iv30'] = float(master_today['iv30'])
+                # the master's iv30 wins, so its provenance must win too — never
+                # leave the fresh live fit's iv30_source beside a master value.
+                m_src = master_today.get('iv30_source')
+                row['iv30_source'] = m_src if isinstance(m_src, str) else None
             row['near_iv'] = row['iv30']
             if master_today['pc_ratio'] == master_today['pc_ratio']:
                 row['pc_ratio'] = float(master_today['pc_ratio'])

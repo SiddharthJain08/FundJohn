@@ -44,10 +44,31 @@ def test_master_row_precedence(tmp_path):
     chain, px, master = _inputs(tmp_path)
     m = pd.read_parquet(master / 'options_surface.parquet')
     m = pd.concat([m, pd.DataFrame([{'ticker': 'SPY', 'date': pd.Timestamp('2026-09-03').date(), 'iv30': 0.777,
-                                     'pc_ratio': 1.0, 'options_features_version': 2}])], ignore_index=True)
+                                     'pc_ratio': 1.0, 'options_features_version': 3, 'iv30_source': 'atm_band'}])],
+                  ignore_index=True)
     m.to_parquet(master / 'options_surface.parquet', index=False)
     out = v2.build(chain, ['SPY'], pd.Timestamp('2026-09-03'), master, px)
     assert out['SPY']['iv30'] == pytest.approx(0.777)
+    # amendment 2026-09-06 §H (fix round 1): the master's iv30 wins, so its
+    # provenance must win too — never the fresh live fit's iv30_source.
+    assert out['SPY']['iv30_source'] == 'atm_band'
+
+
+def test_master_row_precedence_without_iv30_source_column(tmp_path):
+    """An older master vintage without the iv30_source column still loads
+    (load_history schema-checks first) and precedence still picks up iv30;
+    iv30_source is served None rather than left as the fresh live fit's label."""
+    from execution import options_aux_v2 as v2
+    chain, px, master = _inputs(tmp_path)
+    m = pd.read_parquet(master / 'options_surface.parquet')
+    assert 'iv30_source' not in m.columns          # the fixture's base history predates the column
+    m = pd.concat([m, pd.DataFrame([{'ticker': 'SPY', 'date': pd.Timestamp('2026-09-03').date(), 'iv30': 0.777,
+                                     'pc_ratio': 1.0, 'options_features_version': 2}])], ignore_index=True)
+    assert 'iv30_source' not in m.columns
+    m.to_parquet(master / 'options_surface.parquet', index=False)
+    out = v2.build(chain, ['SPY'], pd.Timestamp('2026-09-03'), master, px)
+    assert out['SPY']['iv30'] == pytest.approx(0.777)
+    assert out['SPY']['iv30_source'] is None
 
 
 def test_build_populates_oi_from_cboe_session(tmp_path, monkeypatch):

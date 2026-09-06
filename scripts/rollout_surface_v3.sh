@@ -31,7 +31,8 @@ python3 - <<'PY'
 import sys
 import pyarrow.parquet as pq, pandas as pd
 cols = ['ticker', 'date', 'iv30', 'n_expiries_fit', 'options_features_version', 'mfiv_30d', 'mfiv_90d',
-        'mf_tail_premium_30d', 'rn_skew_30d', 'rn_kurt_30d', 'rn_p_dn10_30d', 'rn_p_up10_30d', 'iv30_source']
+        'mf_tail_premium_30d', 'rn_skew_30d', 'rn_kurt_30d', 'rn_p_dn10_30d', 'rn_p_up10_30d', 'iv30_source',
+        'n_expiries_atm']
 meta = pq.read_metadata('data/master/options_surface.parquet')
 last = pq.read_table('data/master/options_surface.parquet', columns=['date']).to_pandas()['date'].max()
 df = pq.read_table('data/master/options_surface.parquet', columns=cols,

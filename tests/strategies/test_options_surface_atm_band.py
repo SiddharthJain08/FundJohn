@@ -44,6 +44,11 @@ def test_one_sided_tolerance_is_twenty_days():
     assert row['iv30'] == pytest.approx(0.30) and row['iv30_source'] == 'atm_band'   # lone 14-day monthly anchors 30 d
     row2 = osf.features_for_day(pd.DataFrame(_rows(60, [95.0, 100.0, 105.0])), 100.0, '2026-09-03')
     assert row2['iv30'] is None and row2['iv30_source'] is None                   # 30 d away: still None
+    # Pin the 20-day boundary exactly (fix round 1, item 4).
+    row3 = osf.features_for_day(pd.DataFrame(_rows(50, [95.0, 100.0, 105.0])), 100.0, '2026-09-03')
+    assert row3['iv30'] == pytest.approx(0.30)                                    # dist 20: within tolerance
+    row4 = osf.features_for_day(pd.DataFrame(_rows(51, [95.0, 100.0, 105.0])), 100.0, '2026-09-03')
+    assert row4['iv30'] is None                                                  # dist 21: just over tolerance
 
 
 def test_band_never_fabricates_when_no_atm_rows():
@@ -59,7 +64,8 @@ def test_smile_expiry_keeps_smile_source_and_band_fills_gaps():
     row = osf.features_for_day(pd.DataFrame(rich + thin), 100.0, '2026-09-03')
     assert row['n_expiries_fit'] == 1 and row['n_expiries_atm'] == 1
     assert row['iv30_source'] == 'smile'                                         # nearest-30 expiry (42d, dist 12) is the smile fit, not the 14d band point (dist 16)
-    assert row['iv30'] is not None and row['iv90'] is None or row['iv90'] is None or row['iv90'] > 0
+    assert row['iv30'] is not None
+    assert row['iv90'] is None or row['iv90'] > 0
 
 
 def test_new_keys_registered():
