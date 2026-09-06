@@ -107,3 +107,16 @@ VIX3M ingest (the term proxy stops at 30 d); F1b (solving IV for the 39 % null-I
 - **G8** surface IV tier ON by default — cost: `options_parity_check.py`'s IV gate becomes trivial on the overlap window (documented).
 - **G9** `OptionSpec.exercise` defaults to `'american'` — cost: any existing synthetic backtest row (none in the manifest) would re-price slightly higher on puts.
 - **G10** no interactive brainstorming with the operator — the F5–F7 scope was ranked and approved in the 2026-09-04 fit review; ambiguities resolved here as rulings rather than blocking on questions the operator cannot answer in real time.
+
+## H. Amendment 2026-09-06 13:00 UTC — thin-chain coverage (controller ruling G11)
+
+**Measured on main after the v2 rollout (surface master 150,777 rows, 46 sessions 2026-06-29..09-04):** on 2026-09-04 `iv30` is non-null for 28.8 % of the 4,169 panel tickers and **30.5 % of the 3,861 liquid-tier tickers** (1,178 names); the v1 panel carried `iv_front` for 100 % of 3,855 liquid names on 09-03. Cause: v2's smile gate (≥ 5 IV-bearing strikes on both sides of spot, per expiry) plus the 30-day bracket / ±10-day one-sided rule. 57 % of liquid names fit at least one expiry, 43.8 % fit two. Four live strategies (`S21`, `S_HV8`, `S_HV19`, `S_HV20`) read `iv30`/`iv_rank`/`vrp`; their candidate sets would shrink ~3× when `OPENCLAW_OPTIONS_SURFACE` flips. SPY/AAPL/XOM values themselves are correct (0.12 / 0.24 / 0.27).
+
+**Amendment (plan Task 9):**
+1. An expiry that cannot carry a smile gets a v1-style ATM-band point — the |Δ| .40–.60 mean IV (exactly v1's `iv_front` per expiry), `n_strikes` = band row count, every smile-only field `None`, `SmileFit.source = 'atm_band'`. Smile fits take precedence per expiry; band points only fill expiries with no smile. Band points participate in the 30/90-day total-variance interpolation for `iv30`/`iv90` (and therefore `vrp`, `iv_rank`, `ts_ratio`, `term_slope`); the 25Δ, MFIV and RN keys stay `None` on them.
+2. `CM_ONE_SIDED_TOL` 10 → 20 days: a lone 14-day or 42-day monthly (the typical Friday-capture pair) anchors the 30-day point alone.
+3. New keys: `iv30_source` (`'smile' | 'atm_band' | None`) and `n_expiries_atm`; `n_expiries_fit` keeps its v2 meaning (smile fits only) so every frozen v2 value stands.
+4. Guard: the v2 freeze test must still pass; if a band point ever changes a SPY/AAPL/XOM value, the fallback degrades to ticker-level (band points used only when a ticker-day has no smile fit at all) — documented in the plan.
+5. The runbook flip thresholds for `OPENCLAW_OPTIONS_SURFACE` (`iv_rank_nonnull ≥ 80 %`) were written assuming v1-like coverage; after this amendment they are read against the live line as-is, and the `iv30_source` split is reported beside them.
+
+**Cost if wrong:** two extra columns and a ~40-line function to revert; names that only ever had a band point carry a noisier `iv30` than a smile would give — exactly what v1 served, now labelled.
