@@ -37,6 +37,7 @@ class OptionSpec:
     hedge_cadence: str = 'daily'             # rehedge frequency when hedge='delta'
     roll_dte:      int = 7                   # roll when remaining DTE <= this
     hold_to_expiry: bool = False             # income legs may hold to expiry instead of rolling
+    exercise:      str = 'american'          # 'american' | 'european' — US-listed equity/ETF options are American (spec 2026-09-06 B.4, G9)
 
     @classmethod
     def from_dict(cls, d):

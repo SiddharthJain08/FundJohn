@@ -3,23 +3,25 @@ unified_backtest.run_backtest when instrument_class='option'. Returns the SAME
 dict shape as unified_backtest._per_bar_simulate so the downstream metrics +
 DB-write are reused unchanged.
 
-Contracts are synthesized from underlying closes via Black-Scholes
-(options_pricing) + a calibrated realized-vol×VRP IV (synthetic_iv). One
-contract per signal on a 100x multiplier; pnl_pct = cycle_pnl / (entry_S*100)
-(see plan "PnL convention"). Single-leg here; straddle/strangle + delta-hedge
-+ roll/expiry land in later tasks.
+Contracts are synthesized from underlying closes via Black-Scholes-Merton with
+a trailing-year dividend yield (backtest.dividends), American exercise on a
+CRR tree by default (OptionSpec.exercise), and an IV anchored to the real
+surface master when it covers the date, else the VIX9D/VIX term point, else
+realized-vol × VRP (backtest.synthetic_iv) — spec 2026-09-06 Part B.
 """
 from __future__ import annotations
 import logging
 import pandas as pd
+from collections import Counter
 from datetime import date
 
 logger = logging.getLogger(__name__)
 _UNSUPPORTED_WARNED: set = set()
 
-from backtest.options_pricing import (bs_price, bs_greeks, strike_for_target_delta,
-                                       nearest_monthly_expiry, RISK_FREE)
-from backtest.synthetic_iv import synthetic_iv
+from backtest.options_pricing import (price as _price, delta as _delta, strike_for_target_delta,
+                                      nearest_monthly_expiry)
+from backtest.synthetic_iv import synthetic_iv_detail
+from backtest.dividends import dividend_yield_asof, backfill_reference_date
 
 MULTIPLIER = 100.0
 COST_PER_CONTRACT_BPS = 5.0  # mirrors INSTRUMENT_COST_BPS['option']; on premium notional
@@ -30,53 +32,84 @@ def _as_date(ts) -> date:
     return ts.date() if hasattr(ts, 'date') else ts
 
 
-def _select_strike(spec, S: float, t_years: float, sigma: float, flag: str) -> float:
+def _new_stats() -> dict:
+    return {'iv_sources': Counter(), 'q_positive': 0, 'exercise': set()}
+
+
+def _iv(close_to_dt: pd.Series, spec, dt, dte: int, vrp_factor: float, window: int, stats: dict) -> float:
+    """IV for `spec.underlying` on `dt` at the contract's REMAINING life (spec B.4):
+    surface → vix_term → realized; the tier is counted for the summary line."""
+    iv, src = synthetic_iv_detail(close_to_dt, vrp_factor=vrp_factor, window=window,
+                                  underlying=spec.underlying, as_of=_as_date(dt), dte=max(int(dte), 1))
+    stats['iv_sources'][src] += 1
+    return iv
+
+
+def _q(spec, close: pd.Series, dt, S: float, stats: dict) -> float:
+    """Trailing-year dividend yield; the backfill reference close is passed when
+    the series reaches it (spec B.1 / ruling G6)."""
+    ref = backfill_reference_date()
+    ref_spot = None
+    if ref is not None:
+        upto = close.loc[:ref]
+        if len(upto):
+            ref_spot = float(upto.iloc[-1])
+    q = dividend_yield_asof(spec.underlying, _as_date(dt), S, ref_spot=ref_spot)
+    if q > 0:
+        stats['q_positive'] += 1
+    return q
+
+
+def _select_strike(spec, S: float, t_years: float, sigma: float, flag: str, q: float = 0.0) -> float:
     if spec.strike_rule == 'atm':
         return float(S)
     if spec.strike_rule == 'fixed_moneyness' and spec.moneyness:
         return float(S * spec.moneyness)
-    return strike_for_target_delta(flag, S, t_years, sigma, spec.target_delta)
+    return strike_for_target_delta(flag, S, t_years, sigma, spec.target_delta, q=q)
 
 
 def _flag_for(right: str) -> str:
     return 'p' if str(right).lower().startswith('p') else 'c'
 
 
-def _legs_for(spec, S, t_years, sigma):
+def _legs_for(spec, S, t_years, sigma, q: float = 0.0):
     """Return list of (flag, K) legs for a straddle/strangle."""
     if spec.structure == 'straddle':
         return [('c', S), ('p', S)]  # ATM call + put
-    # strangle: OTM call + OTM put at target_delta
-    Kc = strike_for_target_delta('c', S, t_years, sigma, spec.target_delta)
-    Kp = strike_for_target_delta('p', S, t_years, sigma, spec.target_delta)
+    Kc = strike_for_target_delta('c', S, t_years, sigma, spec.target_delta, q=q)
+    Kp = strike_for_target_delta('p', S, t_years, sigma, spec.target_delta, q=q)
     return [('c', Kc), ('p', Kp)]
 
 
-def _price_multileg_cycle(spec, close, entry_dt, sign, vrp_factor, window, max_hold_days):
+def _price_multileg_cycle(spec, close, entry_dt, sign, vrp_factor, window, max_hold_days, stats=None):
     """sign +1 long the structure, -1 short. Delta-hedged daily when spec.hedge=='delta'.
     Option PnL and hedge PnL are tracked separately; pnl_pct sums both over the cycle."""
+    stats = _new_stats() if stats is None else stats
+    ex = spec.exercise
+    stats['exercise'].add(ex)
     idx = close.index
     fut = idx[idx > entry_dt]
     if len(fut) == 0:
         return None
     S0 = float(close.loc[entry_dt])
-    sigma0 = synthetic_iv(close.loc[:entry_dt], vrp_factor=vrp_factor, window=window,
-                          underlying=spec.underlying, as_of=_as_date(entry_dt))
     expiry = nearest_monthly_expiry(_as_date(entry_dt), spec.dte_target)
-    t0 = max((expiry - _as_date(entry_dt)).days / 365.0, 1e-6)
-    legs = _legs_for(spec, S0, t0, sigma0)
-    entry_prem = sum(bs_price(f, S0, K, t0, sigma0) for f, K in legs)
+    dte0 = (expiry - _as_date(entry_dt)).days
+    t0 = max(dte0 / 365.0, 1e-6)
+    sigma0 = _iv(close.loc[:entry_dt], spec, entry_dt, dte0, vrp_factor, window, stats)
+    q0 = _q(spec, close, entry_dt, S0, stats)
+    legs = _legs_for(spec, S0, t0, sigma0, q0)
+    entry_prem = sum(_price(f, S0, K, t0, sigma0, as_of=_as_date(entry_dt), q=q0, exercise=ex) for f, K in legs)
     if entry_prem <= 0:
         return None
 
-    def net_delta(S, t, sig):
-        return sum(bs_greeks(f, S, K, max(t, 1e-6), sig)['delta'] for f, K in legs)
+    def net_delta(S, t, sig, dt, q):
+        return sum(_delta(f, S, K, max(t, 1e-6), sig, as_of=_as_date(dt), q=q, exercise=ex) for f, K in legs)
 
     hedge_units = 0.0
     hedge_pnl = 0.0
     prev_S = S0
     if spec.hedge == 'delta':
-        target_units = -sign * net_delta(S0, t0, sigma0) * MULTIPLIER
+        target_units = -sign * net_delta(S0, t0, sigma0, entry_dt, q0) * MULTIPLIER
         hedge_pnl -= abs(target_units - hedge_units) * S0 * (HEDGE_COST_PER_SHARE_BPS / 1e4)
         hedge_units = target_units
 
@@ -90,21 +123,21 @@ def _price_multileg_cycle(spec, close, entry_dt, sign, vrp_factor, window, max_h
         if dte <= 0:
             exit_prem = sum(max(0.0, (S - K) if f == 'c' else (K - S)) for f, K in legs)
             exit_dt, reason = dt, 'expiry'; break
-        sig_t = synthetic_iv(close.loc[:dt], vrp_factor=vrp_factor, window=window,
-                             underlying=spec.underlying, as_of=_as_date(dt))
+        sig_t = _iv(close.loc[:dt], spec, dt, dte, vrp_factor, window, stats)
+        q_t = _q(spec, close, dt, S, stats)
         if (not spec.hold_to_expiry) and dte <= spec.roll_dte:
-            exit_prem = sum(bs_price(f, S, K, dte / 365.0, sig_t) for f, K in legs)
+            exit_prem = sum(_price(f, S, K, dte / 365.0, sig_t, as_of=cur, q=q_t, exercise=ex) for f, K in legs)
             exit_dt, reason = dt, 'roll'; break
         if spec.hedge == 'delta':
-            target_units = -sign * net_delta(S, dte / 365.0, sig_t) * MULTIPLIER
+            target_units = -sign * net_delta(S, dte / 365.0, sig_t, dt, q_t) * MULTIPLIER
             hedge_pnl -= abs(target_units - hedge_units) * S * (HEDGE_COST_PER_SHARE_BPS / 1e4)
             hedge_units = target_units
     if exit_dt is None:
         dt = fut[:max_hold_days][-1]; S = float(close.loc[dt]); cur = _as_date(dt)
         dte = max((expiry - cur).days, 0)
-        sig_t = synthetic_iv(close.loc[:dt], vrp_factor=vrp_factor, window=window,
-                             underlying=spec.underlying, as_of=_as_date(dt))
-        exit_prem = (sum(bs_price(f, S, K, max(dte / 365.0, 1e-6), sig_t) for f, K in legs)
+        sig_t = _iv(close.loc[:dt], spec, dt, dte, vrp_factor, window, stats)
+        q_t = _q(spec, close, dt, S, stats)
+        exit_prem = (sum(_price(f, S, K, max(dte / 365.0, 1e-6), sig_t, as_of=cur, q=q_t, exercise=ex) for f, K in legs)
                      if dte > 0 else sum(max(0.0, (S - K) if f == 'c' else (K - S)) for f, K in legs))
         exit_dt, reason = dt, 'max_hold'
 
@@ -127,21 +160,25 @@ def _price_multileg_cycle(spec, close, entry_dt, sign, vrp_factor, window, max_h
 
 
 def _price_single_cycle(spec, close: pd.Series, entry_dt, sign: int,
-                        vrp_factor: float, window: int, max_hold_days: int) -> dict:
+                        vrp_factor: float, window: int, max_hold_days: int, stats=None) -> dict:
     """Price ONE single-leg cycle from entry_dt forward. Returns a trade dict
     or None if it can't be priced. sign +1 = long the option, -1 = short."""
+    stats = _new_stats() if stats is None else stats
+    ex = spec.exercise
+    stats['exercise'].add(ex)
     idx = close.index
     fut = idx[idx > entry_dt]
     if len(fut) == 0:
         return None
     S0 = float(close.loc[entry_dt])
-    sigma0 = synthetic_iv(close.loc[:entry_dt], vrp_factor=vrp_factor, window=window,
-                          underlying=spec.underlying, as_of=_as_date(entry_dt))
     flag = _flag_for(spec.right)
     expiry = nearest_monthly_expiry(_as_date(entry_dt), spec.dte_target)
-    t0 = max((expiry - _as_date(entry_dt)).days / 365.0, 1e-6)
-    K = _select_strike(spec, S0, t0, sigma0, flag)
-    entry_premium = bs_price(flag, S0, K, t0, sigma0)
+    dte0 = (expiry - _as_date(entry_dt)).days
+    t0 = max(dte0 / 365.0, 1e-6)
+    sigma0 = _iv(close.loc[:entry_dt], spec, entry_dt, dte0, vrp_factor, window, stats)
+    q0 = _q(spec, close, entry_dt, S0, stats)
+    K = _select_strike(spec, S0, t0, sigma0, flag, q0)
+    entry_premium = _price(flag, S0, K, t0, sigma0, as_of=_as_date(entry_dt), q=q0, exercise=ex)
     if entry_premium <= 0:
         return None
 
@@ -157,18 +194,18 @@ def _price_single_cycle(spec, close: pd.Series, entry_dt, sign: int,
             exit_dt, reason = dt, 'expiry'
             break
         if (not spec.hold_to_expiry) and dte <= spec.roll_dte:
-            sig_t = synthetic_iv(close.loc[:dt], vrp_factor=vrp_factor, window=window,
-                                 underlying=spec.underlying, as_of=_as_date(dt))
-            exit_premium = bs_price(flag, S, K, max(dte / 365.0, 1e-6), sig_t)
+            sig_t = _iv(close.loc[:dt], spec, dt, dte, vrp_factor, window, stats)
+            q_t = _q(spec, close, dt, S, stats)
+            exit_premium = _price(flag, S, K, max(dte / 365.0, 1e-6), sig_t, as_of=cur_date, q=q_t, exercise=ex)
             exit_dt, reason = dt, 'roll'
             break
     if exit_dt is None:
         dt = fut[:max_hold_days][-1]
         S = float(close.loc[dt]); cur_date = _as_date(dt)
         dte = max((expiry - cur_date).days, 0)
-        sig_t = synthetic_iv(close.loc[:dt], vrp_factor=vrp_factor, window=window,
-                             underlying=spec.underlying, as_of=_as_date(dt))
-        exit_premium = (bs_price(flag, S, K, max(dte / 365.0, 1e-6), sig_t)
+        sig_t = _iv(close.loc[:dt], spec, dt, dte, vrp_factor, window, stats)
+        q_t = _q(spec, close, dt, S, stats)
+        exit_premium = (_price(flag, S, K, max(dte / 365.0, 1e-6), sig_t, as_of=cur_date, q=q_t, exercise=ex)
                         if dte > 0 else max(0.0, (S - K) if flag == 'c' else (K - S)))
         exit_dt, reason = dt, 'max_hold'
 
@@ -199,6 +236,7 @@ def simulate(instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt, *,
     oos_dates = close_wide.loc[start_dt:end_dt].index
 
     trades, days_processed, days_with_signals = [], 0, 0
+    stats = _new_stats()
     SIGN = {'LONG': 1, 'BUY': 1, 'BUY_VOL': 1, 'SHORT': -1, 'SELL': -1, 'SELL_VOL': -1}
 
     for current_date in oos_dates:
@@ -246,10 +284,10 @@ def simulate(instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt, *,
                 series = close_wide[ul].dropna()
                 if spec.structure == 'single':
                     cyc = _price_single_cycle(spec, series, cursor, sign,
-                                              vrp_factor, window, remaining)
+                                              vrp_factor, window, remaining, stats=stats)
                 else:
                     cyc = _price_multileg_cycle(spec, series, cursor, sign,
-                                                vrp_factor, window, remaining)
+                                                vrp_factor, window, remaining, stats=stats)
                 if cyc is None:
                     break
                 cyc.update({'ticker': ul, 'direction': 'long' if sign > 0 else 'short',
@@ -262,6 +300,10 @@ def simulate(instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt, *,
                 later = series.index[series.index > pd.Timestamp(cyc['exit_date'])]
                 cursor = later[0] if len(later) else None
 
+    src = stats['iv_sources']
+    logger.info('[options_backtest] iv sources: surface=%d vix_term=%d realized=%d; exercise=%s; q>0 on %d prices',
+                src.get('surface', 0), src.get('vix_term', 0), src.get('realized', 0),
+                ','.join(sorted(stats['exercise'])) or 'n/a', stats['q_positive'])
     return {'trades': trades, 'universe_sizes': [], 'days_processed': days_processed,
             'days_with_signals': days_with_signals, 'static_universe': static_universe,
             'min_lookback': min_lookback}
