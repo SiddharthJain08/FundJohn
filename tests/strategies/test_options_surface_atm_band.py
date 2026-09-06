@@ -63,9 +63,53 @@ def test_smile_expiry_keeps_smile_source_and_band_fills_gaps():
     thin = _rows(14, [95.0, 100.0, 105.0], iv=0.30)                              # band-only expiry
     row = osf.features_for_day(pd.DataFrame(rich + thin), 100.0, '2026-09-03')
     assert row['n_expiries_fit'] == 1 and row['n_expiries_atm'] == 1
-    assert row['iv30_source'] == 'smile'                                         # nearest-30 expiry (42d, dist 12) is the smile fit, not the 14d band point (dist 16)
+    # Final review C1: the 14 d band IS the lower bracket of the 30 d
+    # interpolation, so iv30 is band-blended and must say so.
+    assert row['iv30_source'] == 'atm_band'
     assert row['iv30'] is not None
+    assert row['rn_skew_30d'] is not None                                        # RN keys from the 42 d smile (dist 12 ≤ 15)
     assert row['iv90'] is None or row['iv90'] > 0
+
+
+def test_mixed_day_difference_keys_are_smile_only():
+    """Final review C1: on a band+smile day the difference keys compare the
+    smile 25Δ/MFIV against the SMILE 30 d ATM, never the band-blended iv30 —
+    two flat smiles at different levels must not fabricate skew."""
+    K = 100.0 * np.exp(np.linspace(-0.3, 0.3, 25))
+    rows = _rows(14, [95.0, 100.0, 105.0], iv=0.30) + _rows(42, list(K), iv=0.25)
+    row = osf.features_for_day(pd.DataFrame(rows), 100.0, '2026-09-03')
+    assert row['n_expiries_fit'] == 1 and row['n_expiries_atm'] == 1
+    assert row['skew_25d_30d'] == pytest.approx(0.0, abs=1e-9)                   # flat smile ⇒ exactly zero
+    assert row['rr_25d_30d'] == pytest.approx(0.0, abs=1e-9)
+    assert row['mf_tail_premium_30d'] == pytest.approx(0.0, abs=1e-4)            # MFIV of a flat smile ≡ σ
+    assert row['rn_skew_30d'] is not None and abs(row['rn_skew_30d']) < 1e-2
+    assert row['iv30_source'] == 'atm_band'                                      # the band point participated
+    assert 0.25 < row['iv30'] < 0.30                                             # bracketed 14 d (0.30) ↔ 42 d (0.25)
+
+
+def test_rn_keys_come_from_nearest_smile_not_band():
+    """The nearest expiry to 30 DTE can be a band point; the RN moments still
+    come from the nearest SMILE, and only within RN_MOMENT_DTE_TOL of it."""
+    K = 100.0 * np.exp(np.linspace(-0.3, 0.3, 25))
+    band = _rows(28, [95.0, 100.0, 105.0], iv=0.30)
+    near = osf.features_for_day(pd.DataFrame(band + _rows(45, list(K), iv=0.25)), 100.0, '2026-09-03')
+    assert near['rn_skew_30d'] is not None                                       # |45 − 30| = 15 ≤ RN_MOMENT_DTE_TOL
+    assert near['rn_kurt_30d'] == pytest.approx(3.0, abs=5e-2)
+    far = osf.features_for_day(pd.DataFrame(band + _rows(46, list(K), iv=0.25)), 100.0, '2026-09-03')
+    assert far['rn_skew_30d'] is None and far['rn_kurt_30d'] is None             # |46 − 30| = 16 > tol
+    assert far['iv30'] is not None                                               # the band point still serves iv30
+
+
+def test_band_outside_bracket_keeps_smile_label():
+    """A band point that never enters the 30 d bracket leaves iv30 untouched,
+    so the label stays 'smile' (this is the freeze-test invariant in miniature)."""
+    K = 100.0 * np.exp(np.linspace(-0.3, 0.3, 25))
+    rows = (_rows(7, [95.0, 100.0, 105.0], iv=0.30)
+            + _rows(14, list(K), iv=0.25) + _rows(42, list(K), iv=0.25))
+    row = osf.features_for_day(pd.DataFrame(rows), 100.0, '2026-09-03')
+    assert row['n_expiries_fit'] == 2 and row['n_expiries_atm'] == 1
+    assert row['iv30_source'] == 'smile'
+    assert row['iv30'] == pytest.approx(0.25)
 
 
 def test_new_keys_registered():

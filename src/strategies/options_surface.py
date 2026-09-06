@@ -335,30 +335,41 @@ def features_for_day(chain: pd.DataFrame, spot, as_of) -> dict:
     row['n_expiries_atm'] = n_atm
     if not fits:
         return row
+    # Band points may lift `iv30`/`iv90` (§H.1), but every smile-only key is
+    # taken against the smile-only fits — a difference like `p30 − iv30` must
+    # compare the SAME maturity mix, or a mixed ticker-day fabricates a skew
+    # that is really the band-vs-smile term spread (final review C1).
+    smile_fits = {d: f for d, f in fits.items() if f.source == 'smile'}
     iv30 = constant_maturity(fits, 30, 'atm_iv')
     iv90 = constant_maturity(fits, 90, 'atm_iv')
-    p30 = constant_maturity(fits, 30, 'iv_25d_put')
-    c30 = constant_maturity(fits, 30, 'iv_25d_call')
-    near30 = min(fits, key=lambda d: abs(d - 30))
+    iv30_s = constant_maturity(smile_fits, 30, 'atm_iv')
+    p30 = constant_maturity(smile_fits, 30, 'iv_25d_put')
+    c30 = constant_maturity(smile_fits, 30, 'iv_25d_call')
+    near30 = min(fits, key=lambda d: abs(d - 30))            # the point iv30 leans on
+    near30_s = min(smile_fits, key=lambda d: abs(d - 30)) if smile_fits else None
     row.update({
         'iv30': iv30, 'iv90': iv90, 'near_iv': iv30, 'far_iv': iv90,
         'ts_ratio': (iv30 / iv90) if (iv30 is not None and iv90 is not None and iv90 > 0) else None,
         'term_slope': (iv90 - iv30) if (iv30 is not None and iv90 is not None) else None,
         'iv_25d_put_30d': p30, 'iv_25d_call_30d': c30,
-        'skew_25d_30d': (p30 - iv30) if (p30 is not None and iv30 is not None) else None,
+        'skew_25d_30d': (p30 - iv30_s) if (p30 is not None and iv30_s is not None) else None,
         'rr_25d_30d': (p30 - c30) if (p30 is not None and c30 is not None) else None,
         'n_strikes_30d': fits[near30].n_strikes,
     })
-    row['iv30_source'] = fits[near30].source if row['iv30'] is not None else None
+    # Honest label: 'smile' only when the smile-only 30 d point IS the served
+    # one (same inputs through the same function ⇒ exact equality is legitimate);
+    # any band participation in the interpolation reads 'atm_band'.
+    row['iv30_source'] = (None if iv30 is None else
+                          ('smile' if (iv30_s is not None and iv30 == iv30_s) else 'atm_band'))
     row['skew_20d'] = row['skew_25d_30d']
     # v3 (spec 2026-09-06 A.3): MFIV interpolates in total variance like the ATM
-    # points; RN moments/tails come from the expiry nearest 30 DTE (G4).
-    mf30 = constant_maturity(fits, 30, 'mfiv')
+    # points; RN moments/tails come from the smile expiry nearest 30 DTE (G4).
+    mf30 = constant_maturity(fits, 30, 'mfiv')      # band fits carry mfiv=None ⇒ already smile-only
     mf90 = constant_maturity(fits, 90, 'mfiv')
     row.update({'mfiv_30d': mf30, 'mfiv_90d': mf90,
-                'mf_tail_premium_30d': (mf30 - iv30) if (mf30 is not None and iv30 is not None) else None})
-    if abs(near30 - 30) <= RN_MOMENT_DTE_TOL:
-        f30 = fits[near30]
+                'mf_tail_premium_30d': (mf30 - iv30_s) if (mf30 is not None and iv30_s is not None) else None})
+    if near30_s is not None and abs(near30_s - 30) <= RN_MOMENT_DTE_TOL:
+        f30 = smile_fits[near30_s]
         row.update({'rn_skew_30d': f30.rn_skew, 'rn_kurt_30d': f30.rn_kurt,
                     'rn_p_dn10_30d': f30.rn_p_dn10, 'rn_p_up10_30d': f30.rn_p_up10})
     return row

@@ -9,10 +9,10 @@
 set -uo pipefail
 cd /root/openclaw || exit 2
 export PYTHONPATH=/root/openclaw/src
-VERIFY_ONLY=0; START=2026-06-29; END=$(date -u +%F)
+VERIFY_ONLY=0; START=2026-06-29; END=; END_SET=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --verify-only) VERIFY_ONLY=1;; --start) START="$2"; shift;; --end) END="$2"; shift;;
+    --verify-only) VERIFY_ONLY=1;; --start) START="$2"; shift;; --end) END="$2"; END_SET=1; shift;;
     *) echo "unknown arg $1" >&2; exit 2;;
   esac; shift
 done
@@ -21,6 +21,9 @@ if [ "$VERIFY_ONLY" = 0 ]; then
   for u in openclaw-fleet-overnight-resume.service fleet-rf-epoch-20260906.service options-surface-rollout-20260906.service; do
     while systemctl is-active --quiet "$u"; do echo "[v3 $(ts)] waiting for $u"; sleep 300; done
   done
+  # Default END resolves AFTER the wait — the queue ahead of us can be hours
+  # long and "today" must mean the day we actually build (final review I5).
+  [ "$END_SET" = 1 ] || END=$(date -u +%F)
   echo "[v3 $(ts)] build $START..$END"
   python3 scripts/build_options_surface.py --start "$START" --end "$END" || { echo "[v3 $(ts)] build FAILED"; exit 1; }
   echo "[v3 $(ts)] panel rebuild"
@@ -53,8 +56,8 @@ else:
     print('SPY', {k: (None if pd.isna(spy[k]) else round(float(spy[k]), 4)) for k in cols[2:] if k != 'iv30_source'})
     ok &= 0.0 <= float(spy['mf_tail_premium_30d']) <= 0.03 and float(spy['rn_skew_30d']) < 0 \
           and 0.001 <= float(spy['rn_p_dn10_30d']) <= 0.10
-panel = pq.read_metadata('data/derived/options_aggregates_enriched.parquet')
-pcols = set(pq.read_schema('data/derived/options_aggregates_enriched.parquet').names)
+panel = pq.read_metadata('data/master/options_aggregates_enriched.parquet')
+pcols = set(pq.read_schema('data/master/options_aggregates_enriched.parquet').names)
 missing = [c for c in cols[5:] if c not in pcols]
 print(f'panel rows={panel.num_rows:,} v3 columns missing={missing}')
 ok &= not missing

@@ -28,15 +28,23 @@ def _isolate_iv_masters(monkeypatch, tmp_path):
     production options-surface, vol-indices, or corporate-actions masters.
     Point all three env overrides at non-existent tmp paths (a test that needs
     a fixture master sets the env itself, which wins) and clear the
-    per-process caches so nothing cached from another test leaks through."""
+    per-process caches so nothing cached from another test leaks through.
+
+    The rate source is pinned too (final review M3): the synthetic engine now
+    passes `as_of` to `risk_free.rf_annual_asof`, so under
+    OPENCLAW_RF_SOURCE=macro these tests would read the production
+    macro.parquet — 'const' keeps them hermetic and deterministic."""
     monkeypatch.setenv('OPENCLAW_OPTIONS_SURFACE_PATH', str(tmp_path / 'no_surface.parquet'))
     monkeypatch.setenv('OPENCLAW_VOL_INDICES_PARQUET', str(tmp_path / 'no_vol_indices.parquet'))
     monkeypatch.setenv('OPENCLAW_CORPORATE_ACTIONS_PARQUET', str(tmp_path / 'no_corporate_actions.parquet'))
-    from backtest import dividends, synthetic_iv, vol_index
+    monkeypatch.setenv('OPENCLAW_RF_SOURCE', 'const')
+    from backtest import dividends, risk_free, synthetic_iv, vol_index
     synthetic_iv.clear_cache()
     vol_index._vix9d_series.cache_clear()
     dividends.clear_cache()
+    risk_free.clear_cache()
     yield
     synthetic_iv.clear_cache()
     vol_index._vix9d_series.cache_clear()
     dividends.clear_cache()
+    risk_free.clear_cache()

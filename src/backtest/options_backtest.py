@@ -276,7 +276,8 @@ def simulate(instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt, *,
             if not is_supported_option_underlying(ul) and ul not in _UNSUPPORTED_WARNED:
                 _UNSUPPORTED_WARNED.add(ul)
                 logger.warning('[options_backtest] underlying %s is NOT in VALID_OPTION_UNDERLYINGS '
-                               '— IV uses the low-fidelity realized-vol fallback (~25%% off real IV); '
+                               '— IV falls back to the VIX-term/realized-vol tiers whenever the real '
+                               'surface master does not cover the date (~25%% off real IV); '
                                'backtest metrics are NOT trustworthy for promotion.', ul)
             # roll-then-reopen: keep re-entering while the prior cycle ended on a roll
             cursor = current_date

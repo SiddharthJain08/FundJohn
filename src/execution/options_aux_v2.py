@@ -165,6 +165,18 @@ def _pct_of_new(new: dict, predicate) -> int:
     return round(100.0 * sum(1 for t in new if predicate(new[t])) / len(new)) if new else 0
 
 
+def _pct_of_subset(new: dict, subset, predicate) -> int:
+    """Share of the tickers satisfying `subset` that also satisfy `predicate`,
+    0-100. Used where the spec defines a coverage ratio over a sub-population
+    (v3 coverage is measured on tickers with ≥ 2 fitted expiries, spec §C.3 —
+    the same denominator the rollout verify uses). Empty subset ⇒ 0, never a
+    division by zero and never a fabricated 100 %."""
+    n = sum(1 for t in new if subset(new[t]))
+    if not n:
+        return 0
+    return round(100.0 * sum(1 for t in new if subset(new[t]) and predicate(new[t])) / n)
+
+
 def shadow_summary(old: dict, new: dict, seconds=None) -> str:
     """One-line old-vs-new comparison (spec 2026-09-04 A.7).
 
@@ -174,8 +186,12 @@ def shadow_summary(old: dict, new: dict, seconds=None) -> str:
     close OLDER than the surface date (normal at the 15:00 ET compute, since
     the day's close does not exist yet). `mfiv_nonnull`/`rn_nonnull` are the
     v3 coverage — spec 2026-09-06 §C.3 expects ≥ 90 % of tickers with ≥ 2
-    fitted expiries. `dur` is the build's wall clock, or `n/a` when the
-    caller did not time it."""
+    fitted expiries, and that sub-population IS their denominator (final
+    review I2), matching the rollout verify. `iv30_src smile=…% band=…%`
+    splits the served `iv30` by provenance over the tickers that have one
+    (spec §H.5); the two need not sum to 100 — a master row without the
+    column serves `iv30` with `iv30_source = None`. `dur` is the build's
+    wall clock, or `n/a` when the caller did not time it."""
     common = [t for t in new if t in old]
     ratios = [old[t]['iv30'] / new[t]['iv30'] for t in common
               if old[t].get('iv30') and new[t].get('iv30')]
@@ -184,8 +200,12 @@ def shadow_summary(old: dict, new: dict, seconds=None) -> str:
     pct = _pct_of_new(new, lambda r: r.get('iv_rank') is not None)
     rv_pct = _pct_of_new(new, lambda r: r.get('rv_20') is not None)
     vrp_pct = _pct_of_new(new, lambda r: r.get('vrp') is not None)
-    mf_pct = _pct_of_new(new, lambda r: r.get('mfiv_30d') is not None)
-    rn_pct = _pct_of_new(new, lambda r: r.get('rn_skew_30d') is not None)
+    fit2 = lambda r: (r.get('n_expiries_fit') or 0) >= 2      # noqa: E731 — spec §C.3 denominator
+    mf_pct = _pct_of_subset(new, fit2, lambda r: r.get('mfiv_30d') is not None)
+    rn_pct = _pct_of_subset(new, fit2, lambda r: r.get('rn_skew_30d') is not None)
+    has_iv30 = lambda r: r.get('iv30') is not None            # noqa: E731 — §H.5 split denominator
+    smile_pct = _pct_of_subset(new, has_iv30, lambda r: r.get('iv30_source') == 'smile')
+    band_pct = _pct_of_subset(new, has_iv30, lambda r: r.get('iv30_source') == 'atm_band')
     stale_pct = _pct_of_new(new, lambda r: r.get('spot_date') is not None
                             and r.get('surface_date') is not None
                             and r['spot_date'] < r['surface_date'])
@@ -193,4 +213,5 @@ def shadow_summary(old: dict, new: dict, seconds=None) -> str:
     return (f'[options_surface] shadow n={len(new)} iv30 old/new median={med:.3f} p90={p90:.3f} '
             f'iv_rank_nonnull={pct}% rv20_nonnull={rv_pct}% vrp_nonnull={vrp_pct}% '
             f'mfiv_nonnull={mf_pct}% rn_nonnull={rn_pct}% '
+            f'iv30_src smile={smile_pct}% band={band_pct}% '
             f'spot_stale={stale_pct}% dur={dur} version={OPTIONS_FEATURES_VERSION}')

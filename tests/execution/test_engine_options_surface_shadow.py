@@ -113,9 +113,27 @@ def test_shadow_summary_line():
                   'spot_date': '2026-09-02', 'surface_date': '2026-09-03'},
             'B': {'iv30': 0.25, 'iv_rank': None, 'rv_20': 0.1, 'vrp': None,
                   'spot_date': '2026-09-03', 'surface_date': '2026-09-03'}}
+    assert 'iv30_src smile=0% band=0%' in line          # §H.5 split; no iv30_source ⇒ 0/0, never fabricated
     line2 = v2.shadow_summary(old, rich, seconds=12.4)
     assert 'rv20_nonnull=100%' in line2 and 'vrp_nonnull=50%' in line2
     assert 'spot_stale=50%' in line2 and 'dur=12s' in line2
+    # Final review I2: the v3 coverage denominator is tickers with
+    # n_expiries_fit >= 2 (spec §C.3), not every ticker — C has one fit and
+    # must not dilute the ratio.
+    cov = {'A': {'iv30': 0.20, 'n_expiries_fit': 2, 'mfiv_30d': 0.21, 'rn_skew_30d': -0.4},
+           'B': {'iv30': 0.25, 'n_expiries_fit': 2},
+           'C': {'iv30': 0.30, 'n_expiries_fit': 1, 'mfiv_30d': None}}
+    line3 = v2.shadow_summary(old, cov)
+    assert 'mfiv_nonnull=50%' in line3 and 'rn_nonnull=50%' in line3
+    # Final review I3: iv30_source split over the tickers that HAVE an iv30.
+    split = {'A': {'iv30': 0.20, 'iv30_source': 'smile'},
+             'B': {'iv30': 0.25, 'iv30_source': 'atm_band'},
+             'C': {'iv30': 0.30, 'iv30_source': 'atm_band'},
+             'D': {'iv30': 0.30, 'iv30_source': None},
+             'E': {'iv30': None, 'iv30_source': 'smile'}}
+    line4 = v2.shadow_summary(old, split)
+    assert 'iv30_src smile=25% band=50%' in line4       # 4 tickers with iv30; D's None is neither
+    assert 'rn_nonnull=0%' in line4                     # existing fields keep their spacing
 
 
 def test_engine_flag_selects_dict(monkeypatch, caplog, tmp_path):

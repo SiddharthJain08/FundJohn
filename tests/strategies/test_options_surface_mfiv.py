@@ -35,8 +35,10 @@ def test_flat_smile_mfiv_equals_sigma():
 
 def test_flat_smile_rn_moments_are_lognormal():
     f = _flat_fit()
-    assert abs(f.rn_skew) < 1e-2
-    assert f.rn_kurt == pytest.approx(3.0, abs=5e-2)
+    # Tightened to the measured quadrature error (2.3e-5 / 2.99937) so a real
+    # regression in the strip cannot hide inside a loose band (final review M1).
+    assert abs(f.rn_skew) < 1e-3
+    assert f.rn_kurt == pytest.approx(3.0, abs=1e-2)
 
 
 def test_flat_smile_tails_equal_black_digitals():

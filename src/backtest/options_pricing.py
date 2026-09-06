@@ -4,6 +4,9 @@ spec 2026-09-06 B.2). All functions are pure + deterministic.
 
 Rate: `as_of=None` keeps the legacy flat RISK_FREE (4 %); with `as_of` the
 rate comes from backtest.risk_free (DGS3MO behind OPENCLAW_RF_SOURCE).
+The synthetic engine always passes `as_of`, so its flat-rate path is
+`risk_free.RISK_FREE_ANNUAL_CONST` (5 %) under `OPENCLAW_RF_SOURCE=const`;
+the 4 % `RISK_FREE` constant only serves direct callers that omit `as_of`.
 Dividends: `q` (continuous yield) defaults to 0.0, and the q == 0 path calls
 the SAME py_vollib black_scholes functions as before — bit-identical.
 American exercise: CRR binomial tree (ruling G7), delta by central difference.
