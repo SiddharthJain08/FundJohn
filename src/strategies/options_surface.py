@@ -32,6 +32,12 @@ _GREEKS = ('delta', 'gamma', 'theta', 'vega')
 _D1_25_CALL = float(norm.ppf(0.25))   # −0.6745
 _D1_25_PUT = float(norm.ppf(0.75))    # +0.6745
 
+# Spec 2026-09-06 §A.1–A.2 — model-free strip on the fitted smile.
+K_TRUNC = 5.0            # strip half-width in units of σ_atm·√T (ruling G2)
+N_GRID = 401             # odd ⇒ k = 0 (the call/put switch) is a node
+RN_TAIL_MOVE = 0.10      # ±10 % tail probabilities
+RN_MOMENT_DTE_TOL = 15   # RN moments/tails from the expiry nearest 30 DTE within this (G4)
+
 SCALAR_KEYS = [
     'spot', 'iv30', 'iv90', 'iv_25d_put_30d', 'iv_25d_call_30d', 'skew_25d_30d', 'rr_25d_30d',
     'ts_ratio', 'term_slope', 'iv_spread', 'gamma_atm', 'theta_atm',
@@ -50,6 +56,11 @@ class SmileFit:
     n_strikes: int
     k_min: float
     k_max: float
+    mfiv: float | None = None        # model-free implied vol √(V/T) — spec 2026-09-06 A.2
+    rn_skew: float | None = None     # BKM risk-neutral skewness of ln(S_T/F)
+    rn_kurt: float | None = None     # BKM risk-neutral kurtosis (raw; 3 = lognormal)
+    rn_p_dn10: float | None = None   # RN P(S_T ≤ 0.9·F)
+    rn_p_up10: float | None = None   # RN P(S_T ≥ 1.1·F)
 
 
 def _f(v) -> float | None:
@@ -111,6 +122,82 @@ def _moneyness_for_delta(smile, t: float, k_min: float, k_max: float, d1: float,
     return x
 
 
+def _sigma_on(smile, k, k_min: float, k_max: float, atm: float) -> np.ndarray:
+    """Smile vol at log-moneyness k with FLAT extrapolation outside the observed
+    strike range (ruling G1); non-finite or sub-floor values fall back to ATM."""
+    s = np.asarray(smile(np.clip(np.asarray(k, dtype=float), k_min, k_max)), dtype=float)
+    return np.where(np.isfinite(s) & (s > IV_MIN), s, atm)
+
+
+def _strip_prices(sig: np.ndarray, k: np.ndarray, t: float) -> np.ndarray:
+    """Normalised, undiscounted OTM Black prices q(k) = Q/F with F = S, r = q = 0:
+    call for k ≥ 0, put for k < 0 (spec A.1)."""
+    st = sig * math.sqrt(t)
+    d1 = (-k + 0.5 * sig * sig * t) / st
+    d2 = d1 - st
+    call = norm.cdf(d1) - np.exp(k) * norm.cdf(d2)
+    put = np.exp(k) * norm.cdf(-d2) - norm.cdf(-d1)
+    return np.maximum(np.where(k >= 0.0, call, put), 0.0)
+
+
+def _tail_prob_below(smile, k: float, k_min: float, k_max: float, atm: float, t: float) -> float | None:
+    """RN P(S_T ≤ F·e^k) from the smile-adjusted digital (spec A.2):
+    Φ(−d2) + e^{−k} φ(d1) √T σ′(k), σ′ = 0 in the flat wings, clipped to [0, 1] (G3)."""
+    sig = float(_sigma_on(smile, np.array([k]), k_min, k_max, atm)[0])
+    st = sig * math.sqrt(t)
+    d1 = (-k + 0.5 * sig * sig * t) / st
+    d2 = d1 - st
+    dsig = 0.0
+    if k_min <= k <= k_max:
+        try:
+            dsig = float(smile.derivative()(k))
+        except Exception:  # noqa: BLE001 — a callable without .derivative() ⇒ flat
+            dsig = 0.0
+        if not math.isfinite(dsig):
+            dsig = 0.0
+    p = float(norm.cdf(-d2)) + math.exp(-k) * float(norm.pdf(d1)) * math.sqrt(t) * dsig
+    return float(min(max(p, 0.0), 1.0)) if math.isfinite(p) else None
+
+
+_STRIP_NONE = {'mfiv': None, 'rn_skew': None, 'rn_kurt': None, 'rn_p_dn10': None, 'rn_p_up10': None}
+
+
+def strip_features(smile, k_min: float, k_max: float, atm: float, t: float) -> dict:
+    """Model-free implied variance (DDKZ/VIX integral), BKM (2003) risk-neutral
+    skewness/kurtosis and ±10 % tail probabilities for ONE expiry, from its
+    fitted smile (spec 2026-09-06 §A.1–A.2). In log-moneyness dK/K² = e^{−k}/F·dk,
+    so every integral is ∫ weight(k)·q(k)·e^{−k} dk over a ±K_TRUNC·σ√T grid.
+    Returns None values for anything not finite; never raises."""
+    out = dict(_STRIP_NONE)
+    try:
+        if not (atm > 0.0 and t > 0.0):
+            return out
+        L = K_TRUNC * atm * math.sqrt(t)
+        k = np.linspace(-L, L, N_GRID)
+        q = _strip_prices(_sigma_on(smile, k, k_min, k_max, atm), k, t)
+        w = q * np.exp(-k)
+        var_total = 2.0 * float(np.trapezoid(w, k))            # variance-swap total variance
+        if var_total > 0.0:
+            out['mfiv'] = math.sqrt(var_total / t)
+        v2 = 2.0 * float(np.trapezoid((1.0 - k) * w, k))        # BKM V  (E[x²])
+        w3 = float(np.trapezoid((6.0 * k - 3.0 * k * k) * w, k))  # BKM W  (E[x³])
+        x4 = float(np.trapezoid((12.0 * k * k - 4.0 * k ** 3) * w, k))  # BKM X (E[x⁴])
+        mu = -v2 / 2.0 - w3 / 6.0 - x4 / 24.0                     # E[x], r = 0
+        var = v2 - mu * mu
+        if var > 0.0:
+            out['rn_skew'] = (w3 - 3.0 * mu * v2 + 2.0 * mu ** 3) / var ** 1.5
+            out['rn_kurt'] = (x4 - 4.0 * mu * w3 + 6.0 * mu * mu * v2 - 3.0 * mu ** 4) / var ** 2
+        out['rn_p_dn10'] = _tail_prob_below(smile, math.log(1.0 - RN_TAIL_MOVE), k_min, k_max, atm, t)
+        below_up = _tail_prob_below(smile, math.log(1.0 + RN_TAIL_MOVE), k_min, k_max, atm, t)
+        out['rn_p_up10'] = None if below_up is None else float(1.0 - below_up)
+        for key, val in list(out.items()):
+            if val is not None and not math.isfinite(val):
+                out[key] = None
+        return out
+    except Exception:  # noqa: BLE001 — a degenerate smile must never break the row
+        return dict(_STRIP_NONE)
+
+
 def fit_smile(strikes, ivs, spot: float, dte: int) -> SmileFit | None:
     K = np.asarray(strikes, dtype=float)
     iv = np.asarray(ivs, dtype=float)
@@ -132,8 +219,9 @@ def fit_smile(strikes, ivs, spot: float, dte: int) -> SmileFit | None:
     xc = _moneyness_for_delta(smile, t, k[0], k[-1], _D1_25_CALL, atm)
     ivp = _f(smile(xp))
     ivc = _f(smile(xc))
+    strip = strip_features(smile, float(k[0]), float(k[-1]), atm, t)
     return SmileFit(dte=int(dte), t=t, atm_iv=atm, iv_25d_put=ivp, iv_25d_call=ivc,
-                    n_strikes=int(len(K)), k_min=float(k[0]), k_max=float(k[-1]))
+                    n_strikes=int(len(K)), k_min=float(k[0]), k_max=float(k[-1]), **strip)
 
 
 def constant_maturity(fits: dict, target_dte: int, attr: str) -> float | None:
