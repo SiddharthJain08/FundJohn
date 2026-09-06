@@ -18,7 +18,7 @@ import pandas as pd
 from scipy.interpolate import PchipInterpolator
 from scipy.stats import norm
 
-OPTIONS_FEATURES_VERSION = 2
+OPTIONS_FEATURES_VERSION = 3
 FIT_DTE = (7, 120)          # expiries eligible for a smile fit
 CHAIN_DTE = (1, 120)        # rows kept at all
 FRONT_DTE_MAX = 45          # "front usable expiry" for greeks / iv_spread
@@ -43,6 +43,9 @@ SCALAR_KEYS = [
     'ts_ratio', 'term_slope', 'iv_spread', 'gamma_atm', 'theta_atm',
     'call_volume', 'put_volume', 'volume', 'pc_ratio', 'expiry_date',
     'n_expiries_fit', 'n_strikes_30d', 'options_features_version',
+    # v3 (spec 2026-09-06 A.3): model-free variance + risk-neutral density
+    'mfiv_30d', 'mfiv_90d', 'mf_tail_premium_30d',
+    'rn_skew_30d', 'rn_kurt_30d', 'rn_p_dn10_30d', 'rn_p_up10_30d',
 ]
 
 
@@ -314,6 +317,16 @@ def features_for_day(chain: pd.DataFrame, spot, as_of) -> dict:
         'n_strikes_30d': fits[near30].n_strikes,
     })
     row['skew_20d'] = row['skew_25d_30d']
+    # v3 (spec 2026-09-06 A.3): MFIV interpolates in total variance like the ATM
+    # points; RN moments/tails come from the expiry nearest 30 DTE (G4).
+    mf30 = constant_maturity(fits, 30, 'mfiv')
+    mf90 = constant_maturity(fits, 90, 'mfiv')
+    row.update({'mfiv_30d': mf30, 'mfiv_90d': mf90,
+                'mf_tail_premium_30d': (mf30 - iv30) if (mf30 is not None and iv30 is not None) else None})
+    if abs(near30 - 30) <= RN_MOMENT_DTE_TOL:
+        f30 = fits[near30]
+        row.update({'rn_skew_30d': f30.rn_skew, 'rn_kurt_30d': f30.rn_kurt,
+                    'rn_p_dn10_30d': f30.rn_p_dn10, 'rn_p_up10_30d': f30.rn_p_up10})
     return row
 
 

@@ -72,9 +72,11 @@ def test_build_panel_emits_no_missing_column_warning_on_a_full_surface_frame(cap
                          'rr_25d_30d': 0.05, 'ts_ratio': 0.9, 'term_slope': 0.03, 'iv_spread': 0.0,
                          'gamma_atm': 0.01, 'theta_atm': -0.02, 'call_volume': 100.0, 'put_volume': 160.0,
                          'volume': 260.0, 'pc_ratio': 1.6, 'expiry_date': '2026-06-19', 'n_expiries_fit': 4,
-                         'n_strikes_30d': 20, 'options_features_version': 2, 'built_at': 'x',
+                         'n_strikes_30d': 20, 'options_features_version': 3, 'built_at': 'x',
                          'max_pain': 100.0, 'contracts_liquid': 50, 'gex': 1.0, 'pcr_oi': 1.0,
-                         'iv_centroid_delta': 0.01, 'surface_premium': 0.02, 'oi_session': '2026-04-30'})
+                         'iv_centroid_delta': 0.01, 'surface_premium': 0.02, 'oi_session': '2026-04-30',
+                         'mfiv_30d': 0.29, 'mfiv_90d': 0.31, 'mf_tail_premium_30d': 0.01,
+                         'rn_skew_30d': -0.3, 'rn_kurt_30d': 3.5, 'rn_p_dn10_30d': 0.08, 'rn_p_up10_30d': 0.05})
     closes = pd.DataFrame({'ticker': 'ZZZT', 'date': pd.bdate_range('2026-03-01', periods=115).date,
                            'close': 100 * np.exp(np.cumsum(np.random.default_rng(1).normal(0, 0.01, 115)))})
     with caplog.at_level(logging.WARNING):

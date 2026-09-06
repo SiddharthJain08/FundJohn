@@ -31,7 +31,7 @@ def test_build_returns_v2_keys_with_iv_rank(tmp_path):
     out = v2.build(chain, ['SPY', 'AAPL', 'XOM', 'ZZZT'], pd.Timestamp('2026-09-03'), master, px)
     assert set(out) == {'SPY', 'AAPL', 'XOM'}
     spy = out['SPY']
-    assert spy['options_features_version'] == 2 and 0.08 < spy['iv30'] < 0.20
+    assert spy['options_features_version'] == 3 and 0.08 < spy['iv30'] < 0.20
     assert spy['iv_rank'] is not None and 0 <= spy['iv_rank'] <= 100
     assert spy['last_price'] == pytest.approx(px[(px.ticker == 'SPY') & (px.date == '2026-09-03')]['close'].iloc[0])
     assert isinstance(spy['hv20_history'], list) and spy['rv_20'] > 0
@@ -81,12 +81,13 @@ def test_shadow_summary_line():
     old = {'A': {'iv30': 0.40, 'iv_rank': 50.0}, 'B': {'iv30': 0.50, 'iv_rank': 50.0}}
     new = {'A': {'iv30': 0.20, 'iv_rank': 33.0}, 'B': {'iv30': 0.25, 'iv_rank': None}}
     line = v2.shadow_summary(old, new)
-    assert line.startswith('[options_surface] shadow n=2 iv30 old/new median=2.000') and 'iv_rank_nonnull=50%' in line and 'version=2' in line
+    assert line.startswith('[options_surface] shadow n=2 iv30 old/new median=2.000') and 'iv_rank_nonnull=50%' in line and 'version=3' in line
     # Final fix wave 2026-09-05 (F1/F4c): the line carries the fields the
     # runbook's "clean shadow" definition reads. Called without `seconds`
     # (as here and by any legacy caller) dur is n/a, never a crash.
     assert 'rv20_nonnull=0%' in line and 'vrp_nonnull=0%' in line
     assert 'spot_stale=0%' in line and 'dur=n/a' in line
+    assert 'mfiv_nonnull=0%' in line and 'rn_nonnull=0%' in line   # v3 coverage fields (spec 2026-09-06 §C.3)
     rich = {'A': {'iv30': 0.20, 'iv_rank': 33.0, 'rv_20': 0.1, 'vrp': 0.1,
                   'spot_date': '2026-09-02', 'surface_date': '2026-09-03'},
             'B': {'iv30': 0.25, 'iv_rank': None, 'rv_20': 0.1, 'vrp': None,

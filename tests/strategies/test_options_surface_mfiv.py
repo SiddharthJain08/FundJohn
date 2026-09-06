@@ -77,3 +77,57 @@ def test_strip_features_never_raises():
 def test_fit_smile_none_paths_unchanged():
     assert osf.fit_smile([100.0, 101.0], [0.2, 0.2], 100.0, 30) is None          # < MIN_STRIKES
     assert osf.fit_smile(np.arange(101, 110), np.full(9, 0.2), 100.0, 30) is None  # no strike below spot
+
+
+V3_KEYS = ['mfiv_30d', 'mfiv_90d', 'mf_tail_premium_30d',
+           'rn_skew_30d', 'rn_kurt_30d', 'rn_p_dn10_30d', 'rn_p_up10_30d']
+
+
+def _fixture_row(ticker='SPY'):
+    import json
+    from pathlib import Path
+    import pandas as pd
+    fix = Path(__file__).resolve().parents[1] / 'fixtures'
+    chain = pd.read_parquet(fix / 'options_chain_2026-09-03.parquet')
+    meta = json.load(open(fix / 'options_chain_2026-09-03_spots.json'))
+    ch = chain[chain['ticker'] == ticker]
+    ch = ch.assign(date=pd.to_datetime(ch['date']))
+    return osf.features_for_day(ch, meta['spots'][ticker], pd.Timestamp('2026-09-03'))
+
+
+def test_v3_keys_are_scalar_keys_and_aux_fields():
+    from strategies.aux_data_loader import FIELDS
+    for k in V3_KEYS:
+        assert k in osf.SCALAR_KEYS and k in FIELDS, k
+    assert osf.OPTIONS_FEATURES_VERSION == 3
+
+
+def test_spy_fixture_carries_v3_values():
+    row = _fixture_row('SPY')
+    assert row['options_features_version'] == 3
+    assert row['mfiv_30d'] is not None and row['iv30'] is not None
+    assert 0.0 <= row['mf_tail_premium_30d'] <= 0.05          # index smile: wings a few vol points rich
+    assert row['mfiv_30d'] == pytest.approx(row['iv30'] + row['mf_tail_premium_30d'])
+    assert row['rn_skew_30d'] < 0.0                             # left-skewed index smile
+    assert row['rn_kurt_30d'] > 3.0
+    assert 0.0 < row['rn_p_dn10_30d'] < 0.2 and 0.0 <= row['rn_p_up10_30d'] < 0.2
+    assert row['mfiv_90d'] is None or row['mfiv_90d'] > 0.0
+
+
+def test_v3_keys_none_without_a_30d_expiry():
+    import pandas as pd
+    K = 100.0 * np.exp(np.linspace(-0.3, 0.3, 25)); t = 60 / 365
+    rows = [{'ticker': 'ZZZT', 'date': '2026-09-03', 'expiry': (pd.Timestamp('2026-09-03') + pd.Timedelta(days=60)).date(),
+             'strike': float(k), 'option_type': f, 'implied_volatility': 0.25, 'delta': 0.5 if f == 'CALL' else -0.5,
+             'gamma': 0.01, 'theta': -0.02, 'vega': 0.1, 'volume': 1.0}
+            for k in K for f in ('CALL', 'PUT')]
+    row = osf.features_for_day(pd.DataFrame(rows), 100.0, '2026-09-03')
+    assert row['n_expiries_fit'] == 1
+    for k in ('rn_skew_30d', 'rn_kurt_30d', 'rn_p_dn10_30d', 'rn_p_up10_30d', 'mfiv_30d', 'mf_tail_premium_30d'):
+        assert row[k] is None, k                                # |60 − 30| > 15 and > CM_ONE_SIDED_TOL
+
+
+def test_empty_chain_row_has_v3_keys_as_none():
+    import pandas as pd
+    row = osf.features_for_day(pd.DataFrame(), 100.0, '2026-09-03')
+    assert all(row[k] is None for k in V3_KEYS) and row['options_features_version'] == 3

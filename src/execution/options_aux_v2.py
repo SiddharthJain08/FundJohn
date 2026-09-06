@@ -155,8 +155,10 @@ def shadow_summary(old: dict, new: dict, seconds=None) -> str:
     path losing rv_20 (and therefore vrp/vrp_zscore) whenever prices.parquet
     lags the chain date. `spot_stale` is the share of tickers priced off a
     close OLDER than the surface date (normal at the 15:00 ET compute, since
-    the day's close does not exist yet). `dur` is the build's wall clock, or
-    `n/a` when the caller did not time it."""
+    the day's close does not exist yet). `mfiv_nonnull`/`rn_nonnull` are the
+    v3 coverage — spec 2026-09-06 §C.3 expects ≥ 90 % of tickers with ≥ 2
+    fitted expiries. `dur` is the build's wall clock, or `n/a` when the
+    caller did not time it."""
     common = [t for t in new if t in old]
     ratios = [old[t]['iv30'] / new[t]['iv30'] for t in common
               if old[t].get('iv30') and new[t].get('iv30')]
@@ -165,10 +167,13 @@ def shadow_summary(old: dict, new: dict, seconds=None) -> str:
     pct = _pct_of_new(new, lambda r: r.get('iv_rank') is not None)
     rv_pct = _pct_of_new(new, lambda r: r.get('rv_20') is not None)
     vrp_pct = _pct_of_new(new, lambda r: r.get('vrp') is not None)
+    mf_pct = _pct_of_new(new, lambda r: r.get('mfiv_30d') is not None)
+    rn_pct = _pct_of_new(new, lambda r: r.get('rn_skew_30d') is not None)
     stale_pct = _pct_of_new(new, lambda r: r.get('spot_date') is not None
                             and r.get('surface_date') is not None
                             and r['spot_date'] < r['surface_date'])
     dur = 'n/a' if seconds is None else f'{float(seconds):.0f}s'
     return (f'[options_surface] shadow n={len(new)} iv30 old/new median={med:.3f} p90={p90:.3f} '
             f'iv_rank_nonnull={pct}% rv20_nonnull={rv_pct}% vrp_nonnull={vrp_pct}% '
+            f'mfiv_nonnull={mf_pct}% rn_nonnull={rn_pct}% '
             f'spot_stale={stale_pct}% dur={dur} version={OPTIONS_FEATURES_VERSION}')
