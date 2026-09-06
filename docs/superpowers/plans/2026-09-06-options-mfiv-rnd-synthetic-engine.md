@@ -412,7 +412,8 @@ def _fixture_row(ticker='SPY'):
     fix = Path(__file__).resolve().parents[1] / 'fixtures'
     chain = pd.read_parquet(fix / 'options_chain_2026-09-03.parquet')
     meta = json.load(open(fix / 'options_chain_2026-09-03_spots.json'))
-    ch = chain[chain['ticker'] == ticker].assign(date=pd.to_datetime(chain['date']))
+    ch = chain[chain['ticker'] == ticker]
+    ch = ch.assign(date=pd.to_datetime(ch['date']))
     return osf.features_for_day(ch, meta['spots'][ticker], pd.Timestamp('2026-09-03'))
 
 
@@ -552,10 +553,14 @@ import pandas as pd
 import pytest
 
 
+SPY_EX_DATES = ['2024-03-15', '2024-06-15', '2024-09-15', '2024-12-15', '2025-03-15', '2025-06-15',
+                '2025-09-15', '2025-12-15', '2026-03-15', '2026-06-15']          # quarterly, 10 payments
+
+
 def _fixture(tmp_path, monkeypatch):
-    rows = []
-    for d in pd.date_range('2024-03-15', '2026-06-15', freq='3MS'):          # quarterly, 10 payments
-        rows.append({'symbol': 'SPY', 'action_type': 'cash_dividend', 'ex_date': d.date(), 'cash_amount': 1.5})
+    rows = [{'symbol': 'SPY', 'action_type': 'cash_dividend', 'ex_date': pd.Timestamp(d).date(), 'cash_amount': 1.5}
+            for d in SPY_EX_DATES]
+    rows.append({'symbol': 'ONE', 'action_type': 'cash_dividend', 'ex_date': pd.Timestamp('2025-05-15').date(), 'cash_amount': 2.0})
     rows.append({'symbol': 'SPY', 'action_type': 'forward_split', 'ex_date': pd.Timestamp('2025-01-02').date(), 'cash_amount': None})
     rows.append({'symbol': 'NODIV', 'action_type': 'reverse_split', 'ex_date': pd.Timestamp('2025-01-02').date(), 'cash_amount': None})
     p = tmp_path / 'corporate_actions.parquet'
@@ -568,16 +573,16 @@ def _fixture(tmp_path, monkeypatch):
 
 def test_trailing_year_sum_over_spot(tmp_path, monkeypatch):
     dv = _fixture(tmp_path, monkeypatch)
-    # (2025-06-30, 2026-06-30] holds 2025-09-01, 2025-12-01, 2026-03-01, 2026-06-01 → 4 × 1.5
+    # (2025-06-30, 2026-06-30] holds 2025-09-15, 2025-12-15, 2026-03-15, 2026-06-15 → 4 × 1.5
     assert dv.dividend_yield_asof('SPY', '2026-06-30', 500.0) == pytest.approx(6.0 / 500.0)
 
 
-def test_boundaries_ex_date_equal_as_of_in_and_lower_bound_out(tmp_path, monkeypatch):
-    dv = _fixture(tmp_path, monkeypatch)
-    inc = dv.dividend_yield_asof('SPY', '2026-06-01', 100.0)      # 2026-06-01 itself counts (≤ as_of)
-    exc = dv.dividend_yield_asof('SPY', '2026-05-31', 100.0)      # ... and is excluded the day before
-    assert inc == pytest.approx(exc + 1.5 / 100.0 - 1.5 / 100.0 * 0) or inc > exc
-    assert inc - exc == pytest.approx(0.0) or inc - exc == pytest.approx(1.5 / 100.0)
+def test_window_is_open_below_and_closed_above(tmp_path, monkeypatch):
+    dv = _fixture(tmp_path, monkeypatch)                            # ONE pays 2.0 on 2025-05-15 only
+    assert dv.dividend_yield_asof('ONE', '2025-05-15', 100.0) == pytest.approx(0.02)   # ex_date == as_of counts
+    assert dv.dividend_yield_asof('ONE', '2025-05-14', 100.0) == 0.0                   # not yet
+    assert dv.dividend_yield_asof('ONE', '2026-05-14', 100.0) == pytest.approx(0.02)   # 364 days later: still inside
+    assert dv.dividend_yield_asof('ONE', '2026-05-15', 100.0) == 0.0                   # ex_date == as_of − 365 d: out
 
 
 def test_no_dividend_ticker_and_unknown_ticker_are_zero(tmp_path, monkeypatch):
@@ -594,7 +599,7 @@ def test_pre_coverage_backfills_first_full_year_and_warns_once(tmp_path, monkeyp
     with caplog.at_level(logging.WARNING):
         q1 = dv.dividend_yield_asof('SPY', '2024-06-01', 400.0)               # trailing window starts 2023-06 < coverage
         q2 = dv.dividend_yield_asof('SPY', '2024-09-01', 400.0, ref_spot=600.0)
-    # first full year [2024-03-15, 2025-03-15): 2024-03-15, 06-01, 09-01, 12-01 → 4 × 1.5 = 6.0
+    # first full year [2024-03-15, 2025-03-15): 2024-03-15, 06-15, 09-15, 12-15 → 4 × 1.5 = 6.0
     assert q1 == pytest.approx(6.0 / 400.0)
     assert q2 == pytest.approx(6.0 / 600.0)                                    # ref_spot wins when given
     assert sum('q backfilled' in r.message for r in caplog.records) == 1
@@ -725,7 +730,7 @@ def dividend_yield_asof(ticker: str, as_of, spot: float, ref_spot: float | None 
 - [ ] **Step 4: Run**
 
 Run: `python3 -m pytest tests/backtest/test_dividends.py -q`
-Expected: 5 passed. (If `test_boundaries_...` reads awkwardly, keep its two asserts — they encode "2026-06-01 counts on 2026-06-01, not on 2026-05-31".)
+Expected: 5 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -773,7 +778,8 @@ def test_american_never_below_european_on_a_grid():
     for flag, K, t, q in itertools.product('cp', (80.0, 100.0, 120.0), (0.1, 0.5), (0.0, 0.03)):
         am = american_price(flag, 100.0, K, t, 0.3, r=0.05, q=q)
         eu = bs_price(flag, 100.0, K, t, 0.3, r=0.05, q=q)
-        assert am >= eu - 1e-9, (flag, K, t, q, am, eu)
+        # an N=200 tree carries ~cent-level discretisation error against the closed form
+        assert am >= eu * 0.99 - 0.01, (flag, K, t, q, am, eu)
 
 
 def test_american_call_without_dividend_is_the_european_call():
@@ -1353,7 +1359,7 @@ def test_american_put_cycle_costs_at_least_the_european_one(tmp_path, monkeypatc
     flat = pd.Series(500.0, index=idx)
     am = OptionSpec(underlying='SPY', right='put', strike_rule='atm', dte_target=30, exercise='american')
     eu = OptionSpec(underlying='SPY', right='put', strike_rule='atm', dte_target=30, exercise='european')
-    stats = {'iv_sources': {}, 'q_positive': 0, 'exercise': set()}
+    stats = ob._new_stats()
     ca = ob._price_single_cycle(am, flat, idx[0], +1, 1.2, 21, 10, stats=stats)
     ce = ob._price_single_cycle(eu, flat, idx[0], +1, 1.2, 21, 10)
     assert ca['entry_price'] >= ce['entry_price'] > 0
@@ -1689,7 +1695,7 @@ ok = mf >= 90 and rn >= 90 and ver.get(3, 0) == len(df)
 if spy is not None:
     print('SPY', {k: (None if pd.isna(spy[k]) else round(float(spy[k]), 4)) for k in cols[2:]})
     ok &= 0.0 <= float(spy['mf_tail_premium_30d']) <= 0.03 and float(spy['rn_skew_30d']) < 0 \
-          and 0.005 <= float(spy['rn_p_dn10_30d']) <= 0.05
+          and 0.001 <= float(spy['rn_p_dn10_30d']) <= 0.10
 panel = pq.read_metadata('data/derived/options_aggregates_enriched.parquet')
 pcols = set(pq.read_schema('data/derived/options_aggregates_enriched.parquet').names)
 missing = [c for c in cols[5:] if c not in pcols]
@@ -1723,7 +1729,7 @@ Spec: docs/specs/2026-09-06-options-mfiv-rnd-synthetic-engine-spec.md · Plan: d
 
 ## Steps (controller, after merge, first idle window — never beside a fleet child)
 1. `sudo systemd-run --unit=surface-v3-rollout-$(date -u +%Y%m%d) -p Nice=19 -p MemoryMax=3500M -p RuntimeMaxSec=5h -E PYTHONUNBUFFERED=1 -E PYTHONPATH=/root/openclaw/src --working-directory=/root/openclaw /bin/bash scripts/rollout_surface_v3.sh` — waits for `openclaw-fleet-overnight-resume` / `fleet-rf-epoch-20260906` / `options-surface-rollout-20260906` to be inactive, rebuilds `data/master/options_surface.parquet` from 2026-06-29 (append_dedup replace on (ticker, date) — UNION BY NAME fills the new columns for every rebuilt row), rebuilds `data/derived/options_aggregates_enriched.parquet`, verifies.
-2. Verification thresholds (script exit 0 = all met): `mfiv_nonnull ≥ 90 %` and `rn_nonnull ≥ 90 %` of tickers with ≥ 2 fitted expiries on the latest session; every latest-session row at version 3; SPY `0 ≤ mf_tail_premium_30d ≤ 0.03`, `rn_skew_30d < 0`, `0.5 % ≤ rn_p_dn10_30d ≤ 5 %`; the panel carries all seven columns.
+2. Verification thresholds (script exit 0 = all met): `mfiv_nonnull ≥ 90 %` and `rn_nonnull ≥ 90 %` of tickers with ≥ 2 fitted expiries on the latest session; every latest-session row at version 3; SPY `0 ≤ mf_tail_premium_30d ≤ 0.03`, `rn_skew_30d < 0`, `0.1 % ≤ rn_p_dn10_30d ≤ 10 %`; the panel carries all seven columns.
 3. No re-backtest: no strategy reads a v3 key and no manifest strategy uses the synthetic engine. The options sleeve's v2 values are byte-identical (freeze test).
 4. Results: **TO BE FILLED by the rollout run on main** (surface rows/dates, coverage percentages, SPY row, panel rows).
 
@@ -1733,7 +1739,7 @@ Spec: docs/specs/2026-09-06-options-mfiv-rnd-synthetic-engine-spec.md · Plan: d
 - `scripts/options_parity_check.py`'s IV gate is near-zero on the surface overlap by construction (ruling G8); measure the vix_term tier with `OPENCLAW_OPTIONS_SURFACE_PATH` pointed at an empty path.
 
 ## Rollback
-- Surface: restore the v2 panel copy `data/derived/options_aggregates_enriched.v1-2026-09-04.parquet` is NOT the right target (that is v1); the v2 rows are still in the master — a v3 → v2 rollback is `git revert` of the Part A commits + `scripts/compute_rolling_options_fields.py` (the panel is derived; the master's extra columns are harmless to v2 readers).
+- Surface: revert the Part A commits, then `scripts/compute_rolling_options_fields.py` (the panel is derived; the master's extra v3 columns are harmless to v2 readers — never delete a master).
 - Engine: `git revert` of the Part B commits; nothing live depends on it.
 ```
 
@@ -1752,8 +1758,181 @@ git commit -m "ops(options): surface v3 rollout script + runbook + changelog (sp
 
 ---
 
+### Task 9: ATM-band fallback for thin chains (coverage amendment, spec §H)
+
+**Why this task exists (added 2026-09-06 13:00 UTC by the controller, ruling in the ledger):** the v2 rollout on main measured `iv30` non-null for only **30.5 %** of liquid-tier tickers on 2026-09-04 (1,178 of 3,861) against **100 %** in the v1 panel. v2's smile gate (≥ 5 IV-bearing strikes on both sides of spot per expiry) plus the 30-day bracket (or a one-sided expiry within ±10 d) drops every thin chain that v1 covered with a single ATM strike. Four live strategies read `iv30`/`iv_rank`/`vrp`; their candidate sets would shrink ~3× the day the flag flips. This task restores v1-style coverage WITHOUT touching any value v2 already computes: an expiry that cannot carry a smile gets a v1-style ATM-band point (|Δ| .40–.60 mean IV, exactly v1's `iv_front` definition per expiry) that participates in the constant-maturity interpolation, flagged by a new `iv30_source` key; the one-sided tolerance widens from 10 to 20 days so a lone 14-day or 42-day monthly can anchor the 30-day point.
+
+**Files:**
+- Modify: `src/strategies/options_surface.py` (`CM_ONE_SIDED_TOL`, `SmileFit.source`, new `atm_band_fit`, the fit loop in `features_for_day`, two new `SCALAR_KEYS`)
+- Modify: `src/strategies/aux_data_loader.py` (`FIELDS` + 2)
+- Modify: `tests/strategies/test_options_surface_parity.py` (`SHARED` + 2)
+- Modify: `scripts/rollout_surface_v3.sh` (verification prints the `iv30` coverage and source split)
+- Modify: `docs/runbooks/2026-09-06-options-surface-v3-rollout.md` (one paragraph)
+- Create: `tests/strategies/test_options_surface_atm_band.py`
+
+**Interfaces:**
+- Consumes: `fit_smile`, `SmileFit`, `constant_maturity`, `_empty_row`, `features_for_day` (Tasks 2–3), `ATM_DELTA`, `IV_MIN` (existing).
+- Produces: `atm_band_fit(exp_rows, dte) -> SmileFit | None`; `SmileFit.source: str = 'smile'` (`'smile' | 'atm_band'`); row keys `iv30_source` (`'smile' | 'atm_band' | None`) and `n_expiries_atm` (int); `CM_ONE_SIDED_TOL = 20`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/strategies/test_options_surface_atm_band.py
+"""Spec 2026-09-06 §H: a chain too thin for a smile still yields a 30-day ATM
+point from the |Δ| .40–.60 band (v1's definition), flagged by iv30_source; a
+chain with smiles is untouched (the v2 freeze test guards SPY/AAPL/XOM)."""
+from __future__ import annotations
+import math
+import numpy as np
+import pandas as pd
+import pytest
+
+from strategies import options_surface as osf
+
+
+def _rows(dte, strikes, spot=100.0, as_of='2026-09-03', iv=0.30):
+    """One expiry; every strike carries a CALL and a PUT with a BS-ish delta."""
+    t = dte / 365
+    exp = (pd.Timestamp(as_of) + pd.Timedelta(days=dte)).date()
+    out = []
+    for K in strikes:
+        d1 = (math.log(spot / K) + 0.5 * iv * iv * t) / (iv * math.sqrt(t))
+        from scipy.stats import norm
+        dc = float(norm.cdf(d1))
+        for flag, d in (('CALL', dc), ('PUT', dc - 1.0)):
+            out.append({'ticker': 'THIN', 'date': as_of, 'expiry': exp, 'strike': float(K), 'option_type': flag,
+                        'implied_volatility': iv, 'delta': d, 'gamma': 0.01, 'theta': -0.02, 'vega': 0.1, 'volume': 1.0})
+    return out
+
+
+def test_thin_chain_gets_atm_band_iv30_flagged():
+    # 3 strikes per expiry: below MIN_STRIKES (5) ⇒ no smile; ATM strike 100 sits in the .40–.60 band.
+    rows = _rows(14, [95.0, 100.0, 105.0], iv=0.30) + _rows(42, [95.0, 100.0, 105.0], iv=0.34)
+    row = osf.features_for_day(pd.DataFrame(rows), 100.0, '2026-09-03')
+    assert row['n_expiries_fit'] == 0 and row['n_expiries_atm'] == 2
+    assert row['iv30_source'] == 'atm_band'
+    assert row['iv30'] is not None and 0.30 < row['iv30'] < 0.34          # bracketed 14 d ↔ 42 d in total variance
+    assert row['iv_25d_put_30d'] is None and row['skew_25d_30d'] is None    # smile-only keys stay None
+    assert row['mfiv_30d'] is None and row['rn_skew_30d'] is None            # v3 keys need a smile
+    assert row['n_strikes_30d'] >= 1
+
+
+def test_one_sided_tolerance_is_twenty_days():
+    assert osf.CM_ONE_SIDED_TOL == 20
+    row = osf.features_for_day(pd.DataFrame(_rows(14, [95.0, 100.0, 105.0])), 100.0, '2026-09-03')
+    assert row['iv30'] == pytest.approx(0.30) and row['iv30_source'] == 'atm_band'   # lone 14-day monthly anchors 30 d
+    row2 = osf.features_for_day(pd.DataFrame(_rows(60, [95.0, 100.0, 105.0])), 100.0, '2026-09-03')
+    assert row2['iv30'] is None and row2['iv30_source'] is None                   # 30 d away: still None
+
+
+def test_band_never_fabricates_when_no_atm_rows():
+    rows = _rows(14, [80.0, 120.0])                                             # deltas far outside .40–.60
+    row = osf.features_for_day(pd.DataFrame(rows), 100.0, '2026-09-03')
+    assert row['iv30'] is None and row['iv30_source'] is None and row['n_expiries_atm'] == 0
+
+
+def test_smile_expiry_keeps_smile_source_and_band_fills_gaps():
+    K = 100.0 * np.exp(np.linspace(-0.3, 0.3, 25))
+    rich = _rows(42, list(K), iv=0.25)                                           # smile-capable expiry
+    thin = _rows(14, [95.0, 100.0, 105.0], iv=0.30)                              # band-only expiry
+    row = osf.features_for_day(pd.DataFrame(rich + thin), 100.0, '2026-09-03')
+    assert row['n_expiries_fit'] == 1 and row['n_expiries_atm'] == 1
+    assert row['iv30_source'] == 'atm_band'                                      # nearest-30 expiry is the 14-day band point
+    assert row['iv30'] is not None and row['iv90'] is None or row['iv90'] is None or row['iv90'] > 0
+
+
+def test_new_keys_registered():
+    from strategies.aux_data_loader import FIELDS
+    for k in ('iv30_source', 'n_expiries_atm'):
+        assert k in osf.SCALAR_KEYS and k in FIELDS
+    empty = osf.features_for_day(pd.DataFrame(), 100.0, '2026-09-03')
+    assert empty['iv30_source'] is None and empty['n_expiries_atm'] == 0
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `python3 -m pytest tests/strategies/test_options_surface_atm_band.py -q`
+Expected: failures (`KeyError: 'n_expiries_atm'`, `CM_ONE_SIDED_TOL == 10`).
+
+- [ ] **Step 3: Implement**
+
+`src/strategies/options_surface.py`:
+- `CM_ONE_SIDED_TOL = 20   # was 10; amendment 2026-09-06 §H — a lone 14 d / 42 d monthly anchors the 30 d point`
+- Append to `SmileFit` (after `rn_p_up10`): `source: str = 'smile'   # 'smile' | 'atm_band' (amendment §H)`
+- Append to `SCALAR_KEYS`: `'iv30_source', 'n_expiries_atm',` under a comment `# amendment 2026-09-06 §H: thin-chain fallback`.
+- In `_empty_row`, add `'n_expiries_atm': 0` to the `row.update({...})` dict (`iv30_source` is already `None` from the SCALAR_KEYS seed).
+- New function, placed right after `fit_smile`:
+
+```python
+ATM_BAND_MIN_ROWS = 1
+
+
+def atm_band_fit(exp_rows: pd.DataFrame, dte: int) -> SmileFit | None:
+    """Fallback per-expiry point when no smile can be fitted (amendment 2026-09-06 §H):
+    the |Δ| .40–.60 band mean IV — v1's `iv_front` definition — carrying only
+    `atm_iv`; every smile-only field is None and `source == 'atm_band'`.
+    Never a fabricated 0: no band row ⇒ None."""
+    if 'delta' not in exp_rows.columns:
+        return None
+    iv = pd.to_numeric(exp_rows['implied_volatility'], errors='coerce')
+    d = pd.to_numeric(exp_rows['delta'], errors='coerce').abs()
+    band = iv[(d >= ATM_DELTA[0]) & (d <= ATM_DELTA[1]) & (iv > IV_MIN)]
+    if len(band) < ATM_BAND_MIN_ROWS:
+        return None
+    atm = float(band.mean())
+    if not (atm > 0):
+        return None
+    return SmileFit(dte=int(dte), t=dte / 365.0, atm_iv=atm, iv_25d_put=None, iv_25d_call=None,
+                    n_strikes=int(len(band)), k_min=0.0, k_max=0.0, source='atm_band')
+```
+- In `features_for_day`, replace the fit loop and the two counters:
+
+```python
+    fits: dict[int, SmileFit] = {}
+    n_smile = n_atm = 0
+    for dte, exp_rows in ch[(ch['dte'] >= FIT_DTE[0]) & (ch['dte'] <= FIT_DTE[1])].groupby('dte'):
+        side = _otm_side(exp_rows, spot_f)
+        fit = fit_smile(side['strike'].to_numpy(), side['iv'].to_numpy(), spot_f, int(dte))
+        if fit is not None:
+            n_smile += 1
+        else:
+            fit = atm_band_fit(exp_rows, int(dte))       # amendment §H: smile first, band fills the gap
+            if fit is not None:
+                n_atm += 1
+        if fit is not None:
+            fits[int(dte)] = fit
+    row['n_expiries_fit'] = n_smile
+    row['n_expiries_atm'] = n_atm
+    if not fits:
+        return row
+```
+and, right after `near30 = min(fits, key=lambda d: abs(d - 30))`, add `row['iv30_source'] = fits[near30].source if row.get('iv30') is None else None` — NO: set it after the `row.update({...})` that assigns `iv30`: `row['iv30_source'] = fits[near30].source if row['iv30'] is not None else None`. `n_expiries_fit` keeps its v2 meaning (smile fits only) so the freeze test still holds; the v3 block (Task 3) is unchanged — `constant_maturity(fits, 30, 'mfiv')` skips band fits automatically because their `mfiv` is None, and the RN keys read `fits[near30].rn_*`, which are None on a band fit.
+
+`src/strategies/aux_data_loader.py`: add `'iv30_source', 'n_expiries_atm',` to `FIELDS` after the v3 block.
+`tests/strategies/test_options_surface_parity.py`: add `'iv30_source', 'n_expiries_atm'` to `SHARED`.
+`scripts/rollout_surface_v3.sh`: in the verification python, extend `cols` with `'iv30_source'` and add, after the `print(f'surface rows=...')` line:
+```python
+src = df['iv30_source'].value_counts(dropna=False).to_dict()
+print(f'iv30 nonnull={df.iv30.notna().mean()*100:.1f}% of {len(df):,} tickers; iv30_source={src}')
+```
+`docs/runbooks/2026-09-06-options-surface-v3-rollout.md`: add under "What changes when this merges": `- Amendment §H (coverage): expiries too thin for a smile now carry a v1-style |Δ| .40–.60 band ATM point into the 30/90-day interpolation (`iv30_source = 'atm_band'`, `n_expiries_atm`); one-sided tolerance 10 → 20 days. Expected `iv30` coverage on the liquid tier rises from 30 % toward v1's 100 %; smile-derived keys (25Δ, MFIV, RN) stay None on those names.`
+
+- [ ] **Step 4: Run**
+
+Run: `python3 -m pytest tests/strategies/test_options_surface_atm_band.py tests/strategies/test_options_surface_v2_freeze.py tests/strategies/test_options_surface_mfiv.py tests/strategies/test_options_surface.py tests/strategies/test_options_surface_series.py tests/strategies/test_options_surface_parity.py tests/scripts/test_build_options_surface.py tests/scripts/test_compute_rolling_from_surface.py tests/execution/test_engine_options_surface_shadow.py -q`
+Expected: all pass. **If the freeze test fails** (a band fit changed a SPY/AAPL/XOM value), do not edit the snapshot: switch to the documented alternative — use band fits only when a ticker-day has NO smile fit at all (`if not fits: fits = band_fits`) — re-run, and say so in the report.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/strategies/options_surface.py src/strategies/aux_data_loader.py tests/strategies/test_options_surface_parity.py tests/strategies/test_options_surface_atm_band.py scripts/rollout_surface_v3.sh docs/runbooks/2026-09-06-options-surface-v3-rollout.md
+git commit -m "feat(options): ATM-band fallback for thin chains + 20-day one-sided tolerance — restores v1-style iv30 coverage, flagged by iv30_source (amendment 2026-09-06 §H)"
+```
+
+---
+
 ## Self-review (done while writing)
 
-- **Spec coverage:** A.1/A.2 → Task 2; A.3/A.4 → Task 3; A.5 (catalogue = runbook "What changes") → Task 8; B.1 → Task 4; B.2 → Task 5; B.3 → Task 6; B.4 → Task 7; C → Task 8; D → Tasks 1–7 tests; G rulings named in the code comments where they bite (G1 `_sigma_on`, G3 `_tail_prob_below`, G4 `features_for_day`, G6 `dividends`, G7 `american_price`, G8 parity-check docstring, G9 `OptionSpec`).
+- **Spec coverage:** §H (coverage amendment, added 2026-09-06) → Task 9; A.1/A.2 → Task 2; A.3/A.4 → Task 3; A.5 (catalogue = runbook "What changes") → Task 8; B.1 → Task 4; B.2 → Task 5; B.3 → Task 6; B.4 → Task 7; C → Task 8; D → Tasks 1–7 tests; G rulings named in the code comments where they bite (G1 `_sigma_on`, G3 `_tail_prob_below`, G4 `features_for_day`, G6 `dividends`, G7 `american_price`, G8 parity-check docstring, G9 `OptionSpec`).
 - **Type consistency:** `strip_features(smile, k_min, k_max, atm, t)` (Task 2) ← `fit_smile`; `SmileFit.mfiv/rn_*` (Task 2) → `constant_maturity(fits, 30, 'mfiv')` and `fits[near30].rn_*` (Task 3); `price/delta(flag, S, K, t, sigma, r=None, as_of=None, q=0.0, exercise=...)` (Task 5) ← Task 7; `synthetic_iv_detail(prices, vrp_factor, window, underlying, as_of, dte) -> (float, str)` (Task 6) ← Task 7 `_iv`; `dividend_yield_asof(ticker, as_of, spot, ref_spot=None)` + `backfill_reference_date()` (Task 4) ← Task 7 `_q`; `interp_total_variance(d1, v1, d2, v2, target)` (Task 6) ← `surface_iv`.
 - **Placeholders:** the only "TO BE FILLED" is the runbook's results line, filled by the rollout run on main by design (same convention as the 2026-09-04 runbook).

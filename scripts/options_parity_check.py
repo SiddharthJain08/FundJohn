@@ -7,6 +7,11 @@ strategies on these underlyings when IV-MAE <= IV_MAE_GATE (0.15). This is sound
 because the engine uses VIX-anchored IV for these names, which directly tracks
 real implied vol across regimes.
 
+2026-09-06: with the surface tier ON by default (spec 2026-09-06 B.3, ruling G8)
+the IV gate compares surface to chain on the overlap window and is expected to
+be near 0 there; run it with OPENCLAW_OPTIONS_SURFACE_PATH pointed at an empty
+path to measure the vix_term tier.
+
 DIAGNOSTIC (run — price-level sweep): price-level MAE from the BS pricer swept
 over a (vrp_factor, window) grid. Carries a documented ~22% structural floor from
 data we don't have: no option-snapshot underlying, no dividends, American≠European,

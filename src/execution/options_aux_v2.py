@@ -25,7 +25,7 @@ FLAG = 'OPENCLAW_OPTIONS_SURFACE'
 BUDGET_ENV = 'OPENCLAW_OPTIONS_SURFACE_BUDGET_S'
 DEFAULT_BUDGET_S = 240.0
 HISTORY_DAYS = 400
-_HIST_COLS = ['ticker', 'date', 'iv30', 'pc_ratio']
+_HIST_COLS = ['ticker', 'date', 'iv30', 'pc_ratio', 'iv30_source']
 
 
 def enabled() -> bool:
@@ -46,20 +46,32 @@ def budget_seconds() -> float:
 
 def load_history(master_dir: Path, tickers, before: pd.Timestamp) -> dict[str, pd.DataFrame]:
     """Surface-master rows per ticker with date < before (last HISTORY_DAYS calendar days),
-    plus the row dated `before` itself when the master already holds it."""
+    plus the row dated `before` itself when the master already holds it.
+
+    `iv30_source` (amendment 2026-09-06 §H) is read when the master carries it; an
+    older master vintage without the column still loads (schema-checked first),
+    with `iv30_source` filled `None` for every row so the precedence block in
+    `build()` always finds the key."""
     path = Path(os.environ.get('OPENCLAW_OPTIONS_SURFACE_PATH') or (Path(master_dir) / 'options_surface.parquet'))
     if not path.exists():
         logger.warning('[options_surface] master %s missing — iv_rank/histories unavailable this run', path)
         return {}
+    try:
+        schema_cols = set(pq.read_schema(path).names)
+    except Exception:  # unreadable schema — fall back to requesting everything and let the read below fail loud
+        schema_cols = set(_HIST_COLS)
+    cols = [c for c in _HIST_COLS if c in schema_cols]
     floor = (before - pd.Timedelta(days=HISTORY_DAYS)).strftime('%Y-%m-%d')
     flt = (pc.field('date') >= pc.scalar(pd.Timestamp(floor).date())) & (pc.field('date') <= pc.scalar(before.date())) \
         & pc.field('ticker').isin(list(tickers))
     try:
-        df = pq.read_table(path, columns=_HIST_COLS, filters=flt).to_pandas()
+        df = pq.read_table(path, columns=cols, filters=flt).to_pandas()
     except Exception:  # date stored as string in some vintages
         flt = (pc.field('date') >= pc.scalar(floor)) & (pc.field('date') <= pc.scalar(before.strftime('%Y-%m-%d'))) \
             & pc.field('ticker').isin(list(tickers))
-        df = pq.read_table(path, columns=_HIST_COLS, filters=flt).to_pandas()
+        df = pq.read_table(path, columns=cols, filters=flt).to_pandas()
+    if 'iv30_source' not in df.columns:
+        df['iv30_source'] = None
     df['date'] = pd.to_datetime(df['date']).dt.normalize()
     return {t: g.sort_values('date') for t, g in df.groupby('ticker')}
 
@@ -109,7 +121,12 @@ def build(opts: pd.DataFrame, universe, today, master_dir, px_window: pd.DataFra
             hist = hist[hist['date'] < chain_date]
         row = features_for_day(prepare_chain(chain, chain_date), spot, chain_date)
         if master_today is not None:                       # precedence: the official record wins
-            row['iv30'] = float(master_today['iv30']) if master_today['iv30'] == master_today['iv30'] else row['iv30']
+            if master_today['iv30'] == master_today['iv30']:
+                row['iv30'] = float(master_today['iv30'])
+                # the master's iv30 wins, so its provenance must win too — never
+                # leave the fresh live fit's iv30_source beside a master value.
+                m_src = master_today.get('iv30_source')
+                row['iv30_source'] = m_src if isinstance(m_src, str) else None
             row['near_iv'] = row['iv30']
             if master_today['pc_ratio'] == master_today['pc_ratio']:
                 row['pc_ratio'] = float(master_today['pc_ratio'])
@@ -148,6 +165,18 @@ def _pct_of_new(new: dict, predicate) -> int:
     return round(100.0 * sum(1 for t in new if predicate(new[t])) / len(new)) if new else 0
 
 
+def _pct_of_subset(new: dict, subset, predicate) -> int:
+    """Share of the tickers satisfying `subset` that also satisfy `predicate`,
+    0-100. Used where the spec defines a coverage ratio over a sub-population
+    (v3 coverage is measured on tickers with ≥ 2 fitted expiries, spec §C.3 —
+    the same denominator the rollout verify uses). Empty subset ⇒ 0, never a
+    division by zero and never a fabricated 100 %."""
+    n = sum(1 for t in new if subset(new[t]))
+    if not n:
+        return 0
+    return round(100.0 * sum(1 for t in new if subset(new[t]) and predicate(new[t])) / n)
+
+
 def shadow_summary(old: dict, new: dict, seconds=None) -> str:
     """One-line old-vs-new comparison (spec 2026-09-04 A.7).
 
@@ -155,8 +184,14 @@ def shadow_summary(old: dict, new: dict, seconds=None) -> str:
     path losing rv_20 (and therefore vrp/vrp_zscore) whenever prices.parquet
     lags the chain date. `spot_stale` is the share of tickers priced off a
     close OLDER than the surface date (normal at the 15:00 ET compute, since
-    the day's close does not exist yet). `dur` is the build's wall clock, or
-    `n/a` when the caller did not time it."""
+    the day's close does not exist yet). `mfiv_nonnull`/`rn_nonnull` are the
+    v3 coverage — spec 2026-09-06 §C.3 expects ≥ 90 % of tickers with ≥ 2
+    fitted expiries, and that sub-population IS their denominator (final
+    review I2), matching the rollout verify. `iv30_src smile=…% band=…%`
+    splits the served `iv30` by provenance over the tickers that have one
+    (spec §H.5); the two need not sum to 100 — a master row without the
+    column serves `iv30` with `iv30_source = None`. `dur` is the build's
+    wall clock, or `n/a` when the caller did not time it."""
     common = [t for t in new if t in old]
     ratios = [old[t]['iv30'] / new[t]['iv30'] for t in common
               if old[t].get('iv30') and new[t].get('iv30')]
@@ -165,10 +200,18 @@ def shadow_summary(old: dict, new: dict, seconds=None) -> str:
     pct = _pct_of_new(new, lambda r: r.get('iv_rank') is not None)
     rv_pct = _pct_of_new(new, lambda r: r.get('rv_20') is not None)
     vrp_pct = _pct_of_new(new, lambda r: r.get('vrp') is not None)
+    fit2 = lambda r: (r.get('n_expiries_fit') or 0) >= 2      # noqa: E731 — spec §C.3 denominator
+    mf_pct = _pct_of_subset(new, fit2, lambda r: r.get('mfiv_30d') is not None)
+    rn_pct = _pct_of_subset(new, fit2, lambda r: r.get('rn_skew_30d') is not None)
+    has_iv30 = lambda r: r.get('iv30') is not None            # noqa: E731 — §H.5 split denominator
+    smile_pct = _pct_of_subset(new, has_iv30, lambda r: r.get('iv30_source') == 'smile')
+    band_pct = _pct_of_subset(new, has_iv30, lambda r: r.get('iv30_source') == 'atm_band')
     stale_pct = _pct_of_new(new, lambda r: r.get('spot_date') is not None
                             and r.get('surface_date') is not None
                             and r['spot_date'] < r['surface_date'])
     dur = 'n/a' if seconds is None else f'{float(seconds):.0f}s'
     return (f'[options_surface] shadow n={len(new)} iv30 old/new median={med:.3f} p90={p90:.3f} '
             f'iv_rank_nonnull={pct}% rv20_nonnull={rv_pct}% vrp_nonnull={vrp_pct}% '
+            f'mfiv_nonnull={mf_pct}% rn_nonnull={rn_pct}% '
+            f'iv30_src smile={smile_pct}% band={band_pct}% '
             f'spot_stale={stale_pct}% dur={dur} version={OPTIONS_FEATURES_VERSION}')

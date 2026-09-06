@@ -31,7 +31,7 @@ def test_build_returns_v2_keys_with_iv_rank(tmp_path):
     out = v2.build(chain, ['SPY', 'AAPL', 'XOM', 'ZZZT'], pd.Timestamp('2026-09-03'), master, px)
     assert set(out) == {'SPY', 'AAPL', 'XOM'}
     spy = out['SPY']
-    assert spy['options_features_version'] == 2 and 0.08 < spy['iv30'] < 0.20
+    assert spy['options_features_version'] == 3 and 0.08 < spy['iv30'] < 0.20
     assert spy['iv_rank'] is not None and 0 <= spy['iv_rank'] <= 100
     assert spy['last_price'] == pytest.approx(px[(px.ticker == 'SPY') & (px.date == '2026-09-03')]['close'].iloc[0])
     assert isinstance(spy['hv20_history'], list) and spy['rv_20'] > 0
@@ -44,10 +44,31 @@ def test_master_row_precedence(tmp_path):
     chain, px, master = _inputs(tmp_path)
     m = pd.read_parquet(master / 'options_surface.parquet')
     m = pd.concat([m, pd.DataFrame([{'ticker': 'SPY', 'date': pd.Timestamp('2026-09-03').date(), 'iv30': 0.777,
-                                     'pc_ratio': 1.0, 'options_features_version': 2}])], ignore_index=True)
+                                     'pc_ratio': 1.0, 'options_features_version': 3, 'iv30_source': 'atm_band'}])],
+                  ignore_index=True)
     m.to_parquet(master / 'options_surface.parquet', index=False)
     out = v2.build(chain, ['SPY'], pd.Timestamp('2026-09-03'), master, px)
     assert out['SPY']['iv30'] == pytest.approx(0.777)
+    # amendment 2026-09-06 §H (fix round 1): the master's iv30 wins, so its
+    # provenance must win too — never the fresh live fit's iv30_source.
+    assert out['SPY']['iv30_source'] == 'atm_band'
+
+
+def test_master_row_precedence_without_iv30_source_column(tmp_path):
+    """An older master vintage without the iv30_source column still loads
+    (load_history schema-checks first) and precedence still picks up iv30;
+    iv30_source is served None rather than left as the fresh live fit's label."""
+    from execution import options_aux_v2 as v2
+    chain, px, master = _inputs(tmp_path)
+    m = pd.read_parquet(master / 'options_surface.parquet')
+    assert 'iv30_source' not in m.columns          # the fixture's base history predates the column
+    m = pd.concat([m, pd.DataFrame([{'ticker': 'SPY', 'date': pd.Timestamp('2026-09-03').date(), 'iv30': 0.777,
+                                     'pc_ratio': 1.0, 'options_features_version': 2}])], ignore_index=True)
+    assert 'iv30_source' not in m.columns
+    m.to_parquet(master / 'options_surface.parquet', index=False)
+    out = v2.build(chain, ['SPY'], pd.Timestamp('2026-09-03'), master, px)
+    assert out['SPY']['iv30'] == pytest.approx(0.777)
+    assert out['SPY']['iv30_source'] is None
 
 
 def test_build_populates_oi_from_cboe_session(tmp_path, monkeypatch):
@@ -81,19 +102,38 @@ def test_shadow_summary_line():
     old = {'A': {'iv30': 0.40, 'iv_rank': 50.0}, 'B': {'iv30': 0.50, 'iv_rank': 50.0}}
     new = {'A': {'iv30': 0.20, 'iv_rank': 33.0}, 'B': {'iv30': 0.25, 'iv_rank': None}}
     line = v2.shadow_summary(old, new)
-    assert line.startswith('[options_surface] shadow n=2 iv30 old/new median=2.000') and 'iv_rank_nonnull=50%' in line and 'version=2' in line
+    assert line.startswith('[options_surface] shadow n=2 iv30 old/new median=2.000') and 'iv_rank_nonnull=50%' in line and 'version=3' in line
     # Final fix wave 2026-09-05 (F1/F4c): the line carries the fields the
     # runbook's "clean shadow" definition reads. Called without `seconds`
     # (as here and by any legacy caller) dur is n/a, never a crash.
     assert 'rv20_nonnull=0%' in line and 'vrp_nonnull=0%' in line
     assert 'spot_stale=0%' in line and 'dur=n/a' in line
+    assert 'mfiv_nonnull=0%' in line and 'rn_nonnull=0%' in line   # v3 coverage fields (spec 2026-09-06 §C.3)
     rich = {'A': {'iv30': 0.20, 'iv_rank': 33.0, 'rv_20': 0.1, 'vrp': 0.1,
                   'spot_date': '2026-09-02', 'surface_date': '2026-09-03'},
             'B': {'iv30': 0.25, 'iv_rank': None, 'rv_20': 0.1, 'vrp': None,
                   'spot_date': '2026-09-03', 'surface_date': '2026-09-03'}}
+    assert 'iv30_src smile=0% band=0%' in line          # §H.5 split; no iv30_source ⇒ 0/0, never fabricated
     line2 = v2.shadow_summary(old, rich, seconds=12.4)
     assert 'rv20_nonnull=100%' in line2 and 'vrp_nonnull=50%' in line2
     assert 'spot_stale=50%' in line2 and 'dur=12s' in line2
+    # Final review I2: the v3 coverage denominator is tickers with
+    # n_expiries_fit >= 2 (spec §C.3), not every ticker — C has one fit and
+    # must not dilute the ratio.
+    cov = {'A': {'iv30': 0.20, 'n_expiries_fit': 2, 'mfiv_30d': 0.21, 'rn_skew_30d': -0.4},
+           'B': {'iv30': 0.25, 'n_expiries_fit': 2},
+           'C': {'iv30': 0.30, 'n_expiries_fit': 1, 'mfiv_30d': None}}
+    line3 = v2.shadow_summary(old, cov)
+    assert 'mfiv_nonnull=50%' in line3 and 'rn_nonnull=50%' in line3
+    # Final review I3: iv30_source split over the tickers that HAVE an iv30.
+    split = {'A': {'iv30': 0.20, 'iv30_source': 'smile'},
+             'B': {'iv30': 0.25, 'iv30_source': 'atm_band'},
+             'C': {'iv30': 0.30, 'iv30_source': 'atm_band'},
+             'D': {'iv30': 0.30, 'iv30_source': None},
+             'E': {'iv30': None, 'iv30_source': 'smile'}}
+    line4 = v2.shadow_summary(old, split)
+    assert 'iv30_src smile=25% band=50%' in line4       # 4 tickers with iv30; D's None is neither
+    assert 'rn_nonnull=0%' in line4                     # existing fields keep their spacing
 
 
 def test_engine_flag_selects_dict(monkeypatch, caplog, tmp_path):

@@ -185,3 +185,62 @@ def test_auto_backtest_refuses_option_strategy(tmp_path):
     import pytest
     with pytest.raises(ValueError, match='option'):
         auto.run_backtest(str(fp))
+
+
+# ── spec 2026-09-06 B.4: dividends, American exercise, dte-aware IV ──
+def _isolated_masters(tmp_path, monkeypatch, spy_q=0.02):
+    """No production masters: an empty surface path, a tiny corporate_actions file
+    that gives SPY a `spy_q` trailing yield at a 500 spot, and no VIX9D file."""
+    monkeypatch.setenv('OPENCLAW_OPTIONS_SURFACE_PATH', str(tmp_path / 'no_surface.parquet'))
+    monkeypatch.setenv('OPENCLAW_VOL_INDICES_PARQUET', str(tmp_path / 'no_vol.parquet'))
+    rows = [{'symbol': 'SPY', 'action_type': 'cash_dividend', 'ex_date': d.date(), 'cash_amount': spy_q * 500.0 / 4}
+            for d in pd.date_range('2019-01-15', '2026-09-01', freq='3MS')]
+    p = tmp_path / 'corporate_actions.parquet'; pd.DataFrame(rows).to_parquet(p, index=False)
+    monkeypatch.setenv('OPENCLAW_CORPORATE_ACTIONS_PARQUET', str(p))
+    from backtest import dividends, synthetic_iv, vol_index
+    dividends.clear_cache(); synthetic_iv.clear_cache(); vol_index._vix9d_series.cache_clear()
+
+
+def test_option_spec_exercise_defaults_to_american_and_round_trips():
+    from strategies.base import OptionSpec
+    assert OptionSpec(underlying='SPY').exercise == 'american'
+    assert OptionSpec.from_dict({'underlying': 'SPY', 'exercise': 'european'}).exercise == 'european'
+
+
+def test_american_put_cycle_costs_at_least_the_european_one(tmp_path, monkeypatch):
+    from backtest import options_backtest as ob
+    from strategies.base import OptionSpec
+    _isolated_masters(tmp_path, monkeypatch, spy_q=0.03)
+    monkeypatch.setattr(ob, 'synthetic_iv_detail', lambda *a, **k: (0.30, 'realized'))
+    idx = pd.date_range('2025-06-02', periods=60, freq='B')
+    flat = pd.Series(500.0, index=idx)
+    am = OptionSpec(underlying='SPY', right='put', strike_rule='atm', dte_target=30, exercise='american')
+    eu = OptionSpec(underlying='SPY', right='put', strike_rule='atm', dte_target=30, exercise='european')
+    stats = ob._new_stats()
+    ca = ob._price_single_cycle(am, flat, idx[0], +1, 1.2, 21, 10, stats=stats)
+    ce = ob._price_single_cycle(eu, flat, idx[0], +1, 1.2, 21, 10)
+    assert ca['entry_price'] > ce['entry_price'] > 0
+    assert stats['q_positive'] > 0 and stats['exercise'] == {'american'}
+
+
+def test_simulate_logs_iv_sources_and_keeps_trade_keys(tmp_path, monkeypatch, caplog):
+    import logging
+    _isolated_masters(tmp_path, monkeypatch)
+    close_wide, bars = _trending_panels()
+    regimes = pd.Series('LOW_VOL', index=close_wide.index)
+    inst = _LongCallStrat()
+    with caplog.at_level(logging.INFO):
+        out = options_backtest.simulate(inst, close_wide, bars, regimes, close_wide.index[0], close_wide.index[-1],
+                                        strategy_id='T_long_call', vrp_factor=1.1)
+    assert len(out['trades']) >= 1
+    t = out['trades'][0]
+    assert set(t) == {'entry_date', 'exit_date', 'entry_price', 'exit_price', 'exit_reason', 'holding_days',
+                      'pnl_pct', 'strike', 'expiry', 'iv_entry', 'signal_stop', 'signal_target',
+                      'ticker', 'direction', 'entry_regime'}
+    line = [r.message for r in caplog.records if r.message.startswith('[options_backtest] iv sources:')]
+    assert len(line) == 1 and 'exercise=american' in line[0]
+    import re
+    counts = {k: int(v) for k, v in re.findall(r'(surface|vix_term|realized)=(\d+)', line[0])}
+    assert sum(counts.values()) >= 1 and set(counts) == {'surface', 'vix_term', 'realized'}
+    # the 2022 panel predates the dividend fixture's coverage + 365 d?  No — coverage starts 2019, so q > 0 applies
+    assert 'q>0 on 0 prices' not in line[0]

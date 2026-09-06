@@ -22,7 +22,7 @@ def test_build_rows_from_real_chain_fixture():
     assert set(rows['ticker']) == {'SPY', 'AAPL', 'XOM'}
     spy = rows[rows.ticker == 'SPY'].iloc[0]
     assert 0.08 < spy['iv30'] < 0.20            # true 30d ATM, not the 0.40 chain mean
-    assert spy['n_expiries_fit'] >= 5 and spy['options_features_version'] == 2
+    assert spy['n_expiries_fit'] >= 5 and spy['options_features_version'] == 3
     assert 'built_at' in rows.columns and rows['date'].astype(str).unique().tolist() == ['2026-09-03']
     for c in m.SCALAR_KEYS:
         assert c in rows.columns

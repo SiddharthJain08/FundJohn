@@ -123,6 +123,11 @@ FIELDS = [
     'iv90', 'iv_25d_put_30d', 'iv_25d_call_30d', 'skew_25d_30d', 'rr_25d_30d', 'skew_20d',
     'expiry_date', 'n_expiries_fit', 'n_strikes_30d', 'options_features_version',
     'max_pain', 'pcr_oi', 'oi_session',
+    # options_surface v3 (spec 2026-09-06 A.3)
+    'mfiv_30d', 'mfiv_90d', 'mf_tail_premium_30d',
+    'rn_skew_30d', 'rn_kurt_30d', 'rn_p_dn10_30d', 'rn_p_up10_30d',
+    # amendment 2026-09-06 §H: thin-chain fallback
+    'iv30_source', 'n_expiries_atm',
 ]
 
 # Any `earnings_dte` beyond this gets suppressed — the earnings parquet

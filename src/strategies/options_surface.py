@@ -18,13 +18,13 @@ import pandas as pd
 from scipy.interpolate import PchipInterpolator
 from scipy.stats import norm
 
-OPTIONS_FEATURES_VERSION = 2
+OPTIONS_FEATURES_VERSION = 3
 FIT_DTE = (7, 120)          # expiries eligible for a smile fit
 CHAIN_DTE = (1, 120)        # rows kept at all
 FRONT_DTE_MAX = 45          # "front usable expiry" for greeks / iv_spread
 ATM_DELTA = (0.40, 0.60)
 CM_TARGETS = (30, 90)
-CM_ONE_SIDED_TOL = 10
+CM_ONE_SIDED_TOL = 20   # was 10; amendment 2026-09-06 §H — a lone 14 d / 42 d monthly anchors the 30 d point
 MIN_STRIKES = 5
 IV_MIN = 0.01
 DELTA_BAND = (0.05, 0.95)
@@ -32,11 +32,22 @@ _GREEKS = ('delta', 'gamma', 'theta', 'vega')
 _D1_25_CALL = float(norm.ppf(0.25))   # −0.6745
 _D1_25_PUT = float(norm.ppf(0.75))    # +0.6745
 
+# Spec 2026-09-06 §A.1–A.2 — model-free strip on the fitted smile.
+K_TRUNC = 5.0            # strip half-width in units of σ_atm·√T (ruling G2)
+N_GRID = 401             # odd ⇒ k = 0 (the call/put switch) is a node
+RN_TAIL_MOVE = 0.10      # ±10 % tail probabilities
+RN_MOMENT_DTE_TOL = 15   # RN moments/tails from the expiry nearest 30 DTE within this (G4)
+
 SCALAR_KEYS = [
     'spot', 'iv30', 'iv90', 'iv_25d_put_30d', 'iv_25d_call_30d', 'skew_25d_30d', 'rr_25d_30d',
     'ts_ratio', 'term_slope', 'iv_spread', 'gamma_atm', 'theta_atm',
     'call_volume', 'put_volume', 'volume', 'pc_ratio', 'expiry_date',
     'n_expiries_fit', 'n_strikes_30d', 'options_features_version',
+    # v3 (spec 2026-09-06 A.3): model-free variance + risk-neutral density
+    'mfiv_30d', 'mfiv_90d', 'mf_tail_premium_30d',
+    'rn_skew_30d', 'rn_kurt_30d', 'rn_p_dn10_30d', 'rn_p_up10_30d',
+    # amendment 2026-09-06 §H: thin-chain fallback
+    'iv30_source', 'n_expiries_atm',
 ]
 
 
@@ -50,6 +61,12 @@ class SmileFit:
     n_strikes: int
     k_min: float
     k_max: float
+    mfiv: float | None = None        # model-free implied vol √(V/T) — spec 2026-09-06 A.2
+    rn_skew: float | None = None     # BKM risk-neutral skewness of ln(S_T/F)
+    rn_kurt: float | None = None     # BKM risk-neutral kurtosis (raw; 3 = lognormal)
+    rn_p_dn10: float | None = None   # RN P(S_T ≤ 0.9·F)
+    rn_p_up10: float | None = None   # RN P(S_T ≥ 1.1·F)
+    source: str = 'smile'   # 'smile' | 'atm_band' (amendment §H)
 
 
 def _f(v) -> float | None:
@@ -111,6 +128,82 @@ def _moneyness_for_delta(smile, t: float, k_min: float, k_max: float, d1: float,
     return x
 
 
+def _sigma_on(smile, k, k_min: float, k_max: float, atm: float) -> np.ndarray:
+    """Smile vol at log-moneyness k with FLAT extrapolation outside the observed
+    strike range (ruling G1); non-finite or sub-floor values fall back to ATM."""
+    s = np.asarray(smile(np.clip(np.asarray(k, dtype=float), k_min, k_max)), dtype=float)
+    return np.where(np.isfinite(s) & (s > IV_MIN), s, atm)
+
+
+def _strip_prices(sig: np.ndarray, k: np.ndarray, t: float) -> np.ndarray:
+    """Normalised, undiscounted OTM Black prices q(k) = Q/F with F = S, r = q = 0:
+    call for k ≥ 0, put for k < 0 (spec A.1)."""
+    st = sig * math.sqrt(t)
+    d1 = (-k + 0.5 * sig * sig * t) / st
+    d2 = d1 - st
+    call = norm.cdf(d1) - np.exp(k) * norm.cdf(d2)
+    put = np.exp(k) * norm.cdf(-d2) - norm.cdf(-d1)
+    return np.maximum(np.where(k >= 0.0, call, put), 0.0)
+
+
+def _tail_prob_below(smile, k: float, k_min: float, k_max: float, atm: float, t: float) -> float | None:
+    """RN P(S_T ≤ F·e^k) from the smile-adjusted digital (spec A.2):
+    Φ(−d2) + e^{−k} φ(d1) √T σ′(k), σ′ = 0 in the flat wings, clipped to [0, 1] (G3)."""
+    sig = float(_sigma_on(smile, np.array([k]), k_min, k_max, atm)[0])
+    st = sig * math.sqrt(t)
+    d1 = (-k + 0.5 * sig * sig * t) / st
+    d2 = d1 - st
+    dsig = 0.0
+    if k_min <= k <= k_max:
+        try:
+            dsig = float(smile.derivative()(k))
+        except Exception:  # noqa: BLE001 — a callable without .derivative() ⇒ flat
+            dsig = 0.0
+        if not math.isfinite(dsig):
+            dsig = 0.0
+    p = float(norm.cdf(-d2)) + math.exp(-k) * float(norm.pdf(d1)) * math.sqrt(t) * dsig
+    return float(min(max(p, 0.0), 1.0)) if math.isfinite(p) else None
+
+
+_STRIP_NONE = {'mfiv': None, 'rn_skew': None, 'rn_kurt': None, 'rn_p_dn10': None, 'rn_p_up10': None}
+
+
+def strip_features(smile, k_min: float, k_max: float, atm: float, t: float) -> dict:
+    """Model-free implied variance (DDKZ/VIX integral), BKM (2003) risk-neutral
+    skewness/kurtosis and ±10 % tail probabilities for ONE expiry, from its
+    fitted smile (spec 2026-09-06 §A.1–A.2). In log-moneyness dK/K² = e^{−k}/F·dk,
+    so every integral is ∫ weight(k)·q(k)·e^{−k} dk over a ±K_TRUNC·σ√T grid.
+    Returns None values for anything not finite; never raises."""
+    out = dict(_STRIP_NONE)
+    try:
+        if not (atm > 0.0 and t > 0.0):
+            return out
+        L = K_TRUNC * atm * math.sqrt(t)
+        k = np.linspace(-L, L, N_GRID)
+        q = _strip_prices(_sigma_on(smile, k, k_min, k_max, atm), k, t)
+        w = q * np.exp(-k)
+        var_total = 2.0 * float(np.trapezoid(w, k))            # variance-swap total variance
+        if var_total > 0.0:
+            out['mfiv'] = math.sqrt(var_total / t)
+        v2 = 2.0 * float(np.trapezoid((1.0 - k) * w, k))        # BKM V  (E[x²])
+        w3 = float(np.trapezoid((6.0 * k - 3.0 * k * k) * w, k))  # BKM W  (E[x³])
+        x4 = float(np.trapezoid((12.0 * k * k - 4.0 * k ** 3) * w, k))  # BKM X (E[x⁴])
+        mu = -v2 / 2.0 - w3 / 6.0 - x4 / 24.0                     # E[x], r = 0
+        var = v2 - mu * mu
+        if var > 0.0:
+            out['rn_skew'] = (w3 - 3.0 * mu * v2 + 2.0 * mu ** 3) / var ** 1.5
+            out['rn_kurt'] = (x4 - 4.0 * mu * w3 + 6.0 * mu * mu * v2 - 3.0 * mu ** 4) / var ** 2
+        out['rn_p_dn10'] = _tail_prob_below(smile, math.log(1.0 - RN_TAIL_MOVE), k_min, k_max, atm, t)
+        below_up = _tail_prob_below(smile, math.log(1.0 + RN_TAIL_MOVE), k_min, k_max, atm, t)
+        out['rn_p_up10'] = None if below_up is None else float(1.0 - below_up)
+        for key, val in list(out.items()):
+            if val is not None and not math.isfinite(val):
+                out[key] = None
+        return out
+    except Exception:  # noqa: BLE001 — a degenerate smile must never break the row
+        return dict(_STRIP_NONE)
+
+
 def fit_smile(strikes, ivs, spot: float, dte: int) -> SmileFit | None:
     K = np.asarray(strikes, dtype=float)
     iv = np.asarray(ivs, dtype=float)
@@ -132,8 +225,31 @@ def fit_smile(strikes, ivs, spot: float, dte: int) -> SmileFit | None:
     xc = _moneyness_for_delta(smile, t, k[0], k[-1], _D1_25_CALL, atm)
     ivp = _f(smile(xp))
     ivc = _f(smile(xc))
+    strip = strip_features(smile, float(k[0]), float(k[-1]), atm, t)
     return SmileFit(dte=int(dte), t=t, atm_iv=atm, iv_25d_put=ivp, iv_25d_call=ivc,
-                    n_strikes=int(len(K)), k_min=float(k[0]), k_max=float(k[-1]))
+                    n_strikes=int(len(K)), k_min=float(k[0]), k_max=float(k[-1]), **strip)
+
+
+ATM_BAND_MIN_ROWS = 1
+
+
+def atm_band_fit(exp_rows: pd.DataFrame, dte: int) -> SmileFit | None:
+    """Fallback per-expiry point when no smile can be fitted (amendment 2026-09-06 §H):
+    the |Δ| .40–.60 band mean IV — v1's `iv_front` definition — carrying only
+    `atm_iv`; every smile-only field is None and `source == 'atm_band'`.
+    Never a fabricated 0: no band row ⇒ None."""
+    if 'delta' not in exp_rows.columns:
+        return None
+    iv = pd.to_numeric(exp_rows['implied_volatility'], errors='coerce')
+    d = pd.to_numeric(exp_rows['delta'], errors='coerce').abs()
+    band = iv[(d >= ATM_DELTA[0]) & (d <= ATM_DELTA[1]) & (iv > IV_MIN)]
+    if len(band) < ATM_BAND_MIN_ROWS:
+        return None
+    atm = float(band.mean())
+    if not (atm > 0):
+        return None
+    return SmileFit(dte=int(dte), t=dte / 365.0, atm_iv=atm, iv_25d_put=None, iv_25d_call=None,
+                    n_strikes=int(len(band)), k_min=0.0, k_max=0.0, source='atm_band')
 
 
 def constant_maturity(fits: dict, target_dte: int, attr: str) -> float | None:
@@ -160,7 +276,7 @@ def _empty_row(spot, as_of) -> dict:
     row = {k: None for k in SCALAR_KEYS}
     row.update({'spot': _f(spot), 'last_price': _f(spot), 'near_iv': None, 'far_iv': None,
                 'skew_20d': None, 'call_volume': 0.0, 'put_volume': 0.0, 'volume': 0.0,
-                'n_expiries_fit': 0, 'n_strikes_30d': 0,
+                'n_expiries_fit': 0, 'n_strikes_30d': 0, 'n_expiries_atm': 0,
                 'options_features_version': OPTIONS_FEATURES_VERSION})
     return row
 
@@ -203,29 +319,59 @@ def features_for_day(chain: pd.DataFrame, spot, as_of) -> dict:
     if not (spot_f and spot_f > 0):
         return row
     fits: dict[int, SmileFit] = {}
+    n_smile = n_atm = 0
     for dte, exp_rows in ch[(ch['dte'] >= FIT_DTE[0]) & (ch['dte'] <= FIT_DTE[1])].groupby('dte'):
         side = _otm_side(exp_rows, spot_f)
         fit = fit_smile(side['strike'].to_numpy(), side['iv'].to_numpy(), spot_f, int(dte))
         if fit is not None:
+            n_smile += 1
+        else:
+            fit = atm_band_fit(exp_rows, int(dte))       # amendment §H: smile first, band fills the gap
+            if fit is not None:
+                n_atm += 1
+        if fit is not None:
             fits[int(dte)] = fit
-    row['n_expiries_fit'] = len(fits)
+    row['n_expiries_fit'] = n_smile
+    row['n_expiries_atm'] = n_atm
     if not fits:
         return row
+    # Band points may lift `iv30`/`iv90` (§H.1), but every smile-only key is
+    # taken against the smile-only fits — a difference like `p30 − iv30` must
+    # compare the SAME maturity mix, or a mixed ticker-day fabricates a skew
+    # that is really the band-vs-smile term spread (final review C1).
+    smile_fits = {d: f for d, f in fits.items() if f.source == 'smile'}
     iv30 = constant_maturity(fits, 30, 'atm_iv')
     iv90 = constant_maturity(fits, 90, 'atm_iv')
-    p30 = constant_maturity(fits, 30, 'iv_25d_put')
-    c30 = constant_maturity(fits, 30, 'iv_25d_call')
-    near30 = min(fits, key=lambda d: abs(d - 30))
+    iv30_s = constant_maturity(smile_fits, 30, 'atm_iv')
+    p30 = constant_maturity(smile_fits, 30, 'iv_25d_put')
+    c30 = constant_maturity(smile_fits, 30, 'iv_25d_call')
+    near30 = min(fits, key=lambda d: abs(d - 30))            # the point iv30 leans on
+    near30_s = min(smile_fits, key=lambda d: abs(d - 30)) if smile_fits else None
     row.update({
         'iv30': iv30, 'iv90': iv90, 'near_iv': iv30, 'far_iv': iv90,
         'ts_ratio': (iv30 / iv90) if (iv30 is not None and iv90 is not None and iv90 > 0) else None,
         'term_slope': (iv90 - iv30) if (iv30 is not None and iv90 is not None) else None,
         'iv_25d_put_30d': p30, 'iv_25d_call_30d': c30,
-        'skew_25d_30d': (p30 - iv30) if (p30 is not None and iv30 is not None) else None,
+        'skew_25d_30d': (p30 - iv30_s) if (p30 is not None and iv30_s is not None) else None,
         'rr_25d_30d': (p30 - c30) if (p30 is not None and c30 is not None) else None,
         'n_strikes_30d': fits[near30].n_strikes,
     })
+    # Honest label: 'smile' only when the smile-only 30 d point IS the served
+    # one (same inputs through the same function ⇒ exact equality is legitimate);
+    # any band participation in the interpolation reads 'atm_band'.
+    row['iv30_source'] = (None if iv30 is None else
+                          ('smile' if (iv30_s is not None and iv30 == iv30_s) else 'atm_band'))
     row['skew_20d'] = row['skew_25d_30d']
+    # v3 (spec 2026-09-06 A.3): MFIV interpolates in total variance like the ATM
+    # points; RN moments/tails come from the smile expiry nearest 30 DTE (G4).
+    mf30 = constant_maturity(fits, 30, 'mfiv')      # band fits carry mfiv=None ⇒ already smile-only
+    mf90 = constant_maturity(fits, 90, 'mfiv')
+    row.update({'mfiv_30d': mf30, 'mfiv_90d': mf90,
+                'mf_tail_premium_30d': (mf30 - iv30_s) if (mf30 is not None and iv30_s is not None) else None})
+    if near30_s is not None and abs(near30_s - 30) <= RN_MOMENT_DTE_TOL:
+        f30 = smile_fits[near30_s]
+        row.update({'rn_skew_30d': f30.rn_skew, 'rn_kurt_30d': f30.rn_kurt,
+                    'rn_p_dn10_30d': f30.rn_p_dn10, 'rn_p_up10_30d': f30.rn_p_up10})
     return row
 
 
