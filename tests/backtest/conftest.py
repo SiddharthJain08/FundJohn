@@ -20,3 +20,20 @@ import pytest
 def _pin_legacy_fill_model(monkeypatch):
     if 'OPENCLAW_BT_FILL_MODEL' not in os.environ:
         monkeypatch.setenv('OPENCLAW_BT_FILL_MODEL', 'close')
+
+
+@pytest.fixture(autouse=True)
+def _isolate_iv_masters(monkeypatch, tmp_path):
+    """Spec 2026-09-06 B.3 / global constraint: backtest tests never read the
+    production surface or vol-indices masters. Point both env overrides at
+    non-existent tmp paths (a test that needs a fixture master sets the env
+    itself, which wins) and clear the per-process caches so nothing cached
+    from another test leaks through."""
+    monkeypatch.setenv('OPENCLAW_OPTIONS_SURFACE_PATH', str(tmp_path / 'no_surface.parquet'))
+    monkeypatch.setenv('OPENCLAW_VOL_INDICES_PARQUET', str(tmp_path / 'no_vol_indices.parquet'))
+    from backtest import synthetic_iv, vol_index
+    synthetic_iv.clear_cache()
+    vol_index._vix9d_series.cache_clear()
+    yield
+    synthetic_iv.clear_cache()
+    vol_index._vix9d_series.cache_clear()
