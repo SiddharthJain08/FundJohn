@@ -24,7 +24,7 @@ CHAIN_DTE = (1, 120)        # rows kept at all
 FRONT_DTE_MAX = 45          # "front usable expiry" for greeks / iv_spread
 ATM_DELTA = (0.40, 0.60)
 CM_TARGETS = (30, 90)
-CM_ONE_SIDED_TOL = 10
+CM_ONE_SIDED_TOL = 20   # was 10; amendment 2026-09-06 §H — a lone 14 d / 42 d monthly anchors the 30 d point
 MIN_STRIKES = 5
 IV_MIN = 0.01
 DELTA_BAND = (0.05, 0.95)
@@ -46,6 +46,8 @@ SCALAR_KEYS = [
     # v3 (spec 2026-09-06 A.3): model-free variance + risk-neutral density
     'mfiv_30d', 'mfiv_90d', 'mf_tail_premium_30d',
     'rn_skew_30d', 'rn_kurt_30d', 'rn_p_dn10_30d', 'rn_p_up10_30d',
+    # amendment 2026-09-06 §H: thin-chain fallback
+    'iv30_source', 'n_expiries_atm',
 ]
 
 
@@ -64,6 +66,7 @@ class SmileFit:
     rn_kurt: float | None = None     # BKM risk-neutral kurtosis (raw; 3 = lognormal)
     rn_p_dn10: float | None = None   # RN P(S_T ≤ 0.9·F)
     rn_p_up10: float | None = None   # RN P(S_T ≥ 1.1·F)
+    source: str = 'smile'   # 'smile' | 'atm_band' (amendment §H)
 
 
 def _f(v) -> float | None:
@@ -227,6 +230,28 @@ def fit_smile(strikes, ivs, spot: float, dte: int) -> SmileFit | None:
                     n_strikes=int(len(K)), k_min=float(k[0]), k_max=float(k[-1]), **strip)
 
 
+ATM_BAND_MIN_ROWS = 1
+
+
+def atm_band_fit(exp_rows: pd.DataFrame, dte: int) -> SmileFit | None:
+    """Fallback per-expiry point when no smile can be fitted (amendment 2026-09-06 §H):
+    the |Δ| .40–.60 band mean IV — v1's `iv_front` definition — carrying only
+    `atm_iv`; every smile-only field is None and `source == 'atm_band'`.
+    Never a fabricated 0: no band row ⇒ None."""
+    if 'delta' not in exp_rows.columns:
+        return None
+    iv = pd.to_numeric(exp_rows['implied_volatility'], errors='coerce')
+    d = pd.to_numeric(exp_rows['delta'], errors='coerce').abs()
+    band = iv[(d >= ATM_DELTA[0]) & (d <= ATM_DELTA[1]) & (iv > IV_MIN)]
+    if len(band) < ATM_BAND_MIN_ROWS:
+        return None
+    atm = float(band.mean())
+    if not (atm > 0):
+        return None
+    return SmileFit(dte=int(dte), t=dte / 365.0, atm_iv=atm, iv_25d_put=None, iv_25d_call=None,
+                    n_strikes=int(len(band)), k_min=0.0, k_max=0.0, source='atm_band')
+
+
 def constant_maturity(fits: dict, target_dte: int, attr: str) -> float | None:
     pts = sorted((f.dte, getattr(f, attr)) for f in fits.values() if getattr(f, attr) is not None)
     if not pts:
@@ -251,7 +276,7 @@ def _empty_row(spot, as_of) -> dict:
     row = {k: None for k in SCALAR_KEYS}
     row.update({'spot': _f(spot), 'last_price': _f(spot), 'near_iv': None, 'far_iv': None,
                 'skew_20d': None, 'call_volume': 0.0, 'put_volume': 0.0, 'volume': 0.0,
-                'n_expiries_fit': 0, 'n_strikes_30d': 0,
+                'n_expiries_fit': 0, 'n_strikes_30d': 0, 'n_expiries_atm': 0,
                 'options_features_version': OPTIONS_FEATURES_VERSION})
     return row
 
@@ -294,12 +319,20 @@ def features_for_day(chain: pd.DataFrame, spot, as_of) -> dict:
     if not (spot_f and spot_f > 0):
         return row
     fits: dict[int, SmileFit] = {}
+    n_smile = n_atm = 0
     for dte, exp_rows in ch[(ch['dte'] >= FIT_DTE[0]) & (ch['dte'] <= FIT_DTE[1])].groupby('dte'):
         side = _otm_side(exp_rows, spot_f)
         fit = fit_smile(side['strike'].to_numpy(), side['iv'].to_numpy(), spot_f, int(dte))
         if fit is not None:
+            n_smile += 1
+        else:
+            fit = atm_band_fit(exp_rows, int(dte))       # amendment §H: smile first, band fills the gap
+            if fit is not None:
+                n_atm += 1
+        if fit is not None:
             fits[int(dte)] = fit
-    row['n_expiries_fit'] = len(fits)
+    row['n_expiries_fit'] = n_smile
+    row['n_expiries_atm'] = n_atm
     if not fits:
         return row
     iv30 = constant_maturity(fits, 30, 'atm_iv')
@@ -316,6 +349,7 @@ def features_for_day(chain: pd.DataFrame, spot, as_of) -> dict:
         'rr_25d_30d': (p30 - c30) if (p30 is not None and c30 is not None) else None,
         'n_strikes_30d': fits[near30].n_strikes,
     })
+    row['iv30_source'] = fits[near30].source if row['iv30'] is not None else None
     row['skew_20d'] = row['skew_25d_30d']
     # v3 (spec 2026-09-06 A.3): MFIV interpolates in total variance like the ATM
     # points; RN moments/tails come from the expiry nearest 30 DTE (G4).

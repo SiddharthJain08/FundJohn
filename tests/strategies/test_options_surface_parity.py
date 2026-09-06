@@ -12,7 +12,8 @@ SHARED = ['iv30', 'iv90', 'iv_25d_put_30d', 'iv_25d_call_30d', 'skew_25d_30d', '
           'term_slope', 'iv_spread', 'gamma_atm', 'theta_atm', 'call_volume', 'put_volume', 'volume',
           'pc_ratio', 'expiry_date', 'n_expiries_fit', 'n_strikes_30d', 'options_features_version',
           'mfiv_30d', 'mfiv_90d', 'mf_tail_premium_30d',
-          'rn_skew_30d', 'rn_kurt_30d', 'rn_p_dn10_30d', 'rn_p_up10_30d']
+          'rn_skew_30d', 'rn_kurt_30d', 'rn_p_dn10_30d', 'rn_p_up10_30d',
+          'iv30_source', 'n_expiries_atm']
 
 
 def _script(name):

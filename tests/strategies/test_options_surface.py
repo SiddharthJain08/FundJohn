@@ -78,8 +78,9 @@ def test_constant_maturity_interpolates_total_variance_and_one_sided_rule():
     vt = v20 + (v40 - v20) * (30 - 20) / (40 - 20)
     assert osf.constant_maturity(fits, 30, 'atm_iv') == pytest.approx(math.sqrt(vt / (30 / 365)))
     assert osf.constant_maturity({30: f(30, 0.25)}, 30, 'atm_iv') == pytest.approx(0.25)
-    assert osf.constant_maturity({38: f(38, 0.25)}, 30, 'atm_iv') == pytest.approx(0.25)     # one-sided within 10 d
-    assert osf.constant_maturity({45: f(45, 0.25)}, 30, 'atm_iv') is None                     # too far
+    assert osf.constant_maturity({38: f(38, 0.25)}, 30, 'atm_iv') == pytest.approx(0.25)     # one-sided within 20 d
+    assert osf.constant_maturity({45: f(45, 0.25)}, 30, 'atm_iv') == pytest.approx(0.25)     # one-sided within 20 d (dist 15; amendment §H widened 10 -> 20)
+    assert osf.constant_maturity({55: f(55, 0.25)}, 30, 'atm_iv') is None                     # too far (dist 25 > 20)
     assert osf.constant_maturity({}, 30, 'atm_iv') is None
 
 

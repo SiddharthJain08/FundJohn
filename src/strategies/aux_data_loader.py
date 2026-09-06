@@ -126,6 +126,8 @@ FIELDS = [
     # options_surface v3 (spec 2026-09-06 A.3)
     'mfiv_30d', 'mfiv_90d', 'mf_tail_premium_30d',
     'rn_skew_30d', 'rn_kurt_30d', 'rn_p_dn10_30d', 'rn_p_up10_30d',
+    # amendment 2026-09-06 §H: thin-chain fallback
+    'iv30_source', 'n_expiries_atm',
 ]
 
 # Any `earnings_dte` beyond this gets suppressed — the earnings parquet

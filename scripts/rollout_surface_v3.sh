@@ -29,9 +29,9 @@ fi
 echo "[v3 $(ts)] verify"
 python3 - <<'PY'
 import sys
-import pyarrow.parquet as pq, pyarrow.compute as pc, pandas as pd
+import pyarrow.parquet as pq, pandas as pd
 cols = ['ticker', 'date', 'iv30', 'n_expiries_fit', 'options_features_version', 'mfiv_30d', 'mfiv_90d',
-        'mf_tail_premium_30d', 'rn_skew_30d', 'rn_kurt_30d', 'rn_p_dn10_30d', 'rn_p_up10_30d']
+        'mf_tail_premium_30d', 'rn_skew_30d', 'rn_kurt_30d', 'rn_p_dn10_30d', 'rn_p_up10_30d', 'iv30_source']
 meta = pq.read_metadata('data/master/options_surface.parquet')
 last = pq.read_table('data/master/options_surface.parquet', columns=['date']).to_pandas()['date'].max()
 df = pq.read_table('data/master/options_surface.parquet', columns=cols,
@@ -42,9 +42,14 @@ ver = df['options_features_version'].value_counts().to_dict()
 spy = df[df['ticker'] == 'SPY'].iloc[0] if (df['ticker'] == 'SPY').any() else None
 print(f'surface rows={meta.num_rows:,} latest={pd.Timestamp(last).date()} tickers={df.ticker.nunique():,} '
       f'fit>=2: {len(fit):,} mfiv_nonnull={mf:.1f}% rn_nonnull={rn:.1f}% version={ver}')
+src = df['iv30_source'].value_counts(dropna=False).to_dict()
+print(f'iv30 nonnull={df.iv30.notna().mean()*100:.1f}% of {len(df):,} tickers; iv30_source={src}')
 ok = mf >= 90 and rn >= 90 and ver.get(3, 0) == len(df)
-if spy is not None:
-    print('SPY', {k: (None if pd.isna(spy[k]) else round(float(spy[k]), 4)) for k in cols[2:]})
+if spy is None:
+    print('SPY missing from the latest session')
+    ok = False
+else:
+    print('SPY', {k: (None if pd.isna(spy[k]) else round(float(spy[k]), 4)) for k in cols[2:] if k != 'iv30_source'})
     ok &= 0.0 <= float(spy['mf_tail_premium_30d']) <= 0.03 and float(spy['rn_skew_30d']) < 0 \
           and 0.001 <= float(spy['rn_p_dn10_30d']) <= 0.10
 panel = pq.read_metadata('data/derived/options_aggregates_enriched.parquet')

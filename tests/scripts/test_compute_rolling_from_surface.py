@@ -64,7 +64,8 @@ def test_build_panel_emits_no_missing_column_warning_on_a_full_surface_frame(cap
     """The existing full-column fixture (every SCALAR_KEYS column present) must
     not trigger the missing-column warning added above. Task 14: also carries
     every OI_KEYS column, since a real (post-task-14) surface master always
-    writes them too."""
+    writes them too. Amendment 2026-09-06 §H: also carries iv30_source /
+    n_expiries_atm."""
     m = _mod()
     idx = pd.bdate_range('2026-05-01', periods=70)
     surf = pd.DataFrame({'ticker': 'ZZZT', 'date': idx.date, 'spot': 100.0, 'iv30': np.linspace(0.2, 0.3, 70),
@@ -76,7 +77,8 @@ def test_build_panel_emits_no_missing_column_warning_on_a_full_surface_frame(cap
                          'max_pain': 100.0, 'contracts_liquid': 50, 'gex': 1.0, 'pcr_oi': 1.0,
                          'iv_centroid_delta': 0.01, 'surface_premium': 0.02, 'oi_session': '2026-04-30',
                          'mfiv_30d': 0.29, 'mfiv_90d': 0.31, 'mf_tail_premium_30d': 0.01,
-                         'rn_skew_30d': -0.3, 'rn_kurt_30d': 3.5, 'rn_p_dn10_30d': 0.08, 'rn_p_up10_30d': 0.05})
+                         'rn_skew_30d': -0.3, 'rn_kurt_30d': 3.5, 'rn_p_dn10_30d': 0.08, 'rn_p_up10_30d': 0.05,
+                         'iv30_source': 'smile', 'n_expiries_atm': 0})
     closes = pd.DataFrame({'ticker': 'ZZZT', 'date': pd.bdate_range('2026-03-01', periods=115).date,
                            'close': 100 * np.exp(np.cumsum(np.random.default_rng(1).normal(0, 0.01, 115)))})
     with caplog.at_level(logging.WARNING):
