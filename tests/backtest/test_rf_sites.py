@@ -133,6 +133,43 @@ def test_benchmark_baseline_emits_one_rf_shadow_line_per_regime(monkeypatch, cap
     assert 'const=n/a' in crisis and 'macro=n/a' in crisis and 'n=0' in crisis
 
 
+def test_regime_benchmark_sharpe_flat_wrapper_suppresses_shadow_log(monkeypatch, tmp_path):
+    """2026-09-06 shadow-log regression guard: unified_backtest.py's ONLY call
+    path into this module — the flat regime_benchmark_sharpe wrapper,
+    'Computed ONCE per run' for EVERY backtest — must never write into
+    logs/rf_shadow.log. A backtest window routinely has an empty regime (see
+    the CRISIS n/a case above); if that {regime: n/a} line landed in the same
+    durable sink scripts/rf_flip_after_fleet.sh reads, it would trip the
+    gate's 'dirty' check and permanently block the live rf flip on evidence
+    that has nothing to do with the live path. Only the direct
+    regime_benchmark_sharpe_by_horizon call (the live sizing shape, via
+    execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing) may record."""
+    monkeypatch.setenv('OPENCLAW_RF_SOURCE', 'const')
+    from backtest import benchmark_baseline as bb
+    dates = pd.bdate_range('2025-01-02', periods=60)
+    regimes = ['LOW_VOL'] * len(dates)   # TRANSITIONING/HIGH_VOL/CRISIS all empty -> n/a lines
+    price, closes = 100.0, []
+    for i in range(len(dates)):
+        closes.append(price)
+        price *= (1 + (0.01 if i % 2 else -0.008))
+    reg_p, px_p = tmp_path / 'regimes3.parquet', tmp_path / 'prices3.parquet'
+    pd.DataFrame({'date': [d.date() for d in dates], 'vix': 15.0, 'vix_smoothed': 15.0,
+                  'regime': regimes}).to_parquet(reg_p)
+    pd.DataFrame({'ticker': 'ZZT_SPY3', 'date': [d.strftime('%Y-%m-%d') for d in dates],
+                  'open': closes, 'high': closes, 'low': closes, 'close': closes,
+                  'volume': 1000.0, 'vwap': closes, 'transactions': 10.0,
+                  'source': 'synthetic'}).to_parquet(px_p)
+    monkeypatch.setattr(bb, 'REGIMES_PARQUET', str(reg_p))
+    monkeypatch.setattr(bb, 'PRICES_PARQUET', str(px_p))
+    shadow_dir = tmp_path / 'shadow'
+    monkeypatch.setenv('OPENCLAW_SHADOW_LOG_DIR', str(shadow_dir))
+    out = bb.regime_benchmark_sharpe(dates[0], dates[-1], benchmark='ZZT_SPY3', min_obs=40)
+    assert out and out['LOW_VOL'] is not None            # sanity: the call actually ran
+    assert not (shadow_dir / 'rf_shadow.log').exists()   # the backtest path wrote nothing
+    bb.regime_benchmark_sharpe_by_horizon(dates[0], dates[-1], benchmark='ZZT_SPY3', min_obs=40)
+    assert (shadow_dir / 'rf_shadow.log').exists()       # the live-shape direct call still records
+
+
 def test_benchmark_baseline_no_shadow_line_without_default_horizon(monkeypatch, caplog, tmp_path):
     """A caller asking only for h=5 gets no line — the site emits the sizer's
     column or nothing."""

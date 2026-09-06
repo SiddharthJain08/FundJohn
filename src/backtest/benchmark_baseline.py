@@ -137,7 +137,8 @@ def _excess_sharpe(rets: list[float], min_obs: int, dates=None) -> float | None:
 def regime_benchmark_sharpe_by_horizon(start_date, end_date,
                                        benchmark: str = "SPY",
                                        min_obs: int = 40,
-                                       horizons=BENCH_HORIZONS) -> dict[str, dict[int, float | None]]:
+                                       horizons=BENCH_HORIZONS,
+                                       record_shadow: bool = True) -> dict[str, dict[int, float | None]]:
     """Forward, entry-tagged benchmark Sharpe per (regime, horizon).
 
     For each canonical regime and each H in `horizons`: a synthetic lot of
@@ -156,6 +157,20 @@ def regime_benchmark_sharpe_by_horizon(start_date, end_date,
     Returns {} on any load failure (logged) — callers fail open. Every
     canonical regime is present in the result; a (regime, H) with fewer than
     `min_obs` mark-days (or zero variance) is None.
+
+    record_shadow=False (2026-09-06) suppresses the durable lib.shadow_log
+    write (logger.info still fires) — set by the flat regime_benchmark_sharpe
+    wrapper, this module's ONLY backtest call path (unified_backtest.py,
+    "Computed ONCE per run"). Every OTHER caller
+    (execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing via
+    regime_blended_sizer.py / bench_realized.py / strategy_weights.py) is
+    live-cycle-adjacent and keeps the default True. Without this split, a
+    fleet backtest run's routine {regime: n/a} lines (a regime absent from
+    that strategy's window — see the CRISIS case in
+    test_benchmark_baseline_emits_one_rf_shadow_line_per_regime) would land
+    in the SAME logs/rf_shadow.log the rf flip gate reads and permanently
+    trip its 'dirty' check, blocking scripts/rf_flip_after_fleet.sh on
+    evidence that has nothing to do with the live path.
     """
     try:
         tags = load_regime_tags(start_date, end_date)
@@ -209,7 +224,7 @@ def regime_benchmark_sharpe_by_horizon(start_date, end_date,
             line = '[rf_shadow] site=benchmark_baseline regime=%s h=%d const=%s macro=%s n=%d' % (
                 regime, DEFAULT_HORIZON, _fmt_sharpe(pair['const']), _fmt_sharpe(pair['macro']), pair['n'])
             logger.info(line)
-            if shadow_log is not None:
+            if shadow_log is not None and record_shadow:
                 shadow_log.record('rf_shadow', line)
     return out
 
@@ -220,9 +235,16 @@ def regime_benchmark_sharpe(start_date, end_date,
     """Flat {regime: Sharpe | None} = the DEFAULT_HORIZON (H = 1) column of
     regime_benchmark_sharpe_by_horizon. Signature and shape unchanged for
     unified_backtest's informational strategy_backtest_regimes.benchmark_sharpe
-    write. {} on load failure."""
+    write. {} on load failure.
+
+    record_shadow=False: this is the ONLY backtest call path into
+    regime_benchmark_sharpe_by_horizon (unified_backtest.py, once per run) —
+    see that function's docstring for why its durable shadow-log write is
+    suppressed here (backtest noise must never reach the live rf flip gate's
+    logs/rf_shadow.log)."""
     by_h = regime_benchmark_sharpe_by_horizon(start_date, end_date, benchmark=benchmark,
-                                              min_obs=min_obs, horizons=(DEFAULT_HORIZON,))
+                                              min_obs=min_obs, horizons=(DEFAULT_HORIZON,),
+                                              record_shadow=False)
     if not by_h:
         return {}
     return {r: (by_h.get(r) or {}).get(DEFAULT_HORIZON) for r in CANONICAL_REGIMES}
