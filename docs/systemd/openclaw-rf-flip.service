@@ -1,0 +1,16 @@
+[Unit]
+Description=Guarded OPENCLAW_RF_SOURCE=macro flip (scripts/rf_flip_after_fleet.sh --apply; gates: live tier on macro, >=5 clean [rf_shadow] lines over >=2 days, outside the compute window)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/openclaw
+ExecStart=/bin/bash /root/openclaw/scripts/rf_flip_after_fleet.sh --apply --timer-unit openclaw-rf-flip.timer
+StandardOutput=append:/var/log/openclaw-rf-flip.log
+StandardError=append:/var/log/openclaw-rf-flip.log
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

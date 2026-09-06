@@ -1,0 +1,16 @@
+[Unit]
+Description=Guarded OPENCLAW_OPTIONS_SURFACE=1 flip (scripts/options_surface_flip_after_shadow.sh --apply; gates: v3 master landed, >=2 clean shadow lines on >=2 days, options strategies re-derived on the v3 panel, outside the compute window)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/openclaw
+ExecStart=/bin/bash /root/openclaw/scripts/options_surface_flip_after_shadow.sh --apply --timer-unit openclaw-options-surface-flip.timer
+StandardOutput=append:/var/log/openclaw-options-surface-flip.log
+StandardError=append:/var/log/openclaw-options-surface-flip.log
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

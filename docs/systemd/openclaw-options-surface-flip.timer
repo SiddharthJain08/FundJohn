@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly (Tue-Fri 21:50 UTC) guarded options-surface flip check; the script disables this timer once applied
+
+[Timer]
+OnCalendar=Tue..Fri *-*-* 21:50:00 UTC
+Persistent=false
+AccuracySec=1min
+Unit=openclaw-options-surface-flip.service
+
+[Install]
+WantedBy=timers.target

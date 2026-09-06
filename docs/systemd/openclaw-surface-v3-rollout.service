@@ -1,0 +1,25 @@
+[Unit]
+Description=Options surface v3 rollout (one-shot): wait for fleet units, rebuild master+panel, verify, re-queue the options sleeve in the fleet checkpoint, re-run holiday tv1
+After=network-online.target postgresql.service
+Wants=network-online.target
+OnFailure=openclaw-failure-notify@%n.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/root/openclaw/src
+Environment=OPENCLAW_RF_SOURCE=macro
+Environment=NUMEXPR_MAX_THREADS=1
+Environment=NUMEXPR_NUM_THREADS=1
+Nice=19
+MemoryMax=4500M
+TimeoutStartSec=32400
+ExecStart=/bin/bash /root/openclaw/scripts/rollout_surface_v3_unit.sh
+StandardOutput=append:/var/log/openclaw-surface-v3-rollout.log
+StandardError=append:/var/log/openclaw-surface-v3-rollout.log
+
+[Install]
+WantedBy=multi-user.target

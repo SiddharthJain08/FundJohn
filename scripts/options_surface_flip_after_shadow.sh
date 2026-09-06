@@ -67,7 +67,7 @@ PY
 # --- already applied? ---------------------------------------------------------
 if grep -qE '^OPENCLAW_OPTIONS_SURFACE=1' "$ENVF"; then
   say "already applied (OPENCLAW_OPTIONS_SURFACE=1 in $ENVF) — nothing to do"
-  systemctl stop "$TIMER_UNIT" 2>/dev/null || true
+  systemctl disable --now "$TIMER_UNIT" 2>/dev/null || systemctl disable --now "$TIMER_UNIT" 2>/dev/null || systemctl stop "$TIMER_UNIT" 2>/dev/null || true
   exit 0
 fi
 
@@ -220,7 +220,7 @@ if [ "$RESTART" = 1 ]; then
   fi
 fi
 say "$RESULT"
-systemctl stop "$TIMER_UNIT" 2>/dev/null || true
+systemctl disable --now "$TIMER_UNIT" 2>/dev/null || systemctl disable --now "$TIMER_UNIT" 2>/dev/null || systemctl stop "$TIMER_UNIT" 2>/dev/null || true
 post_discord "[surface-flip] APPLIED — OPENCLAW_OPTIONS_SURFACE=1 ($RESULT). Gate:
 $(echo "$VERDICT" | tail -n +2 | head -8)
 Next cycle: strategies read the v3 surface dict (iv30 = CM-30d ATM, real iv_rank, CBOE OI keys). Kill switch: OPENCLAW_OPTIONS_SURFACE=0 + user-scope johnbot restart."

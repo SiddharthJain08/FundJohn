@@ -62,7 +62,7 @@ PY
 # --- already applied? ---------------------------------------------------------
 if grep -qE '^OPENCLAW_RF_SOURCE=macro' "$ENVF"; then
   say "already applied (OPENCLAW_RF_SOURCE=macro in $ENVF) — nothing to do"
-  systemctl stop "$TIMER_UNIT" 2>/dev/null || true
+  systemctl disable --now "$TIMER_UNIT" 2>/dev/null || systemctl disable --now "$TIMER_UNIT" 2>/dev/null || systemctl stop "$TIMER_UNIT" 2>/dev/null || true
   exit 0
 fi
 
@@ -175,7 +175,7 @@ if [ "$RESTART" = 1 ]; then
   fi
 fi
 say "$RESULT"
-systemctl stop "$TIMER_UNIT" 2>/dev/null || true
+systemctl disable --now "$TIMER_UNIT" 2>/dev/null || systemctl disable --now "$TIMER_UNIT" 2>/dev/null || systemctl stop "$TIMER_UNIT" 2>/dev/null || true
 post_discord "[rf-flip] APPLIED — OPENCLAW_RF_SOURCE=macro ($RESULT). Gate:
 $(echo "$VERDICT" | tail -n +2 | head -8)
 Next: S_m / bench_realized / every backtest now use FRED DGS3MO. Kill switch: OPENCLAW_RF_SOURCE=const + user-scope johnbot restart."

@@ -1,0 +1,12 @@
+[Unit]
+Description=One-shot: options surface v3 rollout Mon 2026-09-07 11:05 UTC (Labor Day gap; the script itself waits for any fleet child). Disable after it has run.
+
+[Timer]
+# Persistent=true: if the box reboots before 11:05 the run fires after boot instead of being lost.
+OnCalendar=2026-09-07 11:05:00 UTC
+Persistent=true
+AccuracySec=1min
+Unit=openclaw-surface-v3-rollout.service
+
+[Install]
+WantedBy=timers.target
