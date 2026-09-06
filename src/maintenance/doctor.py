@@ -117,15 +117,45 @@ def _run_alpaca_cli(args: list) -> dict:
 
 
 def _parquet_last_date(path: str):
-    """Return last date in a parquet's 'date' column, or None if file missing."""
+    """Return the last date in a parquet's 'date' column, or None if the file
+    is missing or empty.
+
+    Reads ROW-GROUP STATISTICS only — never the column. ERR-20260906-001: the
+    old `pd.read_parquet(columns=['date'])` materialised the date column of the
+    62 M-row options_eod.parquet (≈1.5 GB, 3.4 GB process peak) inside johnbot's
+    ExecStartPre and timed the boot out while a fleet child held the rest of
+    the box. A row group that carries no min/max statistics is read alone
+    (bounded by one row group), so a writer that skipped stats still yields
+    the right answer."""
     import pandas as pd
+    import pyarrow.parquet as pq
     p = Path(path)
     if not p.exists():
         return None
-    df = pd.read_parquet(p, columns=['date'])
-    if df.empty:
+    pf = pq.ParquetFile(p)
+    md = pf.metadata
+    if md.num_rows == 0:
         return None
-    return pd.to_datetime(df['date']).max().date()
+    names = list(pf.schema.names)
+    if 'date' not in names:
+        return None
+    col = names.index('date')
+    best = None
+    for i in range(md.num_row_groups):
+        rg = md.row_group(i)
+        if rg.num_rows == 0:
+            continue
+        st = rg.column(col).statistics
+        if st is not None and st.has_min_max and st.max is not None:
+            ts = pd.to_datetime(st.max, errors='coerce')
+        else:  # no stats on this row group: read just this row group's date column
+            s = pf.read_row_group(i, columns=['date']).column('date').to_pandas()
+            ts = pd.to_datetime(s, errors='coerce').max()
+        if ts is None or pd.isna(ts):
+            continue
+        if best is None or ts > best:
+            best = ts
+    return None if best is None else best.date()
 
 
 # ── Individual checks ──────────────────────────────────────────────────────
