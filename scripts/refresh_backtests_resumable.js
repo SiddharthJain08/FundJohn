@@ -176,7 +176,14 @@ function allStrategies() {
     // driver itself at the 2026-07-27 13:30Z market-open surge).
     const r = spawnSync('bash', [path.join(ROOT, 'scripts/fleet_oom_victim_exec.sh'),
       'python3', '-m', 'backtest.unified_backtest', '--strategy-id', sid],
-      { cwd: ROOT, env, timeout: PER_TIMEOUT_S * 1000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      // maxBuffer (2026-09-06): spawnSync's DEFAULT is 1 MiB of captured
+      // stdout+stderr — exceed it and node kills the child with SIGTERM and
+      // sets r.error.code='ENOBUFS'. A chatty strategy (statsmodels warnings
+      // per fit) hit that ceiling at ~1.3 min every night and was logged as a
+      // bare 'signal SIGTERM', indistinguishable from a real kill. 256 MiB
+      // is far above any real backtest's output; r.error is now surfaced.
+      { cwd: ROOT, env, timeout: PER_TIMEOUT_S * 1000, maxBuffer: 256 * 1024 * 1024,
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     const mins = ((Date.now() - s0) / 60000).toFixed(1);
     if (r.status === 0) {
       fs.appendFileSync(CKPT, sid + '\n');   // checkpoint ONLY on success
@@ -196,9 +203,9 @@ function allStrategies() {
       fail++;
       // rc=137 is the OOM signature on this box; surface it distinctly so a
       // memory regression is never mistaken for a strategy-logic failure.
-      const why = r.status === 137 ? 'OOM (rc=137)'
+      const why = (r.status === 137 ? 'OOM (rc=137)'
                 : r.signal            ? `signal ${r.signal}`
-                : `rc=${r.status}`;
+                : `rc=${r.status}`) + (r.error && r.error.code ? ` (${r.error.code})` : '');
       const tail = ((r.stderr || '') + (r.stdout || '')).trim().split('\n').slice(-1)[0] || '';
       fs.appendFileSync(FAILED, `${sid}\t${why}\t${tail.slice(0, 160)}\n`);
       console.log(`[rebt] FAIL ${sid} (${mins}m) ${why} :: ${tail.slice(0, 110)}`);

@@ -17,7 +17,8 @@ STRATS=(
   "$IMPL/shv19_iv_surface_tilt.py"
   "$IMPL/shv20_iv_dispersion_reversion.py"
   "$IMPL/S_options_flow_confirmed_momentum.py"
-  "$IMPL/S_pre_earnings_vol_runup.py"
+  # S_pre_earnings_vol_runup.py was retired by the research curation commit 06f1208b
+  # (2026-09-05 20:41 UTC, file deleted, candidate never promoted) — dropped 2026-09-06.
   "$IMPL/S_holiday_seasonality_energy_etf_tv1.py"
 )
 rc_all=0
