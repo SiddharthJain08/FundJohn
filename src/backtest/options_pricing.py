@@ -95,14 +95,15 @@ def strike_for_target_delta(flag: str, S: float, t: float, sigma: float,
 def american_price(flag: str, S: float, K: float, t: float, sigma: float,
                    r: float | None = None, as_of=None, q: float = 0.0,
                    steps: int = AMERICAN_STEPS) -> float:
-    """Cox–Ross–Rubinstein binomial tree (ruling G7). A call on a non-dividend
-    payer is never exercised early ⇒ its European price, exactly and cheaply."""
+    """Cox–Ross–Rubinstein binomial tree (ruling G7). q ≤ 0 ⇒ the European
+    (BSM at q) price, exactly and cheaply — a call is never exercised early
+    when the cost of carry is non-negative."""
     r = _rate(r, as_of)
     t, sigma = _clean(t, sigma)
     S, K, q = float(S), float(K), float(q)
     is_call = flag == 'c'
     if is_call and q <= 0.0:
-        return bs_price('c', S, K, t, sigma, r=r)
+        return bs_price('c', S, K, t, sigma, r=r, q=q)
     n = max(int(steps), 1)
     dt = t / n
     u = math.exp(sigma * math.sqrt(dt))

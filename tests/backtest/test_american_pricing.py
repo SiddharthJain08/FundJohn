@@ -29,6 +29,10 @@ def test_american_call_without_dividend_is_the_european_call():
     assert american_price('c', 100, 110, 0.5, 0.3, r=0.05) == bs_price('c', 100, 110, 0.5, 0.3, r=0.05)
 
 
+def test_american_call_with_negative_carry_is_the_european_call_at_q():
+    assert american_price('c', 100, 100, 0.5, 0.3, r=0.05, q=-0.02) == bs_price('c', 100, 100, 0.5, 0.3, r=0.05, q=-0.02)
+
+
 def test_deep_itm_american_put_is_intrinsic():
     assert american_price('p', 20.0, 100.0, 0.5, 0.2, r=0.05) == pytest.approx(80.0, abs=1e-9)
 
