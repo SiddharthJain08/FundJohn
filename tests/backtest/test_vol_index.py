@@ -28,7 +28,9 @@ def test_unsupported_underlying_returns_none():
     assert is_supported_option_underlying('SPY')
 
 
-def test_synthetic_iv_uses_vix_when_supported():
+def test_synthetic_iv_uses_vix_when_supported(tmp_path, monkeypatch):
+    monkeypatch.setenv('OPENCLAW_OPTIONS_SURFACE_PATH', str(tmp_path / 'no_surface.parquet'))
+    from backtest import synthetic_iv as si; si.clear_cache()
     s = _vix_series(); asof = s.index[-1]
     px = pd.Series([400.0] * 30, index=pd.date_range('2020-01-01', periods=30))  # flat → low realized
     iv_anchored = synthetic_iv(px, underlying='SPY', as_of=asof)
