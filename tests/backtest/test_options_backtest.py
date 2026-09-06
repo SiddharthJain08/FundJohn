@@ -219,7 +219,7 @@ def test_american_put_cycle_costs_at_least_the_european_one(tmp_path, monkeypatc
     stats = ob._new_stats()
     ca = ob._price_single_cycle(am, flat, idx[0], +1, 1.2, 21, 10, stats=stats)
     ce = ob._price_single_cycle(eu, flat, idx[0], +1, 1.2, 21, 10)
-    assert ca['entry_price'] >= ce['entry_price'] > 0
+    assert ca['entry_price'] > ce['entry_price'] > 0
     assert stats['q_positive'] > 0 and stats['exercise'] == {'american'}
 
 
@@ -238,6 +238,9 @@ def test_simulate_logs_iv_sources_and_keeps_trade_keys(tmp_path, monkeypatch, ca
                       'pnl_pct', 'strike', 'expiry', 'iv_entry', 'signal_stop', 'signal_target',
                       'ticker', 'direction', 'entry_regime'}
     line = [r.message for r in caplog.records if r.message.startswith('[options_backtest] iv sources:')]
-    assert len(line) == 1 and 'realized=' in line[0] and 'exercise=american' in line[0]
+    assert len(line) == 1 and 'exercise=american' in line[0]
+    import re
+    counts = {k: int(v) for k, v in re.findall(r'(surface|vix_term|realized)=(\d+)', line[0])}
+    assert sum(counts.values()) >= 1 and set(counts) == {'surface', 'vix_term', 'realized'}
     # the 2022 panel predates the dividend fixture's coverage + 365 d?  No — coverage starts 2019, so q > 0 applies
     assert 'q>0 on 0 prices' not in line[0]

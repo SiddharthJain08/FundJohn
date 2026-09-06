@@ -46,11 +46,12 @@ def _iv(close_to_dt: pd.Series, spec, dt, dte: int, vrp_factor: float, window: i
 
 
 def _q(spec, close: pd.Series, dt, S: float, stats: dict) -> float:
-    """Trailing-year dividend yield; the backfill reference close is passed when
-    the series reaches it (spec B.1 / ruling G6)."""
+    """Trailing-year dividend yield; the close AT the backfill reference date is
+    passed when the series reaches it (never the panel's last close) (spec B.1 /
+    ruling G6)."""
     ref = backfill_reference_date()
     ref_spot = None
-    if ref is not None:
+    if ref is not None and len(close.index) and close.index[-1] >= ref:
         upto = close.loc[:ref]
         if len(upto):
             ref_spot = float(upto.iloc[-1])
