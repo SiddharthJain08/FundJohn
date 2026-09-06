@@ -63,9 +63,10 @@ def _noisy_series(start, daily, n, first='2026-06-01'):
     return out
 
 
-def test_bench_realized_emits_rf_shadow_per_sharpe(monkeypatch, caplog):
+def test_bench_realized_emits_rf_shadow_per_sharpe(monkeypatch, caplog, tmp_path):
     import logging
     monkeypatch.setenv('OPENCLAW_RF_SOURCE', 'const')
+    monkeypatch.setenv('OPENCLAW_SHADOW_LOG_DIR', str(tmp_path))
     from execution import bench_realized as br
     nav = _noisy_series(100_000.0, -0.002, 120)
     spy = _noisy_series(500.0, +0.001, 120)
@@ -75,6 +76,15 @@ def test_bench_realized_emits_rf_shadow_per_sharpe(monkeypatch, caplog):
     lines = [r.message for r in caplog.records if '[rf_shadow] site=bench_realized' in r.message]
     assert len(lines) == 2                       # one per Sharpe actually computed: book, SPY
     assert all('const=' in ln and 'macro=' in ln and 'n=20' in ln for ln in lines)
+    # The daily-cycle step log keeps only the last 4,000 chars, which drops
+    # these mid-`trade`-step lines before they reach disk (brief 2026-09-06).
+    # lib.shadow_log gives them a durable, dedicated sink the flip gate reads
+    # instead — same two lines, in order.
+    p = tmp_path / 'rf_shadow.log'
+    assert p.exists()
+    file_lines = p.read_text().splitlines()
+    assert len(file_lines) == 2
+    assert all('[rf_shadow] site=bench_realized' in ln for ln in file_lines)
 
 
 def test_bench_realized_emits_no_shadow_line_below_min_obs(monkeypatch, caplog):

@@ -48,3 +48,15 @@ def _isolate_iv_masters(monkeypatch, tmp_path):
     vol_index._vix9d_series.cache_clear()
     dividends.clear_cache()
     risk_free.clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_shadow_log(monkeypatch, tmp_path):
+    """lib.shadow_log.record() defaults to ROOT/'logs' — the SAME directory
+    scripts/rf_flip_after_fleet.sh and scripts/options_surface_flip_after_shadow.sh
+    read (logs/rf_shadow.log, logs/options_surface_shadow.log). Route it into
+    a per-test tmp dir so backtest tests that exercise the rf_shadow emitters
+    (benchmark_baseline, bench_realized) never write spurious lines into a
+    live flip-gate log. A test that wants to assert on the file overrides
+    this env var itself, which wins (monkeypatch is last-write-wins)."""
+    monkeypatch.setenv('OPENCLAW_SHADOW_LOG_DIR', str(tmp_path))

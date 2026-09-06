@@ -61,6 +61,10 @@ _LOOKBACK_CALENDAR_DAYS = 10
 # equality test and for callers that only need the number.
 from backtest.risk_free import (RISK_FREE_ANNUAL_CONST as RISK_FREE_ANNUAL, excess_sharpe as _rf_excess_sharpe,
                                 sharpe_pair as _rf_sharpe_pair)
+try:
+    from lib import shadow_log
+except ImportError:
+    shadow_log = None
 RISK_FREE_DAILY = RISK_FREE_ANNUAL / TRADING_DAYS_PER_YEAR
 # Horizon grid (trading days a synthetic benchmark lot is held). The sizer
 # selects one column via pipeline_config['benchmark_horizon_days'] (default 1).
@@ -202,8 +206,11 @@ def regime_benchmark_sharpe_by_horizon(start_date, end_date,
             except Exception as e:  # noqa: BLE001 — diagnostics never break the grid
                 logger.warning('[bench_baseline] rf shadow skipped for %s: %s: %s', regime, type(e).__name__, e)
                 continue
-            logger.info('[rf_shadow] site=benchmark_baseline regime=%s h=%d const=%s macro=%s n=%d',
-                        regime, DEFAULT_HORIZON, _fmt_sharpe(pair['const']), _fmt_sharpe(pair['macro']), pair['n'])
+            line = '[rf_shadow] site=benchmark_baseline regime=%s h=%d const=%s macro=%s n=%d' % (
+                regime, DEFAULT_HORIZON, _fmt_sharpe(pair['const']), _fmt_sharpe(pair['macro']), pair['n'])
+            logger.info(line)
+            if shadow_log is not None:
+                shadow_log.record('rf_shadow', line)
     return out
 
 

@@ -142,9 +142,18 @@ def test_engine_flag_selects_dict(monkeypatch, caplog, tmp_path):
     new = {'SPY': {'iv30': 0.12, 'iv_rank': 40.0, 'options_features_version': 2}}
     monkeypatch.setattr(v2, 'build', lambda *a, **k: new)
     monkeypatch.delenv('OPENCLAW_OPTIONS_SURFACE', raising=False)
+    monkeypatch.setenv('OPENCLAW_SHADOW_LOG_DIR', str(tmp_path))
     with caplog.at_level(logging.INFO):
         assert engine._apply_options_surface(old, None, [], None, None, None) is old
     assert any('[options_surface] shadow' in r.message for r in caplog.records)
+    # The daily-cycle step log keeps only the last 4,000 chars, which drops
+    # this line before it reaches disk (brief 2026-09-06). lib.shadow_log
+    # gives it a durable, dedicated sink the flip gate reads instead.
+    shadow_log_path = tmp_path / 'options_surface_shadow.log'
+    assert shadow_log_path.exists()
+    lines = shadow_log_path.read_text().splitlines()
+    assert len(lines) == 1
+    assert '[options_surface] shadow n=1' in lines[0]
     monkeypatch.setenv('OPENCLAW_OPTIONS_SURFACE', '1')
     assert engine._apply_options_surface(old, None, [], None, None, None) is new
 

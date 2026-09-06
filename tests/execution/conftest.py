@@ -52,3 +52,15 @@ def _deterministic_sizer_gates(request, monkeypatch):
         monkeypatch.setattr('execution.benchmark_sleeve.load_benchmark_sleeve_ids', lambda conn=None: set())
         monkeypatch.setattr('execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing', lambda *a, **k: None)
         monkeypatch.setattr('execution.benchmark_sizing.load_benchmark_horizon', lambda *a, **k: 1)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_shadow_log(monkeypatch, tmp_path):
+    """lib.shadow_log.record() defaults to ROOT/'logs' — the SAME directory
+    scripts/rf_flip_after_fleet.sh and scripts/options_surface_flip_after_shadow.sh
+    read (logs/rf_shadow.log, logs/options_surface_shadow.log). Route it into
+    a per-test tmp dir so tests that exercise _apply_options_surface (or any
+    future execution-layer rf_shadow emitter) never write spurious lines into
+    a live flip-gate log. A test that wants to assert on the file overrides
+    this env var itself, which wins (monkeypatch is last-write-wins)."""
+    monkeypatch.setenv('OPENCLAW_SHADOW_LOG_DIR', str(tmp_path))

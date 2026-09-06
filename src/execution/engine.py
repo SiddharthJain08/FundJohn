@@ -504,12 +504,15 @@ def _apply_options_surface(old: dict, opts, universe, today, master_dir, px_wind
     t0 = time.monotonic()
     try:
         from execution import options_aux_v2 as _v2
+        from lib import shadow_log
         new = _v2.build(opts, universe, today, master_dir, px_window, earnings)
     except Exception as exc:  # noqa: BLE001 — the v2 path must never take the legacy path down
         logger.warning('[options_surface] v2 build failed (%s); serving legacy dict', exc)
         return old
     try:
-        logger.info(_v2.shadow_summary(old, new, seconds=time.monotonic() - t0))
+        line = _v2.shadow_summary(old, new, seconds=time.monotonic() - t0)
+        logger.info(line)
+        shadow_log.record('options_surface_shadow', line)
     except Exception as exc:  # noqa: BLE001 — a diagnostics failure must never cost the cycle its options aux
         logger.warning('[options_surface] shadow summary failed (%s)', exc)
     return new if _v2.enabled() else old

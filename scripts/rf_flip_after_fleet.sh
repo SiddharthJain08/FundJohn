@@ -96,26 +96,47 @@ if lagging:
 # G2 — live shadow lines
 pat = re.compile(r'\[rf_shadow\] site=(\S+)(?: source=\S+)?(?: regime=\S+ h=\d+)? const=(\S+) macro=(\S+) n=(\d+)(?: rf_mean=(\S+))?')
 clean, dirty, days = [], [], set()
+seen = set()  # (day, canonical '[rf_shadow] ...' text) — a line present in both sinks counts once
+
+def _record(day, raw_line):
+    if '[rf_shadow]' not in raw_line:
+        return
+    canon = raw_line[raw_line.index('[rf_shadow]'):].strip()
+    key = (day, canon)
+    if key in seen:
+        return
+    seen.add(key)
+    mm = pat.search(canon)
+    if not mm:
+        dirty.append((day, 'unparseable: ' + canon[-120:])); return
+    site, c, mac, n, rfm = mm.groups()
+    try:
+        cf, mf = float(c), float(mac)
+    except ValueError:
+        dirty.append((day, f'{site}: const={c} macro={mac}')); return
+    if not (math.isfinite(cf) and math.isfinite(mf)):
+        dirty.append((day, f'{site}: non-finite const/macro')); return
+    if abs(cf - mf) > 0.5:
+        dirty.append((day, f'{site}: |const-macro|={abs(cf-mf):.2f} > 0.5')); return
+    clean.append((day, f'{site} const={cf:.3f} macro={mf:.3f} n={n} rf_mean={rfm or "-"}')); days.add(day)
+
 for f in sorted(glob.glob('/root/openclaw/logs/daily_cycle_steps_*.log')):
     day = re.search(r'(\d{4}-\d{2}-\d{2})', os.path.basename(f)).group(1)
     if day < since:
         continue
     for line in open(f, errors='replace'):
-        if '[rf_shadow]' not in line:
+        _record(day, line)
+
+# Dedicated durable sink (lib.shadow_log) — survives the 4,000-char step-log
+# tail that dropped this line before. One record per line: '<ISO ts> <line>'.
+_rf_shadow_log = '/root/openclaw/logs/rf_shadow.log'
+if os.path.exists(_rf_shadow_log):
+    for line in open(_rf_shadow_log, errors='replace'):
+        day = line[:10]
+        if day < since:
             continue
-        mm = pat.search(line)
-        if not mm:
-            dirty.append((day, 'unparseable: ' + line.strip()[-120:])); continue
-        site, c, mac, n, rfm = mm.groups()
-        try:
-            cf, mf = float(c), float(mac)
-        except ValueError:
-            dirty.append((day, f'{site}: const={c} macro={mac}')); continue
-        if not (math.isfinite(cf) and math.isfinite(mf)):
-            dirty.append((day, f'{site}: non-finite const/macro')); continue
-        if abs(cf - mf) > 0.5:
-            dirty.append((day, f'{site}: |const-macro|={abs(cf-mf):.2f} > 0.5')); continue
-        clean.append((day, f'{site} const={cf:.3f} macro={mf:.3f} n={n} rf_mean={rfm or "-"}')); days.add(day)
+        _record(day, line)
+
 g2 = len(clean) >= need and len(days) >= 2 and not dirty
 ok &= g2
 out.append(f"  G2 shadow: clean={len(clean)} (need {need}) days={len(days)} (need 2) dirty={len(dirty)} since={since} -> {'OK' if g2 else 'NOT_YET'}")
