@@ -77,35 +77,71 @@ def _db_uri() -> str:
 
 
 def load_latest_backtests(uri: str):
-    """Load strategy_regime_backtests rows for the latest run_id.
+    """Load the CANONICAL per-strategy regime backtests: for every strategy,
+    the regime rows of its latest primary-window run in strategy_backtest_runs
+    / strategy_backtest_regimes (the tables the nightly fleet re-backtest
+    writes). The old strategy_regime_backtests snapshot table stopped being
+    written on 2026-06-28 when its weekly timer was retired.
 
-    Returns (df, run_id, run_at). run_at is a UTC-aware datetime; empty DF + ''
-    + None when the table has no rows.
+    Returns (df, run_id, run_at) in the strategy_regime_backtests row shape
+    (`max_dd` positive, `note` None, `declared_regimes` None). run_at is the
+    NEWEST canonical run (a freshness marker for "is the fleet alive?");
+    df.attrs['median_run_at'] carries the median across strategies. Empty DF +
+    '' + None when there are no rows.
     """
     import psycopg2
+    sql = """
+        WITH latest AS (
+            SELECT DISTINCT ON (strategy_id) strategy_id, run_id, run_at
+              FROM strategy_backtest_runs
+             WHERE primary_window = true
+             ORDER BY strategy_id, run_at DESC
+        )
+        SELECT l.strategy_id, r.regime_state,
+               r.sharpe::float            AS sharpe,
+               r.max_dd_pct::float        AS max_dd,
+               r.return_pct::float        AS total_return_pct,
+               r.trade_count, r.oos_days_in_regime AS oos_days,
+               1 AS window_count, NULL::text AS note, NULL::text AS declared_regimes,
+               l.run_at
+          FROM latest l
+          JOIN strategy_backtest_regimes r ON r.run_id = l.run_id
+    """
     with psycopg2.connect(uri) as conn:
-        # Latest run_id = max(run_at). Capture timestamp in the same query so
-        # the doctor / preflight don't need a separate freshness round-trip.
-        latest_sql = """
-            SELECT run_id::text, run_at
-              FROM strategy_regime_backtests
-             ORDER BY run_at DESC LIMIT 1
-        """
-        rows_sql = """
-            SELECT strategy_id, regime_state,
-                   sharpe::float, max_dd::float, total_return_pct::float,
-                   trade_count, oos_days, window_count, note, declared_regimes
-              FROM strategy_regime_backtests
-             WHERE run_id = %s
-        """
-        with conn.cursor() as cur:
-            cur.execute(latest_sql)
-            latest = cur.fetchone()
-            if not latest:
-                return pd.DataFrame(), '', None
-            run_id, run_at = latest[0], latest[1]
-        df = pd.read_sql(rows_sql, conn, params=(run_id,))
-    return df, run_id, run_at
+        df = pd.read_sql(sql, conn)
+    if df.empty:
+        return pd.DataFrame(), '', None
+    run_ats = pd.to_datetime(df['run_at'], utc=True)
+    per_strategy = df.groupby('strategy_id')['run_at'].max()
+    newest = pd.to_datetime(per_strategy.max(), utc=True).to_pydatetime()
+    median = pd.to_datetime(per_strategy, utc=True).sort_values().iloc[len(per_strategy) // 2].to_pydatetime()
+    df = df.drop(columns=['run_at'])
+    df.attrs['median_run_at'] = median
+    run_id = f'canonical:{df["strategy_id"].nunique()}'
+    return df, run_id, newest
+
+
+def load_eligibility_from_params(uri: str) -> dict[str, list[str]]:
+    """Live eligibility map: strategy_id -> regimes with eligible = true in
+    strategy_regime_params (Phase 2A moved eligibility ownership there; the
+    manifest's eligible_regimes is deprecated). Fail-open: any error -> {} and
+    the caller keeps the manifest's field."""
+    import psycopg2
+    out: dict[str, list[str]] = {}
+    try:
+        with psycopg2.connect(uri) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT strategy_id, regime_state, eligible
+                                 FROM strategy_regime_params""")
+                rows = cur.fetchall()
+    except Exception:  # noqa: BLE001 — informational overlay, never fatal
+        return {}
+    seen: dict[str, list[str]] = {}
+    for sid, regime, eligible in rows:
+        seen.setdefault(sid, [])
+        if eligible:
+            seen[sid].append(regime)
+    return seen
 
 
 def regime_day_frequency(parquet_path: Path) -> dict[str, float]:
@@ -190,6 +226,15 @@ def run_walkforward(uri: str, manifest_path: Path, regime_parquet: Path) -> dict
     if df.empty:
         return {'error': 'strategy_regime_backtests has no rows — run backfill first'}
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    # Eligibility overlay: strategy_regime_params is the live owner of
+    # eligibility; the manifest field only survives for strategies without rows.
+    eligibility = load_eligibility_from_params(uri)
+    eligibility_source = 'manifest'
+    if eligibility:
+        strategies = manifest.setdefault('strategies', {})
+        for sid, regimes in eligibility.items():
+            strategies.setdefault(sid, {})['eligible_regimes'] = list(regimes)
+        eligibility_source = 'strategy_regime_params'
     day_freq = regime_day_frequency(regime_parquet)
 
     prod_pr = portfolio_per_regime(df, manifest, eligibility_filter=False)
@@ -205,10 +250,13 @@ def run_walkforward(uri: str, manifest_path: Path, regime_parquet: Path) -> dict
     low_vol_strategies_present = (
         blended['per_regime']['LOW_VOL']['strategy_count'] >= 1
     )
+    median_run_at = df.attrs.get('median_run_at') if hasattr(df, 'attrs') else None
     return {
-        'source':           'strategy_regime_backtests',
+        'source':           'strategy_backtest_regimes (canonical, latest primary run per strategy)',
+        'eligibility_source': eligibility_source,
         'run_id':           run_id,
         'run_at':           run_at.isoformat() if run_at else None,
+        'median_run_at':    median_run_at.isoformat() if median_run_at else None,
         'strategy_count':   int(df['strategy_id'].nunique()),
         'regime_day_frequency': {r: round(day_freq[r], 4) for r in CANONICAL_REGIMES},
         'blended':          blended,

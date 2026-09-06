@@ -82,11 +82,16 @@ SLOW_CHECKS = {'redis', 'data_coverage', 'systemd_services'}
 REGIME_LATEST_FILE = ROOT / '.agents' / 'market-state' / 'regime_latest.json'
 
 
-def _check(name, slow=False):
-    """Decorator that records the check name + slow flag for filtering."""
+def _check(name, slow=False, quick_skip=False):
+    """Decorator that records the check name + slow flag for filtering.
+
+    quick_skip=True marks a check that is NOT a boot precondition (a research-
+    loop quality metric, for example): the johnbot ExecStartPre `--quick`
+    sweep skips it, the full sweep (daily maintenance) still runs it."""
     def deco(fn):
         fn._check_name = name
         fn._slow = slow
+        fn._quick_skip = quick_skip
         return fn
     return deco
 
@@ -857,6 +862,13 @@ def check_regime_blended_gate_b():
       DRY,  gate.pass = true,  fresh  → PASS
       DRY,  any other state           → WARN  (informational pre-flip)
 
+    2026-09-06: the walk-forward reads the CANONICAL tables (latest primary
+    run per strategy in strategy_backtest_runs/_regimes, eligibility from
+    strategy_regime_params) — the old strategy_regime_backtests snapshot died
+    with its weekly timer on 2026-06-28. `age` is the NEWEST canonical run
+    (is the fleet alive?); `median_age` is informational (half the fleet is
+    at least this fresh).
+
     Walk-forward exceptions (DB hiccup etc.) → WARN in both modes; treated as
     "cannot evaluate" rather than "gate fail" to avoid false alarms on infra.
     Returns _fail explicitly when LIVE is on AND we *could* evaluate the gate
@@ -910,6 +922,15 @@ def check_regime_blended_gate_b():
     ]
     if age_days is not None:
         detail_parts.append(f'age={age_days}d')
+    median_iso = result.get('median_run_at')
+    if median_iso:
+        try:
+            med = datetime.fromisoformat(median_iso)
+            if med.tzinfo is None:
+                med = med.replace(tzinfo=timezone.utc)
+            detail_parts.append(f'median_age={(datetime.now(timezone.utc) - med).days}d')
+        except (ValueError, TypeError):
+            pass
     if stale:
         detail_parts.append(f'STALE (>{REGIME_BLENDED_GATE_STALE_DAYS}d)')
 
@@ -925,7 +946,7 @@ def check_regime_blended_gate_b():
             if not gate.get(flag, True):
                 reasons.append(f'!{flag}')
     if stale:
-        reasons.append('snapshot stale (weekly cron missed?)')
+        reasons.append('canonical backtests stale (fleet re-backtest not running?)')
     detail = '; '.join(reasons) + ' [' + ', '.join(detail_parts) + ']'
     return _fail('regime_blended_gate_b', detail) if live else _warn('regime_blended_gate_b', detail)
 
@@ -1039,25 +1060,37 @@ def _calibration_report():
     return calibration_report()
 
 
-@_check('mastermind_calibration_brier')
+@_check('mastermind_calibration_brier', quick_skip=True)
 def check_mastermind_calibration_brier():
-    """PASS if Brier < CALIBRATION_BRIER_WARN with >= CALIBRATION_MIN_SAMPLES."""
+    """PASS if Brier < CALIBRATION_BRIER_WARN with >= CALIBRATION_MIN_SAMPLES.
+
+    quick_skip: this is a research-loop calibration metric (are the
+    mastermind's stated confidences honest?), not a boot precondition — it
+    stays in the full/daily sweep and out of johnbot's ExecStartPre. Counts
+    only RESOLVED outcomes (2026-09-06: outcomes whose decisive live window had
+    no closed trades used to be scored as misses and inflated the Brier from
+    0.25 to 0.43). The detail carries hit rate and mean confidence so an
+    over-confident model reads as such."""
     name = 'mastermind_calibration_brier'
     try:
         rep = _calibration_report()
     except Exception as exc:
         return _warn(name, f'calibration query failed: {exc!s}')
-    n = int(rep.get('total_observations') or 0)
+    total = int(rep.get('total_observations') or 0)
+    n = int(rep.get('resolved_observations') if rep.get('resolved_observations') is not None else total)
     brier = rep.get('brier_score')
+    extra = ''
+    if rep.get('hit_rate') is not None and rep.get('mean_confidence') is not None:
+        extra = f', hit_rate={rep["hit_rate"]:.2f} vs mean_conf={rep["mean_confidence"]:.2f}'
     if n < CALIBRATION_MIN_SAMPLES:
-        return _ok(name, f'insufficient data ({n}/{CALIBRATION_MIN_SAMPLES} samples)')
+        return _ok(name, f'insufficient data ({n}/{CALIBRATION_MIN_SAMPLES} resolved of {total})')
     if brier is None or (isinstance(brier, float) and brier != brier):  # NaN check
         return _warn(name, 'Brier could not be computed despite samples')
     if brier >= CALIBRATION_BRIER_FAIL:
-        return _fail(name, f'Brier {brier:.3f} >= {CALIBRATION_BRIER_FAIL} (n={n})')
+        return _fail(name, f'Brier {brier:.3f} >= {CALIBRATION_BRIER_FAIL} (n={n} resolved of {total}{extra})')
     if brier >= CALIBRATION_BRIER_WARN:
-        return _warn(name, f'Brier {brier:.3f} >= {CALIBRATION_BRIER_WARN} (n={n})')
-    return _ok(name, f'Brier {brier:.3f} (n={n})')
+        return _warn(name, f'Brier {brier:.3f} >= {CALIBRATION_BRIER_WARN} (n={n} resolved of {total}{extra})')
+    return _ok(name, f'Brier {brier:.3f} (n={n} resolved of {total}{extra})')
 
 
 def _latest_overlap_run_at():
@@ -1610,31 +1643,54 @@ def _query_consistency(sql: str, params: tuple = ()):
 
 @_check('strategy_regime_params_consistency')
 def check_strategy_regime_params_consistency():
-    """Each strategy in strategy_registry × each of 4 canonical regimes must
-    have exactly one row in strategy_regime_params. Catches partial migrations
-    + orphans (rows pointing at strategies that no longer exist)."""
+    """Each APPROVED strategy in strategy_registry × each of 4 canonical
+    regimes must have exactly one row in strategy_regime_params. Catches
+    partial migrations + orphans (rows pointing at strategies that exist
+    nowhere: not in the registry, not in the manifest, no implementation
+    file).
+
+    2026-09-06: was every registry id — but the registry is a history table
+    (143 deprecated + 19 pending_approval rows beside the 108 approved ones on
+    that day); deprecated strategies never keep params rows and
+    pending_approval ones have not been promoted yet, so 25 retired/pending
+    ids produced 100 "missing" cells every boot. Rows keyed by an
+    implementation file stem (the `--strategy-file` backtest path resolves
+    max_hold through this table) are not orphans either."""
     name = 'strategy_regime_params_consistency'
     REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
     try:
-        registry_rows = _query_consistency('SELECT id FROM strategy_registry')
+        registry_rows = _query_consistency(
+            "SELECT id FROM strategy_registry WHERE status = 'approved'")
         registry_ids = {r[0] for r in registry_rows} if registry_rows else set()
-        # Fall back to manifest if strategy_registry is empty (early-bootstrap envs).
-        if not registry_ids:
+        # Every registry id (any status) legitimately owns params rows — a
+        # deprecated strategy keeps its history; only the APPROVED ones must
+        # be complete.
+        all_registry_rows = _query_consistency('SELECT id FROM strategy_registry')
+        all_registry_ids = {r[0] for r in all_registry_rows} if all_registry_rows else set()
+        manifest_ids: set = set()
+        try:
             mf = json.loads((ROOT / 'src' / 'strategies' / 'manifest.json')
                             .read_text(encoding='utf-8'))
-            registry_ids = set(mf.get('strategies') or {})
+            manifest_ids = set(mf.get('strategies') or {})
+        except Exception:  # noqa: BLE001 — the manifest is only a fallback / exclusion aid
+            pass
+        # Fall back to manifest if strategy_registry is empty (early-bootstrap envs).
+        if not registry_ids:
+            registry_ids = set(manifest_ids)
         param_rows = _query_consistency(
             'SELECT strategy_id, regime_state FROM strategy_regime_params')
         param_set = {(r[0], r[1]) for r in param_rows}
     except Exception as exc:
         return _warn(name, f'query failed: {exc!s}')
+    impl_dir = ROOT / 'src' / 'strategies' / 'implementations'
+    file_stems = {p.stem for p in impl_dir.glob('*.py')} if impl_dir.exists() else set()
     expected = {(sid, r) for sid in registry_ids for r in REGIMES}
     missing  = expected - param_set
-    orphans  = {sid for sid, _ in param_set} - registry_ids
+    orphans  = {sid for sid, _ in param_set} - all_registry_ids - registry_ids - manifest_ids - file_stems
     if not missing and not orphans:
         return _ok(name,
-                   f'{len(registry_ids)} strategies × 4 regimes = '
-                   f'{len(expected)} rows, all present')
+                   f'{len(registry_ids)} approved strategies × 4 regimes = '
+                   f'{len(expected)} rows, all present; no orphan rows')
     parts = []
     if missing:
         first = next(iter(missing))
@@ -1846,7 +1902,7 @@ def _all_checks():
     out = []
     for fn in globals().values():
         if callable(fn) and getattr(fn, '_check_name', None):
-            out.append((fn._check_name, fn, fn._slow))
+            out.append((fn._check_name, fn, fn._slow or getattr(fn, '_quick_skip', False)))
     return out
 
 

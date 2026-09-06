@@ -68,7 +68,7 @@ def _live_sharpe_for_window(strategy_id: str, regime_state: str,
 
 
 def _direction_match(*, proposal: dict, live_sharpe_pre: Optional[float],
-                       live_sharpe_post: Optional[float]) -> bool:
+                       live_sharpe_post: Optional[float]) -> Optional[bool]:
     """Did live behavior change in the direction the proposal predicted?
 
     Heuristics:
@@ -78,22 +78,28 @@ def _direction_match(*, proposal: dict, live_sharpe_pre: Optional[float],
     - eligibility True: post Sharpe should be > pre (new regime adds alpha)
     - eligibility False: pre was bad (Sharpe < 0) — making ineligible is
       a "match" by removing drag
+
+    Returns None when the decisive window carries NO evidence (no closed
+    trades ⇒ Sharpe None): an eligibility expansion needs the post window, a
+    restriction needs the pre window, a size/stop change needs both. Scoring
+    those as misses (the pre-2026-09-06 behaviour, which coerced None to 0.0)
+    inflated the Brier score from 0.25 to 0.43 on 96 outcomes, 55 of which had
+    no evidence in the window that mattered.
     """
-    pre = live_sharpe_pre if live_sharpe_pre is not None else 0.0
-    post = live_sharpe_post if live_sharpe_post is not None else 0.0
     if proposal.get('proposed_eligible') is False:
         # Making ineligible — match if the strategy was bleeding pre-decision.
-        return pre < 0
+        if live_sharpe_pre is None:
+            return None
+        return live_sharpe_pre < 0
     if proposal.get('proposed_eligible') is True:
         # Expanding eligibility — match if post Sharpe is positive.
-        return post > 0
-    proposed_size = proposal.get('proposed_size_scalar')
-    current_size = proposal.get('current_size_scalar')
-    if proposed_size is not None and current_size is not None:
-        # Any size change: match if post >= pre (loosely)
-        return post >= pre
-    # Pure stop/target/max-hold change: no direction we can test simply.
-    return post >= pre
+        if live_sharpe_post is None:
+            return None
+        return live_sharpe_post > 0
+    if live_sharpe_pre is None or live_sharpe_post is None:
+        return None
+    # Any size / stop / target / max-hold change: match if post >= pre (loosely).
+    return live_sharpe_post >= live_sharpe_pre
 
 
 def _brier_score(observations: list[dict]) -> float:
@@ -230,10 +236,16 @@ def calibration_report() -> dict:
     # NaN → None for JSON cross-compat (JS strict JSON.parse rejects NaN literal).
     if isinstance(brier, float) and brier != brier:
         brier = None
+    resolved = [o for o in obs if o.get('direction_match') is not None]
+    hit_rate = (sum(1 for o in resolved if o['direction_match']) / len(resolved)) if resolved else None
+    mean_conf = (sum(float(o['confidence']) for o in resolved) / len(resolved)) if resolved else None
     return {
-        'total_observations': len(obs),
-        'brier_score':        brier,
-        'buckets':            _bucket_aggregates(obs),
+        'total_observations':    len(obs),
+        'resolved_observations': len(resolved),
+        'hit_rate':              hit_rate,
+        'mean_confidence':       mean_conf,
+        'brier_score':           brier,
+        'buckets':               _bucket_aggregates(obs),
     }
 
 
