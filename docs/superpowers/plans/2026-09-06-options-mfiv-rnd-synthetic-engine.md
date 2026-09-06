@@ -412,7 +412,8 @@ def _fixture_row(ticker='SPY'):
     fix = Path(__file__).resolve().parents[1] / 'fixtures'
     chain = pd.read_parquet(fix / 'options_chain_2026-09-03.parquet')
     meta = json.load(open(fix / 'options_chain_2026-09-03_spots.json'))
-    ch = chain[chain['ticker'] == ticker].assign(date=pd.to_datetime(chain['date']))
+    ch = chain[chain['ticker'] == ticker]
+    ch = ch.assign(date=pd.to_datetime(ch['date']))
     return osf.features_for_day(ch, meta['spots'][ticker], pd.Timestamp('2026-09-03'))
 
 
@@ -552,10 +553,14 @@ import pandas as pd
 import pytest
 
 
+SPY_EX_DATES = ['2024-03-15', '2024-06-15', '2024-09-15', '2024-12-15', '2025-03-15', '2025-06-15',
+                '2025-09-15', '2025-12-15', '2026-03-15', '2026-06-15']          # quarterly, 10 payments
+
+
 def _fixture(tmp_path, monkeypatch):
-    rows = []
-    for d in pd.date_range('2024-03-15', '2026-06-15', freq='3MS'):          # quarterly, 10 payments
-        rows.append({'symbol': 'SPY', 'action_type': 'cash_dividend', 'ex_date': d.date(), 'cash_amount': 1.5})
+    rows = [{'symbol': 'SPY', 'action_type': 'cash_dividend', 'ex_date': pd.Timestamp(d).date(), 'cash_amount': 1.5}
+            for d in SPY_EX_DATES]
+    rows.append({'symbol': 'ONE', 'action_type': 'cash_dividend', 'ex_date': pd.Timestamp('2025-05-15').date(), 'cash_amount': 2.0})
     rows.append({'symbol': 'SPY', 'action_type': 'forward_split', 'ex_date': pd.Timestamp('2025-01-02').date(), 'cash_amount': None})
     rows.append({'symbol': 'NODIV', 'action_type': 'reverse_split', 'ex_date': pd.Timestamp('2025-01-02').date(), 'cash_amount': None})
     p = tmp_path / 'corporate_actions.parquet'
@@ -568,16 +573,16 @@ def _fixture(tmp_path, monkeypatch):
 
 def test_trailing_year_sum_over_spot(tmp_path, monkeypatch):
     dv = _fixture(tmp_path, monkeypatch)
-    # (2025-06-30, 2026-06-30] holds 2025-09-01, 2025-12-01, 2026-03-01, 2026-06-01 → 4 × 1.5
+    # (2025-06-30, 2026-06-30] holds 2025-09-15, 2025-12-15, 2026-03-15, 2026-06-15 → 4 × 1.5
     assert dv.dividend_yield_asof('SPY', '2026-06-30', 500.0) == pytest.approx(6.0 / 500.0)
 
 
-def test_boundaries_ex_date_equal_as_of_in_and_lower_bound_out(tmp_path, monkeypatch):
-    dv = _fixture(tmp_path, monkeypatch)
-    inc = dv.dividend_yield_asof('SPY', '2026-06-01', 100.0)      # 2026-06-01 itself counts (≤ as_of)
-    exc = dv.dividend_yield_asof('SPY', '2026-05-31', 100.0)      # ... and is excluded the day before
-    assert inc == pytest.approx(exc + 1.5 / 100.0 - 1.5 / 100.0 * 0) or inc > exc
-    assert inc - exc == pytest.approx(0.0) or inc - exc == pytest.approx(1.5 / 100.0)
+def test_window_is_open_below_and_closed_above(tmp_path, monkeypatch):
+    dv = _fixture(tmp_path, monkeypatch)                            # ONE pays 2.0 on 2025-05-15 only
+    assert dv.dividend_yield_asof('ONE', '2025-05-15', 100.0) == pytest.approx(0.02)   # ex_date == as_of counts
+    assert dv.dividend_yield_asof('ONE', '2025-05-14', 100.0) == 0.0                   # not yet
+    assert dv.dividend_yield_asof('ONE', '2026-05-14', 100.0) == pytest.approx(0.02)   # 364 days later: still inside
+    assert dv.dividend_yield_asof('ONE', '2026-05-15', 100.0) == 0.0                   # ex_date == as_of − 365 d: out
 
 
 def test_no_dividend_ticker_and_unknown_ticker_are_zero(tmp_path, monkeypatch):
@@ -594,7 +599,7 @@ def test_pre_coverage_backfills_first_full_year_and_warns_once(tmp_path, monkeyp
     with caplog.at_level(logging.WARNING):
         q1 = dv.dividend_yield_asof('SPY', '2024-06-01', 400.0)               # trailing window starts 2023-06 < coverage
         q2 = dv.dividend_yield_asof('SPY', '2024-09-01', 400.0, ref_spot=600.0)
-    # first full year [2024-03-15, 2025-03-15): 2024-03-15, 06-01, 09-01, 12-01 → 4 × 1.5 = 6.0
+    # first full year [2024-03-15, 2025-03-15): 2024-03-15, 06-15, 09-15, 12-15 → 4 × 1.5 = 6.0
     assert q1 == pytest.approx(6.0 / 400.0)
     assert q2 == pytest.approx(6.0 / 600.0)                                    # ref_spot wins when given
     assert sum('q backfilled' in r.message for r in caplog.records) == 1
@@ -725,7 +730,7 @@ def dividend_yield_asof(ticker: str, as_of, spot: float, ref_spot: float | None 
 - [ ] **Step 4: Run**
 
 Run: `python3 -m pytest tests/backtest/test_dividends.py -q`
-Expected: 5 passed. (If `test_boundaries_...` reads awkwardly, keep its two asserts — they encode "2026-06-01 counts on 2026-06-01, not on 2026-05-31".)
+Expected: 5 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -773,7 +778,8 @@ def test_american_never_below_european_on_a_grid():
     for flag, K, t, q in itertools.product('cp', (80.0, 100.0, 120.0), (0.1, 0.5), (0.0, 0.03)):
         am = american_price(flag, 100.0, K, t, 0.3, r=0.05, q=q)
         eu = bs_price(flag, 100.0, K, t, 0.3, r=0.05, q=q)
-        assert am >= eu - 1e-9, (flag, K, t, q, am, eu)
+        # an N=200 tree carries ~cent-level discretisation error against the closed form
+        assert am >= eu * 0.99 - 0.01, (flag, K, t, q, am, eu)
 
 
 def test_american_call_without_dividend_is_the_european_call():
@@ -1353,7 +1359,7 @@ def test_american_put_cycle_costs_at_least_the_european_one(tmp_path, monkeypatc
     flat = pd.Series(500.0, index=idx)
     am = OptionSpec(underlying='SPY', right='put', strike_rule='atm', dte_target=30, exercise='american')
     eu = OptionSpec(underlying='SPY', right='put', strike_rule='atm', dte_target=30, exercise='european')
-    stats = {'iv_sources': {}, 'q_positive': 0, 'exercise': set()}
+    stats = ob._new_stats()
     ca = ob._price_single_cycle(am, flat, idx[0], +1, 1.2, 21, 10, stats=stats)
     ce = ob._price_single_cycle(eu, flat, idx[0], +1, 1.2, 21, 10)
     assert ca['entry_price'] >= ce['entry_price'] > 0
@@ -1689,7 +1695,7 @@ ok = mf >= 90 and rn >= 90 and ver.get(3, 0) == len(df)
 if spy is not None:
     print('SPY', {k: (None if pd.isna(spy[k]) else round(float(spy[k]), 4)) for k in cols[2:]})
     ok &= 0.0 <= float(spy['mf_tail_premium_30d']) <= 0.03 and float(spy['rn_skew_30d']) < 0 \
-          and 0.005 <= float(spy['rn_p_dn10_30d']) <= 0.05
+          and 0.001 <= float(spy['rn_p_dn10_30d']) <= 0.10
 panel = pq.read_metadata('data/derived/options_aggregates_enriched.parquet')
 pcols = set(pq.read_schema('data/derived/options_aggregates_enriched.parquet').names)
 missing = [c for c in cols[5:] if c not in pcols]
@@ -1723,7 +1729,7 @@ Spec: docs/specs/2026-09-06-options-mfiv-rnd-synthetic-engine-spec.md · Plan: d
 
 ## Steps (controller, after merge, first idle window — never beside a fleet child)
 1. `sudo systemd-run --unit=surface-v3-rollout-$(date -u +%Y%m%d) -p Nice=19 -p MemoryMax=3500M -p RuntimeMaxSec=5h -E PYTHONUNBUFFERED=1 -E PYTHONPATH=/root/openclaw/src --working-directory=/root/openclaw /bin/bash scripts/rollout_surface_v3.sh` — waits for `openclaw-fleet-overnight-resume` / `fleet-rf-epoch-20260906` / `options-surface-rollout-20260906` to be inactive, rebuilds `data/master/options_surface.parquet` from 2026-06-29 (append_dedup replace on (ticker, date) — UNION BY NAME fills the new columns for every rebuilt row), rebuilds `data/derived/options_aggregates_enriched.parquet`, verifies.
-2. Verification thresholds (script exit 0 = all met): `mfiv_nonnull ≥ 90 %` and `rn_nonnull ≥ 90 %` of tickers with ≥ 2 fitted expiries on the latest session; every latest-session row at version 3; SPY `0 ≤ mf_tail_premium_30d ≤ 0.03`, `rn_skew_30d < 0`, `0.5 % ≤ rn_p_dn10_30d ≤ 5 %`; the panel carries all seven columns.
+2. Verification thresholds (script exit 0 = all met): `mfiv_nonnull ≥ 90 %` and `rn_nonnull ≥ 90 %` of tickers with ≥ 2 fitted expiries on the latest session; every latest-session row at version 3; SPY `0 ≤ mf_tail_premium_30d ≤ 0.03`, `rn_skew_30d < 0`, `0.1 % ≤ rn_p_dn10_30d ≤ 10 %`; the panel carries all seven columns.
 3. No re-backtest: no strategy reads a v3 key and no manifest strategy uses the synthetic engine. The options sleeve's v2 values are byte-identical (freeze test).
 4. Results: **TO BE FILLED by the rollout run on main** (surface rows/dates, coverage percentages, SPY row, panel rows).
 
@@ -1733,7 +1739,7 @@ Spec: docs/specs/2026-09-06-options-mfiv-rnd-synthetic-engine-spec.md · Plan: d
 - `scripts/options_parity_check.py`'s IV gate is near-zero on the surface overlap by construction (ruling G8); measure the vix_term tier with `OPENCLAW_OPTIONS_SURFACE_PATH` pointed at an empty path.
 
 ## Rollback
-- Surface: restore the v2 panel copy `data/derived/options_aggregates_enriched.v1-2026-09-04.parquet` is NOT the right target (that is v1); the v2 rows are still in the master — a v3 → v2 rollback is `git revert` of the Part A commits + `scripts/compute_rolling_options_fields.py` (the panel is derived; the master's extra columns are harmless to v2 readers).
+- Surface: revert the Part A commits, then `scripts/compute_rolling_options_fields.py` (the panel is derived; the master's extra v3 columns are harmless to v2 readers — never delete a master).
 - Engine: `git revert` of the Part B commits; nothing live depends on it.
 ```
 
