@@ -17,7 +17,14 @@
 set -uo pipefail
 cd /root/openclaw || exit 2
 DATE="${1:-$(date -u +%F)}"
-POST=1; [ "${2:-}" = "--no-post" ] && POST=0
+shift || true
+POST=1; NOTE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-post) POST=0;;
+    --note) NOTE="$2"; shift;;
+  esac; shift
+done
 OUT=/root/openclaw/logs/fresh_book_report_${DATE}.log
 ts() { date -u +%FT%TZ; }
 A=/root/go/bin/alpaca
@@ -41,6 +48,8 @@ A=/root/go/bin/alpaca
     echo "--- broker (account PA3K16GEOQ4E)"
     $A account get --jq '{equity, cash, buying_power}' 2>/dev/null
     echo "positions: $($A position list --jq 'length' 2>/dev/null)"
+    echo "book split: $($A position list --jq '{spy_usd: ([.[] | select(.symbol=="SPY") | .market_value | tonumber] | add // 0 | round), alpha_gross_usd: ([.[] | select(.symbol!="SPY") | .market_value | tonumber | fabs] | add // 0 | round)}' 2>/dev/null | tr -d ' \n')"
+    [ -n "$NOTE" ] && echo "note: $NOTE"
     echo "SPY position: $($A position list --jq '.[] | select(.symbol=="SPY") | {qty, market_value, avg_entry_price, unrealized_pl}' 2>/dev/null | tr -d ' \n')"
     echo "SPY orders today:"
     $A order list --symbols SPY --status all --limit 20 --nested \
