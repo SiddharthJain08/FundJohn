@@ -2879,7 +2879,18 @@ async function _buildCandles(days) {
     candles.push(row);
     prevClose = row.close;
   }
-  return candles;
+  // Account-epoch filter (2026-09-08): candles from before the current
+  // broker account never render. The 09-04 cutover archived the OHLC file,
+  // but the running sampler's in-memory _ohlcStore re-persisted the
+  // old-account days on its next 60s save (the consumer's in-memory copy is
+  // the real store), and the new account's Alpaca portfolio history opens
+  // with junk pre-funding samples ($107k wick on 09-03) — the chart showed
+  // an old-account candle fused into a fake +8.75% cutover jump. One filter
+  // covers both sources; bump pipeline_config.account_epoch on any future
+  // cutover and the chart resets with the stats. Fail-open: an unreadable
+  // epoch (1970-01-01) filters nothing.
+  const _epoch = await _accountEpoch();
+  return candles.filter(c => c.date >= _epoch);
 }
 
 app.get('/api/portfolio/pnl-candles', async (req, res) => {
