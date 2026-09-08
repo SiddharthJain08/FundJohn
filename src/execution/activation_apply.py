@@ -124,6 +124,37 @@ def pending_state(conn) -> dict:
             out['pending'] = True
             out['reasons'].append(
                 f'{k}={s["value"]} set {ts.isoformat()} > last applied {m_ts.isoformat()}')
+
+    # Fresh re-backtests also invalidate eligibility (2026-09-08): the fleet
+    # epoch re-backtests strategies NIGHTLY, but the assigner only ran on
+    # slider changes + the Mon 00:00 ET weekly cron — so a Sunday 09:12 run
+    # that turned S_ma_tsmom_crossover negative in every regime sat ELIGIBLE
+    # behind a 04:00 marker for two trading days (39 stale-eligible cells
+    # measured, worst sleeve −6.9). A primary run landing after the marker
+    # now makes the daily activation step re-derive. Fail-safe: a read error
+    # here does NOT force pending (the sliders above already cover their own
+    # failure); it just logs — a broken runs-table read must not re-apply
+    # eligibility every cycle forever.
+    try:
+        cur = conn.cursor()
+        cur.execute("""SELECT MAX(r.run_at) FROM strategy_backtest_runs r
+                        JOIN strategy_registry sr ON sr.id = r.strategy_id
+                       WHERE r.primary_window AND sr.status = 'approved'""")
+        row = cur.fetchone()
+        cur.close()
+        newest_run = row[0] if row else None
+        out['newest_primary_run_at'] = newest_run
+        if newest_run is not None and m_ts is not None and newest_run > m_ts:
+            out['pending'] = True
+            out['reasons'].append(
+                f'primary backtest run landed {newest_run.isoformat()} > last applied '
+                f'{m_ts.isoformat()} — eligibility derived from superseded sleeves')
+    except Exception as e:
+        _log(f'newest-run staleness probe failed ({e}) — slider-only pending check')
+        try:
+            conn.rollback()
+        except Exception:
+            pass
     return out
 
 

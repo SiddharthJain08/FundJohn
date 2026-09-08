@@ -18,25 +18,34 @@ T1 = dt.datetime(2026, 8, 22, 19, 0, 0, tzinfo=UTC)   # operator moved slider
 
 
 class FakeCur:
-    def __init__(self, rows, raise_on_execute=False):
+    def __init__(self, rows, raise_on_execute=False, newest_run=None):
         self._rows = rows
         self._raise = raise_on_execute
+        self._newest_run = newest_run
+        self._last_sql = ''
 
     def execute(self, sql, params=()):
         if self._raise:
             raise RuntimeError('boom')
+        self._last_sql = sql
         self.params = params
 
     def fetchall(self):
         return list(self._rows)
+
+    def fetchone(self):
+        # The 2026-09-08 staleness probe (MAX(run_at) over primary runs).
+        if 'strategy_backtest_runs' in self._last_sql:
+            return (self._newest_run,)
+        return None
 
     def close(self):
         pass
 
 
 class FakeConn:
-    def __init__(self, rows, raise_on_execute=False):
-        self._cur = FakeCur(rows, raise_on_execute)
+    def __init__(self, rows, raise_on_execute=False, newest_run=None):
+        self._cur = FakeCur(rows, raise_on_execute, newest_run=newest_run)
         self.rolled_back = False
         self.closed = False
 
@@ -91,6 +100,25 @@ def test_not_pending_when_no_slider_rows_but_marker_present():
     # weekly apply already reflects that; nothing to re-apply.
     conn = FakeConn([_marker(T0)])
     assert aa.pending_state(conn)['pending'] is False
+
+
+def test_pending_when_primary_run_lands_after_marker():
+    # 2026-09-08: the fleet epoch re-backtests nightly; a run landing after
+    # the marker means eligibility was derived from superseded sleeves
+    # (S_ma_tsmom_crossover sat eligible with all-negative fresh sleeves).
+    conn = FakeConn([('strategy_activation_min_sharpe', '1', T0 - dt.timedelta(days=1)),
+                     _marker(T0)], newest_run=T0 + dt.timedelta(hours=5))
+    st = aa.pending_state(conn)
+    assert st['pending'] is True
+    assert any('primary backtest run landed' in r for r in st['reasons'])
+
+
+def test_not_pending_when_runs_older_than_marker():
+    conn = FakeConn([('strategy_activation_min_sharpe', '1', T0 - dt.timedelta(days=1)),
+                     _marker(T0)], newest_run=T0 - dt.timedelta(days=2))
+    st = aa.pending_state(conn)
+    assert st['pending'] is False
+    assert st['newest_primary_run_at'] == T0 - dt.timedelta(days=2)
 
 
 def test_read_failure_is_fail_safe_pending():
