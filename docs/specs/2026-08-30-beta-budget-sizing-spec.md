@@ -2,7 +2,19 @@
 
 **Status:** LANDED 2026-08-30 (`bf1d1d10..99eb1ade`, final review + one fix wave clean; flag
 `OPENCLAW_BENCH_BETA_BUDGET` unset = shadow; flip per §5 after two clean
-shadow cycles). Amends
+shadow cycles).
+
+> **Amendment 2 (operator directive, 2026-09-08):** the acting-strategy gate
+> (`min_acting_strategies`) now runs BEFORE rule C and this budget, so the
+> pool in §3.1 sums over the POST-GATE SURVIVORS only — a gate-dropped
+> ticker neither keeps weight nor hands its `min(|S_i|, S_m)` base to the
+> benchmark, and λ·NAV distributes over the survivors ("NAV should be
+> distributed among all surviving tickers … allowing alpha to fill up the
+> book even when acting strategies is set above 1"; "the beta budget should
+> also only sweep the tickers after the acting strategy gate"). Measured
+> trigger 2026-09-08 (LOW_VOL, min_acting=2): 196/207 gate-dropped names fed
+> pool=164 ⇒ SPY raw target 176% NAV (NAV-capped to 100%) while the 11
+> surviving alpha names split $24k of the $200k gross. Amends
 `docs/specs/2026-08-29-benchmark-relative-sizing-spec.md` §2.5 (rule C) and
 follows amendment 1 (`docs/specs/2026-08-29-bench-sizing-amendment-1-spec.md`).
 Operator directive (chat, 2026-08-30 09:11 UTC):

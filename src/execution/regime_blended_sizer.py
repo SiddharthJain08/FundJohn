@@ -1720,8 +1720,35 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # sleeve should appear, cap-bounded, ahead of the flip.
     _bench_exempt = _bench_tkrs if _bsz.bench_relative_sizing_enabled() else set()
 
+    # Acting-strategy gate (MOVED ABOVE rule C, operator directive 2026-09-08):
+    # drop tickers fewer than `min_acting` distinct strategies act on in the
+    # net direction BEFORE the hurdle/beta budget run, so a gate-dropped
+    # ticker neither keeps weight NOR hands its min(|S|, S_m) base to the
+    # benchmark pool — λ·NAV distributes over the SURVIVORS and alpha can
+    # fill the book even at min_acting > 1. (Measured 2026-09-08 pre-move:
+    # 196/207 gate-dropped names fed pool=164 ⇒ SPY raw target 176% NAV,
+    # clamped to 100%, alpha squeezed to $24k of the $200k budget.)
+    # At the floor setting (1) the block is skipped — book byte-identical.
+    # Benchmark tickers that are net-direction-qualified (spec §2.4 i) are
+    # exempt (their conviction is the market's own). Deliberately UNGATED on
+    # OPENCLAW_BENCH_RELATIVE_SIZING (B3 ruling, unlike the two caps below and
+    # the D9 similarity rule): the promoted sleeve should appear here,
+    # cap-bounded, ahead of the rule-C flip.
+    if min_acting > MIN_ACTING_STRATEGIES_LO:
+        gated_out = [tkr for tkr in list(ticker_w.keys())
+                     if acting_n.get(tkr, 0) < min_acting and tkr not in _bench_tkrs]
+        for tkr in gated_out:
+            ticker_w.pop(tkr, None)
+            ticker_meta.pop(tkr, None)
+        if gated_out:
+            logger.info('regime_blended_sizer.sharpe_cadence: dropped %d tickers below '
+                        'min_acting_strategies=%d (kept=%d): %s',
+                        len(gated_out), min_acting, len(ticker_w), sorted(gated_out)[:20])
+
     # Rule C — benchmark-relative sizing (spec 2026-08-29 §2.5). Alpha tickers
     # are sized on |S_adj| − S_m (sign preserved), benchmark tickers keep S_adj.
+    # Runs on the POST-acting-gate survivor set (directive 2026-09-08): the
+    # beta budget sweeps only survivors' bases.
     # SHADOW unless OPENCLAW_BENCH_RELATIVE_SIZING=1. Whole block fail-open.
     # _bench_applied_dropped defaults to 0 here (not inside the try) so the
     # name always exists for the "no tickers cleared the acting-strategy gate"
@@ -1779,26 +1806,9 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     except Exception as e:
         logger.warning('bench_sizing: failed (%s: %s); sizing on raw S_adj', type(e).__name__, e)
 
-    # Acting-strategy gate: drop tickers fewer than `min_acting` distinct
-    # strategies act on in the net direction. At the floor setting (1) the
-    # block is skipped — every ticker with a contributor already has ≥1 acting
-    # strategy, so the book is byte-identical to the pre-gate behaviour.
-    # Benchmark tickers that are net-direction-qualified (spec §2.4 i) are
-    # exempt (their conviction is the market's own). Deliberately UNGATED on
-    # OPENCLAW_BENCH_RELATIVE_SIZING (B3 ruling, unlike the two caps below and
-    # the D9 similarity rule): the promoted sleeve should appear here,
-    # cap-bounded, ahead of the rule-C flip.
-    if min_acting > MIN_ACTING_STRATEGIES_LO:
-        gated_out = [tkr for tkr in list(ticker_w.keys())
-                     if acting_n.get(tkr, 0) < min_acting and tkr not in _bench_tkrs]
-        for tkr in gated_out:
-            ticker_w.pop(tkr, None)
-            ticker_meta.pop(tkr, None)
-        if gated_out:
-            logger.info('regime_blended_sizer.sharpe_cadence: dropped %d tickers below '
-                        'min_acting_strategies=%d (kept=%d): %s',
-                        len(gated_out), min_acting, len(ticker_w), sorted(gated_out)[:20])
-
+    # (Acting-strategy gate formerly ran HERE — moved above rule C on the
+    # 2026-09-08 operator directive so gate-dropped conviction never reaches
+    # the beta pool or the λ·NAV normalizer.)
     if not ticker_w:
         logger.info('regime_blended_sizer.sharpe_cadence: no tickers cleared the '
                     'acting-strategy gate (min_acting_strategies=%d) bench_dropped=%d',
