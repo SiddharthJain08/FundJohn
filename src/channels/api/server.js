@@ -9476,13 +9476,9 @@ function _stRenderDataUsage() {
 // trade_count, total_return_pct, hit_rate}. Shows backtest Sharpe per regime.
 const _REGIME_AXIS = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
 const _REGIME_TAGS = { LOW_VOL: 'LV', TRANSITIONING: 'TR', HIGH_VOL: 'HV', CRISIS: 'CR' };
-// Per-regime effective Sharpe — since 2026-08-29 (benchmark-relative sizing
-// spec D2) this IS the raw sleeve Sharpe: strategy_weights.daily_weight ==
-// effective_sharpe, no sqrt(avg holding days) divisor. Kept as a function so
-// the column keeps its name and sort key.
-function _effSharpeOf(b) {
-  return (b && b.sharpe != null) ? parseFloat(b.sharpe) : null;
-}
+// (Per-regime effective Sharpe helper _effSharpeOf RETIRED 2026-09-08 —
+// since spec D2 it returned raw b.sharpe; the Eff.Sharpe column/row it fed
+// is gone: only backtest values are displayed, per operator directive.)
 function _regimeBreakdown(r) {
   const breakdown = r.backtest_regime_breakdown || {};
   const eligible = Array.isArray(r.eligible_regimes)
@@ -9496,8 +9492,8 @@ function _regimeBreakdown(r) {
     const b      = breakdown[rg];
     const trades = b && b.trade_count ? parseInt(b.trade_count) : 0;
     // Cell value = raw per-regime BACKTEST Sharpe — the quantity the
-    // activation slider gates on. Eff.Sharpe lives in the expanded
-    // "Backtest by Regime" grid only (operator 2026-07-27).
+    // activation slider gates on (and, since 2026-09-08, the ONLY Sharpe
+    // shown anywhere on this page: live + blended-effective retired).
     const sharpe = (b && b.sharpe != null) ? parseFloat(b.sharpe) : null;
     const klass = ['st-regime-cell', \`st-rg-\${rg}\`];
     if (current === rg) klass.push('st-rg-current');
@@ -9928,7 +9924,9 @@ function _renderActiveStack(rows) {
     const m = _pickScope(r);
     const overlay = m ? {
       sharpe:           m.sharpe,
-      effective_sharpe: m.effective_sharpe,
+      // effective_sharpe RETIRED from display (operator 2026-09-08): the
+      // weekly re-backtest folds prior live signals into the backtest
+      // values, so only backtest Sharpe is shown — no live, no blend.
       closed_count:     m.closed_count,
       win_rate:         m.win_rate,
       arr_pct:          m.arr_pct,
@@ -9963,14 +9961,13 @@ function _renderActiveStack(rows) {
   const _scopeLabel = _scope === 'ALL' ? 'All regimes'
     : _scope === 'ELIGIBLE' ? 'Eligible regimes'
     : _scope + ' only';
-  el.innerHTML = \`<div class="st-scope-caption" style="font-size:9.5px;color:var(--dim);padding:2px 4px 6px;letter-spacing:.04em">Metrics scope: <b style="color:var(--muted)">\${_scopeLabel}</b> — Sharpe / Eff / Closed / Win / ARR / ADR / ACT reflect this regime selection. "By Regime" always shows all four.</div>
+  el.innerHTML = \`<div class="st-scope-caption" style="font-size:9.5px;color:var(--dim);padding:2px 4px 6px;letter-spacing:.04em">Metrics scope: <b style="color:var(--muted)">\${_scopeLabel}</b> — Sharpe / Closed / Win / ARR / ADR / ACT reflect this regime selection (all BACKTEST-sourced; the weekly re-backtest folds in prior live signals). "By Regime" always shows all four.</div>
   <table class="db-table st-active-table" style="min-width:1180px">
     <tr>
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
       <th data-sort-key="_active_rank" data-sort-type="num" title="Waiting(0)<Stale(1)<Live(2)">Status</th>
       <th title="Per-regime BACKTEST Sharpe; dot=current regime; blue=declared">By Regime</th>
-      <th class="num" data-sort-key="sharpe" data-sort-type="num" title="Backtest Sharpe (primary window)">Sharpe</th>
-      <th class="num" data-sort-key="effective_sharpe" data-sort-type="num" title="Sleeve Sharpe (cadence normalization retired 2026-08-29)">Eff.Sharpe</th>
+      <th class="num" data-sort-key="sharpe" data-sort-type="num" title="Backtest Sharpe (primary window; the weekly re-backtest folds in prior live signals)">Sharpe</th>
       <th class="num" data-sort-key="closed_count" data-sort-type="num" title="Backtest trade count">Closed</th>
       <th class="num" data-sort-key="win_rate" data-sort-type="num" title="Backtest hit rate">Win&nbsp;%</th>
       <th class="num" data-sort-key="arr_pct" data-sort-type="num" title="Backtest mean trade return %">ARR&nbsp;%</th>
@@ -9992,7 +9989,7 @@ function _renderActiveStack(rows) {
       const ourCell = oueEmpty
         ? '<span style="color:var(--dim)">—</span>'
         : \`<span style="color:#4ade80">\${o}</span>/<span style="color:#f87171">\${u}</span>/<span style="color:#94a3b8">\${e}</span>\`;
-      const sh = r.sharpe, esh = r.effective_sharpe;
+      const sh = r.sharpe;
       const closedTxt = r.closed_count || 0;
       const winTxt = r.win_rate != null ? Math.round(parseFloat(r.win_rate) * 100) + '%' : '—';
       const adrTitle = 'ARR ' + (arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—')
@@ -10009,7 +10006,7 @@ function _renderActiveStack(rows) {
       const isOpen = r.strategy_id === expandedSid;
       const expandRow = isOpen ? \`
         <tr class="st-expand-row" data-sid="\${_escStr(r.strategy_id)}">
-          <td colspan="13">
+          <td colspan="12">
             <div class="st-expand-shell" id="st-expand-shell-\${_escStr(r.strategy_id)}">
               <div class="st-expand-pad" id="st-expand-pad-\${_escStr(r.strategy_id)}">
                 <div class="st-expand-head">
@@ -10032,7 +10029,6 @@ function _renderActiveStack(rows) {
         <td><span class="sg-status sg-status-\${sub}" title="\${_escStr(title)}">\${subLabel}</span>\${_driftBadge(r)}\${_freshBadge(r)}</td>
         <td>\${_regimeBreakdown(r)}</td>
         <td class="num">\${sh != null ? parseFloat(sh).toFixed(2) : '—'}</td>
-        <td class="num">\${esh != null ? parseFloat(esh).toFixed(2) : '—'}</td>
         <td class="num">\${closedTxt}</td>
         <td class="num">\${winTxt}</td>
         <td class="num \${pnlCls(arr)}">\${arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—'}</td>
@@ -10101,22 +10097,12 @@ async function _stPaintExpand(sid) {
     const retPct = retSrc != null ? parseFloat(retSrc) : null;
     const sharpe = b.sharpe != null ? parseFloat(b.sharpe) : null;
     const winPct = b.hit_rate != null ? Math.round(b.hit_rate * 100) : null;
-    // Additional per-regime risk metrics (operator 2026-07-27): effective
-    // Sharpe — since 2026-08-29 (spec D2) this expanded-card value
-    // (_effSharpeOf, below) is ALWAYS the raw sleeve Sharpe: it is a plain
-    // function of b.sharpe and cannot read process.env (C1 fix, final
-    // review — it does NOT revert together with the other two sources).
-    // The row column (strategy_weights.daily_weight, written server/Python
-    // side) and blendScope's row Eff.Sharpe (blend_scope.js, which does read
-    // process.env) are the ones that revert to sharpe / sqrt(avg holding
-    // days) under OPENCLAW_STRATEGY_CADENCE_WEIGHT_NORM=1 — Calmar (the
-    // DD-gate escape-hatch metric) and Max DD (the ceiling it escapes).
-    const effSh  = _effSharpeOf(b);
+    // Eff.Sharpe row RETIRED (operator 2026-09-08) — since spec D2 it
+    // duplicated the raw sleeve Sharpe; only backtest values are shown.
     const calmar = b.calmar != null ? parseFloat(b.calmar) : null;
     const maxDd  = b.max_dd_pct != null ? parseFloat(b.max_dd_pct) : null;
     const inner = ''
       + '<div class="st-rs-row"><span>Sharpe</span><b>' + (sharpe != null ? sharpe.toFixed(2) : '—') + '</b></div>'
-      + '<div class="st-rs-row"><span>Eff.Sharpe</span><b>' + (effSh != null ? effSh.toFixed(2) : '—') + '</b></div>'
       + '<div class="st-rs-row"><span>Calmar</span><b' + (calmar != null ? ' style="color:' + (calmar >= 0.5 ? 'var(--green)' : 'var(--red)') + '"' : '') + '>'
       +   (calmar != null ? calmar.toFixed(2) : '—') + '</b></div>'
       + '<div class="st-rs-row"><span>Max DD</span><b' + (maxDd != null ? ' style="color:' + (maxDd <= 20 ? 'var(--muted)' : maxDd <= 50 ? 'var(--orange, #f0883e)' : 'var(--red)') + '"' : '') + '>'
@@ -10180,7 +10166,7 @@ async function _stPaintExpand(sid) {
   body.innerHTML = \`
     <div class="st-expand-grid">
       <div class="st-expand-section">
-        <div class="st-expand-section-title"><span>Backtest by Regime</span><span style="color:var(--dim);font-size:9px">Sharpe · Eff · Calmar · MaxDD · Return · Win · Trades</span></div>
+        <div class="st-expand-section-title"><span>Backtest by Regime</span><span style="color:var(--dim);font-size:9px">Sharpe · Calmar · MaxDD · Return · Win · Trades</span></div>
         <div class="st-regime-stats">\${cellsHtml}</div>
         <div class="st-expand-section-title" style="margin-top:14px"><span>Similar Active Strategies</span><span style="color:var(--dim);font-size:9px">sorted by pairwise ρ · then backtest Sharpe per regime · click to open</span></div>
         <div class="st-similar">
