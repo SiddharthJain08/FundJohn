@@ -1,0 +1,16 @@
+[Unit]
+Description=Guarded OPENCLAW_TARGET_MODE=atr_r flip (scripts/target_mode_flip_after_fleet.sh --apply; gates: live tier re-backtested under atr_r, Sharpe sanity vs flat rows, outside the compute window)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/openclaw
+ExecStart=/bin/bash /root/openclaw/scripts/target_mode_flip_after_fleet.sh --apply --timer-unit openclaw-target-mode-flip.timer
+StandardOutput=append:/var/log/openclaw-target-mode-flip.log
+StandardError=append:/var/log/openclaw-target-mode-flip.log
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

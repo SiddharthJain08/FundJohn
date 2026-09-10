@@ -15,6 +15,7 @@ import numpy as np
 from abc import ABC, abstractmethod
 from typing import List, Optional
 from dataclasses import dataclass, field
+import os
 
 
 @dataclass
@@ -97,15 +98,36 @@ REGIME_SYNONYMS = {
     'RISK_ON':  ('LOW_VOL', 'TRANSITIONING'),   # mirror of RISK_OFF
 }
 
-# Tighten ATR-based stops in high-vol regimes to preserve R:R geometry.
-# Without this, 2× ATR stops balloon to 6-9% in TRANSITIONING/HIGH_VOL while
-# targets remain fixed at 5-20%, collapsing R:R to <1x and making EV negative.
+# Tighten ATR-based stops in high-vol regimes. Under the legacy 'flat' target
+# mode this was the only thing keeping R:R from collapsing (2× ATR stops
+# balloon to 6-9% in TRANSITIONING/HIGH_VOL while targets stayed at 5-20%).
+# Under 'atr_r' the targets are R-multiples of the same stop distance, so the
+# scale tightens stop AND targets together and the geometry is regime-invariant.
 REGIME_ATR_SCALE = {
     'LOW_VOL':       1.00,
     'TRANSITIONING': 0.70,
     'HIGH_VOL':      0.55,
     'CRISIS':        0.35,
 }
+
+# Target geometry (2026-09-10). 'flat' = legacy ±5/10/20 % of price regardless
+# of vol (143/156 strategies inherited it: SPY got 6:1 reward:risk, a 3 %-ATR
+# name 0.8:1 — R:R inversely proportional to vol). 'atr_r' = targets are
+# BaseStrategy.target_r_multiples × the stop distance (ATR14 × atr_multiplier ×
+# REGIME_ATR_SCALE), so the geometry is fixed by construction and scales with
+# vol and regime; at the fleet's median stop (2.2 %) t1 lands ≈ 4.4 %, i.e. the
+# median trade is nearly unchanged while low-vol names tighten and high-vol
+# names widen. Default stays 'flat' until the fleet is re-gated under 'atr_r'
+# (scripts/target_mode_flip_after_fleet.sh sets OPENCLAW_TARGET_MODE=atr_r).
+TARGET_MODE_ENV = 'OPENCLAW_TARGET_MODE'
+TARGET_MODES = ('flat', 'atr_r')
+
+
+def target_mode() -> str:
+    mode = (os.environ.get(TARGET_MODE_ENV) or 'flat').strip().lower()
+    if mode not in TARGET_MODES:
+        raise ValueError(f'{TARGET_MODE_ENV}={mode!r} — expected one of {TARGET_MODES}')
+    return mode
 
 
 class BaseStrategy(ABC):
@@ -130,6 +152,11 @@ class BaseStrategy(ABC):
     # Safety cap: generate_signals should not return more than this many signals.
     # Prevents runaway signal counts at large universe sizes without slicing in each strategy.
     MAX_SIGNALS:      int = 50
+    # 'atr_r' target ladder as R-multiples of the stop distance (t1, t2, t3).
+    # Only t1 is executed (bracket / backtest exit); t2 feeds bracket stacking,
+    # t3 is informational (an explicit bull_/bear_target still wins t3).
+    # Override per strategy when its edge has a different horizon.
+    target_r_multiples: tuple = (2.0, 4.0, 8.0)
     # Per-bar exit hook (spec docs/specs/2026-08-28-per-bar-exit-hook-spec.md §1).
     # Explicit opt-in: the backtest open-book path and (Phase 2) live
     # update_pnl call should_exit() ONLY when this is True. Overriding
@@ -267,20 +294,35 @@ class BaseStrategy(ABC):
         # Treat ATR=0 (e.g. stale/ffilled constant series) same as NaN — use 2% fallback.
         atr  = float(_atr_raw) if (pd.notna(_atr_raw) and float(_atr_raw) > 0) else current_price * 0.02
 
-        # Scale ATR multiplier by regime to preserve R:R geometry in high-vol environments.
-        # High vol inflates ATR-based stops without expanding fixed-% targets, killing EV.
+        # Scale ATR multiplier by regime (see REGIME_ATR_SCALE).
         effective_atr_mult = atr_multiplier * REGIME_ATR_SCALE.get(regime_state, 1.0)
+        d = atr * effective_atr_mult            # stop distance from entry
+        mode = target_mode()
 
-        if direction == 'LONG':
-            stop = current_price - atr * effective_atr_mult
-            t1   = current_price * 1.05
-            t2   = current_price * 1.10
-            t3   = bull_target or current_price * 1.20
-        else:
-            stop = current_price + atr * effective_atr_mult
-            t1   = current_price * 0.95
-            t2   = current_price * 0.90
-            t3   = bear_target or current_price * 0.80
+        if mode == 'flat':
+            # Legacy geometry — byte-identical to the pre-2026-09-10 helper.
+            if direction == 'LONG':
+                stop = current_price - d
+                t1   = current_price * 1.05
+                t2   = current_price * 1.10
+                t3   = bull_target or current_price * 1.20
+            else:
+                stop = current_price + d
+                t1   = current_price * 0.95
+                t2   = current_price * 0.90
+                t3   = bear_target or current_price * 0.80
+        else:  # 'atr_r'
+            r1, r2, r3 = self.target_r_multiples
+            if direction == 'LONG':
+                stop = current_price - d
+                t1   = current_price + r1 * d
+                t2   = current_price + r2 * d
+                t3   = bull_target or current_price + r3 * d
+            else:
+                stop = current_price + d
+                t1   = current_price - r1 * d
+                t2   = current_price - r2 * d
+                t3   = bear_target or current_price - r3 * d
 
         return {
             'stop': round(stop, 4),

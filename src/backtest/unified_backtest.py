@@ -64,6 +64,15 @@ from execution import regime_param_override  # noqa: E402  # per-(strategy, regi
 from strategies.lifecycle import VALID_INSTRUMENT_CLASSES, _detect_module_instrument_class  # noqa: E402  # SP-4 dispatch
 from backtest.risk_free import RISK_FREE_ANNUAL_CONST as _RF_CONST, excess_sharpe as _excess_sharpe_rf, sharpe_pair as _sharpe_pair_rf, rf_source as _rf_source
 
+
+def _bt_target_mode() -> str:
+    """Provenance only — the strategies themselves read strategies.base.target_mode()."""
+    try:
+        from strategies.base import target_mode as _tm
+        return _tm()
+    except Exception:
+        return 'flat'
+
 # ── Configuration ────────────────────────────────────────────────────────────
 TRADING_DAYS_PER_YEAR = 252
 RISK_FREE_DAILY       = _RF_CONST / TRADING_DAYS_PER_YEAR   # legacy constant; Sharpe now goes through risk_free.excess_sharpe
@@ -1436,6 +1445,10 @@ def run_backtest(strategy_id: str, *,
                                    else len(universe)),
                 'methodology':    'discovery',
                 'rf': {'source': _rf_source(), **(total_metrics.get('rf_shadow') or {})},
+                # Target geometry epoch (2026-09-10): 'flat' (legacy ±5 %) or
+                # 'atr_r' (R-multiples of the stop). Read by
+                # scripts/target_mode_flip_after_fleet.sh gate G1.
+                'target_mode': _bt_target_mode(),
                 # Honest-cost provenance (2026-07-27): distinguishes this epoch
                 # from pre-cost canonical rows. spread_v1 = per-ticker half-spread
                 # artifact; flat = INSTRUMENT_COST_BPS fallback.
