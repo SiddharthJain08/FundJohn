@@ -101,6 +101,15 @@ def _ortho_enabled(gate: str) -> bool:
     return os.environ.get(gate) == '1'
 
 
+def _bench_sleeve_bracket_on() -> bool:
+    """2026-09-10: a benchmark-sleeve ticker takes the SLEEVE's own bracket
+    (S_beta_spy: stop -40 % / target +400 %, deliberately unreachable) instead
+    of whichever alpha strategy's 2xATR bracket wins the weight pick. Default
+    ON; OPENCLAW_BENCH_SLEEVE_BRACKET=0 restores the legacy pick (the 09-10
+    pre-market ejection of the whole sleeve on a ~1 % SPY stop)."""
+    return os.environ.get('OPENCLAW_BENCH_SLEEVE_BRACKET', '1') != '0'
+
+
 # 2026-08-29 (spec D3): the √(ln n / ln anchor) trade-count factor is OFF by
 # default; set '1' to restore it (the anchor knob strategy_trade_factor_anchor
 # only matters on that path).
@@ -2010,7 +2019,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     _orders = _emit_orders_from_targets(
         target_usd, ticker_meta, nav, confirmer, _ortho_groups,
         sharpe_by_strat, eff_weight_by_strat, opt_active, weight_by_strat,
-        scale, account_state, gate_net_sharpe=gate_net_sharpe)
+        scale, account_state, gate_net_sharpe=gate_net_sharpe,
+        bench_ids=_bench_ids, bench_tkrs=_bench_tkrs)
 
     # Final fix wave (2026-08-30) #2: under the beta budget the benchmark ticker
     # carries the conviction rule C took off ~every alpha name (≈78 % of NAV on
@@ -2438,7 +2448,7 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
 def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_groups,
                               sharpe_by_strat, eff_weight_by_strat, opt_active,
                               weight_by_strat, scale, account_state, broker=None,
-                              gate_net_sharpe=None):
+                              gate_net_sharpe=None, bench_ids=None, bench_tkrs=None):
     """Order-emission tail shared by the normal sizing path AND the zero-conviction
     flatten path (extracted 2026-07-08, byte-identical to the prior in-line tail).
 
@@ -2514,8 +2524,21 @@ def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_gr
         if kind in ('orphan_close', 'flip_close'):
             bracket = {}     # forces close_only=True downstream
         else:
+            # Benchmark-sleeve tickers (bench_tkrs: a sleeve contributor acting
+            # in the ticker's net direction) take the sleeve's own bracket.
+            _bids = bench_ids if (bench_ids and bench_tkrs and tkr in bench_tkrs) else None
             bracket = _choose_bracket(ticker_meta[tkr].get('brackets', []),
-                                      dir_sign, _ortho_groups, sharpe_by_strat)
+                                      dir_sign, _ortho_groups, sharpe_by_strat,
+                                      bench_ids=_bids)
+            if _bids and bracket and bracket.get('sid') in _bids:
+                try:
+                    _e = float(bracket['entry'])
+                    logger.info('bench_sleeve_bracket: %s <- %s stop=%.2f (%+.1f%%) t1=%.2f (%+.1f%%)',
+                                tkr, bracket['sid'], float(bracket['stop']),
+                                (float(bracket['stop']) / _e - 1) * 100,
+                                float(bracket['t1']), (float(bracket['t1']) / _e - 1) * 100)
+                except (TypeError, ValueError, KeyError, ZeroDivisionError):
+                    logger.info('bench_sleeve_bracket: %s <- %s', tkr, bracket.get('sid'))
         real_sid = '|'.join(sorted(set(ticker_meta[tkr]['strategies'])))[:120]
         if kind == 'flip_close':
             sid_out = '__flip_close__'
@@ -2896,12 +2919,24 @@ def _apply_asset_corr_cap(target_usd, conviction, nav, lam=1.0, exclude=None):
 
 
 def _choose_bracket(candidates: list[dict], dir_sign: int,
-                    ortho_groups: dict | None, sharpe_by_strat: dict) -> dict:
+                    ortho_groups: dict | None, sharpe_by_strat: dict,
+                    bench_ids: set | None = None) -> dict:
     """Gate decision for the bracket attached to an emission.
+    Benchmark sleeve first (2026-09-10): when `bench_ids` names the sleeve
+    strategies and one of them contributes a usable (finite, direction-aligned)
+    bracket, that bracket wins outright — ahead of stacking and the max-weight
+    pick — so buy-and-hold beta is never protected by an alpha strategy's ATR
+    stop. Falls through to the legacy rules when no usable sleeve bracket
+    exists or the kill switch is set.
     OPENCLAW_STRATEGY_BRACKET_STACK ON + block substrate present -> stacked bracket
     (falls back to the legacy max-weight _select_bracket if stacking yields nothing).
     OFF (or no substrate) -> _select_bracket, byte-identical to legacy.
     Under ORTHO_SHADOW (and stacking OFF) it logs the would-be stacked bracket."""
+    if bench_ids and _bench_sleeve_bracket_on():
+        sleeve = _select_bracket([b for b in candidates if b.get('sid') in bench_ids],
+                                 dir_sign)
+        if sleeve:
+            return sleeve
     if ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_BRACKET_STACK'):
         from execution import bracket_stacking as _bs
         stacked = _bs.stacked_bracket(candidates, dir_sign,
