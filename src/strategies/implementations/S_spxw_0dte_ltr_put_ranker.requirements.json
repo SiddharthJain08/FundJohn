@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_spxw_0dte_ltr_put_ranker",
+  "required": ["prices", "options_eod"],
+  "optional": ["vol_indices"]
+}

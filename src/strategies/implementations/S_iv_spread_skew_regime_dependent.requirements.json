@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_iv_spread_skew_regime_dependent",
+  "required": ["prices", "options_eod"],
+  "optional": []
+}

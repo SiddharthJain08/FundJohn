@@ -210,6 +210,10 @@ _IMPL_MAP = {
     'S_ast_momentum_and_reversal_combined_with_volatility_effect_in_stocks': ('strategies.implementations.S_ast_momentum_and_reversal_combined_with_volatility_effect_in_stocks', 'AstMomentumAndReversalCombinedWithVolatilityEffectInStocks'),
     # Quantpedia: Sector Momentum Rotational System — monthly top-3 252-day ROC rotation across 10 sector ETFs
     'S_ast_sector_momentum_rotational_system': ('strategies.implementations.S_ast_sector_momentum_rotational_system', 'SectorMomentumRotationalSystem'),
+    # Beyond Passive Investing: Sector Trend Overlay — 12m-skip-1m TSMOM direction, inverse-vol sizing, one instrument per sector
+    'S_sector_trend_overlay': ('strategies.implementations.S_sector_trend_overlay', 'SectorTrendOverlay'),
+    # PortfolioOptimizer.io: Sharpe Stability Optimization — rank-weight long-only sleeve by temporal consistency of rolling-subperiod Sharpe (SSR), not raw Sharpe level
+    'S_sharpe_stability_optimization': ('strategies.implementations.S_sharpe_stability_optimization', 'SharpeStabilityOptimization'),
     # Oxford/blueprint batch — impl files + manifest entries existed but _IMPL_MAP
     # wiring was never done, so all 30 were unimportable (12 live ones were
     # "dead live": manifest live, 0 registry rows, 0 signals ever). Wired
@@ -396,6 +400,16 @@ _IMPL_MAP = {
     'S_leadlag_cluster_minirocket_v2': ('strategies.implementations.S_leadlag_cluster_minirocket_v2', 'LeadLagClusterMinirocketV2'),
     # PyQuant News 2026: inverse-volatility risk parity — LONG-only equal-risk-contribution allocation, monthly rebalance
     'S_inverse_volatility_risk_parity': ('strategies.implementations.S_inverse_volatility_risk_parity', 'InverseVolatilityRiskParity'),
+    # Gasparavicius/Grigutis 2026: diagonal-Q generalized-Markowitz tangency score, cross-sectional LONG/SHORT decile, monthly rebalance
+    'S_quadratic_risk_tangency_mvo': ('strategies.implementations.S_quadratic_risk_tangency_mvo', 'QuadraticRiskTangencyMVO'),
+    # Guo/Wang/Zhang 2026: Ito signature-conditioned VRP harvesting on SPY options, delta-hedged strangle, sized by path-order signature term
+    'S_ito_signature_vol_hedge': ('strategies.implementations.S_ito_signature_vol_hedge', 'ItoSignatureVolHedge'),
+    # Li/Wang 2026: Cremers-Weinbaum IV spread + Bakshi et al. skew proxy, cross-sectional rank, regime-partitioned
+    'S_iv_spread_skew_regime_dependent': ('strategies.implementations.S_iv_spread_skew_regime_dependent', 'IVSpreadSkewRegimeDependent'),
+    # quantish 2025: SPX first-60-min opening range sets bias; confirmed 10:30-noon breakout -> sell $15-wide 0DTE credit spread at the range extreme, SPY chain proxy
+    'S_spx_0dte_opening_range_breakout': ('strategies.implementations.S_spx_0dte_opening_range_breakout', 'SpxZeroDteOpeningRangeBreakout'),
+    # Wysocki 2026: LTR proxy ranking 8 delta-targeted SPXW 0DTE short puts + SKIP via a regime/tail-risk-aware expected-value score, SPY chain proxy
+    'S_spxw_0dte_ltr_put_ranker': ('strategies.implementations.S_spxw_0dte_ltr_put_ranker', 'SpxwZeroDteLtrPutRanker'),
 }
 
 

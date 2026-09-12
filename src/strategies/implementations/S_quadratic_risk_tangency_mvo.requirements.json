@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_quadratic_risk_tangency_mvo",
+  "required": ["prices", "macro"],
+  "optional": []
+}
