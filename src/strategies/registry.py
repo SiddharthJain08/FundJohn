@@ -394,6 +394,8 @@ _IMPL_MAP = {
     'S_leadlag_cluster_minirocket': ('strategies.implementations.S_leadlag_cluster_minirocket', 'LeadLagClusterMinirocket'),
     # Deng/Zhang 2026 (variant 2): liquidity-prefiltered MiniRocket-KMeans clusters, weekly refresh, multi-lag out-strength centrality leader
     'S_leadlag_cluster_minirocket_v2': ('strategies.implementations.S_leadlag_cluster_minirocket_v2', 'LeadLagClusterMinirocketV2'),
+    # PyQuant News 2026: inverse-volatility risk parity — LONG-only equal-risk-contribution allocation, monthly rebalance
+    'S_inverse_volatility_risk_parity': ('strategies.implementations.S_inverse_volatility_risk_parity', 'InverseVolatilityRiskParity'),
 }
 
 

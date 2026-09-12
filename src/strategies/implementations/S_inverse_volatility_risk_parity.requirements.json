@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_inverse_volatility_risk_parity",
+  "required": ["prices"],
+  "optional": []
+}
