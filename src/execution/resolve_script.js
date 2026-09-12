@@ -4,7 +4,8 @@
  * Step name → (argv, timeoutSec). Search order:
  *   1. src/pipeline/<step>.py  → python3 + --date,    600s
  *   2. src/pipeline/<step>.js  → node (no --date),   5400s
- *   3. src/execution/<step>.py → python3 + --date,    300s (720s for ic_gate_runner)
+ *   3. src/execution/<step>.py → python3 + --date,    300s (720s for ic_gate_runner,
+ *                                                        900s for engine/alpaca_executor)
  *
  * PIPELINE_DRY_RUN=1 appends --dry-run to every step argv.
  * PIPELINE_ALPACA_DRY_RUN=1 appends --dry-run only to the alpaca_executor step.
@@ -65,6 +66,14 @@ function resolveScript(step, runDate, env = process.env, root = DEFAULT_ROOT) {
       // manual recovery invocation uses, so patching only this file leaves
       // recovery still capped at 300s.
       timeoutSec = parseInt(env.OPENCLAW_SIGNALS_TIMEOUT_SECONDS || '900', 10);
+    } else if (step === 'alpaca_executor') {
+      // Same failure mode as `engine` above: bare 300s literal, order count
+      // grew (315 handoff orders on 2026-09-04), rc=124 at exactly 300018ms
+      // killed the rest of the cycle (reconcile/report/pyportfolioopt_shadow/
+      // health never ran). Keep in lockstep with the Python twin in
+      // pipeline_orchestrator.py:_resolve_script — that path is what the
+      // manual recovery invocation uses.
+      timeoutSec = parseInt(env.OPENCLAW_ALPACA_TIMEOUT_SECONDS || '900', 10);
     }
     const execArgv = ['python3', pyExec, '--date', runDate];
     // The daily cycle runs during RTH, so the stop_reattach step places GTC

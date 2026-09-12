@@ -520,6 +520,14 @@ def _resolve_script(script: str, run_date: str) -> tuple[list[str], int]:
         # secular, not regime-driven. This path is the one a manual recovery
         # run uses, so it must move with the JS twin or recovery stays capped.
         timeout = int(os.environ.get('OPENCLAW_SIGNALS_TIMEOUT_SECONDS', '900'))
+    elif script == 'alpaca_executor':
+        # Same failure mode as `engine` above: bare 300s literal, order count
+        # grew (315 handoff orders on 2026-09-04), rc=124 at exactly 300018ms
+        # killed the rest of the cycle (reconcile/report/pyportfolioopt_shadow/
+        # health never ran). Keep in lockstep with the JS twin in
+        # resolve_script.js — that path is what the manual recovery
+        # invocation uses.
+        timeout = int(os.environ.get('OPENCLAW_ALPACA_TIMEOUT_SECONDS', '900'))
     else:
         timeout = 300
     exec_argv = ['python3', str(py_exec), '--date', run_date]
