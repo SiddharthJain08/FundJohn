@@ -953,7 +953,18 @@ def test_155_is_the_next_free_number():
 cd /root/openclaw/.claude/worktrees/qd-adoptions && python3 -m pytest tests/database/test_stream_b_migration_shape.py -q
 ```
 
-- [ ] **Step 3** — Create `src/database/migrations/155_broker_fills.sql`:
+- [ ] **Step 3** — Create `src/database/migrations/155_broker_fills.sql`.
+
+> **Re-check the migration number first.** A concurrent session is planning Stream E
+> (`docs/superpowers/plans/2026-09-12-qd-stream-e-reliability.md` was untracked in the worktree
+> when this plan was written) and E3/E5 may claim numbers. Run
+> `cd /root/openclaw/.claude/worktrees/qd-adoptions && ls src/database/migrations | tail -3`
+> before creating the file; if 155/156 are taken, shift BOTH Stream B migrations to the next free
+> pair and update the filenames, the `_sql(...)` calls in
+> `tests/database/test_stream_b_migration_shape.py`, and the citations in Tasks 4-9 and the
+> changelog entry together.
+
+Contents:
 
 ```sql
 -- 155: broker-fill fact table + fill timestamps + exit-leg slippage.
@@ -1427,7 +1438,7 @@ idempotent and never rewrites a value. Inert until merged to main and migration 
   - `alpaca_reconcile.exit_level_kind(order_type, client_order_id) -> str` (`'stop'` | `'target'`)
   - `alpaca_reconcile.exit_slippage_bps(direction, level, price) -> float | None`
   - `alpaca_reconcile.plan_exit_slippage(rows) -> list[tuple[str, object, float]]`
-  - `alpaca_reconcile.backfill_exit_slippage(cur, run_date, *, lookback_days=5) -> int`
+  - `alpaca_reconcile.backfill_exit_slippage(cur, run_date, *, lookback_days=5, dry_run=False) -> int`
 
 - [ ] **Step 1** — Write the failing test file `tests/execution/test_exit_slippage.py`:
 
@@ -1550,6 +1561,12 @@ def test_backfill_updates_only_null_rows_and_releases_its_savepoint():
     assert any(c[0] == 'RELEASE SAVEPOINT sp_exit_slip' for c in cur.calls)
 
 
+def test_backfill_dry_run_plans_but_writes_nothing():
+    cur = _Cursor([_row('stop', 'oc_1_sl', 9.95)])
+    assert ar.backfill_exit_slippage(cur, '2026-09-11', dry_run=True) == 1
+    assert cur.updates() == []
+
+
 def test_backfill_rolls_back_and_returns_zero_on_failure():
     class _Boom(_Cursor):
         def execute(self, sql, params=None):
@@ -1645,7 +1662,8 @@ def plan_exit_slippage(rows) -> list:
     return out
 
 
-def backfill_exit_slippage(cur, run_date, *, lookback_days: int = 5) -> int:
+def backfill_exit_slippage(cur, run_date, *, lookback_days: int = 5,
+                           dry_run: bool = False) -> int:
     """Attribute broker exit-leg fills to signals and persist exit_slippage_bps
     on each signal's LATEST signal_pnl row (migration 155).
 
@@ -1654,19 +1672,26 @@ def backfill_exit_slippage(cur, run_date, *, lookback_days: int = 5) -> int:
     submission maps to its signal by (run_date -> target_date, ticker,
     strategy_id) — the same key parity_mark.backfill_broker_fill_truth:323-332
     uses for the entry twin. Idempotent: only rows still NULL are written.
-    Savepoint-isolated; returns rows updated (0 on any failure)."""
+    Savepoint-isolated; returns rows planned (0 on any failure).
+
+    dry_run reads and reports but issues no UPDATE — reconcile()'s docstring
+    promises dry-run "exits cleanly without touching the DB", and
+    PIPELINE_DRY_RUN=1 appends --dry-run to every pipeline step
+    (pipeline_orchestrator._resolve_script:491-496), so that path is reachable."""
     cur.execute('SAVEPOINT sp_exit_slip')
     try:
         cur.execute(_EXIT_CANDIDATE_SQL, (run_date, int(lookback_days)))
         plan = plan_exit_slippage(cur.fetchall() or [])
-        for sig_id, pnl_date, bps in plan:
-            cur.execute(
-                'UPDATE signal_pnl SET exit_slippage_bps = %s '
-                'WHERE signal_id = %s AND pnl_date = %s AND exit_slippage_bps IS NULL',
-                (bps, sig_id, pnl_date))
+        if not dry_run:
+            for sig_id, pnl_date, bps in plan:
+                cur.execute(
+                    'UPDATE signal_pnl SET exit_slippage_bps = %s '
+                    'WHERE signal_id = %s AND pnl_date = %s AND exit_slippage_bps IS NULL',
+                    (bps, sig_id, pnl_date))
         cur.execute('RELEASE SAVEPOINT sp_exit_slip')
         if plan:
-            log(f'exit slippage: persisted {len(plan)} exit-leg bp value(s)')
+            log(f'exit slippage: {len(plan)} exit-leg bp value(s)'
+                f'{" (DRY-RUN, not written)" if dry_run else " persisted"}')
         return len(plan)
     except Exception as exc:  # noqa: BLE001
         log(f'exit slippage backfill failed ({type(exc).__name__}: {exc}) — skipped')
@@ -1683,7 +1708,7 @@ backfill on the line after the `ingest_broker_fills(...)` call and before
 `cur.execute('RELEASE SAVEPOINT sp_broker_fills')`:
 
 ```python
-        backfill_exit_slippage(cur, run_date)
+        backfill_exit_slippage(cur, run_date, dry_run=dry_run)
 ```
 
 - [ ] **Step 5** — Run the task's test plus the touched module's tests; expect PASS:
@@ -2366,7 +2391,18 @@ def test_run_ownership_pass_swallows_a_db_failure(monkeypatch):
 cd /root/openclaw/.claude/worktrees/qd-adoptions && python3 -m pytest tests/execution/test_position_ownership.py -q
 ```
 
-- [ ] **Step 3** — Create `src/database/migrations/156_position_ownership.sql`:
+- [ ] **Step 3** — Create `src/database/migrations/156_position_ownership.sql`.
+
+> **Re-check the migration number first.** A concurrent session is planning Stream E
+> (`docs/superpowers/plans/2026-09-12-qd-stream-e-reliability.md` was untracked in the worktree
+> when this plan was written) and E3/E5 may claim numbers. Run
+> `cd /root/openclaw/.claude/worktrees/qd-adoptions && ls src/database/migrations | tail -3`
+> before creating the file; if 155/156 are taken, shift BOTH Stream B migrations to the next free
+> pair and update the filenames, the `_sql(...)` calls in
+> `tests/database/test_stream_b_migration_shape.py`, and the citations in Tasks 4-9 and the
+> changelog entry together.
+
+Contents:
 
 ```sql
 -- 156: per-ticker ownership ledger.
@@ -2713,7 +2749,16 @@ verbatim, which is what makes "exits and flattens are never blocked" structural 
 promise. `_load_ownership_blocklist` returns an EMPTY set unless `OPENCLAW_OWNERSHIP_BLOCK=1`, so
 an unset flag leaves sizing byte-identical to today. The `[ownership]` line is emitted from the
 loader, called at the `_emit_orders_from_targets` call site (line 2469), so it still prints when
-`OPENCLAW_ENTRY_HYGIENE=0` short-circuits the gate. Inert until merged to main.
+`OPENCLAW_ENTRY_HYGIENE=0` short-circuits the gate.
+
+Grep-verified (`grep -rn "_apply_entry_hygiene_gate" src scripts tests`): line 2469 is the ONLY
+production caller — `tests/execution/test_entry_hygiene_gate.py:198` already pins that with
+`module.count('_apply_entry_hygiene_gate(') == 2`, and this task keeps the count at 2 by editing
+that invocation rather than adding one. The other callers are two test files
+(`test_entry_hygiene_gate.py:32`, `test_sameday_premarket_protection.py:271,282,293,302`) that
+pass every lookup by injection and pass NO `ownership_blocked` — which is exactly why the gate
+must resolve an omitted argument to the empty set instead of loading it (Step 4c). Inert until
+merged to main.
 
 **Files:**
 - Modify: `src/execution/regime_blended_sizer.py` — new helpers after `_load_recent_stopouts` (ends line 2317); `_apply_entry_hygiene_gate` signature (lines 2362-2363), docstring (2364-2380), defaults block (2384-2393), accumulator list (2396), `_shed` closure (2398-2404, unchanged), loop branch (after the premarket-veto `continue` at 2411-2414), final warning (2438-2444); call site in `_emit_orders_from_targets` (line 2469)
@@ -2846,6 +2891,35 @@ def test_blocklist_logs_the_ownership_line_in_report_only_mode(monkeypatch, capl
     with caplog.at_level("INFO", logger=rbs.logger.name):
         rbs._ownership_blocklist_from(_STATUSES)
     assert any("[ownership]" in r.getMessage() for r in caplog.records)
+
+
+# ── the gate itself must never reach the DB ────────────────────────────────
+
+def test_gate_defaults_to_no_block_and_never_loads():
+    """An omitted ownership_blocked must resolve to the empty set, NOT to a DB
+    read: tests/execution/test_entry_hygiene_gate.py and
+    test_sameday_premarket_protection.py call this gate without the kwarg and
+    their contract is 'no DB access in tests'. Enforcement is supplied by the
+    single production call site instead."""
+    import inspect
+    src = inspect.getsource(rbs._apply_entry_hygiene_gate)
+    assert '_load_ownership_blocklist' not in src, \
+        'the gate must not load the blocklist; the call site supplies it'
+    out = rbs._apply_entry_hygiene_gate(
+        {"AAA": 5000.0}, {}, stopouts={}, liq=({}, {}), params=dict(PARAMS),
+        risk_exits={}, premarket_vetoes=set())
+    assert out["AAA"] == 5000.0
+
+
+def test_the_single_production_call_site_supplies_the_blocklist():
+    """test_entry_hygiene_gate.py:198 already pins the gate to exactly ONE
+    invocation (definition + call = 2 occurrences). Pin that the one invocation
+    is the one that passes the blocklist, so a second emission route can never
+    silently skip ownership enforcement."""
+    import inspect
+    tail = inspect.getsource(rbs._emit_orders_from_targets)
+    assert 'ownership_blocked=_load_ownership_blocklist()' in tail
+    assert inspect.getsource(rbs).count('_apply_entry_hygiene_gate(') == 2
 ```
 
 - [ ] **Step 2** — Run it and confirm the expected failure (`TypeError: _apply_entry_hygiene_gate() got an unexpected keyword argument 'ownership_blocked'`):
@@ -2915,12 +2989,19 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
                        empty set, so unset == today's behaviour.
 ```
 
-(c) Defaults + init list. After the `if liq is None:` block (line 2392-2393) add:
+(c) Resolve, do NOT load. After the `if liq is None:` block (lines 2392-2393) add:
 
 ```python
-    if ownership_blocked is None:
-        ownership_blocked = _load_ownership_blocklist()
+    ownership_blocked = ownership_blocked or frozenset()
 ```
+
+**Do not add a `_load_ownership_blocklist()` fallback here.** `tests/execution/
+test_entry_hygiene_gate.py:32` and `tests/execution/test_sameday_premarket_protection.py:271,282,293,302`
+call this gate WITHOUT `ownership_blocked`, and both files' contract is "all inputs injectable,
+no DB access in tests" — an in-gate loader would open `psycopg2.connect(POSTGRES_URI)` against
+production Postgres in every one of those tests, while the fleet backtest runs. Step 5 supplies
+the set at the ONE production call site; an omitted argument means no enforcement, which is the
+fail-open direction.
 
 and change the accumulator line (2396) to:
 
@@ -2966,7 +3047,7 @@ and widen the final warning (lines 2438-2444) to:
 - [ ] **Step 6** — Run the task's test plus the touched module's gate tests; expect PASS:
 
 ```bash
-cd /root/openclaw/.claude/worktrees/qd-adoptions && python3 -m pytest tests/execution/test_ownership_sizer_block.py tests/execution/test_entry_hygiene_gate.py tests/execution/test_asset_eligibility_gate.py tests/execution/test_position_ownership.py -q
+cd /root/openclaw/.claude/worktrees/qd-adoptions && python3 -m pytest tests/execution/test_ownership_sizer_block.py tests/execution/test_entry_hygiene_gate.py tests/execution/test_sameday_premarket_protection.py tests/execution/test_asset_eligibility_gate.py tests/execution/test_position_ownership.py -q
 ```
 
 - [ ] **Step 7** — Commit:
@@ -3306,12 +3387,12 @@ Searched the plan for `TBD`, `similar to Task`, `add error handling`, `write tes
 | `classify_exit_fills(orders)` emits `{id, symbol, side, qty, price, level, kind, filled_at}` | existing, `afterhours_tp.py:562-609` | Task 2 | ✓ verified against source |
 | `_BROKER_FILL_COLUMNS` | Task 4 | Task 3's shape test cross-check | ✓ |
 | `build_order_meta(orders)` / `ingest_broker_fills(cur, fills, order_meta=None, *, dry_run=False)` | Task 4 | `reconcile()` | ✓ |
-| `exit_level_kind` / `exit_slippage_bps` / `plan_exit_slippage` / `backfill_exit_slippage(cur, run_date, *, lookback_days=5)` | Task 5 | `reconcile()` | ✓ |
+| `exit_level_kind` / `exit_slippage_bps` / `plan_exit_slippage` / `backfill_exit_slippage(cur, run_date, *, lookback_days=5, dry_run=False)` | Task 5 | `reconcile()` (passes `dry_run=dry_run`) | ✓ |
 | `load_ticker_cost_bps() -> dict | None` | existing, `unified_backtest.py:101` | Task 6 `modelled_median_bps` | ✓ verified against source |
 | `fill_slippage_line(run_date, *, conn=None, cost_bps=None)` | Task 6 | `send_report.main()` | ✓ |
 | `fetch_positions() -> list | None` | existing, `stop_reattach.py:230` | Task 7 `load_account_qty` | ✓ verified (None == CLI failure) |
 | `classify` / `compute_ownership` / `transitions` / `persist_ownership` / `latest_status_map` / `run_ownership_pass(conn, cycle_date, *, dry_run=False, account_qty=None, log_fn=None)` | Task 7 | Task 8 (`latest_status_map`, `STATUS_OK`), Task 9 (table only), `alpaca_reconcile.main()` | ✓ |
-| `_apply_entry_hygiene_gate(..., ownership_blocked=None)` | Task 8 | `_emit_orders_from_targets:2470`; existing callers pass keywords only | ✓ |
+| `_apply_entry_hygiene_gate(..., ownership_blocked=None)` | Task 8 | `_emit_orders_from_targets:2469` — grep-verified as the ONLY production caller; the two test-file callers (`test_entry_hygiene_gate.py:32`, `test_sameday_premarket_protection.py:271,282,293,302`) omit the new kwarg, so the gate resolves it to `frozenset()` and never loads | ✓ |
 | `@check(name=..., tags=[...], requires=[...])` returning `(Status, str)` | existing, `src/system_checks/README.md` | Task 9 | ✓ |
 
 ### Env vars, tables, columns, flags used
