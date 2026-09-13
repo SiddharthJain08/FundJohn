@@ -182,6 +182,74 @@ def _fetch_open_orders() -> tuple[bool, list, dict | None]:
     return True, orders, None
 
 
+_CLOSED_ORDERS_PAGE = 500
+_CLOSED_SYMBOL_CHUNK = 100
+
+
+def fetch_recent_closed_orders(symbols=None, *, include_unscoped: bool = True,
+                               page: int = _CLOSED_ORDERS_PAGE,
+                               chunk: int = _CLOSED_SYMBOL_CHUNK,
+                               timeout: int = 45) -> tuple[bool, list]:
+    """Newest-first CLOSED orders with legs, deduped by order id.
+
+    Why NOT the --after-order-id keyset loop _fetch_open_orders uses: that cursor
+    is ASCENDING and inception-anchored. On --status open the set is bounded by
+    the live book, but on --status closed it starts at the oldest order the
+    account ever had and walks forward — the 10-minute exit-fill reporter would
+    burn its whole page budget on ancient history and never reach today's fills.
+    The CLI exposes no time bound (`order list` takes only --status, --symbols,
+    --limit, --direction, --after-order-id, --nested), so the right shape is the
+    DEFAULT newest-first window, widened from the old 200 to `page` rows, plus a
+    --symbols-scoped read that spends a whole fresh window on just the names we
+    care about — the same server-side-filter trick latest_broker_bracket applies
+    at :381-383 once the account's history outgrew the unfiltered window.
+
+    ok=False only when EVERY read failed (no coverage at all). A partial failure
+    returns ok=True with what was gathered plus a loud warning: partial coverage
+    beats none, and the worst case equals the old single-read behavior.
+    """
+    out: list = []
+    seen: set = set()
+    any_ok = False
+
+    def _absorb(payload) -> None:
+        for o in (payload or []):
+            oid = (o or {}).get('id') or (o or {}).get('order_id')
+            if oid is not None:
+                if oid in seen:
+                    continue
+                seen.add(oid)
+            out.append(o)
+
+    if include_unscoped:
+        ok, payload, err = _run_cli(
+            ['order', 'list', '--status', 'closed', '--nested', '--limit', str(page)],
+            timeout=timeout)
+        if ok and isinstance(payload, list):
+            any_ok = True
+            _absorb(payload)
+            if len(payload) >= page:
+                log(f'⚠ closed-order window full ({page} rows) — coverage may be '
+                    f'truncated; the symbol-scoped reads cover the names that matter')
+        else:
+            log(f'⚠ closed-order read failed: {(err or {}).get("error", "unknown")}')
+
+    syms = sorted({str(s).strip().upper() for s in (symbols or []) if s})
+    for i in range(0, len(syms), chunk):
+        group = syms[i:i + chunk]
+        ok, payload, err = _run_cli(
+            ['order', 'list', '--status', 'closed', '--nested',
+             '--limit', str(page), '--symbols', ','.join(group)],
+            timeout=timeout)
+        if ok and isinstance(payload, list):
+            any_ok = True
+            _absorb(payload)
+        else:
+            log(f'⚠ closed-order read for {len(group)} symbol(s) failed: '
+                f'{(err or {}).get("error", "unknown")}')
+    return any_ok, out
+
+
 def _is_rate_limited(err: dict | None) -> bool:
     if not err:
         return False
