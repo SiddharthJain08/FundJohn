@@ -611,13 +611,106 @@ def classify_exit_fills(orders) -> list:
     return out
 
 
+# Fills that mean "the broker closed this position at its stop". A take-profit
+# or ah_take_profit fill is a WIN and must never be written as 'stop_loss' —
+# that would arm the stop-out cooldown against a name that worked.
+_CLOSING_FILL_KINDS = ('stop', 'ah_exit')
+
+
+def _db_conn():
+    import psycopg2
+    return psycopg2.connect(os.environ['POSTGRES_URI'])
+
+
+def _open_signal_tickers(*, conn_factory=None) -> list:
+    """Tickers with at least one HELD ledger row — the scope that matters for
+    the close pass. A stop fill REMOVES the position from the broker, so the
+    position list cannot name it; the still-open signal rows can. Empty list on
+    any DB failure: the unscoped newest-first window still backs the Discord post."""
+    conn_factory = conn_factory or _db_conn
+    try:
+        conn = conn_factory()
+    except Exception as e:  # noqa: BLE001
+        log(f'fill-reporter: DB connect failed ({e}) — unscoped window only')
+        return []
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT ticker FROM execution_signals "
+                "WHERE status = 'open' "
+                "AND (lifecycle_state IS NULL OR lifecycle_state = 'FILLED') "
+                "AND ticker IS NOT NULL")
+            return [r[0] for r in (cur.fetchall() or []) if r and r[0]]
+    except Exception as e:  # noqa: BLE001
+        log(f'fill-reporter: open-signal ticker lookup failed ({e}) — unscoped window only')
+        return []
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _close_signals_for_fill(fill, *, conn_factory=None) -> int:
+    """Close every HELD ledger row on this fill's ticker whose direction matches
+    the position the fill exited, with close_reason='stop_loss' at the fill price
+    and closed_at = the broker's fill timestamp.
+
+    The broker nets a position per TICKER while the ledger carries one row per
+    signal, so all matching rows close — the same reasoning open_reconcile
+    ._held_signal_rows documents at :534-537. Exit side maps to direction: a
+    'sell' exit closed a LONG, a 'buy' exit closed a SHORT.
+
+    Returns rows closed, and returns 0 rather than raising on ANY failure: this
+    runs first on each --monitor tick, before run_stop_monitor, and a DB blip
+    must not cost the book its ext-hours stop emulation for that tick."""
+    from execution.open_reconcile import _held_signal_rows, drop_signal_close
+    conn_factory = conn_factory or _db_conn
+    sym = fill.get('symbol') or ''
+    want = 'LONG' if (fill.get('side') or '').lower() == 'sell' else 'SHORT'
+    try:
+        conn = conn_factory()
+    except Exception as e:  # noqa: BLE001
+        log(f'  ⚠ {sym}: DB connect failed ({e}) — signal close skipped')
+        return 0
+    n = 0
+    try:
+        with conn, conn.cursor() as cur:
+            for sig_id, direction in _held_signal_rows(cur, sym):
+                if (direction or '').upper() != want:
+                    continue
+                drop_signal_close(cur, sig_id, sym, float(fill['price']),
+                                  reason='stop_loss', closed_at=fill.get('filled_at'))
+                n += 1
+        if n:
+            log(f"  ↳ {sym}: closed {n} {want} signal(s) stop_loss @ {float(fill['price']):.2f}")
+        else:
+            log(f'  ↳ {sym}: no open {want} signal to close (reported only)')
+        return n
+    except Exception as e:  # noqa: BLE001
+        log(f'  ⚠ {sym}: signal close failed ({e}) — reported only')
+        return 0
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def run_exit_fill_reporter(dry_run: bool) -> dict:
-    """Report newly-filled exit orders to #trade-reports. First run seeds the
-    seen-set silently so history doesn't flood the channel."""
-    from execution.stop_reattach import _post_alert
-    stats = {'fills_seen': 0, 'reported': 0}
-    ok, orders, _ = _cli(['order', 'list', '--status', 'closed', '--nested',
-                          '--limit', '200'])
+    """Report newly-filled exit orders to #trade-reports AND close the ledger
+    rows a broker stop / after-hours exit actually closed (B1, spec item 3).
+
+    The FIRST run seeds the seen-set silently so history doesn't flood the
+    channel — and, load-bearing, closes NOTHING: a missing or deleted state file
+    would otherwise mass-close every historical fill's signals in a single tick
+    (the 2026-05-22 empty-signals blowout class). Idempotency has two layers:
+    the seen-set file, and drop_signal_close flipping execution_signals to
+    'closed' so _held_signal_rows stops returning the row even if the state file
+    is lost."""
+    from execution.stop_reattach import _post_alert, fetch_recent_closed_orders
+    stats = {'fills_seen': 0, 'reported': 0, 'signals_closed': 0}
+    ok, orders = fetch_recent_closed_orders(symbols=_open_signal_tickers())
     if not ok:
         log('fill-reporter: order list failed — skipping')
         return stats
@@ -635,7 +728,7 @@ def run_exit_fill_reporter(dry_run: bool) -> dict:
         seen.add(f['id'])
         seen_list.append(f['id'])
         if first_run:
-            continue                     # seed silently, no history flood
+            continue                     # seed silently; close NOTHING
         lvl = f" (level {f['level']:.2f})" if f['level'] else ''
         msg = (f"{_EXIT_FILL_LABELS[f['kind']]} {f['symbol']}: "
                f"{f['side'].upper()} {f['qty']:g} @ {f['price']:.2f}{lvl} — "
@@ -644,6 +737,8 @@ def run_exit_fill_reporter(dry_run: bool) -> dict:
         stats['reported'] += 1
         if not dry_run:
             _post_alert(msg, channel='trade-reports')
+            if f['kind'] in _CLOSING_FILL_KINDS:
+                stats['signals_closed'] += _close_signals_for_fill(f)
     if not dry_run:
         try:
             state_p.parent.mkdir(parents=True, exist_ok=True)

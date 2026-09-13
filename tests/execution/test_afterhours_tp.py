@@ -405,10 +405,19 @@ def test_classify_exit_fills_kinds_and_entry_exclusion():
 
 
 def _reporter_env(monkeypatch, tmp_path, orders):
+    # B1 (spec item 3): run_exit_fill_reporter now reads orders via
+    # stop_reattach.fetch_recent_closed_orders (Task 1) instead of ah._cli, and
+    # scopes the read to _open_signal_tickers(); stub both so these
+    # reporting-only tests never touch the real CLI or Postgres. Stubbing
+    # _close_signals_for_fill keeps them scoped to reporting — the close path
+    # has its own coverage in test_b_stop_fill_close.py.
     import execution.stop_reattach as sr
     monkeypatch.setenv('OPENCLAW_EXIT_FILLS_STATE', str(tmp_path / 'fills.json'))
     posts = []
-    monkeypatch.setattr(ah, '_cli', lambda a, timeout=15: (True, orders, None))
+    monkeypatch.setattr(sr, 'fetch_recent_closed_orders',
+                        lambda *a, **k: (True, orders))
+    monkeypatch.setattr(ah, '_open_signal_tickers', lambda **k: [])
+    monkeypatch.setattr(ah, '_close_signals_for_fill', lambda f, **k: 0)
     monkeypatch.setattr(sr, '_post_alert',
                         lambda msg, channel='data-alerts':
                         posts.append((channel, msg)))
@@ -418,7 +427,7 @@ def _reporter_env(monkeypatch, tmp_path, orders):
 def test_fill_reporter_first_run_seeds_silently(monkeypatch, tmp_path):
     posts = _reporter_env(monkeypatch, tmp_path, _CLOSED_ORDERS)
     stats = ah.run_exit_fill_reporter(dry_run=False)
-    assert stats == {'fills_seen': 3, 'reported': 0}
+    assert stats == {'fills_seen': 3, 'reported': 0, 'signals_closed': 0}
     assert posts == []
     st = _json.loads((tmp_path / 'fills.json').read_text())
     assert set(st['seen']) == {'tp1', 'st2', 'x3'}
