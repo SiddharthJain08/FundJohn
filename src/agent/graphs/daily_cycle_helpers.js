@@ -3,11 +3,15 @@
  *
  *   skipForSubset(step, state) → true if state.requestedSteps excludes this step
  *   strictMode(env)            → boolean from OPENCLAW_STRICT_EXIT_CODES
- *   runSubprocess(argv, opts)  → Promise<{rc, stdout, stderrTail, durationMs, timedOut}>
+ *   runSubprocess(argv, opts)  → Promise<{rc, stdout, stderrTail, durationMs, timedOut, lockLost?}>
+ *     opts.step names the caller's step for the `[lock] lost before <step>`
+ *     message if the shared run lock (src/lib/run_lock.js) is lost before
+ *     spawning — see runSubprocess's own comment (QD E1, 2026-09-14).
  */
 'use strict';
 
 const { spawn } = require('node:child_process');
+const runLock    = require('../../lib/run_lock');
 
 function skipForSubset(step, state) {
   if (!state || !state.requestedSteps) return false;
@@ -22,7 +26,25 @@ function strictMode(env) {
   return (env && env.OPENCLAW_STRICT_EXIT_CODES) === '1';
 }
 
-function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd } = {}) {
+// QD E1 controller ruling (2026-09-14): this graph IS the production cycle
+// whenever OPENCLAW_LANGGRAPH_ORCHESTRATOR=1 (the prod default — see
+// cron-schedule.js), so every step spawned here must renew the shared run
+// lock first, exactly like pipeline_orchestrator.py's run_step does before
+// each script. `renewCurrent` is a no-op (returns true) when no lock is
+// currently held — via `runLock.setCurrent` in daily-cycle.js — so tests
+// and one-off runs that never acquire a lock behave exactly as before.
+async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, step } = {}) {
+  const lockOk = await runLock.renewCurrent(timeoutSec);
+  if (!lockOk) {
+    return {
+      rc:          runLock.LOCK_BUSY_RC,
+      stdout:      '',
+      stderrTail:  `[lock] lost before ${step || 'step'}`,
+      durationMs:  0,
+      timedOut:    false,
+      lockLost:    true,
+    };
+  }
   return new Promise((resolve) => {
     const startedAt = Date.now();
     const [cmd, ...args] = argv;

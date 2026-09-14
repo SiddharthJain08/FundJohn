@@ -165,3 +165,30 @@ test('activation rc=2 (hard fail) → still warn, NO throw', async () => {
   assert.equal(out.completedSteps[0].status, 'warn');
   assert.ok(logCalls.some(([fn]) => fn === 'notifyFailure'));
 });
+
+// QD E1 (2026-09-14): runSubprocess now returns rc=75/lockLost when the
+// shared run lock (src/lib/run_lock.js) is lost before a step spawns. rc=75
+// is >=2, so the ordinary path throws (abort) — EXCEPT the pre-existing
+// sentiment/activation exemption above, which swallows ANY non-zero rc into
+// 'warn' regardless of cause. This is a known, pre-existing gap the QD E1
+// controller ruling did not ask this task to close (daily_cycle_node.js's
+// exemption block is untouched): a lock lost during sentiment/activation
+// does not abort immediately — it is caught one step later, when the next
+// (non-exempt) step's own renewCurrent() call also observes the lost lock.
+// Documented here as a regression check, not a fix.
+test('KNOWN GAP: rc=75 (lock lost) during the exempted "sentiment" step does NOT abort', async () => {
+  const { makeStepNode, logCalls } = makeStubbedFactory({ rc: 75, stderrTail: '[lock] lost before sentiment' });
+  const node = makeStepNode('sentiment', 'run_sentiment_step');
+  const out = await node({ ...BASE_STATE, env: {} });
+  assert.equal(out.completedSteps[0].status, 'warn'); // swallowed, NOT aborted
+  assert.ok(logCalls.some(([fn]) => fn === 'notifyFailure')); // alert still fires
+});
+
+test('rc=75 (lock lost) during a non-exempt step (e.g. signals) DOES abort', async () => {
+  const { makeStepNode } = makeStubbedFactory({ rc: 75, stderrTail: '[lock] lost before signals' });
+  const node = makeStepNode('signals');
+  await assert.rejects(
+    () => node({ ...BASE_STATE, env: {} }),
+    (err) => { assert.equal(err.step, 'signals'); assert.equal(err.rc, 75); return true; },
+  );
+});

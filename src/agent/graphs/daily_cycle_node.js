@@ -56,7 +56,7 @@ function makeStepNode(STEP, scriptName) {
     const { argv, timeoutSec } = resolveScript(SCRIPT, state.runDate, env);
 
     const runOnce = async (attempt) => {
-      const res = await runSubprocess(argv, { timeoutSec, env });
+      const res = await runSubprocess(argv, { timeoutSec, env, step: STEP });
 
       // Persist the step's stdout AND stderr tails on EVERY completion (success
       // included). rc=0 zero-order days were un-diagnosable twice (2026-06-02/03):

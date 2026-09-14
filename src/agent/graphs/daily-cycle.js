@@ -134,24 +134,46 @@ function getCompiled() {
   return _compiled;
 }
 
-// ── Redis lock (mirrors pipeline_orchestrator.py:152-158) ────────────────────
+// ── Redis lock (shared with pipeline_orchestrator.py via src/lib/run_lock) ───
+// QD E1 (2026-09-12): this used to be its OWN key — the `engine:run_lock`
+// prefix, one per run date — while the Python orchestrator held a separate
+// `pipeline:running` key per date — two locks, so both runners could hold
+// "the" lock at once. One key now, owned value, and a value-checked release
+// so a lock we lost to a takeover is never deleted by us.
+const runLock = require('../../lib/run_lock');
+
 async function _acquireRunLock(runDate) {
   const Redis = require('ioredis');
   const r = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
-  const key = `engine:run_lock:${runDate}`;
-  const lockId = `daily-cycle:${process.pid}:${Date.now()}`;
-  const ok = await r.set(key, lockId, 'NX', 'EX', 7200);
-  if (!ok) {
-    let owner = '?';
-    try {
-      owner = await r.get(key);
-    } catch (_e) { /* best effort */ }
+  const key = runLock.lockKey(runDate);
+  const ttl = runLock.ttlFor(Number(process.env.OPENCLAW_COLLECT_TIMEOUT_SECONDS || 9000));
+  const out = await runLock.acquire(r, runDate, ttl,
+    { log: (m) => console.log(`[daily-cycle] ${m}`) });
+  if (!out.ok) {
     await r.quit().catch(() => {});
-    const err = new Error(`cycle already in progress for ${runDate} (lock held by ${owner})`);
+    const err = new Error(`cycle already in progress for ${runDate} (lock held by ${out.holder || '?'})`);
     err.lockHeld = true;
+    err.holder = out.holder;
     throw err;
   }
-  return { release: async () => { try { await r.del(key); } finally { await r.quit().catch(() => {}); } } };
+  console.log(`[daily-cycle] [lock] acquired ${key} as ${out.value} (ttl=${ttl}s)`);
+  // QD E1 controller ruling (2026-09-14): cron-schedule.js dispatches THIS
+  // graph as the production cycle whenever OPENCLAW_LANGGRAPH_ORCHESTRATOR=1
+  // (the prod default) — reversing the original plan's assumption that only
+  // the Python orchestrator needed to renew. `setCurrent` publishes the held
+  // lock so `daily_cycle_helpers.runSubprocess` (several call-frames away,
+  // via each step node) can renew before every step without threading the
+  // lock through LangGraph state; `renewCurrent` reporting loss there aborts
+  // the step (rc=75) exactly like pipeline_orchestrator.py's LockLost.
+  runLock.setCurrent({ r, runDate, value: out.value });
+  return {
+    value: out.value,
+    release: async () => {
+      try { await runLock.release(r, runDate, out.value,
+                                  { log: (m) => console.log(`[daily-cycle] ${m}`) }); }
+      finally { runLock.clearCurrent(); await r.quit().catch(() => {}); }
+    },
+  };
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

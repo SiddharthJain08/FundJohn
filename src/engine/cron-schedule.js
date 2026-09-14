@@ -206,8 +206,12 @@ async function checkPipelineResume() {
         const runDate    = checkpoint.run_date;
         if (!runDate) return;
 
-        // Check if pipeline lock still active (already running)
-        const locked = await r.get(`pipeline:running:${runDate}`);
+        // Check if the shared run lock is still held (a cycle is running).
+        // QD E1: this read used the dead `pipeline:running` key (per run
+        // date); the orchestrator and the LangGraph cycle now share the
+        // `pipeline:run_lock` key (src/lib/run_lock_key.json).
+        const runLock = require('../lib/run_lock');
+        const locked = await r.get(runLock.lockKey(runDate));
         if (locked) return;
 
         // Check budget is OK before resuming
