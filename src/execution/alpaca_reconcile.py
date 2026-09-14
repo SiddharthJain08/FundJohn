@@ -477,7 +477,12 @@ def ingest_broker_fills(cur, fills, order_meta=None, *, dry_run: bool = False) -
 #     exit against an equity level);
 #   - require bf.side be the OPPOSITE of the signal's direction (long exits
 #     sell, short exits buy) — a same-side add-on fill on the same bracket
-#     is not an exit and must never be scored as one;
+#     is not an exit and must never be scored as one. Both branches use the
+#     SAME normalized UPPER(direction) IN ('LONG','BUY','BUY_VOL') form (fix
+#     round 2, item 3) — branch 2 originally hardcoded a raw `s2.direction =
+#     'long'`/`'short'` literal comparison that diverged from branch 1's
+#     normalized form and would silently miss any non-canonical direction
+#     spelling;
 #   - are per-SIGNAL idempotent via NOT EXISTS, not just "the latest
 #     signal_pnl row is NULL": a fill that already stamped an OLDER pnl row
 #     for this signal must not be re-applied to a newer row upserted on a
@@ -533,8 +538,8 @@ _EXIT_CANDIDATE_SQL = """
               FROM alpaca_submissions s2
              WHERE s2.ticker = bf.ticker
                AND s2.run_date >= %s::date - %s
-               AND ((bf.side = 'sell' AND s2.direction = 'long')
-                    OR (bf.side = 'buy' AND s2.direction = 'short'))
+               AND ((UPPER(s2.direction) IN ('LONG','BUY','BUY_VOL') AND bf.side = 'sell')
+                    OR (UPPER(s2.direction) NOT IN ('LONG','BUY','BUY_VOL') AND bf.side = 'buy'))
              ORDER BY s2.run_date DESC
              LIMIT 1
            ) s ON TRUE
@@ -554,20 +559,47 @@ _EXIT_CANDIDATE_SQL = """
            )
 """
 
-# Diagnostic-only count: broker fills that LOOK like they could be an exit
-# (they have a side) but neither candidate branch above can attribute them —
-# no parent_order_id to walk to a bracket, and no ahsx_/ahtp_ prefix to match
-# the after-hours branch. Never gates the UPDATE; purely surfaced in the log
-# line so an operator notices when exits stop being explainable (e.g. a
-# closed-order window that no longer covers our orders, or a third exit path
-# this join doesn't know about yet) instead of silently landing nothing.
+# Diagnostic-only count: broker fills that neither candidate branch above can
+# attribute — no parent_order_id to walk to a bracket, no ahsx_/ahtp_ prefix
+# to match the after-hours branch, AND no alpaca_submissions row shares its
+# client_order_id (that column is TEXT NOT NULL UNIQUE since migration 043).
+# That last clause matters: a bracket ENTRY fill also has parent_order_id
+# IS NULL (it IS the parent order, not a leg), so without it every entry fill
+# in the lookback window inflated this count and made the log line read a
+# steady non-zero number even on a perfectly healthy day (fix round 2, item
+# 2) — an entry's own client_order_id always matches its own submission row,
+# so the NOT EXISTS below correctly excludes it. Never gates the UPDATE;
+# purely surfaced in the log line so an operator notices when exits stop
+# being explainable (e.g. a closed-order window that no longer covers our
+# orders, or a third exit path this join doesn't know about yet) instead of
+# silently landing nothing.
 _EXIT_ORPHAN_COUNT_SQL = """
     SELECT COUNT(*)
       FROM broker_fills bf
      WHERE bf.parent_order_id IS NULL
-       AND bf.side IS NOT NULL
        AND LEFT(COALESCE(bf.client_order_id, ''), 5) <> 'ahsx_'
        AND LEFT(COALESCE(bf.client_order_id, ''), 5) <> 'ahtp_'
+       AND bf.filled_at >= %s::date - %s
+       AND NOT EXISTS (
+             SELECT 1 FROM alpaca_submissions a
+              WHERE a.client_order_id = bf.client_order_id
+           )
+"""
+
+# Diagnostic-only count (fix round 2, item 2): how many ah-prefixed
+# (ahsx_/ahtp_), parentless fills exist in the lookback window at all —
+# independent of whether branch 2 above actually managed to attribute them
+# to a submission/signal and land a plan row. backfill_exit_slippage
+# subtracts the number of branch-2 rows that made it into the plan from this
+# count to report `ah_unmatched=`, catching ah exits that COUNT sees but the
+# LATERAL-joined candidate query couldn't resolve (submission out of the
+# lookback window, no matching signal, or no usable stop/target level).
+_EXIT_AH_COUNT_SQL = """
+    SELECT COUNT(*)
+      FROM broker_fills bf
+     WHERE bf.parent_order_id IS NULL
+       AND (LEFT(COALESCE(bf.client_order_id, ''), 5) = 'ahsx_'
+            OR LEFT(COALESCE(bf.client_order_id, ''), 5) = 'ahtp_')
        AND bf.filled_at >= %s::date - %s
 """
 
@@ -575,18 +607,67 @@ _EXIT_ORPHAN_COUNT_SQL = """
 def exit_level_kind(order_type, client_order_id) -> str:
     """'stop' or 'target' — which bracket level this exit fill was aiming at.
 
-    client_order_id WINS over order_type: the after-hours monitor's ahsx_ exits
-    are marketable LIMITS that emulate a stop (afterhours_tp.classify_exit_fills
-    tags them 'ah_exit'), so typing alone would score them against target_1 and
-    report a 20 % "slippage" on every emulated stop."""
+    client_order_id WINS over order_type for ahtp_: the after-hours monitor's
+    resting take-profit exits are marketable LIMITS that emulate a stop-style
+    fire-and-forget order, and afterhours_tp.classify_exit_fills tags them
+    'ah_exit', so order_type typing alone would misscore them.
+
+    ahsx_ is deliberately NOT special-cased here (fix round 2, item 1):
+    afterhours_tp.py:349/:352 submits BOTH its stop_breach and tp_reach exits
+    through the SAME ahsx_{sym}_{ts} client_order_id, so a prefix match alone
+    cannot tell which level a given ahsx_ fill was aiming at — scoring every
+    ahsx_ fill against stop_loss put a tp_reach fill near target_1 thousands
+    of bps "off". That disambiguation now happens upstream, in
+    plan_exit_slippage, via pick_ah_level() choosing whichever of
+    stop_loss/target_1 the fill price actually landed near. An ahsx_ coid
+    reaching this function (nothing in this module still calls it that way)
+    falls through to the order_type default below like any other order."""
     coid = str(client_order_id or '')
-    if coid.startswith('ahsx_'):
-        return 'stop'
     if coid.startswith('ahtp_'):
         return 'target'
     if str(order_type or '').lower() in ('stop', 'stop_limit', 'trailing_stop'):
         return 'stop'
     return 'target'
+
+
+def pick_ah_level(price, stop_loss, target_1):
+    """For an ahsx_ top-level after-hours exit, choose stop vs target by
+    PROXIMITY to the fill price (fix round 2, item 1).
+
+    afterhours_tp.py:349 (`reason, level = 'stop_breach', stop`) and :352
+    (`'tp_reach', tp`) both submit through the same ahsx_{sym}_{ts}
+    client_order_id — client_order_id alone can't disambiguate which level a
+    given ahsx_ fill was aiming at.
+
+    Candidates are the signal's non-null stop_loss and target_1; the smaller
+    |fill_price - level| wins. A single non-null candidate is used outright.
+    No usable candidate returns None (caller drops the row, same as any
+    other missing-level case). An exact tie favors 'stop'.
+
+    Returns (kind, level) where kind is 'stop' or 'target', or None."""
+    try:
+        px = float(price)
+    except (TypeError, ValueError):
+        return None
+    sl = None
+    tg = None
+    if stop_loss is not None:
+        try:
+            sl = float(stop_loss)
+        except (TypeError, ValueError):
+            sl = None
+    if target_1 is not None:
+        try:
+            tg = float(target_1)
+        except (TypeError, ValueError):
+            tg = None
+    if sl is None and tg is None:
+        return None
+    if sl is None:
+        return ('target', tg)
+    if tg is None:
+        return ('stop', sl)
+    return ('stop', sl) if abs(px - sl) <= abs(px - tg) else ('target', tg)
 
 
 def exit_slippage_bps(direction, level, price):
@@ -614,11 +695,22 @@ def exit_slippage_bps(direction, level, price):
 def plan_exit_slippage(rows) -> list:
     """Pure: candidate rows from _EXIT_CANDIDATE_SQL -> [(signal_id, pnl_date, bps)].
     Row shape: (activity_id, order_type, client_order_id, price, signal_id,
-    direction, stop_loss, target_1, pnl_date)."""
+    direction, stop_loss, target_1, pnl_date).
+
+    ahsx_ rows route through pick_ah_level (fix round 2, item 1) instead of
+    exit_level_kind: a single ahsx_ coid covers both stop_breach and
+    tp_reach exits, so the level is chosen by proximity to the fill price,
+    not by prefix."""
     out = []
     for r in (rows or []):
         (_aid, otype, coid, price, sig_id, direction, stop_loss, target_1, pnl_date) = r
-        level = stop_loss if exit_level_kind(otype, coid) == 'stop' else target_1
+        if str(coid or '').startswith('ahsx_'):
+            picked = pick_ah_level(price, stop_loss, target_1)
+            if picked is None:
+                continue
+            level = picked[1]
+        else:
+            level = stop_loss if exit_level_kind(otype, coid) == 'stop' else target_1
         bps = exit_slippage_bps(direction, level, price)
         if bps is None:
             continue
@@ -651,10 +743,19 @@ def backfill_exit_slippage(cur, run_date, *, lookback_days: int = 5,
     always targets the signal's LATEST row). Savepoint-isolated; returns
     rows planned (0 on any failure).
 
-    Also logs, every run (including a 0-row plan), the count of broker
-    fills that LOOK exit-shaped (they carry a side) but neither branch could
-    attribute — no parent_order_id and no ah prefix — so an unexplained gap
-    in exit attribution is never silent.
+    Also logs, every run (including a 0-row plan), two diagnostic counts so
+    an unexplained gap in exit attribution is never silent (fix round 2,
+    item 2):
+      - `orphans=` — broker fills that neither branch could attribute at
+        all (no parent_order_id, no ah prefix, and no alpaca_submissions row
+        shares their client_order_id — that last check is what keeps a
+        bracket ENTRY fill, which also has parent_order_id IS NULL, from
+        permanently inflating this count).
+      - `ah_unmatched=` — ah-prefixed (ahsx_/ahtp_), parentless fills that
+        exist in the lookback window but did NOT end up as a branch-2 row in
+        the plan (submission out of the lookback window, no matching
+        signal, or no usable stop/target level) — distinct from `orphans=`,
+        which only counts fills with NO ah prefix at all.
 
     dry_run reads and reports but issues no UPDATE — reconcile()'s docstring
     promises dry-run "exits cleanly without touching the DB", and
@@ -667,7 +768,8 @@ def backfill_exit_slippage(cur, run_date, *, lookback_days: int = 5,
             run_date, int(lookback_days),
             run_date, int(lookback_days),
         ))
-        plan = plan_exit_slippage(cur.fetchall() or [])
+        rows = cur.fetchall() or []
+        plan = plan_exit_slippage(rows)
         if not dry_run:
             for sig_id, pnl_date, bps in plan:
                 cur.execute(
@@ -677,10 +779,16 @@ def backfill_exit_slippage(cur, run_date, *, lookback_days: int = 5,
         cur.execute(_EXIT_ORPHAN_COUNT_SQL, (run_date, int(lookback_days)))
         orphan_row = cur.fetchone()
         n_orphan = int(orphan_row[0]) if orphan_row and orphan_row[0] is not None else 0
+        cur.execute(_EXIT_AH_COUNT_SQL, (run_date, int(lookback_days)))
+        ah_row = cur.fetchone()
+        n_ah_total = int(ah_row[0]) if ah_row and ah_row[0] is not None else 0
+        n_branch2_in_plan = len(plan_exit_slippage(
+            [r for r in rows if str(r[2] or '').startswith(('ahsx_', 'ahtp_'))]))
+        n_ah_unmatched = max(0, n_ah_total - n_branch2_in_plan)
         cur.execute('RELEASE SAVEPOINT sp_exit_slip')
         log(f'exit slippage: n={len(plan)} exit-leg bp value(s)'
             f'{" (DRY-RUN, not written)" if dry_run else " persisted"}, '
-            f'{n_orphan} orphan fill(s) skipped (no parent, no ah prefix)')
+            f'orphans={n_orphan} ah_unmatched={n_ah_unmatched}')
         return len(plan)
     except Exception as exc:  # noqa: BLE001
         log(f'exit slippage backfill failed ({type(exc).__name__}: {exc}) — skipped')
