@@ -133,9 +133,14 @@ def advance_open_book(open_book: list, current_date, bars_by_ticker: dict,
             continue
         bar = bars.loc[current_date]
         high, low, close = float(bar['high']), float(bar['low']), float(bar['close'])
+        # `open` is absent from some synthetic bars frames; None there means
+        # _bar_exit ignores the gap rule (spec §A2 fallback).
+        _o = bar.get('open')
+        _open = float(_o) if _o is not None and pd.notna(_o) else None
         t.holding_days += 1
         # 1. intra-bar bracket
-        exit_level, reason = _bar_exit(t.direction, high, low, t.stop_loss, t.target_1, dt_priority)
+        exit_level, reason = _bar_exit(t.direction, high, low, t.stop_loss, t.target_1, dt_priority,
+                                       open_=_open)
         # 2. hook at the close
         if exit_level is None and use_hook:
             try:

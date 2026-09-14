@@ -389,11 +389,35 @@ def _signal_to_long_short(direction: str) -> int:
 
 
 def _bar_exit(direction: int, high: float, low: float,
-              stop_loss: float, target_1: float, dt_priority: str):
+              stop_loss: float, target_1: float, dt_priority: str,
+              *, open_: Optional[float] = None):
     """Intra-bar bracket decision shared by simulate_trade and the exit-hook
     open-book stepper. Returns (exit_level, reason) or (None, None).
     Long: target when high >= target_1, stop when low <= stop_loss; short
-    mirrored. Double-touch resolves by dt_priority ('stop' default)."""
+    mirrored. Double-touch resolves by dt_priority ('stop' default).
+
+    Gap fill (spec 2026-09-12 §A2): a stop does NOT protect against an
+    overnight gap — if the bar already OPENS beyond a level, that is the fill.
+    Under OPENCLAW_BT_GAP_FILL='open': long `open_ <= stop_loss` fills 'stop'
+    at open_ and `open_ >= target_1` fills 'target' at open_; short mirrored.
+    This is checked BEFORE the touch/double-touch logic because the open is the
+    bar's first price. Unset / 'level' (the default) ignores open_ entirely, as
+    does any call passing open_=None (a bars frame with no 'open' column) —
+    both are byte-identical to the pre-2026-09-12 engine. The env read is
+    guarded behind `open_ is not None` so legacy callers pay nothing.
+    """
+    if open_ is not None and os.environ.get('OPENCLAW_BT_GAP_FILL', 'level') == 'open':
+        o = float(open_)
+        if direction > 0:
+            if o <= stop_loss:
+                return o, 'stop'
+            if o >= target_1:
+                return o, 'target'
+        else:
+            if o >= stop_loss:
+                return o, 'stop'
+            if o <= target_1:
+                return o, 'target'
     if direction > 0:
         t_hit = high >= target_1
         s_hit = low <= stop_loss
@@ -469,7 +493,12 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
     _dt_priority = os.environ.get('OPENCLAW_BT_DOUBLE_TOUCH', 'stop')
     for i, (dt, bar) in enumerate(bars_window.iterrows(), start=1):
         high, low, close = float(bar['high']), float(bar['low']), float(bar['close'])
-        exit_level, reason = _bar_exit(direction, high, low, stop_loss, target_1, _dt_priority)
+        # `open` is absent from some synthetic/legacy bars frames; None there
+        # means _bar_exit ignores the gap rule (spec §A2 fallback).
+        _o = bar.get('open')
+        _open = float(_o) if _o is not None and pd.notna(_o) else None
+        exit_level, reason = _bar_exit(direction, high, low, stop_loss, target_1, _dt_priority,
+                                       open_=_open)
         if exit_level is None and i == n:  # last bar, no bracket -> exit at close
             exit_level = close
             reason = 'max_hold' if n == max_hold_days else 'end_of_data'
@@ -1457,6 +1486,15 @@ def run_backtest(strategy_id: str, *,
                 'asset_gate': (os.environ.get('OPENCLAW_BT_ASSET_GATE', 'parity')
                                if _sim_kwargs.get('asset_gate') else 'off'),
                 'double_touch': os.environ.get('OPENCLAW_BT_DOUBLE_TOUCH', 'stop'),
+                # Gap-fill provenance (2026-09-12 §A2): 'level' = a bracket
+                # touch returns the LEVEL (legacy); 'open' = a bar that opens
+                # beyond the level fills at that open. Read by
+                # scripts/pit_gap_flip_gate.py gate G1.
+                'gap_fill': os.environ.get('OPENCLAW_BT_GAP_FILL', 'level'),
+                # Fundamentals point-in-time provenance (2026-09-12 §A1). Read
+                # straight from the env at persist time rather than importing
+                # aux_data_loader — no new cross-module dependency here.
+                'financials_pit': os.environ.get('OPENCLAW_FINANCIALS_PIT', '0') == '1',
                 'exit_hook':   bool(getattr(instance, 'exit_hook', False)),
                 'hook_exits':  int(sim.get('hook_exits', 0)),
                 # Persisted, not just logged: a run whose hook raised on every
