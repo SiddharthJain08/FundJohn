@@ -1069,11 +1069,18 @@ def main():
         # Stream B (2026-09-12) item 15: per-ticker ownership ledger. REPORT-ONLY
         # here — OPENCLAW_OWNERSHIP_BLOCK=1 is what makes the sizer act on it.
         # run_ownership_pass swallows its own failures and returns {'skipped': …},
-        # and does its DB work inside SAVEPOINT sp_ownership so an unapplied
+        # and does its DB work (cursor, SAVEPOINT sp_ownership, commit) inside a
+        # try that rolls back to the savepoint on any failure, so an unapplied
         # migration 156 rolls back cleanly instead of poisoning this connection
-        # for whatever runs after it — so this can never fail the reconcile step.
-        from execution.position_ownership import run_ownership_pass
-        log(f'ownership: {run_ownership_pass(conn, args.date, dry_run=args.dry_run, log_fn=log)}')
+        # for whatever runs after it. The try/except here is defense in depth
+        # (fix round 1, item 1) — even the import itself must not be able to
+        # fail this step, which is main()'s critical path (only RuntimeError is
+        # caught below).
+        try:
+            from execution.position_ownership import run_ownership_pass
+            log(f'ownership: {run_ownership_pass(conn, args.date, dry_run=args.dry_run, log_fn=log)}')
+        except Exception as exc:  # noqa: BLE001
+            log(f'[ownership] skipped: {type(exc).__name__}: {str(exc)[:120]}')
     except RuntimeError as exc:
         log(f'aborted: {exc}')
         conn.close()
