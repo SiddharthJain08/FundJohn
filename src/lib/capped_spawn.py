@@ -28,10 +28,18 @@ steps and the research/backtest children can be tuned independently.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 
 DEFAULT_MEMORY_MAX = '4500M'
 MEMORY_MAX_ENV     = 'OPENCLAW_STEP_MEMORY_MAX'
+
+# A well-formed systemd size string: a bare '0' (our own disables-the-cap
+# sentinel) or digits followed by a K/M/G/T unit. A bare non-zero number
+# (e.g. '4500') is the footgun this guards against: systemd-run reads an
+# unsuffixed MemoryMax= as raw BYTES, which would OOM-kill every step at
+# spawn. Case-insensitive on the unit letter.
+_CAP_RE = re.compile(r'^(?:0|\d+[KMGT])$', re.IGNORECASE)
 
 
 def _real_probe() -> bool:
@@ -45,14 +53,36 @@ def _real_probe() -> bool:
         return False
 
 
-_STATE = {'probe': _real_probe, 'uid': os.getuid, 'available': None, 'warned': False}
+_STATE = {'probe': _real_probe, 'uid': os.getuid, 'available': None, 'warned': False,
+          'cap_warned': False}
 
 
-def default_memory_max() -> str:
+def _validate_cap(cap: str, log=None) -> str:
+    """Return `cap` if it matches `_CAP_RE`; otherwise fall back to
+    DEFAULT_MEMORY_MAX and log a warning ONCE per process (shared with the
+    availability warning's once-only discipline, tracked separately so a
+    malformed-cap warning and an unavailable-scopes warning don't suppress
+    each other)."""
+    if _CAP_RE.match(cap):
+        return cap
+    if not _STATE['cap_warned']:
+        _STATE['cap_warned'] = True
+        msg = (f'[capped_spawn] malformed {MEMORY_MAX_ENV}={cap!r} (no unit '
+               f'suffix — systemd-run would read this as raw bytes); '
+               f'falling back to default {DEFAULT_MEMORY_MAX}')
+        (log or print)(msg)
+    return DEFAULT_MEMORY_MAX
+
+
+def _resolve_env_cap(log=None) -> str:
     v = os.environ.get(MEMORY_MAX_ENV)
     if v is None or not str(v).strip():
         return DEFAULT_MEMORY_MAX
-    return str(v).strip()
+    return _validate_cap(str(v).strip(), log=log)
+
+
+def default_memory_max() -> str:
+    return _resolve_env_cap()
 
 
 def _available(log=None) -> bool:
@@ -69,7 +99,23 @@ def _available(log=None) -> bool:
 
 def wrap_capped(cmd, memory_max=None, log=None):
     """Return `(argv, cap_applied_or_None)`. Never mutates `cmd`."""
-    cap = default_memory_max() if memory_max is None else str(memory_max or '').strip()
+    # Env-sourced cap: route through `_resolve_env_cap(log=log)` (not the
+    # bare `default_memory_max()`) so a malformed OPENCLAW_STEP_MEMORY_MAX
+    # warns into the CALLER's log (run_step's cycle log on the real path)
+    # instead of only reaching raw stdout — `default_memory_max()` itself
+    # has no `log` param (frozen public signature) and falls back to
+    # print(), which a direct caller of that function still gets.
+    if memory_max is None:
+        cap = _resolve_env_cap(log=log)
+    else:
+        # Explicit memory_max bypasses the env path entirely and has not
+        # been validated yet — same guard, same caller `log`. Already-valid
+        # input matches _CAP_RE and returns unchanged (no-op). A blank
+        # value stays blank (disables below) rather than being flagged as
+        # malformed — blank means "no cap requested", not "bad cap".
+        cap = str(memory_max or '').strip()
+        if cap:
+            cap = _validate_cap(cap, log=log)
     plain = list(cmd)
     if not cap or cap == '0':
         return plain, None
@@ -79,9 +125,15 @@ def wrap_capped(cmd, memory_max=None, log=None):
              '-p', f'MemoryMax={cap}', '--', *plain], cap)
 
 
-def _reset(available=None):
-    """Test hook: pin the availability decision; None restores the real probe."""
-    _STATE['probe'] = _real_probe
-    _STATE['uid'] = os.getuid
+def _reset(available=None, probe=None, uid=None):
+    """Test hook: pin the availability decision; None restores the real
+    probe/uid. `probe=`/`uid=` let a test inject a fake probe function or
+    uid getter while leaving `available` unresolved (None) so `_available()`
+    actually calls them — used to test probe caching and uid gating without
+    ever invoking a real systemd-run. `_reset()` / `_reset(available=...)`
+    with no `probe`/`uid` behave exactly as before (real probe, real uid)."""
+    _STATE['probe'] = probe if probe is not None else _real_probe
+    _STATE['uid'] = uid if uid is not None else os.getuid
     _STATE['available'] = available
     _STATE['warned'] = False
+    _STATE['cap_warned'] = False

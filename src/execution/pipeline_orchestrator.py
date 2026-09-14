@@ -707,7 +707,9 @@ def run_step(script, run_date, env, renew=None):
                 ) from e2
     # QD E2: contain an OOMing step to its own cgroup. Without this the
     # kernel's global OOM killer picks the victim on this 8 GB no-swap box
-    # (it has picked johnbot). rc=137 already routes to the bounded retry.
+    # (it has picked johnbot). A SIGKILLed child surfaces here as rc=-9
+    # (Python's negative-signal convention, not the shell's 128+n=137) and
+    # already routes to the bounded retry.
     from lib import capped_spawn as _capped_spawn
     cmd, _cap_applied = _capped_spawn.wrap_capped(cmd, log=log)
     # Stdout-idle watchdog: if the subprocess emits nothing for this many

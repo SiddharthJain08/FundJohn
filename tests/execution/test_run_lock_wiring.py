@@ -30,23 +30,18 @@ from execution import pipeline_orchestrator as po  # noqa: E402
 from lib import run_lock  # noqa: E402
 from lib import capped_spawn as _capped_spawn  # noqa: E402
 
-
-def setUpModule():
-    # QD E2 hermeticity: run_step now calls capped_spawn.wrap_capped(), whose
-    # module-global `_STATE['available']` defaults to None (unresolved) and,
-    # on an unresolved probe, actually shells out to `systemd-run` the first
-    # time any test here calls run_step — on this box (uid 0, systemd-run
-    # present) that is a REAL transient scope, exactly what this file's
-    # "no real subprocess but the stub scripts" contract forbids. Pin it OFF
-    # for the whole module (matches pre-QD-E2 behaviour: unwrapped argv) so
-    # every run_step-calling test here — old and new — stays hermetic
-    # regardless of pytest invocation order or what other test module ran
-    # before this one. `TestRunStepIsCapped` overrides per-test as needed.
-    _capped_spawn._reset(available=False)
-
-
-def tearDownModule():
-    _capped_spawn._reset()
+# QD E2 hermeticity (fix round 2, task-4 review finding 1): run_step calls
+# capped_spawn.wrap_capped() on every invocation. Its module-global
+# `_STATE['available']` defaults to None (unresolved), and on an unresolved
+# probe it shells out to a REAL `systemd-run`. Module-scoped setUpModule/
+# tearDownModule used to pin this for the whole file, but that pinned
+# process-global state for every test regardless of pytest invocation order
+# and could not be composed with a real leak elsewhere in the same process
+# (the review's finding 1 repro). The pin now lives in
+# tests/execution/conftest.py as an autouse fixture covering the whole
+# directory (OPENCLAW_STEP_MEMORY_MAX=0 + `_reset(available=False)` per
+# test, every test). `TestRunStepIsCapped` below overrides both explicitly
+# in its own setUp/tearDown to exercise the "available" branch.
 
 
 class FakeRedis:
@@ -426,20 +421,51 @@ class TestMainStopsWhenRenewRaisesTwice(unittest.TestCase):
 
 
 class TestRunStepIsCapped(unittest.TestCase):
-    """run_step wraps the child in a MemoryMax scope when one is available."""
+    """run_step wraps the child in a MemoryMax scope when one is available.
+
+    Fix round 2 (task-4 review finding 1): this class pins availability
+    directly via `_reset(available=...)`, which resolves `_STATE['available']`
+    WITHOUT ever calling the probe — so `capped_spawn.subprocess.run` must
+    never be invoked by any test here. setUp patches it to raise if it is,
+    as a hard guard (belt and suspenders on top of the conftest-level
+    counting proxy, which only asserts at the end of every test in the
+    directory). This class also needs the REAL default cap decision
+    (4500M), not the conftest's blanket OPENCLAW_STEP_MEMORY_MAX=0 override
+    for the rest of the directory — setUp clears it for the duration of
+    each test and tearDown restores whatever conftest's monkeypatch had set."""
 
     def setUp(self):
         from lib import capped_spawn as cs
         self.cs = cs
         self._orig_resolve = po._resolve_script
+        self._old_cap_env = os.environ.get('OPENCLAW_STEP_MEMORY_MAX')
+        os.environ.pop('OPENCLAW_STEP_MEMORY_MAX', None)
+        self._real_run_patcher = mock.patch.object(
+            cs.subprocess, 'run',
+            side_effect=AssertionError(
+                'capped_spawn._real_probe() must not run in '
+                'TestRunStepIsCapped — availability is always pinned'))
+        self._real_run_patcher.start()
+        # Per the review ruling: pin available=True here (each test method
+        # re-pins to whatever it actually needs as its first statement, so
+        # this is overwritten immediately by every test below — but it
+        # matches the ruling's literal setUp contract and, either way,
+        # never touches the probe).
+        self.cs._reset(available=True)
 
     def tearDown(self):
+        self._real_run_patcher.stop()
         po._resolve_script = self._orig_resolve
+        if self._old_cap_env is None:
+            os.environ.pop('OPENCLAW_STEP_MEMORY_MAX', None)
+        else:
+            os.environ['OPENCLAW_STEP_MEMORY_MAX'] = self._old_cap_env
         # Deviation from the brief's literal `self.cs._reset()`: that leaves
-        # availability unresolved (None), so the NEXT run_step call in this
-        # process — including in another test module sharing this global —
-        # re-probes for real. Pin back to the module's hermetic default
-        # (available=False) instead; see setUpModule's comment.
+        # availability unresolved (None). Pin back to False instead — the
+        # conftest fixture's own teardown (`_reset()`, unpinned) runs AFTER
+        # this tearDown and re-pins False again before the next test's
+        # setup, so this is redundant-but-harmless defense in depth, not
+        # load-bearing on its own.
         self.cs._reset(available=False)
 
     def test_argv_is_wrapped_when_scopes_are_available(self):
