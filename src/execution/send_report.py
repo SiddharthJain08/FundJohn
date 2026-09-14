@@ -666,6 +666,18 @@ def main() -> int:
     except Exception as e:
         print(f'[send_report] bench_realized skipped: {e}')
 
+    # Stream B (2026-09-12) item 14: realized fill-slippage line, entry + exit
+    # legs, with a verdict against our own per-ticker half-spread cost model.
+    # Report-only, fail-open; same daily post as bench_realized, no new webhook.
+    try:
+        from execution.fill_slippage import fill_slippage_line
+        _fs = fill_slippage_line(run_date)
+        if _fs:
+            summary = f'{summary}\n{_fs}'
+            print(f'[send_report] {_fs}')
+    except Exception as e:
+        print(f'[send_report] fill_slippage skipped: {e}')
+
     if dry_run or (not wh_signals and not wh_reports):
         msg = '[send_report] DRY-RUN — printing post bodies to stdout' if dry_run \
               else '[send_report] no webhooks available — printing to stdout only'
