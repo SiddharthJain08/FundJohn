@@ -8,6 +8,14 @@ const ROOT = path.resolve(__dirname, '..');
 const helpers = require(path.join(ROOT, 'src/agent/graphs/daily_cycle_helpers.js'));
 const runLock = require(path.join(ROOT, 'src/lib/run_lock.js'));
 
+// QD E2 fix round 1 (2026-09-14): this file's runSubprocess calls never pass
+// memoryMax, so on a uid-0 box with a working systemd-run they would
+// otherwise wrap every one in a real transient scope. '0' short-circuits in
+// wrapCapped BEFORE the availability probe runs, so there's no probe call
+// and no stderr warning either. node --test runs this file in its own
+// process, so this can't leak into any other test file.
+process.env.OPENCLAW_STEP_MEMORY_MAX = '0';
+
 test('skipForSubset honors requestedSteps when present', () => {
   assert.equal(helpers.skipForSubset('collect', { requestedSteps: null }),                          false);
   assert.equal(helpers.skipForSubset('collect', { requestedSteps: undefined }),                     false);

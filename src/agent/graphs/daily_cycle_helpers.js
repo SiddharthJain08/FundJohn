@@ -15,18 +15,12 @@
 
 const { spawn } = require('node:child_process');
 const runLock    = require('../../lib/run_lock');
-const { wrapCapped } = require('../../lib/capped_spawn');
-
-// QD E2 (2026-09-12): the cycle-step cap. Deliberately its own env var —
-// wrapCapped's built-in default reads OPENCLAW_BACKTEST_MEMORY_MAX, which
-// tunes the research/backtest children, not the daily cycle.
-const DEFAULT_STEP_MEMORY_MAX = '4500M';
-
-function stepMemoryMax() {
-  const v = process.env.OPENCLAW_STEP_MEMORY_MAX;
-  return (v === undefined || v === null || String(v).trim() === '')
-    ? DEFAULT_STEP_MEMORY_MAX : String(v).trim();
-}
+// QD E2 fix round 1 (2026-09-14): stepMemoryMax() now lives in capped_spawn.js
+// itself — the single resolver for OPENCLAW_STEP_MEMORY_MAX, shared with
+// cron-schedule.js's two orchestrator spawns and validated against a
+// systemd-size-string regex (mirrors capped_spawn.py). Re-exported here
+// under its original name for backward compatibility with existing callers.
+const { wrapCapped, stepMemoryMax, DEFAULT_STEP_MEMORY_MAX } = require('../../lib/capped_spawn');
 
 function skipForSubset(step, state) {
   if (!state || !state.requestedSteps) return false;
@@ -58,12 +52,17 @@ async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, s
       durationMs:  0,
       timedOut:    false,
       lockLost:    true,
+      memoryMax:   null,
     };
   }
   return new Promise((resolve) => {
     const startedAt = Date.now();
     const cap = (memoryMax === undefined) ? stepMemoryMax() : memoryMax;
-    const wrapped = wrapCapped(argv[0], argv.slice(1), { memoryMax: cap });
+    // fallback: DEFAULT_STEP_MEMORY_MAX — if `cap` reached here malformed
+    // (an explicit opts.memoryMax bypassing stepMemoryMax()'s own
+    // validation), it must fall back to the STEP default, never wrapCapped's
+    // own backtest-oriented default.
+    const wrapped = wrapCapped(argv[0], argv.slice(1), { memoryMax: cap, fallback: DEFAULT_STEP_MEMORY_MAX });
     const cmd  = wrapped.cmd;
     const args = wrapped.args;
     let stdout = '';
