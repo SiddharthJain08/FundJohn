@@ -710,10 +710,21 @@ def _close_signals_for_fill(fill, *, conn_factory=None) -> int:
     --monitor tick, before run_stop_monitor, and a DB blip must not cost the
     book its ext-hours stop emulation for that tick, nor be silently mistaken
     for a no-op."""
-    from execution.open_reconcile import _held_signal_rows, drop_signal_close
     conn_factory = conn_factory or _db_conn
     sym = fill.get('symbol') or ''
     want = 'LONG' if (fill.get('side') or '').lower() == 'sell' else 'SHORT'
+    # QD wave-1 fix item 4 (2026-09-14): this import used to sit OUTSIDE every
+    # guard, so an import-time failure in open_reconcile (or anything it pulls
+    # in) raised straight out of the reporter and killed the whole --monitor
+    # tick, taking the stop monitor with it. Guarded and mapped to the same
+    # -1 "could not even attempt" contract as a DB failure, so the caller
+    # records the fill pending and retries it next tick.
+    try:
+        from execution.open_reconcile import _held_signal_rows, drop_signal_close
+    except Exception as e:  # noqa: BLE001
+        log(f'  ⚠ {sym}: open_reconcile import failed ({e}) — '
+            f'signal close FAILED (will retry)')
+        return -1
     try:
         conn = conn_factory()
     except Exception as e:  # noqa: BLE001
@@ -797,6 +808,17 @@ def run_exit_fill_reporter(dry_run: bool) -> dict:
         state = json.loads(state_p.read_text())
     except (OSError, ValueError):
         state = {}
+    # QD wave-1 fix item 4 (2026-09-14): a state file that is VALID JSON but
+    # not an object (`[]`, `"x"`, `null`, a bare number — a truncated or
+    # hand-edited file) parses fine and then blew up on `.get` with an
+    # AttributeError, which propagated out of main() and cost that --monitor
+    # tick its stop-monitor pass (the book's only ext-hours downside
+    # protection). Treat any non-object as "no state": worst case this run
+    # re-seeds, which closes nothing.
+    if not isinstance(state, dict):
+        log(f'⚠ fill-reporter: state file {state_p} is not a JSON object '
+            f'({type(state).__name__}) — treating as empty')
+        state = {}
     seen_list = list(state.get('seen', []))
     pending_list = list(state.get('pending', []))
     watermark_dt = _parse_fill_time(state.get('watermark'))
@@ -814,6 +836,25 @@ def run_exit_fill_reporter(dry_run: bool) -> dict:
             pf = fills_by_id.get(pid)
             if pf is None:
                 still_pending.append(pid)     # not in this window — keep waiting
+                continue
+            # QD wave-1 fix item 3 (2026-09-14): re-gate every retry exactly
+            # the way a NEW fill is gated. This loop was the one path past the
+            # 48h recency floor: an id whose close kept failing (a multi-day DB
+            # outage) stayed pending indefinitely and would then close TODAY's
+            # fresh position at a days-old fill price — precisely the harm the
+            # floor exists to prevent. Same rule as the new-fill branch below
+            # (unparseable/missing filled_at counts as stale), plus a re-check
+            # of `kind`. A dropped id is NOT re-added to `pending` and is
+            # already in `seen`, so it never resurfaces and is never re-posted.
+            pf_dt = _parse_fill_time(pf.get('filled_at'))
+            pf_sym = pf.get('symbol') or '?'
+            if pf_dt is None or pf_dt <= cutoff:
+                log(f'  ↳ pending {pid} ({pf_sym}) aged past '
+                    f'{_RECENCY_WINDOW_HOURS}h — dropped without closing')
+                continue
+            if pf.get('kind') not in _CLOSING_FILL_KINDS:
+                log(f'  ↳ pending {pid} ({pf_sym}) is kind {pf.get("kind")!r}, '
+                    f'not a closing fill — dropped without closing')
                 continue
             result = _close_signals_for_fill(pf)
             if result is None or result < 0:
@@ -890,7 +931,17 @@ def main(argv=None) -> int:
     if args.monitor:
         # Fill reporter first (session-agnostic — RTH OCO/bracket fills are
         # the common case); the stop monitor still skips during RTH itself.
-        log(f'fill-reporter: {run_exit_fill_reporter(args.dry_run)}')
+        # QD wave-1 fix item 4 (2026-09-14): the reporter is a best-effort
+        # reporting + ledger-bookkeeping pass; `run_stop_monitor` below is the
+        # book's ONLY downside protection outside RTH. An unhandled exception
+        # in the former (malformed state file, unexpected broker payload,
+        # import error) used to take the entire --monitor tick down with it,
+        # silently skipping the monitor. Log and carry on instead.
+        try:
+            log(f'fill-reporter: {run_exit_fill_reporter(args.dry_run)}')
+        except Exception as e:  # noqa: BLE001
+            log(f'⚠ fill-reporter raised ({type(e).__name__}: {e}) — '
+                f'continuing to the stop monitor')
         log(f'stop-monitor: {run_stop_monitor(args.dry_run)}')
         return 0
     if not afterhours_tp_on():

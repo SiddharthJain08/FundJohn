@@ -446,3 +446,83 @@ def test_pending_retry_not_found_in_window_stays_pending(monkeypatch, tmp_path):
     assert stats['signals_closed'] == 0
     st = json.loads(state_p.read_text())
     assert st['pending'] == ['ghost1']
+
+
+# ── pending retry re-gating (wave-1 fix item 3) ─────────────────────────────
+# The retry loop used to close every pending id present in the current fill
+# window WITHOUT re-checking recency or kind — the one path past the 48h
+# floor. A close that kept failing (a multi-day DB outage) therefore stayed
+# pending and would eventually close TODAY's fresh position at a days-old
+# fill price: exactly the harm the floor exists to prevent.
+
+def test_pending_retry_aged_past_the_48h_floor_is_dropped_not_closed(
+        monkeypatch, tmp_path):
+    closed = []
+    order = _stop_order(filled_at=_stale(hours=72), oid='aged1')
+    _wire(monkeypatch, tmp_path, order, closed)
+    # Already seen (so the new-fill loop ignores it) and still pending.
+    _seed_state(tmp_path, seen=['aged1'], pending=['aged1'])
+    stats = ah.run_exit_fill_reporter(dry_run=False)
+    assert stats['signals_closed'] == 0
+    assert closed == []                       # never closed at a stale price
+    st = json.loads(_state_path(tmp_path).read_text())
+    assert st['pending'] == []                # dropped, not retried forever
+
+
+def test_pending_retry_with_an_unparseable_filled_at_is_dropped(monkeypatch, tmp_path):
+    """Same rule as the new-fill branch: no usable filled_at counts as stale."""
+    closed = []
+    order = _stop_order(filled_at='not-a-timestamp', oid='bad1')
+    _wire(monkeypatch, tmp_path, order, closed)
+    _seed_state(tmp_path, seen=['bad1'], pending=['bad1'])
+    stats = ah.run_exit_fill_reporter(dry_run=False)
+    assert stats['signals_closed'] == 0
+    assert closed == []
+    st = json.loads(_state_path(tmp_path).read_text())
+    assert st['pending'] == []
+
+
+def test_pending_retry_within_48h_is_still_closed(monkeypatch, tmp_path):
+    """The fix must not break the retry it was added for."""
+    closed = []
+    order = _stop_order(filled_at=_recent(minutes=30), oid='fresh1')
+    _wire(monkeypatch, tmp_path, order, closed)
+    _seed_state(tmp_path, seen=['fresh1'], pending=['fresh1'])
+    stats = ah.run_exit_fill_reporter(dry_run=False)
+    assert stats['signals_closed'] == 1
+    assert len(closed) == 1
+    st = json.loads(_state_path(tmp_path).read_text())
+    assert st['pending'] == []
+
+
+def test_pending_retry_of_a_non_closing_kind_is_dropped(monkeypatch, tmp_path):
+    """A take-profit id must never be closed as a stop_loss on the retry path
+    either — `kind` is re-checked, exactly as it is for a new fill."""
+    closed = []
+    tp = [{'id': 'tp1', 'symbol': 'AAA', 'side': 'sell', 'status': 'filled',
+           'type': 'limit', 'order_class': 'oco', 'limit_price': '12.00',
+           'filled_qty': '10', 'filled_avg_price': '12.05',
+           'filled_at': _recent()}]
+    _wire(monkeypatch, tmp_path, tp, closed)
+    _seed_state(tmp_path, seen=['tp1'], pending=['tp1'])
+    stats = ah.run_exit_fill_reporter(dry_run=False)
+    assert stats['signals_closed'] == 0
+    assert closed == []
+    st = json.loads(_state_path(tmp_path).read_text())
+    assert st['pending'] == []
+
+
+# ── malformed state file (wave-1 fix item 4) ────────────────────────────────
+
+def test_state_file_that_is_valid_json_but_not_an_object_does_not_raise(
+        monkeypatch, tmp_path):
+    """`[]` / `"x"` / `null` / a bare number parse fine, then used to blow up
+    on `state.get(...)` with an AttributeError that propagated out of main()
+    and cost that --monitor tick its stop-monitor pass."""
+    for body in ('[]', '"corrupt"', 'null', '3'):
+        closed = []
+        _wire(monkeypatch, tmp_path, [], closed)
+        _state_path(tmp_path).write_text(body)
+        stats = ah.run_exit_fill_reporter(dry_run=False)
+        assert stats == {'fills_seen': 0, 'reported': 0, 'signals_closed': 0}
+        assert closed == []

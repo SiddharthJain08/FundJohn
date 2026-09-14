@@ -458,6 +458,45 @@ def test_fill_reporter_posts_new_fills_to_trade_reports_once(monkeypatch, tmp_pa
     assert stats['reported'] == 0 and posts == []
 
 
+# ── --monitor tick isolation (wave-1 fix item 4) ────────────────────────────
+# `main(--monitor)` ran the fill reporter UNGUARDED before the stop monitor.
+# The reporter is best-effort reporting + ledger bookkeeping; the stop monitor
+# is the book's ONLY downside protection outside RTH. An exception in the
+# former used to take the whole tick down with it and silently skip the latter.
+
+def test_monitor_tick_runs_the_stop_monitor_even_if_the_reporter_raises(monkeypatch):
+    calls = []
+
+    def _boom(dry_run):
+        calls.append('reporter')
+        raise RuntimeError('state file exploded')
+
+    monkeypatch.setattr(ah, 'run_exit_fill_reporter', _boom)
+    monkeypatch.setattr(ah, 'run_stop_monitor',
+                        lambda dry_run: calls.append('monitor') or {'checked': 0})
+    logs = []
+    monkeypatch.setattr(ah, 'log', lambda m: logs.append(str(m)))
+    rc = ah.main(['--monitor', '--dry-run'])
+    assert rc == 0
+    assert calls == ['reporter', 'monitor']
+    assert any('fill-reporter raised' in m and 'RuntimeError' in m for m in logs), logs
+
+
+def test_monitor_tick_is_unchanged_when_the_reporter_succeeds(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ah, 'run_exit_fill_reporter',
+                        lambda dry_run: calls.append('reporter') or {'fills_seen': 0})
+    monkeypatch.setattr(ah, 'run_stop_monitor',
+                        lambda dry_run: calls.append('monitor') or {'checked': 0})
+    logs = []
+    monkeypatch.setattr(ah, 'log', lambda m: logs.append(str(m)))
+    rc = ah.main(['--monitor', '--dry-run'])
+    assert rc == 0
+    assert calls == ['reporter', 'monitor']
+    assert any(m.startswith('fill-reporter: ') for m in logs), logs
+    assert not any('raised' in m for m in logs), logs
+
+
 # ── quote-based exit pricing (2026-07-21) ───────────────────────────────────
 
 def _act(side, reason, level, current, limit=None):
