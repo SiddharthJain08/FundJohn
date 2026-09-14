@@ -705,6 +705,11 @@ def run_step(script, run_date, env, renew=None):
                     f'renew failed twice before {script} ({run_date}) — '
                     f'first: {e!r}; retry: {e2!r}'
                 ) from e2
+    # QD E2: contain an OOMing step to its own cgroup. Without this the
+    # kernel's global OOM killer picks the victim on this 8 GB no-swap box
+    # (it has picked johnbot). rc=137 already routes to the bounded retry.
+    from lib import capped_spawn as _capped_spawn
+    cmd, _cap_applied = _capped_spawn.wrap_capped(cmd, log=log)
     # Stdout-idle watchdog: if the subprocess emits nothing for this many
     # seconds we treat it as wedged and SIGTERM it. The 2026-04-29 cycle
     # got stuck in collector Phase 3 (options) for 30+ minutes with zero
@@ -713,7 +718,8 @@ def run_step(script, run_date, env, renew=None):
     # is the belt-and-suspenders defense for any future silent stall.
     # Override per-step via STEP_STDOUT_IDLE_MAX_S env (default 600s).
     stdout_idle_max_s = int(os.environ.get('STEP_STDOUT_IDLE_MAX_S', '600'))
-    log(f'Starting {script} timeout={timeout}s stdout_idle_max={stdout_idle_max_s}s (cmd: {" ".join(cmd)})...')
+    log(f'Starting {script} timeout={timeout}s stdout_idle_max={stdout_idle_max_s}s '
+        f'memory_max={_cap_applied or "uncapped"} (cmd: {" ".join(cmd)})...')
     try:
         proc = subprocess.Popen(
             cmd, cwd=str(ROOT), env=env,

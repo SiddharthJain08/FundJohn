@@ -28,6 +28,25 @@ sys.path.insert(0, str(ROOT / 'src'))
 
 from execution import pipeline_orchestrator as po  # noqa: E402
 from lib import run_lock  # noqa: E402
+from lib import capped_spawn as _capped_spawn  # noqa: E402
+
+
+def setUpModule():
+    # QD E2 hermeticity: run_step now calls capped_spawn.wrap_capped(), whose
+    # module-global `_STATE['available']` defaults to None (unresolved) and,
+    # on an unresolved probe, actually shells out to `systemd-run` the first
+    # time any test here calls run_step — on this box (uid 0, systemd-run
+    # present) that is a REAL transient scope, exactly what this file's
+    # "no real subprocess but the stub scripts" contract forbids. Pin it OFF
+    # for the whole module (matches pre-QD-E2 behaviour: unwrapped argv) so
+    # every run_step-calling test here — old and new — stays hermetic
+    # regardless of pytest invocation order or what other test module ran
+    # before this one. `TestRunStepIsCapped` overrides per-test as needed.
+    _capped_spawn._reset(available=False)
+
+
+def tearDownModule():
+    _capped_spawn._reset()
 
 
 class FakeRedis:
@@ -404,6 +423,64 @@ class TestMainStopsWhenRenewRaisesTwice(unittest.TestCase):
         # 1 success (signals) + 1 raise (handoff, attempt) + 1 raise
         # (handoff, retry) — exactly one retry before giving up.
         self.assertEqual(len(renew_calls), 3)
+
+
+class TestRunStepIsCapped(unittest.TestCase):
+    """run_step wraps the child in a MemoryMax scope when one is available."""
+
+    def setUp(self):
+        from lib import capped_spawn as cs
+        self.cs = cs
+        self._orig_resolve = po._resolve_script
+
+    def tearDown(self):
+        po._resolve_script = self._orig_resolve
+        # Deviation from the brief's literal `self.cs._reset()`: that leaves
+        # availability unresolved (None), so the NEXT run_step call in this
+        # process — including in another test module sharing this global —
+        # re-probes for real. Pin back to the module's hermetic default
+        # (available=False) instead; see setUpModule's comment.
+        self.cs._reset(available=False)
+
+    def test_argv_is_wrapped_when_scopes_are_available(self):
+        seen = {}
+        self.cs._reset(available=True)
+        po._resolve_script = lambda script, run_date: (['true'], 5)
+
+        real_popen = po.subprocess.Popen
+
+        def _spy(cmd, **kw):
+            seen['cmd'] = list(cmd)
+            return real_popen(['true'], **kw)
+
+        po.subprocess.Popen = _spy
+        try:
+            po.run_step('engine', DATE, dict(os.environ))
+        finally:
+            po.subprocess.Popen = real_popen
+        self.assertEqual(seen['cmd'][:6],
+                         ['systemd-run', '--scope', '--collect', '--quiet',
+                          '-p', 'MemoryMax=4500M'])
+        self.assertEqual(seen['cmd'][-1], 'true')
+
+    def test_argv_is_untouched_when_scopes_are_unavailable(self):
+        seen = {}
+        self.cs._reset(available=False)
+        po._resolve_script = lambda script, run_date: (['true'], 5)
+
+        real_popen = po.subprocess.Popen
+
+        def _spy(cmd, **kw):
+            seen['cmd'] = list(cmd)
+            return real_popen(['true'], **kw)
+
+        po.subprocess.Popen = _spy
+        try:
+            ok, rc = po.run_step('engine', DATE, dict(os.environ))
+        finally:
+            po.subprocess.Popen = real_popen
+        self.assertEqual(seen['cmd'], ['true'])
+        self.assertTrue(ok)
 
 
 if __name__ == '__main__':
