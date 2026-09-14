@@ -116,6 +116,21 @@ def test_blocklist_logs_the_ownership_line_in_report_only_mode(monkeypatch, capl
     assert any("[ownership]" in r.getMessage() for r in caplog.records)
 
 
+def test_flag_on_resolves_to_a_blocklist_the_gate_actually_sheds(monkeypatch):
+    """Connects the two halves the other tests exercise separately: the pure
+    resolver (env flag -> set) and the gate's shed semantics (injected set ->
+    shed). Without this, a resolver change (e.g. returning a dict, or
+    lowercased tickers) that breaks the gate's `tkr in ownership_blocked`
+    check could pass every other test here while silently blocking nothing
+    in production."""
+    monkeypatch.setenv("OPENCLAW_OWNERSHIP_BLOCK", "1")
+    blocked = rbs._ownership_blocklist_from(_STATUSES)
+    out = _gate({"AAA": 9000.0, "BBB": 5000.0}, {"AAA": 4000.0},
+                ownership_blocked=blocked)
+    assert out["AAA"] == 4000.0   # non-ok -> capped at held
+    assert out["BBB"] == 5000.0   # ok -> untouched
+
+
 # ── the gate itself must never reach the DB ────────────────────────────────
 
 def test_gate_defaults_to_no_block_and_never_loads():
