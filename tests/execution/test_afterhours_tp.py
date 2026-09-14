@@ -1,9 +1,18 @@
 """W3: extended-hours take-profit placement (limit/day/extended_hours)."""
 from __future__ import annotations
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'src'))
 from execution import afterhours_tp as ah
+
+
+def _recent_ts() -> str:
+    """A filled_at inside run_exit_fill_reporter's recency-gate window (review
+    fix round 1, finding 1) — real broker fills always carry a filled_at, and
+    the gate now treats a missing/stale one as stale, so fixtures exercising
+    the reporter need one."""
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
 def test_desired_tps_long_and_short():
@@ -373,7 +382,7 @@ _CLOSED_ORDERS = [
      'legs': [
          {'id': 'tp1', 'symbol': 'MU', 'type': 'limit', 'status': 'filled',
           'side': 'sell', 'filled_qty': '3', 'filled_avg_price': '918.54',
-          'limit_price': '886.23'},
+          'limit_price': '886.23', 'filled_at': _recent_ts()},
          {'id': 'st1', 'symbol': 'MU', 'type': 'stop', 'status': 'canceled',
           'side': 'sell', 'filled_qty': '0', 'stop_price': '813.05'},
      ]},
@@ -383,12 +392,13 @@ _CLOSED_ORDERS = [
      'limit_price': '10.69', 'client_order_id': 'oco_BW_1',
      'legs': [{'id': 'st2', 'symbol': 'BW', 'type': 'stop',
                'status': 'filled', 'side': 'sell', 'filled_qty': '275',
-               'filled_avg_price': '9.70', 'stop_price': '9.75'}]},
+               'filled_avg_price': '9.70', 'stop_price': '9.75',
+               'filled_at': _recent_ts()}]},
     # Ext-hours emulated exit (ahsx_) filled.
     {'id': 'x3', 'symbol': 'AXTI', 'type': 'limit', 'order_class': 'simple',
      'status': 'filled', 'side': 'sell', 'filled_qty': '59',
      'filled_avg_price': '51.74', 'limit_price': '51.74',
-     'client_order_id': 'ahsx_AXTI_1'},
+     'client_order_id': 'ahsx_AXTI_1', 'filled_at': _recent_ts()},
     # Plain filled entry (simple market) — must NOT be reported.
     {'id': 'e4', 'symbol': 'HPE', 'type': 'market', 'order_class': 'simple',
      'status': 'filled', 'side': 'buy', 'filled_qty': '50',

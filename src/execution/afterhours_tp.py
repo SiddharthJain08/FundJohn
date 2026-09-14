@@ -21,7 +21,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path as _Path
 
 # Run standalone via systemd (ExecStart=python3 .../afterhours_tp.py): src/ is not
@@ -616,6 +616,38 @@ def classify_exit_fills(orders) -> list:
 # that would arm the stop-out cooldown against a name that worked.
 _CLOSING_FILL_KINDS = ('stop', 'ah_exit')
 
+# Recency gate (review fix round 1, finding 1): fetch_recent_closed_orders'
+# per-symbol scoped window (Task 1) can surface an order that has NEVER been
+# in `seen` yet is chronologically ancient — e.g. a ticker that rarely trades
+# still has last quarter's stop fill inside its own fresh 500-row window. Such
+# an id is genuinely "new" by the seen-set check alone, so without a time
+# floor it would be posted AND closed against TODAY's fresh position on that
+# same ticker at an ancient price — the mass-close class safety rule #2
+# forbids. `_RECENCY_WINDOW_HOURS` is the fallback floor when no watermark is
+# persisted yet; the watermark then ratchets the floor forward permanently so
+# an id that later ages out of the 800-entry seen cap can never resurface as
+# "new" and get reprocessed, independent of the rolling window.
+_RECENCY_WINDOW_HOURS = 48
+_SEEN_CAP = 800
+_PENDING_CAP = 200
+
+
+def _parse_fill_time(value):
+    """Best-effort parse of a broker filled_at / persisted watermark ISO
+    timestamp to an aware UTC datetime. None on missing/unparseable input —
+    callers treat that as 'cannot establish recency' and err toward treating
+    the fill as stale (see run_exit_fill_reporter), matching this module's
+    fail-closed posture on ledger-affecting decisions."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).strip().replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (TypeError, ValueError):
+        return None
+
 
 def _db_conn():
     import psycopg2
@@ -661,9 +693,14 @@ def _close_signals_for_fill(fill, *, conn_factory=None) -> int:
     ._held_signal_rows documents at :534-537. Exit side maps to direction: a
     'sell' exit closed a LONG, a 'buy' exit closed a SHORT.
 
-    Returns rows closed, and returns 0 rather than raising on ANY failure: this
-    runs first on each --monitor tick, before run_stop_monitor, and a DB blip
-    must not cost the book its ext-hours stop emulation for that tick."""
+    Returns the count of ledger rows closed (>=0 — 0 is a legitimate outcome:
+    the ticker/direction genuinely had nothing HELD to close). Returns -1 on
+    any failure to even attempt the close (DB connect or query failure) so the
+    caller can tell "nothing needed closing" from "could not close" and retry
+    the latter (review fix round 1, finding 2) — this runs first on each
+    --monitor tick, before run_stop_monitor, and a DB blip must not cost the
+    book its ext-hours stop emulation for that tick, nor be silently mistaken
+    for a no-op."""
     from execution.open_reconcile import _held_signal_rows, drop_signal_close
     conn_factory = conn_factory or _db_conn
     sym = fill.get('symbol') or ''
@@ -671,8 +708,8 @@ def _close_signals_for_fill(fill, *, conn_factory=None) -> int:
     try:
         conn = conn_factory()
     except Exception as e:  # noqa: BLE001
-        log(f'  ⚠ {sym}: DB connect failed ({e}) — signal close skipped')
-        return 0
+        log(f'  ⚠ {sym}: DB connect failed ({e}) — signal close FAILED (will retry)')
+        return -1
     n = 0
     try:
         with conn, conn.cursor() as cur:
@@ -688,8 +725,8 @@ def _close_signals_for_fill(fill, *, conn_factory=None) -> int:
             log(f'  ↳ {sym}: no open {want} signal to close (reported only)')
         return n
     except Exception as e:  # noqa: BLE001
-        log(f'  ⚠ {sym}: signal close failed ({e}) — reported only')
-        return 0
+        log(f'  ⚠ {sym}: signal close FAILED ({e}) — will retry')
+        return -1
     finally:
         try:
             conn.close()
@@ -704,10 +741,36 @@ def run_exit_fill_reporter(dry_run: bool) -> dict:
     The FIRST run seeds the seen-set silently so history doesn't flood the
     channel — and, load-bearing, closes NOTHING: a missing or deleted state file
     would otherwise mass-close every historical fill's signals in a single tick
-    (the 2026-05-22 empty-signals blowout class). Idempotency has two layers:
-    the seen-set file, and drop_signal_close flipping execution_signals to
-    'closed' so _held_signal_rows stops returning the row even if the state file
-    is lost."""
+    (the 2026-05-22 empty-signals blowout class).
+
+    Recency gate (review fix round 1, finding 1): a fill is only posted/closed
+    if its filled_at is NEWER than `cutoff = max(persisted watermark, now -
+    _RECENCY_WINDOW_HOURS)`. A fill at or before cutoff is still added to
+    `seen` (so it never resurfaces) but is otherwise ignored. This protects
+    against the symbol-scoped read (Task 1) surfacing an order that is
+    genuinely new to `seen` yet chronologically ancient — without the gate
+    that would post + close against today's fresh position on the same
+    ticker at a stale price. The watermark is persisted and only advances to
+    the filled_at of a fill actually POSTED this run (never on a stale-
+    skipped or first-run-seeded one — advancing on those would gain nothing,
+    since their ids are already in `seen`, while risking gating out a fill
+    that legitimately surfaces late: Task 1's combined read is "newest-first
+    PER READ but NOT globally re-sorted", and _open_signal_tickers fails
+    closed to [] on any DB blip, so the arrival stream is not strictly
+    monotonic in filled_at). This still closes the steady-state gap: an id
+    that ages out of the 800-entry seen cap can't resurface as "new" once the
+    watermark has passed its filled_at.
+
+    Pending retry (review fix round 1, finding 2): a closing-kind fill whose
+    close attempt FAILS (DB blip; _close_signals_for_fill returns -1, not a
+    legitimate 0) is recorded in `pending` instead of being silently dropped —
+    it is never re-posted (already in `seen`), but every subsequent run
+    retries the close for any pending id still present in that run's fill
+    window, clearing it on success.
+
+    Idempotency has three layers: the seen-set file, the watermark, and
+    drop_signal_close flipping execution_signals to 'closed' so
+    _held_signal_rows stops returning the row even if the state file is lost."""
     from execution.stop_reattach import _post_alert, fetch_recent_closed_orders
     stats = {'fills_seen': 0, 'reported': 0, 'signals_closed': 0}
     ok, orders = fetch_recent_closed_orders(symbols=_open_signal_tickers())
@@ -716,19 +779,61 @@ def run_exit_fill_reporter(dry_run: bool) -> dict:
         return stats
     fills = classify_exit_fills(orders)
     stats['fills_seen'] = len(fills)
+    fills_by_id = {f['id']: f for f in fills if f.get('id')}
+
     state_p = _fills_state_path()
     first_run = not state_p.exists()
     try:
-        seen_list = list(json.loads(state_p.read_text()).get('seen', []))
+        state = json.loads(state_p.read_text())
     except (OSError, ValueError):
-        seen_list = []
+        state = {}
+    seen_list = list(state.get('seen', []))
+    pending_list = list(state.get('pending', []))
+    watermark_dt = _parse_fill_time(state.get('watermark'))
+
+    now = datetime.now(timezone.utc)
+    default_cutoff = now - timedelta(hours=_RECENCY_WINDOW_HOURS)
+    cutoff = max(watermark_dt, default_cutoff) if watermark_dt else default_cutoff
+
     seen = set(seen_list)
+
+    # Retry closes that failed on a prior tick, for fills still in this run's
+    # window. Never re-posts — these ids are already in `seen`.
+    if not dry_run and pending_list:
+        still_pending = []
+        for pid in pending_list:
+            pf = fills_by_id.get(pid)
+            if pf is None:
+                still_pending.append(pid)     # not in this window — keep waiting
+                continue
+            result = _close_signals_for_fill(pf)
+            if result is None or result < 0:
+                still_pending.append(pid)     # still failing — retry again next tick
+            else:
+                stats['signals_closed'] += result
+        pending_list = still_pending
+
     new = [f for f in fills if f['id'] and f['id'] not in seen]
+    newest_dt = watermark_dt
     for f in new:
         seen.add(f['id'])
         seen_list.append(f['id'])
-        if first_run:
-            continue                     # seed silently; close NOTHING
+        fill_dt = _parse_fill_time(f.get('filled_at'))
+        is_stale = fill_dt is None or fill_dt <= cutoff
+        if first_run or is_stale:
+            continue                     # seed / stale: neither posted nor closed
+        # Only a fill we actually ACT on (post, and close if eligible) may
+        # advance the watermark. Task 1's combined read is "newest-first PER
+        # READ but NOT globally re-sorted", and _open_signal_tickers fails
+        # closed to [] on any DB blip — so the arrival stream is not
+        # monotonic in filled_at: a fill can legitimately surface late (e.g.
+        # its ticker dropped out of scope for one tick). Advancing the
+        # watermark on a stale-skipped or first-run-seeded fill would ratchet
+        # the cutoff forward with nothing gained (its id is already in
+        # `seen`) while risking gating out that kind of late, still-eligible
+        # fill on a future run.
+        if newest_dt is None or fill_dt > newest_dt:
+            newest_dt = fill_dt
         lvl = f" (level {f['level']:.2f})" if f['level'] else ''
         msg = (f"{_EXIT_FILL_LABELS[f['kind']]} {f['symbol']}: "
                f"{f['side'].upper()} {f['qty']:g} @ {f['price']:.2f}{lvl} — "
@@ -738,12 +843,24 @@ def run_exit_fill_reporter(dry_run: bool) -> dict:
         if not dry_run:
             _post_alert(msg, channel='trade-reports')
             if f['kind'] in _CLOSING_FILL_KINDS:
-                stats['signals_closed'] += _close_signals_for_fill(f)
+                result = _close_signals_for_fill(f)
+                if result is None or result < 0:
+                    pending_list.append(f['id'])
+                else:
+                    stats['signals_closed'] += result
     if not dry_run:
         try:
             state_p.parent.mkdir(parents=True, exist_ok=True)
             tmp = state_p.with_suffix('.tmp')
-            tmp.write_text(json.dumps({'seen': seen_list[-800:]}))
+            new_state = {
+                'seen': seen_list[-_SEEN_CAP:],
+                'pending': pending_list[-_PENDING_CAP:],
+            }
+            if newest_dt is not None:
+                new_state['watermark'] = newest_dt.isoformat()
+            elif state.get('watermark'):
+                new_state['watermark'] = state['watermark']
+            tmp.write_text(json.dumps(new_state))
             os.replace(tmp, state_p)
         except OSError as e:
             log(f'⚠ fill-reporter state write failed: {e}')
