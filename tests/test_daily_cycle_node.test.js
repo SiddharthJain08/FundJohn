@@ -249,7 +249,11 @@ test('a NON-lock failure on "signals" still gets its one bounded retry', async (
   assert.equal(attempts.length, 2);
 });
 
-test('rc=75 (lock lost) during a non-exempt step (e.g. signals) DOES abort', async () => {
+// Pre-existing regression check, retitled for accuracy after the item-1 fix:
+// this case carries NO `lockLost` flag, so it exercises the ordinary rc>=2
+// abort path (with the signals retry still in play) — the lock-lost path is
+// covered by the three `lockLost: true` tests above.
+test('a bare rc=75 (no lockLost flag) on a non-exempt step still aborts', async () => {
   const { makeStepNode } = makeStubbedFactory({ rc: 75, stderrTail: '[lock] lost before signals' });
   const node = makeStepNode('signals');
   await assert.rejects(
