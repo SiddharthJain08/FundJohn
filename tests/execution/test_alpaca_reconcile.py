@@ -82,7 +82,8 @@ class TestFetchOrderStatusCli(unittest.TestCase):
         argv = mock_run.call_args[0][0]
         self.assertIn('--order-id', argv)
         self.assertEqual(argv[argv.index('--order-id') + 1], 'ord-Z')
-        self.assertEqual(rec, {'qty': 5.0, 'avg_price': 10.0, 'status': 'filled'})
+        self.assertEqual(rec, {'qty': 5.0, 'avg_price': 10.0, 'status': 'filled',
+                               'filled_at': None})
 
 
 # ── collapse_fills tests ─────────────────────────────────────────────────────
@@ -171,7 +172,8 @@ class TestReconcile(unittest.TestCase):
         self.assertEqual(params[0], 'filled')
         self.assertEqual(params[1], 10.0)
         self.assertEqual(params[2], 150.00)
-        self.assertEqual(params[3], 'sub-uuid-1')
+        self.assertEqual(params[3], '2026-04-28T14:30:00Z')  # filled_at
+        self.assertEqual(params[4], 'sub-uuid-1')
         # CLI was invoked with correct args
         argv = mock_run.call_args[0][0]
         self.assertIn('--activity-types', argv)
@@ -307,7 +309,8 @@ class TestReconcilePolling(unittest.TestCase):
         self.assertEqual(params[0], 'filled')
         self.assertEqual(params[1], 1.0)
         self.assertEqual(params[2], 27.15)
-        self.assertEqual(params[3], 'sub-uuid-W')
+        self.assertIsNone(params[3])  # filled_at — not in this fixture's mocked order JSON
+        self.assertEqual(params[4], 'sub-uuid-W')
 
     def test_in_flight_throughout_poll_stays_submitted(self):
         """If the order stays in-flight for the entire poll window, the

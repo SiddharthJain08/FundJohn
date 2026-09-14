@@ -135,6 +135,9 @@ def collapse_fills(fills):
             'qty':       cq,
             'avg_price': avg_price,
             'status':    status,
+            # B2: the broker's own fill timestamp — latency vs submitted_at, and
+            # the ordering key for the broker_fills ledger.
+            'filled_at': rec['last_seen'] or None,
         }
     return out
 
@@ -174,9 +177,11 @@ def fetch_order_status(order_id: str) -> dict | None:
     filled_qty = float(o.get('filled_qty') or 0)
     avg_price = float(o.get('filled_avg_price') or 0)
     if status == 'filled':
-        return {'qty': filled_qty, 'avg_price': avg_price, 'status': 'filled'}
+        return {'qty': filled_qty, 'avg_price': avg_price, 'status': 'filled',
+                'filled_at': o.get('filled_at')}
     if status == 'partially_filled':
-        return {'qty': filled_qty, 'avg_price': avg_price, 'status': 'partial'}
+        return {'qty': filled_qty, 'avg_price': avg_price, 'status': 'partial',
+                'filled_at': o.get('filled_at')}
     if status in ('canceled', 'rejected', 'expired'):
         return {'qty': 0.0, 'avg_price': 0.0, 'status': 'rejected'}
     return None  # new / accepted / held / pending_new — still in flight
@@ -272,9 +277,10 @@ def _apply_fill(cur, sub_id, ticker, rec, *, dry_run: bool) -> None:
         SET broker_status=%s,
             filled_qty=%s,
             filled_avg_price=%s,
+            filled_at=COALESCE(%s::timestamptz, filled_at),
             reconciled_at=NOW()
         WHERE id=%s
-    """, (rec['status'], rec['qty'], rec['avg_price'], sub_id))
+    """, (rec['status'], rec['qty'], rec['avg_price'], rec.get('filled_at'), sub_id))
 
 
 def _mark_rejected(cur, sub_id, ticker, rec, *, dry_run: bool) -> None:
@@ -292,6 +298,95 @@ def _mark_rejected(cur, sub_id, ticker, rec, *, dry_run: bool) -> None:
             reconciled_at=NOW()
         WHERE id=%s
     """, (sub_id,))
+
+
+# ── B2: broker_fills fact table (spec item 14) ──────────────────────────────
+# Column order of the INSERT below; ingested_at is a DB default and is NOT here.
+_BROKER_FILL_COLUMNS = (
+    'activity_id', 'order_id', 'parent_order_id', 'client_order_id',
+    'ticker', 'side', 'order_type', 'order_class', 'qty', 'price', 'filled_at',
+)
+
+_BROKER_FILL_INSERT = (
+    'INSERT INTO broker_fills '
+    '(activity_id, order_id, parent_order_id, client_order_id, ticker, '
+    ' side, order_type, order_class, qty, price, filled_at) '
+    'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::timestamptz) '
+    'ON CONFLICT (activity_id) DO NOTHING'
+)
+
+
+def build_order_meta(orders) -> dict:
+    """{order_id: {parent_order_id, client_order_id, order_type, order_class}}
+    from a --nested order list.
+
+    Alpaca FILL ACTIVITY records carry none of these four fields, and the REST
+    order model has no parent pointer at all — a leg's parent is only knowable
+    by walking `legs` (the same walk classify_exit_fills and
+    alpaca_replace_stop.find_stop_loss_leg do). A leg inherits its enclosing
+    order's class when it declares none; a top-level order's parent is None."""
+    meta: dict = {}
+    for top in (orders or []):
+        stack = [(top, None)]
+        while stack:
+            o, parent = stack.pop()
+            if not isinstance(o, dict):
+                continue
+            for leg in (o.get('legs') or []):
+                stack.append((leg, o))
+            oid = o.get('id') or o.get('order_id')
+            if not oid:
+                continue
+            meta[oid] = {
+                'parent_order_id': (parent or {}).get('id'),
+                'client_order_id': o.get('client_order_id'),
+                'order_type': (o.get('type') or o.get('order_type') or None),
+                'order_class': (o.get('order_class')
+                                or (parent or {}).get('order_class') or None),
+            }
+    return meta
+
+
+def ingest_broker_fills(cur, fills, order_meta=None, *, dry_run: bool = False) -> int:
+    """Append every FILL activity to broker_fills (migration 155).
+
+    Keyed by the broker's own activity id with ON CONFLICT DO NOTHING, so
+    re-running the reconcile step — or the --sweep-stale pass — never duplicates
+    and never rewrites a row (append-only invariant). Returns rows offered.
+
+    The counted NULL-parent log line is deliberate: the exit-leg slippage join
+    in backfill_exit_slippage keys on parent_order_id, so a closed-order window
+    that stopped covering our orders would otherwise show up only as a silent
+    `exit n=0` in the daily digest."""
+    order_meta = order_meta or {}
+    n = 0
+    n_no_parent = 0
+    for f in (fills or []):
+        aid = f.get('id')
+        if not aid:
+            continue
+        try:
+            qty = float(f.get('qty') or 0)
+            price = float(f.get('price') or 0)
+        except (TypeError, ValueError):
+            continue
+        oid = f.get('order_id')
+        m = order_meta.get(oid) or {}
+        if not m.get('parent_order_id'):
+            n_no_parent += 1
+        n += 1
+        if dry_run:
+            continue
+        cur.execute(_BROKER_FILL_INSERT, (
+            aid, oid, m.get('parent_order_id'), m.get('client_order_id'),
+            f.get('symbol'), (f.get('side') or '').lower() or None,
+            m.get('order_type'), m.get('order_class'),
+            qty, price, f.get('transaction_time'),
+        ))
+    log(f'broker_fills: {n} fill activity row(s) offered '
+        f'({n_no_parent} without a parent_order_id)'
+        f'{" (DRY-RUN)" if dry_run else ""}')
+    return n
 
 
 def reconcile(run_date: str, conn, dry_run: bool = False,
@@ -392,6 +487,28 @@ def reconcile(run_date: str, conn, dry_run: bool = False,
     elif in_flight:
         for sub_id, oid, ticker in in_flight:
             log(f'  {ticker}: no fill activity, order in-flight — leaving as submitted')
+
+    # ── B2: append the raw fill activities to the broker_fills ledger ───────
+    # The enrichment read is symbol-scoped to today's fill symbols: the four
+    # order-shape columns are not on activity records, and a --nested closed
+    # order list is the only place a leg's parent is visible. Savepoint-isolated
+    # so a missing migration or a broker hiccup can never poison the submission
+    # reconcile above — that is this step's critical path.
+    try:
+        cur.execute('SAVEPOINT sp_broker_fills')
+        from execution.stop_reattach import fetch_recent_closed_orders
+        _syms = sorted({f.get('symbol') for f in fills if f.get('symbol')})
+        _ok_meta, _orders = fetch_recent_closed_orders(_syms, include_unscoped=False)
+        ingest_broker_fills(cur, fills, build_order_meta(_orders) if _ok_meta else {},
+                            dry_run=dry_run)
+        cur.execute('RELEASE SAVEPOINT sp_broker_fills')
+    except Exception as exc:  # noqa: BLE001
+        log(f'broker_fills ingest skipped ({type(exc).__name__}: {exc})')
+        try:
+            cur.execute('ROLLBACK TO SAVEPOINT sp_broker_fills')
+            cur.execute('RELEASE SAVEPOINT sp_broker_fills')
+        except Exception:  # noqa: BLE001
+            pass
 
     if not dry_run:
         conn.commit()

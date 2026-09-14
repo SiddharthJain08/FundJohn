@@ -107,7 +107,8 @@ class TestSweepStale(unittest.TestCase):
         self.assertEqual(params[0], 'filled')
         self.assertEqual(params[1], 10.0)
         self.assertEqual(params[2], 150.0)
-        self.assertEqual(params[3], 'sub-1')
+        self.assertIsNone(params[3])  # filled_at — not in this fixture's mocked order JSON
+        self.assertEqual(params[4], 'sub-1')
         self.assertEqual(n, 1)
         self.assertEqual(conn.commits, 1)
 
