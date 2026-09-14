@@ -52,6 +52,28 @@ def log(msg: str) -> None:
     print(f'{ts} [RECONCILE] {msg}')
 
 
+def _parse_ts(value) -> str | None:
+    """Best-effort ISO-8601 validation ahead of a `::timestamptz` cast.
+
+    Broker activity/order timestamps arrive as spec-compliant ISO-8601
+    strings (`2026-09-11T13:32:00Z`) in the happy path, but a malformed or
+    missing value must degrade to NULL here rather than reach Postgres and
+    abort the transaction on an unparseable-timestamp error. Returns the
+    ORIGINAL string unchanged when it parses — the `%s::timestamptz` casts
+    want the string form, not a Python datetime — else None. Used before
+    both timestamp casts in this module (the broker_fills INSERT and the
+    separate filled_at UPDATE in _apply_fill)."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        # datetime.fromisoformat doesn't accept a trailing 'Z' before 3.11;
+        # normalize defensively for whatever runtime this executes under.
+        datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return None
+    return value
+
+
 def fetch_fills_for_date(run_date: str, *, page_size: int = 100, max_pages: int = 50):
     """Return the list of FILL activity dicts for `run_date`.
 
@@ -98,8 +120,9 @@ def collapse_fills(fills):
 
     For each order_id, take the max cum_qty seen, and the qty-weighted
     average price across all fills. Returns a dict keyed by order_id with
-    {qty, avg_price, status} where status is 'filled' if the latest fill
-    has order_status='filled', else 'partial'.
+    {qty, avg_price, status, filled_at} where status is 'filled' if the
+    latest fill has order_status='filled', else 'partial', and filled_at is
+    the latest transaction_time seen for that order (or None).
     """
     by_oid = {}
     for f in fills:
@@ -262,11 +285,32 @@ def cleanup_phantom_signals(conn, dry_run: bool, broker_tickers: set[str]) -> in
     return n_closed
 
 
+# B2: set True after the first UndefinedColumn from the filled_at UPDATE
+# below, so a run with many un-reconciled rows logs the warning once, not
+# once per row. Reset at the top of reconcile() / sweep_stale() so each
+# script invocation gets its own "once".
+_FILLED_AT_COLUMN_MISSING_LOGGED = False
+
+
+def _reset_filled_at_missing_log() -> None:
+    global _FILLED_AT_COLUMN_MISSING_LOGGED
+    _FILLED_AT_COLUMN_MISSING_LOGGED = False
+
+
 def _apply_fill(cur, sub_id, ticker, rec, *, dry_run: bool) -> None:
     """Write a terminal fill/partial record onto an alpaca_submissions row.
 
     Shared by reconcile()'s first/poll passes and the stale-sweep so the
     UPDATE SQL lives in exactly one place. Caller owns the commit.
+
+    This UPDATE is BYTE-IDENTICAL to the pre-B2 statement: broker_status /
+    filled_qty / filled_avg_price / reconciled_at are the critical path and
+    must never depend on a column that might not exist yet.
+    alpaca_submissions.filled_at (migration 155) is written by a SEPARATE,
+    savepoint-isolated UPDATE right after, because this code can land on
+    main and run before the johnbot restart that applies that migration —
+    a plain UndefinedColumn on a combined UPDATE would abort the whole
+    transaction, including the write above.
     """
     if dry_run:
         log(f'  DRY: would mark sub={sub_id} ({ticker}) → {rec["status"]} '
@@ -277,10 +321,29 @@ def _apply_fill(cur, sub_id, ticker, rec, *, dry_run: bool) -> None:
         SET broker_status=%s,
             filled_qty=%s,
             filled_avg_price=%s,
-            filled_at=COALESCE(%s::timestamptz, filled_at),
             reconciled_at=NOW()
         WHERE id=%s
-    """, (rec['status'], rec['qty'], rec['avg_price'], rec.get('filled_at'), sub_id))
+    """, (rec['status'], rec['qty'], rec['avg_price'], sub_id))
+
+    ts = _parse_ts(rec.get('filled_at'))
+    if ts is None:
+        return
+    global _FILLED_AT_COLUMN_MISSING_LOGGED
+    cur.execute('SAVEPOINT sp_filled_at')
+    try:
+        cur.execute("""
+            UPDATE alpaca_submissions
+            SET filled_at=COALESCE(filled_at,%s::timestamptz)
+            WHERE id=%s
+        """, (ts, sub_id))
+        cur.execute('RELEASE SAVEPOINT sp_filled_at')
+    except psycopg2.errors.UndefinedColumn:
+        cur.execute('ROLLBACK TO SAVEPOINT sp_filled_at')
+        cur.execute('RELEASE SAVEPOINT sp_filled_at')
+        if not _FILLED_AT_COLUMN_MISSING_LOGGED:
+            log('alpaca_submissions.filled_at column missing (migration 155 not '
+                'applied yet) — skipping filled_at backfill this run')
+            _FILLED_AT_COLUMN_MISSING_LOGGED = True
 
 
 def _mark_rejected(cur, sub_id, ticker, rec, *, dry_run: bool) -> None:
@@ -301,17 +364,24 @@ def _mark_rejected(cur, sub_id, ticker, rec, *, dry_run: bool) -> None:
 
 
 # ── B2: broker_fills fact table (spec item 14) ──────────────────────────────
-# Column order of the INSERT below; ingested_at is a DB default and is NOT here.
+# Single source of truth for column order; ingested_at is a DB default and is
+# NOT here. `ticker` stores the broker's OWN symbol form (e.g. `BTC/USD` for
+# crypto, not a normalized `BTCUSD`) by design — broker_fills is a fact table
+# over what the broker actually said, not a normalized join key.
 _BROKER_FILL_COLUMNS = (
     'activity_id', 'order_id', 'parent_order_id', 'client_order_id',
     'ticker', 'side', 'order_type', 'order_class', 'qty', 'price', 'filled_at',
 )
 
+# Built FROM _BROKER_FILL_COLUMNS so the two can't desynchronize on a reorder;
+# only filled_at needs the ::timestamptz cast (via _parse_ts before it lands
+# in the params tuple).
 _BROKER_FILL_INSERT = (
-    'INSERT INTO broker_fills '
-    '(activity_id, order_id, parent_order_id, client_order_id, ticker, '
-    ' side, order_type, order_class, qty, price, filled_at) '
-    'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::timestamptz) '
+    'INSERT INTO broker_fills (' + ', '.join(_BROKER_FILL_COLUMNS) + ') '
+    'VALUES (' + ', '.join(
+        '%s::timestamptz' if col == 'filled_at' else '%s'
+        for col in _BROKER_FILL_COLUMNS
+    ) + ') '
     'ON CONFLICT (activity_id) DO NOTHING'
 )
 
@@ -351,8 +421,11 @@ def ingest_broker_fills(cur, fills, order_meta=None, *, dry_run: bool = False) -
     """Append every FILL activity to broker_fills (migration 155).
 
     Keyed by the broker's own activity id with ON CONFLICT DO NOTHING, so
-    re-running the reconcile step — or the --sweep-stale pass — never duplicates
-    and never rewrites a row (append-only invariant). Returns rows offered.
+    re-running the reconcile step never duplicates and never rewrites a row
+    (append-only invariant). Returns rows offered. NOTE: --sweep-stale does
+    NOT call this — it re-derives terminal status per order via
+    fetch_order_status, not the FILL activity feed, so stale rows swept on a
+    later day are not (and cannot be) added to broker_fills retroactively.
 
     The counted NULL-parent log line is deliberate: the exit-leg slippage join
     in backfill_exit_slippage keys on parent_order_id, so a closed-order window
@@ -381,7 +454,7 @@ def ingest_broker_fills(cur, fills, order_meta=None, *, dry_run: bool = False) -
             aid, oid, m.get('parent_order_id'), m.get('client_order_id'),
             f.get('symbol'), (f.get('side') or '').lower() or None,
             m.get('order_type'), m.get('order_class'),
-            qty, price, f.get('transaction_time'),
+            qty, price, _parse_ts(f.get('transaction_time')),
         ))
     log(f'broker_fills: {n} fill activity row(s) offered '
         f'({n_no_parent} without a parent_order_id)'
@@ -519,6 +592,7 @@ def reconcile(run_date: str, conn, dry_run: bool = False,
     activities API by 5-30 seconds; without polling, those rows would
     stay broker_status=NULL until the NEXT reconcile run. Set to 0 to
     disable polling entirely (legacy behavior)."""
+    _reset_filled_at_missing_log()
     cur = conn.cursor()
 
     cur.execute("""
@@ -608,14 +682,25 @@ def reconcile(run_date: str, conn, dry_run: bool = False,
     # ── B2: append the raw fill activities to the broker_fills ledger ───────
     # The enrichment read is symbol-scoped to today's fill symbols: the four
     # order-shape columns are not on activity records, and a --nested closed
-    # order list is the only place a leg's parent is visible. Savepoint-isolated
-    # so a missing migration or a broker hiccup can never poison the submission
-    # reconcile above — that is this step's critical path.
+    # order list is the only place a leg's parent is visible. It's a pure
+    # broker CLI read (no DB writes), so it's done ABOVE the savepoint and
+    # OUTSIDE the ingest try below — it cannot dirty the transaction, and an
+    # unexpected failure here (beyond the ok=False the read already reports
+    # on a CLI error) must still let fills land with NULL order-shape columns
+    # rather than lose the day's fills entirely.
     try:
-        cur.execute('SAVEPOINT sp_broker_fills')
         from execution.stop_reattach import fetch_recent_closed_orders
         _syms = sorted({f.get('symbol') for f in fills if f.get('symbol')})
         _ok_meta, _orders = fetch_recent_closed_orders(_syms, include_unscoped=False)
+    except Exception as exc:  # noqa: BLE001
+        log(f'closed-order enrichment read failed ({type(exc).__name__}: {exc}) — '
+            f'ingesting fills with NULL order-shape columns')
+        _ok_meta, _orders = False, []
+
+    # Savepoint-isolated so a missing migration or a broker hiccup can never
+    # poison the submission reconcile above — that is this step's critical path.
+    try:
+        cur.execute('SAVEPOINT sp_broker_fills')
         ingest_broker_fills(cur, fills, build_order_meta(_orders) if _ok_meta else {},
                             dry_run=dry_run)
         backfill_exit_slippage(cur, run_date, dry_run=dry_run)
@@ -662,6 +747,7 @@ def sweep_stale(conn, days: int = 5, dry_run: bool = False) -> int:
 
     Returns the number of rows updated (or that WOULD be updated in dry-run).
     """
+    _reset_filled_at_missing_log()
     cur = conn.cursor()
     cur.execute("""
         SELECT id, alpaca_order_id, ticker, qty, run_date

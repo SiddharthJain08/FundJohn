@@ -64,6 +64,19 @@ _NESTED_ORDERS = [
 ]
 
 
+# ── _parse_ts ────────────────────────────────────────────────────────────
+
+def test_parse_ts_passes_through_a_valid_iso8601_string():
+    assert ar._parse_ts('2026-09-11T13:32:00Z') == '2026-09-11T13:32:00Z'
+
+
+def test_parse_ts_rejects_missing_or_junk_values():
+    assert ar._parse_ts(None) is None
+    assert ar._parse_ts('') is None
+    assert ar._parse_ts('not-a-timestamp') is None
+    assert ar._parse_ts(12345) is None
+
+
 # ── collapse_fills / fetch_order_status carry the fill timestamp ────────────
 
 def test_collapse_fills_carries_the_latest_transaction_time():
@@ -73,21 +86,79 @@ def test_collapse_fills_carries_the_latest_transaction_time():
     assert abs(out['o-entry']['qty'] - 100.0) < 1e-9
 
 
-def test_apply_fill_writes_filled_at_without_clobbering(monkeypatch):
+def test_apply_fill_first_update_is_byte_identical_to_pre_b2_shape():
+    """The critical-path UPDATE (broker_status/filled_qty/filled_avg_price)
+    must be untouched by B2 — migration 155 can land on a LATER johnbot
+    restart than this code merges, so this statement can never depend on a
+    column that might not exist yet."""
     cur = _Cursor()
     ar._apply_fill(cur, 'sub-1', 'AAA',
                    {'status': 'filled', 'qty': 100.0, 'avg_price': 10.04,
                     'filled_at': '2026-09-11T13:32:00Z'}, dry_run=False)
     sql, params = cur.calls[0]
-    assert 'filled_at=COALESCE(%s::timestamptz, filled_at)' in sql
-    assert '2026-09-11T13:32:00Z' in params
+    assert 'filled_at' not in sql
+    assert params == ('filled', 100.0, 10.04, 'sub-1')
+
+
+def test_apply_fill_writes_filled_at_in_its_own_savepoint():
+    cur = _Cursor()
+    ar._apply_fill(cur, 'sub-1', 'AAA',
+                   {'status': 'filled', 'qty': 100.0, 'avg_price': 10.04,
+                    'filled_at': '2026-09-11T13:32:00Z'}, dry_run=False)
+    norms = [c[0] for c in cur.calls]
+    assert 'SAVEPOINT sp_filled_at' in norms
+    assert 'RELEASE SAVEPOINT sp_filled_at' in norms
+    fa_calls = [c for c in cur.calls if 'SET filled_at' in c[0]]
+    assert len(fa_calls) == 1
+    sql, params = fa_calls[0]
+    assert 'COALESCE(filled_at' in sql
+    assert params == ('2026-09-11T13:32:00Z', 'sub-1')
 
 
 def test_apply_fill_tolerates_a_record_without_a_timestamp():
+    """No usable filled_at data -> the second UPDATE/savepoint is skipped
+    entirely, not attempted-and-NULL."""
     cur = _Cursor()
     ar._apply_fill(cur, 'sub-1', 'AAA',
                    {'status': 'partial', 'qty': 1.0, 'avg_price': 2.0}, dry_run=False)
-    assert cur.calls[0][1][3] is None
+    assert len(cur.calls) == 1
+    assert cur.calls[0][1] == ('partial', 1.0, 2.0, 'sub-1')
+
+
+def test_apply_fill_skips_the_savepoint_for_an_unparseable_timestamp():
+    cur = _Cursor()
+    ar._apply_fill(cur, 'sub-1', 'AAA',
+                   {'status': 'filled', 'qty': 1.0, 'avg_price': 2.0,
+                    'filled_at': 'not-a-timestamp'}, dry_run=False)
+    assert len(cur.calls) == 1
+
+
+def test_apply_fill_survives_a_missing_filled_at_column(monkeypatch, capsys):
+    """UndefinedColumn on the separate filled_at UPDATE (migration 155 not
+    applied yet) must not propagate: the critical-path UPDATE already
+    landed, the savepoint absorbs the failure, and exactly one warning is
+    logged."""
+    ar._reset_filled_at_missing_log()
+
+    class _Boom(_Cursor):
+        def execute(self, sql, params=None):
+            norm = ' '.join(sql.split())
+            if norm.startswith('UPDATE alpaca_submissions') and 'SET filled_at' in norm:
+                super().execute(sql, params)
+                raise psycopg2.errors.UndefinedColumn(
+                    'column "filled_at" of relation "alpaca_submissions" does not exist')
+            super().execute(sql, params)
+
+    cur = _Boom()
+    ar._apply_fill(cur, 'sub-1', 'AAA',
+                   {'status': 'filled', 'qty': 100.0, 'avg_price': 10.04,
+                    'filled_at': '2026-09-11T13:32:00Z'}, dry_run=False)  # must not raise
+
+    status_calls = [c for c in cur.calls if 'SET broker_status' in c[0]]
+    assert len(status_calls) == 1  # the critical-path UPDATE still landed
+    assert 'ROLLBACK TO SAVEPOINT sp_filled_at' in [c[0] for c in cur.calls]
+    out = capsys.readouterr().out
+    assert out.count('filled_at column missing') == 1
 
 
 # ── build_order_meta ───────────────────────────────────────────────────────
@@ -173,20 +244,34 @@ def test_ingest_column_list_matches_migration_155():
 
 class _ReconcileCursor:
     """Fake cursor with a scripted fetchall() (submissions rows) and an
-    optional trap that raises on the first broker_fills INSERT — standing in
-    for psycopg2.errors.UndefinedTable when migration 155 hasn't landed."""
+    honesty contract a stub-that-just-records can't fake its way past: after
+    `trigger(norm_sql)` matches once and raises `raise_exc`, EVERY subsequent
+    execute() raises psycopg2.errors.InFailedSqlTransaction until a
+    'ROLLBACK TO SAVEPOINT' statement clears it — the same thing a real
+    aborted Postgres transaction enforces. Without this, a test could pass
+    even if production code forgot the ROLLBACK TO SAVEPOINT line entirely
+    (the trap fires once, everything after is silently accepted)."""
 
-    def __init__(self, submission_rows, raise_on_broker_fills_insert=None):
+    def __init__(self, submission_rows, trigger=None, raise_exc=None):
         self.calls = []
         self._rows = submission_rows
-        self._raise = raise_on_broker_fills_insert
+        self._trigger = trigger
+        self._raise_exc = raise_exc
+        self._aborted = False
 
     def execute(self, sql, params=None):
         norm = ' '.join(sql.split())
-        if self._raise is not None and norm.startswith('INSERT INTO broker_fills'):
-            exc = self._raise
-            self._raise = None  # raise once, like a real missing-table error
-            raise exc
+        if norm.startswith('ROLLBACK TO SAVEPOINT'):
+            self._aborted = False
+            self.calls.append((norm, params))
+            return
+        if self._aborted:
+            raise psycopg2.errors.InFailedSqlTransaction(
+                'current transaction is aborted, commands ignored until end of transaction block')
+        if self._trigger is not None and self._trigger(norm):
+            self._trigger = None  # raise once, like a real missing-table/-column error
+            self._aborted = True
+            raise self._raise_exc
         self.calls.append((norm, params))
 
     def fetchall(self):
@@ -198,8 +283,11 @@ class _ReconcileCursor:
     def inserts(self):
         return [c for c in self.calls if c[0].startswith('INSERT INTO broker_fills')]
 
-    def updates(self):
-        return [c for c in self.calls if c[0].startswith('UPDATE')]
+    def status_updates(self):
+        return [c for c in self.calls if 'SET broker_status' in c[0]]
+
+    def filled_at_updates(self):
+        return [c for c in self.calls if 'SET filled_at' in c[0]]
 
 
 class _ReconcileConn:
@@ -251,14 +339,18 @@ def test_reconcile_ingests_fills_even_when_closed_order_read_fails(monkeypatch):
 
 
 def test_reconcile_survives_a_missing_broker_fills_table(monkeypatch):
+    """UndefinedTable on the broker_fills INSERT (migration 155 not applied
+    yet) must be caught, logged once, and reconcile() must proceed to
+    commit — proven with the aborted-flag fake, not just a bare `except
+    Exception` that happens not to be exercised."""
     monkeypatch.setattr(sr, 'fetch_recent_closed_orders',
                         lambda symbols, **kwargs: (True, []))
     monkeypatch.setattr(ar, 'fetch_fills_for_date', lambda *a, **k: _RECONCILE_FILLS)
 
     cur = _ReconcileCursor(
         [('sub-9', 'o-9', 'ZZZ', 5.0)],
-        raise_on_broker_fills_insert=psycopg2.errors.UndefinedTable(
-            'relation "broker_fills" does not exist'),
+        trigger=lambda norm: norm.startswith('INSERT INTO broker_fills'),
+        raise_exc=psycopg2.errors.UndefinedTable('relation "broker_fills" does not exist'),
     )
     conn = _ReconcileConn(cur)
 
@@ -266,7 +358,41 @@ def test_reconcile_survives_a_missing_broker_fills_table(monkeypatch):
 
     assert n == 1
     assert cur.inserts() == []  # the one INSERT attempt raised and was not recorded
-    # the submission UPDATE from earlier in reconcile() must survive the
-    # savepoint rollback — the missing table can't poison the critical path.
-    assert len(cur.updates()) == 1
+    # the submission UPDATE from earlier in reconcile() survived — the
+    # missing table can't poison the critical path — and the aborted-flag
+    # fake proves this: it would have raised InFailedSqlTransaction on
+    # RELEASE SAVEPOINT (and on conn.commit()'s implicit end-of-statement)
+    # had the ROLLBACK TO SAVEPOINT line been skipped.
+    assert len(cur.status_updates()) == 1
+    assert 'ROLLBACK TO SAVEPOINT sp_broker_fills' in [c[0] for c in cur.calls]
     assert conn.commits == 1
+
+
+def test_reconcile_survives_a_missing_filled_at_column(monkeypatch, capsys):
+    """UndefinedColumn on the separate filled_at UPDATE (migration 155 not
+    applied yet) must not touch the sibling sp_broker_fills savepoint: the
+    submission's critical-path UPDATE lands, the broker_fills INSERT for the
+    same cycle still lands, and reconcile() commits."""
+    ar._reset_filled_at_missing_log()
+    monkeypatch.setattr(sr, 'fetch_recent_closed_orders',
+                        lambda symbols, **kwargs: (True, []))
+    monkeypatch.setattr(ar, 'fetch_fills_for_date', lambda *a, **k: _RECONCILE_FILLS)
+
+    cur = _ReconcileCursor(
+        [('sub-9', 'o-9', 'ZZZ', 5.0)],
+        trigger=lambda norm: norm.startswith('UPDATE alpaca_submissions') and 'SET filled_at' in norm,
+        raise_exc=psycopg2.errors.UndefinedColumn(
+            'column "filled_at" of relation "alpaca_submissions" does not exist'),
+    )
+    conn = _ReconcileConn(cur)
+
+    n = ar.reconcile('2026-09-14', conn)  # must not raise
+
+    assert n == 1
+    assert len(cur.status_updates()) == 1   # the critical-path UPDATE still landed
+    assert cur.filled_at_updates() == []    # the attempted write never committed
+    assert 'ROLLBACK TO SAVEPOINT sp_filled_at' in [c[0] for c in cur.calls]
+    assert len(cur.inserts()) == 1          # broker_fills ingest still ran — unrelated savepoint
+    assert conn.commits == 1
+    out = capsys.readouterr().out
+    assert out.count('filled_at column missing') == 1

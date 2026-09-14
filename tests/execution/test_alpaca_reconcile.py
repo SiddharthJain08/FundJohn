@@ -165,15 +165,24 @@ class TestReconcile(unittest.TestCase):
                    return_value=_mock_proc(0, fill_json, '')) as mock_run:
             ar.reconcile('2026-04-28', conn)
 
-        # 2 executes: SELECT submissions, UPDATE on the matched row
-        update_calls = [c for c in conn.cur.calls if 'UPDATE' in c[0]]
-        self.assertEqual(len(update_calls), 1)
-        sql, params = update_calls[0]
+        # The critical-path UPDATE (broker_status/filled_qty/filled_avg_price)
+        # is byte-identical to the pre-migration-155 statement — no filled_at
+        # in it, and its own params tuple is unaffected by the column's
+        # existence.
+        status_updates = [c for c in conn.cur.calls if 'SET broker_status' in c[0]]
+        self.assertEqual(len(status_updates), 1)
+        sql, params = status_updates[0]
+        self.assertNotIn('filled_at', sql)
         self.assertEqual(params[0], 'filled')
         self.assertEqual(params[1], 10.0)
         self.assertEqual(params[2], 150.00)
-        self.assertEqual(params[3], '2026-04-28T14:30:00Z')  # filled_at
-        self.assertEqual(params[4], 'sub-uuid-1')
+        self.assertEqual(params[3], 'sub-uuid-1')
+        # filled_at is a SEPARATE, savepoint-isolated UPDATE right after.
+        self.assertIn('SAVEPOINT sp_filled_at', [c[0] for c in conn.cur.calls])
+        filled_at_updates = [c for c in conn.cur.calls if 'SET filled_at' in c[0]]
+        self.assertEqual(len(filled_at_updates), 1)
+        fa_sql, fa_params = filled_at_updates[0]
+        self.assertEqual(fa_params, ('2026-04-28T14:30:00Z', 'sub-uuid-1'))
         # CLI was invoked with correct args
         argv = mock_run.call_args[0][0]
         self.assertIn('--activity-types', argv)
@@ -309,8 +318,10 @@ class TestReconcilePolling(unittest.TestCase):
         self.assertEqual(params[0], 'filled')
         self.assertEqual(params[1], 1.0)
         self.assertEqual(params[2], 27.15)
-        self.assertIsNone(params[3])  # filled_at — not in this fixture's mocked order JSON
-        self.assertEqual(params[4], 'sub-uuid-W')
+        self.assertEqual(params[3], 'sub-uuid-W')
+        # No filled_at in this fixture's mocked order JSON -> the separate
+        # filled_at UPDATE is skipped entirely, not attempted-and-NULL.
+        self.assertEqual([c for c in conn.cur.calls if 'SET filled_at' in c[0]], [])
 
     def test_in_flight_throughout_poll_stays_submitted(self):
         """If the order stays in-flight for the entire poll window, the
