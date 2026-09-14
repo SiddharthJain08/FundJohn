@@ -668,15 +668,21 @@ def main() -> int:
 
     # Stream B (2026-09-12) item 14: realized fill-slippage line, entry + exit
     # legs, with a verdict against our own per-ticker half-spread cost model.
-    # Report-only, fail-open; same daily post as bench_realized, no new webhook.
+    # Report-only; same daily post as bench_realized, no new webhook.
+    # fix round 1 (2026-09-14): fill_slippage_line ALWAYS returns a string
+    # (n/a-with-reason on any failure, e.g. migration 155 unapplied) and is
+    # appended UNCONDITIONALLY — a silent skip must never look like "nothing
+    # to report". The try/except here is a last-resort guard only, in case
+    # even the import or the call itself blows up.
     try:
         from execution.fill_slippage import fill_slippage_line
         _fs = fill_slippage_line(run_date)
-        if _fs:
-            summary = f'{summary}\n{_fs}'
-            print(f'[send_report] {_fs}')
+        summary = f'{summary}\n{_fs}'
+        print(f'[send_report] {_fs}')
     except Exception as e:
-        print(f'[send_report] fill_slippage skipped: {e}')
+        _fs = 'fill_slippage: n/a (report error)'
+        summary = f'{summary}\n{_fs}'
+        print(f'[send_report] fill_slippage hard-failed: {e}')
 
     if dry_run or (not wh_signals and not wh_reports):
         msg = '[send_report] DRY-RUN — printing post bodies to stdout' if dry_run \
