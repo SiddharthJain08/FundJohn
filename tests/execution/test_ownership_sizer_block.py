@@ -143,3 +143,14 @@ def test_the_single_production_call_site_supplies_the_blocklist():
     tail = inspect.getsource(rbs._emit_orders_from_targets)
     assert 'ownership_blocked=_load_ownership_blocklist()' in tail
     assert inspect.getsource(rbs).count('_apply_entry_hygiene_gate(') == 2
+
+
+def test_the_call_site_exempts_benchmark_sleeve_tickers():
+    """Deviation from the brief (recorded in task-8-report.md): this task's
+    binding constraints forbid ever blocking a benchmark-sleeve ticker unless
+    the brief says otherwise, and the brief is silent — so bench_tkrs must be
+    subtracted from the loaded blocklist at the call site, not inside the
+    gate (the gate has no bench_tkrs input)."""
+    import inspect
+    tail = inspect.getsource(rbs._emit_orders_from_targets)
+    assert 'set(bench_tkrs or ())' in tail

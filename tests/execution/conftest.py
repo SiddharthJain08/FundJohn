@@ -24,6 +24,17 @@ def _deterministic_sizer_gates(request, monkeypatch):
     monkeypatch.setattr(rbs, '_load_asset_eligibility', lambda symbols: None)
     monkeypatch.setenv('OPENCLAW_NET_EXPOSURE_CAP', '0')
     monkeypatch.setenv('OPENCLAW_ENTRY_HYGIENE', '0')
+    # Ownership block (Stream B item 15, task 8): _load_ownership_blocklist()
+    # now runs unconditionally at the _emit_orders_from_targets call site (so
+    # the `[ownership]` line prints even when OPENCLAW_ENTRY_HYGIENE=0 short-
+    # circuits the gate above), which means it opens a REAL
+    # psycopg2.connect(POSTGRES_URI) on every e2e test that reaches the
+    # emission tail. Stub it the same way as _load_asset_eligibility above.
+    # SKIPPED for its own test file, same reasoning as the benchmark stubs
+    # below: stubbing the subject-under-test out from under its own unit
+    # tests would make them vacuously pass.
+    if request.path.name != 'test_ownership_sizer_block.py':
+        monkeypatch.setattr(rbs, '_load_ownership_blocklist', lambda: set())
     # §8 (2026-08-06): production .env carries OPENCLAW_SAMEDAY_SIGNAL_TARGET=1
     # and some test module's import-time load_dotenv pulls it into os.environ
     # during collection. The resolver lets the new flag WIN over the legacy

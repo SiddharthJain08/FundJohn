@@ -2519,9 +2519,13 @@ def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_gr
     # Stream B item 15: the `[ownership]` line is emitted every cycle (report-only
     # by default) because the loader runs HERE, not inside the gate — the gate
     # short-circuits on OPENCLAW_ENTRY_HYGIENE=0 and would swallow the line. The
-    # returned set is empty unless OPENCLAW_OWNERSHIP_BLOCK=1.
+    # returned set is empty unless OPENCLAW_OWNERSHIP_BLOCK=1. Benchmark-sleeve
+    # tickers (bench_tkrs) are exempted here, not inside the gate: this task's
+    # constraints forbid ever blocking the benchmark sleeve, and the sleeve is a
+    # deliberate S_m-vs-book proxy the ownership ledger has no opinion on.
     target_usd = _apply_entry_hygiene_gate(
-        target_usd, broker, ownership_blocked=_load_ownership_blocklist())
+        target_usd, broker,
+        ownership_blocked=_load_ownership_blocklist() - set(bench_tkrs or ()))
     # Net cap runs LAST: the per-name gates above can re-skew net (dropping an
     # unshortable short leg raises net-long) — the emitted book must respect it.
     target_usd = _apply_net_exposure_cap(target_usd)
