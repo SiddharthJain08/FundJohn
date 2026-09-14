@@ -463,6 +463,33 @@ def ingest_broker_fills(cur, fills, order_meta=None, *, dry_run: bool = False) -
 
 
 # ── B2: exit-leg slippage join (spec item 14) ────────────────────────────────
+# Two candidate branches, UNION ALL:
+#   1. bracket exit legs — bf.parent_order_id points at the entry submission's
+#      alpaca_order_id.
+#   2. after-hours emulated-stop/target exits — TOP-LEVEL orders
+#      (afterhours_tp.py submits them order_class='simple'), so
+#      parent_order_id is NULL; matched instead by ticker + opposite side to
+#      the latest submission in the lookback window.
+# Both branches:
+#   - require bf.ticker = the submission's own ticker (a bracket's OCC-symbol
+#     option leg, e.g. an `mleg` structure, has bf.ticker != the underlying
+#     ticker on alpaca_submissions and must never be scored as an equity
+#     exit against an equity level);
+#   - require bf.side be the OPPOSITE of the signal's direction (long exits
+#     sell, short exits buy) — a same-side add-on fill on the same bracket
+#     is not an exit and must never be scored as one;
+#   - are per-SIGNAL idempotent via NOT EXISTS, not just "the latest
+#     signal_pnl row is NULL": a fill that already stamped an OLDER pnl row
+#     for this signal must not be re-applied to a newer row upserted on a
+#     later run_date (that would corrupt any mean/count over signal_pnl).
+#     The pnl_date written is still always the signal's LATEST row.
+# Branch 2 pre-filters broker_fills (parent_order_id IS NULL, ah prefix,
+# filled_at bound) in a subquery BEFORE the LATERAL, not in the outer WHERE
+# after it — broker_fills is append-only and grows forever (CLAUDE.md), and
+# broker_fills_parent_idx is a partial index that only covers
+# parent_order_id IS NOT NULL, so an unbounded LATERAL here would drive a
+# submission-scan per historical fill instead of per fill in the lookback
+# window. filled_at is bounded before the join in both branches.
 _EXIT_CANDIDATE_SQL = """
     SELECT bf.activity_id, bf.order_type, bf.client_order_id, bf.price,
            es.id, es.direction, es.stop_loss, es.target_1, sp.pnl_date
@@ -472,15 +499,76 @@ _EXIT_CANDIDATE_SQL = """
                                AND es.ticker = s.ticker
                                AND es.strategy_id = s.strategy_id
       JOIN LATERAL (
-            SELECT pnl_date, exit_slippage_bps
+            SELECT pnl_date
               FROM signal_pnl
              WHERE signal_id = es.id
              ORDER BY pnl_date DESC
              LIMIT 1
            ) sp ON TRUE
      WHERE bf.parent_order_id IS NOT NULL
+       AND bf.ticker = s.ticker
        AND bf.filled_at >= %s::date - %s
-       AND sp.exit_slippage_bps IS NULL
+       AND ((UPPER(es.direction) IN ('LONG','BUY','BUY_VOL') AND bf.side = 'sell')
+            OR (UPPER(es.direction) NOT IN ('LONG','BUY','BUY_VOL') AND bf.side = 'buy'))
+       AND NOT EXISTS (
+             SELECT 1 FROM signal_pnl p
+              WHERE p.signal_id = es.id AND p.exit_slippage_bps IS NOT NULL
+           )
+
+    UNION ALL
+
+    SELECT bf.activity_id, bf.order_type, bf.client_order_id, bf.price,
+           es.id, es.direction, es.stop_loss, es.target_1, sp.pnl_date
+      FROM (
+            SELECT activity_id, order_type, client_order_id, price,
+                   ticker, side, filled_at
+              FROM broker_fills
+             WHERE parent_order_id IS NULL
+               AND (LEFT(COALESCE(client_order_id, ''), 5) = 'ahsx_'
+                    OR LEFT(COALESCE(client_order_id, ''), 5) = 'ahtp_')
+               AND filled_at >= %s::date - %s
+           ) bf
+      JOIN LATERAL (
+            SELECT s2.run_date, s2.ticker, s2.strategy_id
+              FROM alpaca_submissions s2
+             WHERE s2.ticker = bf.ticker
+               AND s2.run_date >= %s::date - %s
+               AND ((bf.side = 'sell' AND s2.direction = 'long')
+                    OR (bf.side = 'buy' AND s2.direction = 'short'))
+             ORDER BY s2.run_date DESC
+             LIMIT 1
+           ) s ON TRUE
+      JOIN execution_signals es ON es.target_date = s.run_date
+                               AND es.ticker = s.ticker
+                               AND es.strategy_id = s.strategy_id
+      JOIN LATERAL (
+            SELECT pnl_date
+              FROM signal_pnl
+             WHERE signal_id = es.id
+             ORDER BY pnl_date DESC
+             LIMIT 1
+           ) sp ON TRUE
+     WHERE NOT EXISTS (
+             SELECT 1 FROM signal_pnl p
+              WHERE p.signal_id = es.id AND p.exit_slippage_bps IS NOT NULL
+           )
+"""
+
+# Diagnostic-only count: broker fills that LOOK like they could be an exit
+# (they have a side) but neither candidate branch above can attribute them —
+# no parent_order_id to walk to a bracket, and no ahsx_/ahtp_ prefix to match
+# the after-hours branch. Never gates the UPDATE; purely surfaced in the log
+# line so an operator notices when exits stop being explainable (e.g. a
+# closed-order window that no longer covers our orders, or a third exit path
+# this join doesn't know about yet) instead of silently landing nothing.
+_EXIT_ORPHAN_COUNT_SQL = """
+    SELECT COUNT(*)
+      FROM broker_fills bf
+     WHERE bf.parent_order_id IS NULL
+       AND bf.side IS NOT NULL
+       AND LEFT(COALESCE(bf.client_order_id, ''), 5) <> 'ahsx_'
+       AND LEFT(COALESCE(bf.client_order_id, ''), 5) <> 'ahtp_'
+       AND bf.filled_at >= %s::date - %s
 """
 
 
@@ -496,7 +584,7 @@ def exit_level_kind(order_type, client_order_id) -> str:
         return 'stop'
     if coid.startswith('ahtp_'):
         return 'target'
-    if str(order_type or '').lower() in ('stop', 'stop_limit'):
+    if str(order_type or '').lower() in ('stop', 'stop_limit', 'trailing_stop'):
         return 'stop'
     return 'target'
 
@@ -507,8 +595,8 @@ def exit_slippage_bps(direction, level, price):
     LONG exits (sell): filling BELOW the level is adverse -> +bp.
     SHORT exits (buy): filling ABOVE the level is adverse -> +bp.
     Both collapse to dir_sign * (level - price) / level * 10000 with
-    dir_sign = +1 for LONG, -1 for SHORT — the same convention
-    execution_signals.fill_slippage_bps uses for entries (migration 145,
+    dir_sign = +1 for LONG, -1 for SHORT — mirrored numerator, same
+    adverse-positive semantics as entry fill_slippage_bps (migration 145,
     parity_mark.backfill_broker_fill_truth:317-322).
 
     None when the level or the price is missing or non-positive."""
@@ -544,19 +632,41 @@ def backfill_exit_slippage(cur, run_date, *, lookback_days: int = 5,
     on each signal's LATEST signal_pnl row (migration 155).
 
     Attribution: broker_fills.parent_order_id = alpaca_submissions.alpaca_order_id
-    identifies the submission whose bracket produced this exit leg, and the
-    submission maps to its signal by (run_date -> target_date, ticker,
-    strategy_id) — the same key parity_mark.backfill_broker_fill_truth:323-332
-    uses for the entry twin. Idempotent: only rows still NULL are written.
-    Savepoint-isolated; returns rows planned (0 on any failure).
+    identifies the submission whose bracket produced this exit leg (bracket
+    branch), OR — for after-hours emulated-stop/target exits, which are
+    TOP-LEVEL orders with no parent — a client_order_id ahsx_/ahtp_ prefix
+    matched by ticker + opposite side to the latest submission in the
+    lookback window (ah branch). Either way the submission maps to its
+    signal by (run_date -> target_date, ticker, strategy_id) — the same key
+    parity_mark.backfill_broker_fill_truth:323-332 uses for the entry twin.
+    Both branches also require bf.ticker to match the submission's own
+    ticker (an option leg's OCC symbol must never score against an equity
+    level) and bf.side to be the OPPOSITE of the signal's direction (a
+    same-side add-on fill is not an exit).
+
+    Idempotent per SIGNAL, not just per signal_pnl row: NOT EXISTS(...)
+    checks whether ANY signal_pnl row for this signal already carries a
+    value, so a fill already attributed to an older pnl_date row is never
+    re-applied to a newer row upserted on a later run_date (the write still
+    always targets the signal's LATEST row). Savepoint-isolated; returns
+    rows planned (0 on any failure).
+
+    Also logs, every run (including a 0-row plan), the count of broker
+    fills that LOOK exit-shaped (they carry a side) but neither branch could
+    attribute — no parent_order_id and no ah prefix — so an unexplained gap
+    in exit attribution is never silent.
 
     dry_run reads and reports but issues no UPDATE — reconcile()'s docstring
     promises dry-run "exits cleanly without touching the DB", and
     PIPELINE_DRY_RUN=1 appends --dry-run to every pipeline step
     (pipeline_orchestrator._resolve_script:491-496), so that path is reachable."""
-    cur.execute('SAVEPOINT sp_exit_slip')
     try:
-        cur.execute(_EXIT_CANDIDATE_SQL, (run_date, int(lookback_days)))
+        cur.execute('SAVEPOINT sp_exit_slip')
+        cur.execute(_EXIT_CANDIDATE_SQL, (
+            run_date, int(lookback_days),
+            run_date, int(lookback_days),
+            run_date, int(lookback_days),
+        ))
         plan = plan_exit_slippage(cur.fetchall() or [])
         if not dry_run:
             for sig_id, pnl_date, bps in plan:
@@ -564,10 +674,13 @@ def backfill_exit_slippage(cur, run_date, *, lookback_days: int = 5,
                     'UPDATE signal_pnl SET exit_slippage_bps = %s '
                     'WHERE signal_id = %s AND pnl_date = %s AND exit_slippage_bps IS NULL',
                     (bps, sig_id, pnl_date))
+        cur.execute(_EXIT_ORPHAN_COUNT_SQL, (run_date, int(lookback_days)))
+        orphan_row = cur.fetchone()
+        n_orphan = int(orphan_row[0]) if orphan_row and orphan_row[0] is not None else 0
         cur.execute('RELEASE SAVEPOINT sp_exit_slip')
-        if plan:
-            log(f'exit slippage: {len(plan)} exit-leg bp value(s)'
-                f'{" (DRY-RUN, not written)" if dry_run else " persisted"}')
+        log(f'exit slippage: n={len(plan)} exit-leg bp value(s)'
+            f'{" (DRY-RUN, not written)" if dry_run else " persisted"}, '
+            f'{n_orphan} orphan fill(s) skipped (no parent, no ah prefix)')
         return len(plan)
     except Exception as exc:  # noqa: BLE001
         log(f'exit slippage backfill failed ({type(exc).__name__}: {exc}) — skipped')
