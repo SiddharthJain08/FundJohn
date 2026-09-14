@@ -224,7 +224,10 @@ async function checkPipelineResume() {
         log(`Budget recovered (${mode}) — resuming pipeline for ${runDate}`);
 
         const orchestrator = path.join(ROOT, 'src', 'execution', 'pipeline_orchestrator.py');
-        const proc = spawn('python3', [orchestrator, '--date', runDate, '--force-resume'], {
+        const { wrapCapped } = require('../lib/capped_spawn');   // QD E2: MemoryMax scope
+        const w = wrapCapped('python3', [orchestrator, '--date', runDate, '--force-resume'],
+                             { memoryMax: process.env.OPENCLAW_STEP_MEMORY_MAX || '4500M' });
+        const proc = spawn(w.cmd, w.args, {
             cwd:      ROOT,
             env:      { ...process.env, PYTHONPATH: ROOT },
             detached: true,
@@ -312,7 +315,10 @@ function start(swarm, generateId, notifyDiscord) {
             try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
             const logPath = path.join(logDir, `pipeline_orchestrator_${today}.log`);
             const logFd = fs.openSync(logPath, 'a');
-            const child = spawn(PYTHON, ['scripts/run_pipeline.py', '--date', today], {
+            const { wrapCapped } = require('../lib/capped_spawn');   // QD E2: MemoryMax scope
+            const w = wrapCapped(PYTHON, ['scripts/run_pipeline.py', '--date', today],
+                                 { memoryMax: process.env.OPENCLAW_STEP_MEMORY_MAX || '4500M' });
+            const child = spawn(w.cmd, w.args, {
                 cwd: ROOT,
                 env: { ...process.env },
                 detached: true,

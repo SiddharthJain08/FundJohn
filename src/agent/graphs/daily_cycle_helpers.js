@@ -3,15 +3,30 @@
  *
  *   skipForSubset(step, state) → true if state.requestedSteps excludes this step
  *   strictMode(env)            → boolean from OPENCLAW_STRICT_EXIT_CODES
- *   runSubprocess(argv, opts)  → Promise<{rc, stdout, stderrTail, durationMs, timedOut, lockLost?}>
+ *   runSubprocess(argv, opts)  → Promise<{rc, stdout, stderrTail, durationMs, timedOut, lockLost?, memoryMax}>
  *     opts.step names the caller's step for the `[lock] lost before <step>`
  *     message if the shared run lock (src/lib/run_lock.js) is lost before
  *     spawning — see runSubprocess's own comment (QD E1, 2026-09-14).
+ *     opts.memoryMax overrides the MemoryMax cap wrapCapped applies around
+ *     the spawn (undefined → stepMemoryMax(), '0' → uncapped); see
+ *     stepMemoryMax()'s own comment (QD E2b, 2026-09-12).
  */
 'use strict';
 
 const { spawn } = require('node:child_process');
 const runLock    = require('../../lib/run_lock');
+const { wrapCapped } = require('../../lib/capped_spawn');
+
+// QD E2 (2026-09-12): the cycle-step cap. Deliberately its own env var —
+// wrapCapped's built-in default reads OPENCLAW_BACKTEST_MEMORY_MAX, which
+// tunes the research/backtest children, not the daily cycle.
+const DEFAULT_STEP_MEMORY_MAX = '4500M';
+
+function stepMemoryMax() {
+  const v = process.env.OPENCLAW_STEP_MEMORY_MAX;
+  return (v === undefined || v === null || String(v).trim() === '')
+    ? DEFAULT_STEP_MEMORY_MAX : String(v).trim();
+}
 
 function skipForSubset(step, state) {
   if (!state || !state.requestedSteps) return false;
@@ -33,7 +48,7 @@ function strictMode(env) {
 // each script. `renewCurrent` is a no-op (returns true) when no lock is
 // currently held — via `runLock.setCurrent` in daily-cycle.js — so tests
 // and one-off runs that never acquire a lock behave exactly as before.
-async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, step } = {}) {
+async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, step, memoryMax } = {}) {
   const lockOk = await runLock.renewCurrent(timeoutSec);
   if (!lockOk) {
     return {
@@ -47,7 +62,10 @@ async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, s
   }
   return new Promise((resolve) => {
     const startedAt = Date.now();
-    const [cmd, ...args] = argv;
+    const cap = (memoryMax === undefined) ? stepMemoryMax() : memoryMax;
+    const wrapped = wrapCapped(argv[0], argv.slice(1), { memoryMax: cap });
+    const cmd  = wrapped.cmd;
+    const args = wrapped.args;
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -78,6 +96,7 @@ async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, s
         stderrTail: stderr.slice(-4000),
         durationMs,
         timedOut,
+        memoryMax: wrapped.memoryMax,
       });
     });
 
@@ -89,6 +108,7 @@ async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, s
         stderrTail: `spawn failed: ${e.message}`,
         durationMs: Date.now() - startedAt,
         timedOut: false,
+        memoryMax: wrapped.memoryMax,
       });
     });
   });
@@ -203,6 +223,6 @@ async function postAbortAlert(payload, deps = {}) {
 }
 
 module.exports = {
-  skipForSubset, strictMode, runSubprocess,
+  skipForSubset, strictMode, runSubprocess, stepMemoryMax,
   formatAbortAlert, postAbortAlert,
 };
