@@ -60,7 +60,11 @@ def _run_main(argv, *, doctor_rc=0, step_rc=0, postgres_uri='postgresql://x',
     pipeline_feed_msgs: list[str] = []
     notify_msgs: list[str] = []
 
-    def _fake_run_step(script, run_date, env):
+    def _fake_run_step(script, run_date, env, **_kwargs):
+        # **_kwargs absorbs the `renew` callback pipeline_orchestrator.main()
+        # now passes at both run_step call sites (QD E1b) — this stub only
+        # cares about which steps ran, not the lock-renewal wiring, which
+        # has its own coverage in tests/execution/test_run_lock_wiring.py.
         scheduled_steps.append((script, run_date))
         return (step_rc == 0, step_rc)
 
