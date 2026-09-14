@@ -64,3 +64,33 @@ def test_155_is_the_next_free_number():
     existing = sorted(p.name for p in MIG.glob('*.sql'))
     assert '155_broker_fills.sql' in existing
     assert not any(n.startswith('155_') and n != '155_broker_fills.sql' for n in existing)
+
+
+POSITION_OWNERSHIP_COLUMNS = (
+    'cycle_date', 'ticker', 'account_qty', 'signal_qty', 'unknown_qty',
+    'status', 'created_at',
+)
+
+
+def test_156_declares_every_position_ownership_column():
+    body = _create_body(_sql('156_position_ownership.sql'), 'position_ownership')
+    for col in POSITION_OWNERSHIP_COLUMNS:
+        assert re.search(rf'^\s*{col}\s+\w', body, re.M), f'position_ownership.{col} missing'
+
+
+def test_156_primary_key_supports_the_append_only_upsert():
+    assert 'PRIMARY KEY (cycle_date, ticker)' in _sql('156_position_ownership.sql')
+
+
+def test_156_is_idempotent_and_append_only():
+    upper = _sql('156_position_ownership.sql').upper()
+    assert 'CREATE TABLE IF NOT EXISTS' in _sql('156_position_ownership.sql')
+    for stmt in ('DROP ', 'DELETE ', 'TRUNCATE '):
+        assert stmt not in upper, f'{stmt.strip()} violates the append-only invariant'
+
+
+def test_156_is_the_next_free_number():
+    existing = sorted(p.name for p in MIG.glob('*.sql'))
+    assert '156_position_ownership.sql' in existing
+    assert not any(n.startswith('156_') and n != '156_position_ownership.sql'
+                   for n in existing)
