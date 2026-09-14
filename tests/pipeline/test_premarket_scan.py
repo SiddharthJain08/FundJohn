@@ -39,6 +39,11 @@ def test_holiday_exits_zero_no_db_writes(mock_calendar, env_master_on):
     mock_calendar.assert_called_once()
 
 
+# C4 (item 16): run_scan now reads ticker_sentiment_daily. src/pipeline modules
+# load .env at import, so an unpatched loader would reach the REAL Postgres from
+# a unit test. Every run_scan test stubs it to {} (= "no social row", the
+# pre-item-16 behaviour these assertions were written against).
+@patch('src.pipeline.run_premarket_scan._load_social_for_tickers', return_value={})
 @patch('src.pipeline.run_premarket_scan._post_discord')
 @patch('src.pipeline.run_premarket_scan._persist_alert_rows')
 @patch('src.pipeline.run_premarket_scan.resolve_premarket_webhook',
@@ -47,7 +52,7 @@ def test_holiday_exits_zero_no_db_writes(mock_calendar, env_master_on):
 @patch('src.pipeline.run_premarket_scan.load_open_equity_positions')
 @patch('src.pipeline.run_premarket_scan.is_trading_day_in_et', return_value=True)
 def test_rules_only_path_persists_and_posts_when_score_above_threshold(
-    _cal, _load, mock_news, _webhook, _persist, _post, env_master_on,
+    _cal, _load, mock_news, _webhook, _persist, _post, _social, env_master_on,
 ):
     _load.return_value = [
         {'symbol': 'GLW', 'qty': 100, 'avg_entry_price': 32.5, 'market_value': 3210},
@@ -70,6 +75,7 @@ def test_rules_only_path_persists_and_posts_when_score_above_threshold(
     _post.assert_called_once()
 
 
+@patch('src.pipeline.run_premarket_scan._load_social_for_tickers', return_value={})
 @patch('src.pipeline.run_premarket_scan.resolve_premarket_webhook',
        return_value='https://discord.com/api/webhooks/test')
 @patch('src.pipeline.run_premarket_scan._post_discord')
@@ -79,7 +85,7 @@ def test_rules_only_path_persists_and_posts_when_score_above_threshold(
 @patch('src.pipeline.run_premarket_scan.load_open_equity_positions')
 @patch('src.pipeline.run_premarket_scan.is_trading_day_in_et', return_value=True)
 def test_confirmer_path_calls_sonnet_only_for_above_threshold(
-    _cal, _load, mock_news, mock_sonnet, _persist, _post, _webhook, monkeypatch,
+    _cal, _load, mock_news, mock_sonnet, _persist, _post, _webhook, _social, monkeypatch,
 ):
     monkeypatch.setenv('OPENCLAW_PREMARKET_SCAN', '1')
     monkeypatch.setenv('OPENCLAW_PREMARKET_CONFIRMER', '1')
@@ -109,6 +115,7 @@ def test_confirmer_path_calls_sonnet_only_for_above_threshold(
     assert mock_sonnet.call_args[0][0].ticker == 'GLW'
 
 
+@patch('src.pipeline.run_premarket_scan._load_social_for_tickers', return_value={})
 @patch('src.pipeline.run_premarket_scan.close_subset')
 @patch('src.pipeline.run_premarket_scan._post_discord')
 @patch('src.pipeline.run_premarket_scan._persist_alert_rows')
@@ -117,7 +124,7 @@ def test_confirmer_path_calls_sonnet_only_for_above_threshold(
 @patch('src.pipeline.run_premarket_scan.load_open_equity_positions')
 @patch('src.pipeline.run_premarket_scan.is_trading_day_in_et', return_value=True)
 def test_autoclose_fires_only_when_gate_on_and_strict_severity_met(
-    _cal, _load, mock_news, mock_sonnet, _persist, _post, mock_close, monkeypatch,
+    _cal, _load, mock_news, mock_sonnet, _persist, _post, mock_close, _social, monkeypatch,
 ):
     monkeypatch.setenv('OPENCLAW_PREMARKET_SCAN', '1')
     monkeypatch.setenv('OPENCLAW_PREMARKET_CONFIRMER', '1')
@@ -145,6 +152,7 @@ def test_autoclose_fires_only_when_gate_on_and_strict_severity_met(
     assert kwargs.get('reason', args[1] if len(args) > 1 else None) == 'PREMARKET_PANIC'
 
 
+@patch('src.pipeline.run_premarket_scan._load_social_for_tickers', return_value={})
 @patch('src.pipeline.run_premarket_scan.close_subset')
 @patch('src.pipeline.run_premarket_scan._post_discord')
 @patch('src.pipeline.run_premarket_scan._persist_alert_rows')
@@ -153,7 +161,7 @@ def test_autoclose_fires_only_when_gate_on_and_strict_severity_met(
 @patch('src.pipeline.run_premarket_scan.load_open_equity_positions')
 @patch('src.pipeline.run_premarket_scan.is_trading_day_in_et', return_value=True)
 def test_autoclose_skipped_on_llm_error_even_when_gate_on(
-    _cal, _load, mock_news, mock_sonnet, _persist, _post, mock_close, monkeypatch,
+    _cal, _load, mock_news, mock_sonnet, _persist, _post, mock_close, _social, monkeypatch,
 ):
     monkeypatch.setenv('OPENCLAW_PREMARKET_SCAN', '1')
     monkeypatch.setenv('OPENCLAW_PREMARKET_CONFIRMER', '1')
