@@ -442,6 +442,18 @@ def _load_financials() -> pd.DataFrame:
     return _FIN_DF
 
 
+def _reset_financials_caches() -> None:
+    """Clear every module-level cache `_financials_slice` depends on
+    (`_FIN_DF`, `_EARNINGS_DF`, `_FIN_AVAIL_DF`). Test-fixture convenience —
+    the three must be busted together whenever a test swaps
+    `FINANCIALS_PATH`/`EARNINGS_PATH`, since `_FIN_AVAIL_DF` is derived from
+    the other two."""
+    global _FIN_DF, _EARNINGS_DF, _FIN_AVAIL_DF
+    _FIN_DF = None
+    _EARNINGS_DF = None
+    _FIN_AVAIL_DF = None
+
+
 # ── Point-in-time fundamentals availability (spec 2026-09-12 §A1) ────────────
 # financials.parquet's `date` is the FMP statement PERIOD END, not a filing
 # date (src/pipeline/backfillers/fmp.py::build_financial_rows stores no filing
@@ -480,7 +492,14 @@ def _financials_with_availability() -> pd.DataFrame:
     if earn.empty or 'date' not in earn.columns:
         df['available_at'] = df['date'] + pd.Timedelta(days=FINANCIALS_PIT_FALLBACK_DAYS)
     else:
-        keys = (df[['ticker', 'date']].drop_duplicates()
+        # dropna: a null period-end (collector can write one — collector.js
+        # store.js) must not reach merge_asof, which raises ValueError on a
+        # NaT left key. Legacy silently drops such rows via `date <= ts`;
+        # dropping them from `keys` only (not `df`) preserves that — the row
+        # gets no `report_date` match, `available_at` falls back to
+        # `NaT + 60d` = NaT, and `available_at <= ts` is False, hiding it
+        # exactly as legacy does. "aux is best-effort, never fatal."
+        keys = (df[['ticker', 'date']].drop_duplicates().dropna(subset=['date'])
                   .sort_values('date', kind='mergesort').reset_index(drop=True))
         right = earn[['ticker', 'date']].dropna().rename(columns={'date': 'report_date'})
         right['report_date'] = pd.to_datetime(right['report_date'])
@@ -489,10 +508,19 @@ def _financials_with_availability() -> pd.DataFrame:
             keys, right, left_on='date', right_on='report_date', by='ticker',
             direction='forward', allow_exact_matches=False,
             tolerance=pd.Timedelta(days=FINANCIALS_PIT_MAX_LAG_DAYS))
+        # Merge back onto `df` under a name that cannot already exist on it —
+        # financials.parquet may one day gain its own `report_date` (or even
+        # `available_at`) column (CLAUDE.md: columns may be added at any
+        # time), and merging two same-named columns would otherwise
+        # pandas-suffix them (`_x`/`_y`) and silently break the `df['...']`
+        # lookup below instead of erroring loudly or, worse, quietly reading
+        # the wrong one.
+        matched = matched[['ticker', 'date', 'report_date']].rename(
+            columns={'report_date': '_pit_report_date'})
         df = df.merge(matched, on=['ticker', 'date'], how='left')
-        df['available_at'] = df['report_date'].fillna(
+        df['available_at'] = df['_pit_report_date'].fillna(
             df['date'] + pd.Timedelta(days=FINANCIALS_PIT_FALLBACK_DAYS))
-        df = df.drop(columns=['report_date'])
+        df = df.drop(columns=['_pit_report_date'])
     _FIN_AVAIL_DF = df.sort_values('date', kind='mergesort')
     log.info('aux_data_loader: financials availability built rows=%d (pit lag<=%dd, fallback %dd)',
              len(_FIN_AVAIL_DF), FINANCIALS_PIT_MAX_LAG_DAYS, FINANCIALS_PIT_FALLBACK_DAYS)
