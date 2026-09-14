@@ -2318,6 +2318,42 @@ def _load_recent_stopouts(days: float) -> dict:
         return {}
 
 
+def _ownership_block_on() -> bool:
+    """Stream B item 15 enforcement flag. Unset (or anything other than '1')
+    means report-only: the ledger is written and logged, sizing is untouched."""
+    return os.environ.get('OPENCLAW_OWNERSHIP_BLOCK') == '1'
+
+
+def _ownership_blocklist_from(status_map, *, enforcing=None) -> set:
+    """Pure: {ticker: ownership status} -> the set the hygiene gate sheds.
+
+    ALWAYS logs the `[ownership]` line so the trade step shows the finding even
+    in report-only mode, and returns an EMPTY set unless enforcing — so an unset
+    OPENCLAW_OWNERSHIP_BLOCK leaves today's sizing byte-identical."""
+    from execution.position_ownership import STATUS_OK
+    if enforcing is None:
+        enforcing = _ownership_block_on()
+    bad = {t for t, s in (status_map or {}).items() if s and s != STATUS_OK}
+    logger.info('[ownership] %d ticker(s) not ok=%s enforcing=%s',
+                len(bad), sorted(bad)[:20], bool(enforcing))
+    return bad if enforcing else set()
+
+
+def _load_ownership_blocklist() -> set:
+    """Read the newest position_ownership cycle and resolve the blocklist.
+    Fail-open (empty set) on any error: a ledger read must never stop the book
+    from trading."""
+    try:
+        import psycopg2
+        from execution.position_ownership import latest_status_map
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            status_map = latest_status_map(cur)
+    except Exception as e:  # noqa: BLE001
+        logger.warning('[ownership] latest-status lookup failed (%s) — no block applied', e)
+        return set()
+    return _ownership_blocklist_from(status_map)
+
+
 def _load_liquidity_stats():
     """(adv_usd, med_close) dicts from the derived cost artifact, or None."""
     try:
@@ -2360,17 +2396,25 @@ def _load_premarket_vetoes():
 
 
 def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, params=None,
-                              premarket_vetoes=None, risk_exits=None):
+                              premarket_vetoes=None, risk_exits=None,
+                              ownership_blocked=None):
     """Apply premarket veto + cooldowns + liquidity floor + participation cap to
     targets. Only-shed semantics per blocked ticker: not held → target dropped;
     flip → close-only; same-sign increase → capped at held size. The
     participation cap reduces target magnitude to max(cap, |held|). Inputs
     injectable for tests.
 
-    Three cooldown classes, all same-direction-only except the news veto:
+    Four cooldown classes, all same-direction-only except the news veto and
+    ownership:
       premarket veto  — this name is dangerous TODAY (direction-agnostic)
       stop-out        — this side of this name just hit its stop
       risk exit       — the circuit breaker fired on it, or it was liquidated
+      ownership       — the broker's share count and the open signals' claim
+                       disagree on this name (Stream B item 15). Direction-
+                       agnostic like the news veto: the finding says "we do not
+                       know who owns these shares", not "this side lost". Opt-in
+                       via OPENCLAW_OWNERSHIP_BLOCK=1; the default resolves to an
+                       empty set, so unset == today's behaviour.
 
     The premarket veto is what makes pre-market protection actually protective.
     Without it the 09:25 reconcile closes a news-vetoed position at the open and
@@ -2391,9 +2435,10 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
                        _ENTRY_HYGIENE_DEFAULTS['risk_exit_cooldown_days']))
     if liq is None:
         liq = _load_liquidity_stats()
+    ownership_blocked = ownership_blocked or frozenset()
     adv, px = liq if liq else ({}, {})
     out = dict(target_usd)
-    cooled, illiquid, part_capped, vetoed, risk_cooled = [], [], [], [], []
+    cooled, illiquid, part_capped, vetoed, risk_cooled, own_blocked = [], [], [], [], [], []
 
     def _shed(tkr):
         target, current = out[tkr], broker.get(tkr, 0.0)
@@ -2411,6 +2456,10 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
         if tkr in premarket_vetoes and target != 0.0:
             _shed(tkr)
             vetoed.append(tkr)
+            continue
+        if tkr in ownership_blocked and target != 0.0:
+            _shed(tkr)
+            own_blocked.append(tkr)
             continue
         stop_dir = stopouts.get(tkr)
         if stop_dir and (target > 0) == (stop_dir > 0) and target != 0.0:
@@ -2435,12 +2484,13 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
             if abs(target) > limit + 0.01:
                 out[tkr] = (1.0 if target > 0 else -1.0) * limit
                 part_capped.append(tkr)
-    if cooled or illiquid or part_capped or vetoed or risk_cooled:
+    if cooled or illiquid or part_capped or vetoed or risk_cooled or own_blocked:
         logger.warning(
             'regime_blended_sizer.entry_hygiene: premarket-veto blocked=%s, '
             'stop-out cooldown blocked=%s, risk-exit cooldown blocked=%s, '
-            'liquidity floor blocked=%s, participation-capped=%s',
-            sorted(vetoed), sorted(cooled), sorted(risk_cooled),
+            'ownership blocked=%s, liquidity floor blocked=%s, '
+            'participation-capped=%s',
+            sorted(vetoed), sorted(cooled), sorted(risk_cooled), sorted(own_blocked),
             sorted(illiquid), sorted(part_capped))
     return out
 
@@ -2466,7 +2516,12 @@ def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_gr
     if broker is None:
         broker = _load_broker_positions_usd()
     target_usd = _apply_asset_eligibility_gate(target_usd, broker)
-    target_usd = _apply_entry_hygiene_gate(target_usd, broker)
+    # Stream B item 15: the `[ownership]` line is emitted every cycle (report-only
+    # by default) because the loader runs HERE, not inside the gate — the gate
+    # short-circuits on OPENCLAW_ENTRY_HYGIENE=0 and would swallow the line. The
+    # returned set is empty unless OPENCLAW_OWNERSHIP_BLOCK=1.
+    target_usd = _apply_entry_hygiene_gate(
+        target_usd, broker, ownership_blocked=_load_ownership_blocklist())
     # Net cap runs LAST: the per-name gates above can re-skew net (dropping an
     # unshortable short leg raises net-long) — the emitted book must respect it.
     target_usd = _apply_net_exposure_cap(target_usd)
