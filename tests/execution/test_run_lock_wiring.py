@@ -1,14 +1,26 @@
 """tests/execution/test_run_lock_wiring.py — orchestrator uses the shared,
 owned, renewed run lock and exits rc=75 when another run owns today.
 
-Fake Redis only; no subprocess is ever spawned (run_step is stubbed).
+Fake Redis only. No REAL pipeline script is ever spawned: run_step tests use
+harmless one-shot binaries (`true`/`false`) via a stubbed `_resolve_script`
+(TestRunStepRenews / TestRunStepRenewRetry actually invoke subprocess.Popen
+on those binaries — that's a real subprocess, just not a real pipeline
+script). Every test that drives `main()` goes through `_hermetic_main()`,
+which forces POSTGRES_URI to a stub value, replaces every Discord/DB/
+dashboard call site (`pipeline_feed`, `data_alerts`, `set_agent_status`,
+`broadcast_dashboard_refresh`, `notify`, `get_redis`), and — belt and
+suspenders — patches `http.client.HTTPConnection` to raise if anything
+still tries a real HTTP connection. Nothing here touches a real Redis,
+Postgres, Discord webhook, or the live dashboard on :3000.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -56,6 +68,63 @@ DATE = '2026-09-14'
 KEY = f'pipeline:run_lock:{DATE}'
 
 
+def _raise_if_touched(*a, **kw):
+    raise AssertionError(
+        'a test tried to open a real HTTP connection (http.client.'
+        'HTTPConnection) — stub the call site instead')
+
+
+@contextlib.contextmanager
+def _hermetic_main(r):
+    """Patch every real-I/O surface `main()` can reach, for every test that
+    drives `po.main()` — a test whose cycle runs to completion must never
+    touch a real Redis, Postgres, Discord webhook, or the live dashboard's
+    HTTP endpoint on this production host.
+
+    POSTGRES_URI is FORCED via `mock.patch.dict` (never `os.environ.
+    setdefault`): this host exports a real value via `.env`, so setdefault
+    is a no-op there and every psycopg2 call inside `set_agent_status` /
+    `_load_channel_webhooks` would attempt a real connection.
+
+    `http.client.HTTPConnection` is patched to raise if ANY code reaches
+    it — belt-and-suspenders alongside stubbing `broadcast_dashboard_
+    refresh` directly, so a future refactor that bypasses the module-level
+    stub still fails loudly in CI instead of POSTing to the live dashboard.
+
+    Yields (posts, feed_msgs, alert_msgs, dashboard_calls) for the caller to
+    assert against. `run_step` / `_resolve_script` are snapshotted and
+    ALWAYS restored on exit, but left as the real implementations for the
+    caller to override (fully stubbed, wrapped, or left alone) inside the
+    `with` block — different tests need different treatment.
+    """
+    posts: list[tuple[str, str]] = []
+    feed_msgs: list[str] = []
+    alert_msgs: list[str] = []
+    dashboard_calls: list[str] = []
+
+    orig = (po.get_redis, po.notify, po.pipeline_feed, po.data_alerts,
+            po.set_agent_status, po.broadcast_dashboard_refresh,
+            po.is_completed_today, po.read_checkpoint,
+            po.run_step, po._resolve_script)
+    po.get_redis = lambda: r
+    po.notify = lambda msg, channel='pipeline-feed': posts.append((channel, msg))
+    po.pipeline_feed = lambda msg: feed_msgs.append(msg)
+    po.data_alerts = lambda msg: alert_msgs.append(msg)
+    po.set_agent_status = lambda *a, **kw: None
+    po.broadcast_dashboard_refresh = lambda run_date: dashboard_calls.append(run_date)
+    po.is_completed_today = lambda _r, _d: False
+    po.read_checkpoint = lambda _r: None
+    try:
+        with mock.patch.dict(os.environ, {'POSTGRES_URI': 'postgresql://stub/stub'}), \
+             mock.patch('http.client.HTTPConnection', side_effect=_raise_if_touched):
+            yield posts, feed_msgs, alert_msgs, dashboard_calls
+    finally:
+        (po.get_redis, po.notify, po.pipeline_feed, po.data_alerts,
+         po.set_agent_status, po.broadcast_dashboard_refresh,
+         po.is_completed_today, po.read_checkpoint,
+         po.run_step, po._resolve_script) = orig
+
+
 class TestLockHelpers(unittest.TestCase):
     def setUp(self):
         po.LOCK_VALUE = None
@@ -74,6 +143,11 @@ class TestLockHelpers(unittest.TestCase):
     def test_acquire_refuses_when_a_live_holder_owns_the_key(self):
         r = FakeRedis({KEY: f'{po._HOST}:{os.getpid()}:T0'})
         self.assertFalse(po.acquire_lock(r, DATE))
+
+    def test_acquire_stashes_the_holder_for_the_caller_on_refusal(self):
+        r = FakeRedis({KEY: f'{po._HOST}:{os.getpid()}:T0'})
+        self.assertFalse(po.acquire_lock(r, DATE))
+        self.assertEqual(po._LAST_HOLDER, f'{po._HOST}:{os.getpid()}:T0')
 
     def test_renew_extends_our_ttl_to_step_timeout_plus_120(self):
         r = FakeRedis()
@@ -120,77 +194,114 @@ class TestRunStepRenews(unittest.TestCase):
         self.assertEqual(rc, 0)
 
 
+class TestRunStepRenewRetry(unittest.TestCase):
+    """Controller ruling (fix round 1): a renew() that RAISES (rather than
+    cleanly reporting False) is tolerated once — a 2s-later retry — before
+    being treated as fatal. `time.sleep` is stubbed so these stay fast.
+    """
+
+    def setUp(self):
+        self._orig_resolve = po._resolve_script
+        self._orig_sleep = po.time.sleep
+        po._resolve_script = lambda script, run_date: (['true'], 5)
+        po.time.sleep = lambda s: None
+
+    def tearDown(self):
+        po._resolve_script = self._orig_resolve
+        po.time.sleep = self._orig_sleep
+
+    def test_renew_raising_once_then_succeeding_runs_the_step(self):
+        calls = []
+
+        def _renew(t):
+            calls.append(t)
+            if len(calls) == 1:
+                raise ConnectionError('redis blip')
+            # second call: succeeds (real callback returns None too)
+
+        ok, rc = po.run_step('engine', DATE, dict(os.environ), renew=_renew)
+        self.assertTrue(ok)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 2)   # first attempt + one retry
+
+    def test_renew_raising_twice_is_fatal_and_the_step_never_spawns(self):
+        calls = []
+
+        def _renew(t):
+            calls.append(t)
+            raise ConnectionError('redis blip')
+
+        orig_popen = po.subprocess.Popen
+        po.subprocess.Popen = lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError('no subprocess may spawn — renew already failed twice'))
+        try:
+            with self.assertRaises(po.LockLost):
+                po.run_step('engine', DATE, dict(os.environ), renew=_renew)
+        finally:
+            po.subprocess.Popen = orig_popen
+        self.assertEqual(len(calls), 2)   # exactly one retry, no more
+
+
 class TestMainBusyLock(unittest.TestCase):
     def test_main_returns_75_and_posts_when_another_run_owns_today(self):
-        posts = []
         r = FakeRedis({KEY: f'{po._HOST}:{os.getpid()}:T0'})
-        orig = (po.get_redis, po.notify, po.run_step, po.is_completed_today, po.read_checkpoint)
-        po.get_redis = lambda: r
-        po.notify = lambda msg, channel='pipeline-feed': posts.append((channel, msg))
-        po.run_step = lambda *a, **kw: (_ for _ in ()).throw(AssertionError('no step may run'))
-        po.is_completed_today = lambda _r, _d: False
-        po.read_checkpoint = lambda _r: None
-        os.environ.setdefault('POSTGRES_URI', 'postgresql://stub/stub')
-        try:
+        with _hermetic_main(r) as (posts, feed_msgs, alert_msgs, dashboard_calls):
+            po.run_step = lambda *a, **kw: (_ for _ in ()).throw(
+                AssertionError('no step may run'))
             rc = po.main(['--date', DATE, '--steps', 'report'])
-        finally:
-            (po.get_redis, po.notify, po.run_step,
-             po.is_completed_today, po.read_checkpoint) = orig
         self.assertEqual(rc, 75)
         self.assertEqual(rc, run_lock.LOCK_BUSY_RC)
         self.assertTrue(any('[lock] held by' in m for _c, m in posts), posts)
         self.assertEqual(r.store[KEY], f'{po._HOST}:{os.getpid()}:T0')
+        # Refused before the cycle starts — the final action never runs.
+        self.assertEqual(dashboard_calls, [])
 
 
 class TestForceResume(unittest.TestCase):
-    """--force-resume must write an OWNED value (not the literal '1', not the
-    prior holder) and log/post loudly — and, critically, that value must
-    actually be released when the cycle finishes. `main()` assigns the
-    module-level LOCK_VALUE inside this branch via `global LOCK_VALUE`; if
-    that declaration were missing or misplaced, every other test in this file
-    would still pass (they exercise the non-force path), but in production
-    the `finally: release_lock()` would see LOCK_VALUE as None, refuse to
-    delete, and leave a lock that lingers for the full lock_ttl after an
-    operator override — the exact silent-lingering-lock class of bug this
-    task exists to eliminate. The final assertNotIn(KEY, r.store) is the one
-    that would catch that regression.
+    """Controller ruling (fix round 1): --force-resume must NOT acquire,
+    write, overwrite, or release the lock at all. The pre-fix-round-1
+    version of this branch wrote an OWNED value over whatever was already
+    there; since scripts/redeploy_pipeline.py hardcodes --force-resume onto
+    every intraday redeploy, that write could clobber the DAILY CYCLE's own
+    lock value mid-run and kill it at its very next renew — a failure mode
+    this task introduced and that did not exist before it. Zero lock
+    interaction preserves the old "runs beside the holder" semantics
+    without ever being able to harm it: `LOCK_VALUE` is simply never
+    assigned in this branch, so every `release_lock()` call (including the
+    top-level `finally`) is a no-op.
     """
 
-    def test_force_resume_writes_an_owned_value_and_releases_it_on_exit(self):
-        posts = []
-        r = FakeRedis({KEY: 'otherbox:99999:T0'})   # some prior (stale) holder
-        captured_lock_value = []
-        orig = (po.get_redis, po.notify, po.run_step,
-                po.is_completed_today, po.read_checkpoint)
-        po.get_redis = lambda: r
-        po.notify = lambda msg, channel='pipeline-feed': posts.append((channel, msg))
+    def setUp(self):
+        po.LOCK_VALUE = None
 
-        def _fake_run_step(script, run_date, env, **kw):
-            # Snapshot LOCK_VALUE while the cycle is mid-flight, before the
-            # `finally` clears it on release.
-            captured_lock_value.append(po.LOCK_VALUE)
-            return (True, 0)
+    def tearDown(self):
+        po.LOCK_VALUE = None
 
-        po.run_step = _fake_run_step
-        po.is_completed_today = lambda _r, _d: False
-        po.read_checkpoint = lambda _r: None
-        os.environ.setdefault('POSTGRES_URI', 'postgresql://stub/stub')
-        try:
+    def _run(self, r):
+        with _hermetic_main(r) as (posts, feed_msgs, alert_msgs, dashboard_calls):
+            po.run_step = lambda *a, **kw: (True, 0)
             rc = po.main(['--date', DATE, '--force-resume', '--steps', 'report'])
-        finally:
-            (po.get_redis, po.notify, po.run_step,
-             po.is_completed_today, po.read_checkpoint) = orig
+        return rc, posts, dashboard_calls
 
+    def test_force_resume_with_live_holder_leaves_it_byte_identical(self):
+        r = FakeRedis({KEY: 'otherbox:99999:T0'})   # some other live holder
+        rc, posts, dashboard_calls = self._run(r)
         self.assertEqual(rc, 0)
-        self.assertTrue(any('force-resume' in m.lower() for _c, m in posts), posts)
-        self.assertEqual(len(captured_lock_value), 1)
-        parsed = run_lock.parse_value(captured_lock_value[0])
-        self.assertIsNotNone(parsed)
-        self.assertEqual(parsed[1], os.getpid())
-        self.assertNotEqual(captured_lock_value[0], '1')
-        self.assertNotEqual(captured_lock_value[0], 'otherbox:99999:T0')
-        # The owned value must have been released on the way out.
-        self.assertNotIn(KEY, r.store)
+        # Byte-identical — not overwritten, not deleted.
+        self.assertEqual(r.store[KEY], 'otherbox:99999:T0')
+        self.assertIsNone(po.LOCK_VALUE)
+        self.assertTrue(any('running beside holder' in m for _c, m in posts), posts)
+        self.assertTrue(any('otherbox:99999:T0' in m for _c, m in posts), posts)
+        self.assertEqual(dashboard_calls, [DATE])   # cycle still ran to completion
+
+    def test_force_resume_with_no_holder_writes_nothing(self):
+        r = FakeRedis()
+        rc, posts, dashboard_calls = self._run(r)
+        self.assertEqual(rc, 0)
+        self.assertNotIn(KEY, r.store)               # nothing written
+        self.assertIsNone(po.LOCK_VALUE)
+        self.assertTrue(any('running beside holder' in m for _c, m in posts), posts)
+        self.assertEqual(dashboard_calls, [DATE])
 
 
 class TestRenewLostIsFatal(unittest.TestCase):
@@ -202,38 +313,17 @@ class TestRenewLostIsFatal(unittest.TestCase):
     cleanly, the first step succeeds, and the SECOND renew (before the
     second step) reports loss — the harder, mid-cycle case the ruling names.
 
-    `_resolve_script` is stubbed for speed/determinism (real scripts are
-    never spawned — `run_step` itself is NOT stubbed, so the real renew
-    wiring runs). Because main() also calls `_resolve_script` once per step
-    up front to size the initial lock TTL, "which steps ran" is tracked by
-    wrapping `run_step` itself (called exactly once per step attempted),
-    not by counting `_resolve_script` calls.
+    `_resolve_script` is stubbed for speed/determinism; `run_step` itself is
+    NOT stubbed, so the real renew wiring runs. Because main() also calls
+    `_resolve_script` once per step up front to size the initial lock TTL,
+    "which steps ran" is tracked by wrapping `run_step` itself (called
+    exactly once per step attempted), not by counting `_resolve_script`
+    calls.
     """
 
     def test_main_stops_before_the_next_step_when_renew_reports_lock_loss(self):
-        posts = []
         r = FakeRedis()
         ran_scripts = []
-        orig = (po.get_redis, po.notify, po._resolve_script, po.run_step,
-                po.is_completed_today, po.read_checkpoint)
-        po.get_redis = lambda: r
-        po.notify = lambda msg, channel='pipeline-feed': posts.append((channel, msg))
-        po._resolve_script = lambda script, run_date: (['true'], 5)
-        po.is_completed_today = lambda _r, _d: False
-        po.read_checkpoint = lambda _r: None
-        os.environ.setdefault('POSTGRES_URI', 'postgresql://stub/stub')
-
-        orig_run_step = po.run_step
-
-        def _tracking_run_step(script, run_date, env, renew=None):
-            ran_scripts.append(script)
-            return orig_run_step(script, run_date, env, renew=renew)
-
-        po.run_step = _tracking_run_step
-
-        # First renew (before step 1, 'signals') succeeds normally; the
-        # second (before step 2, 'handoff') reports we no longer own the
-        # lock — simulating a takeover that happened mid-cycle.
         renew_calls = []
         orig_renew = run_lock.renew
 
@@ -243,10 +333,17 @@ class TestRenewLostIsFatal(unittest.TestCase):
 
         run_lock.renew = _fake_renew
         try:
-            rc = po.main(['--date', DATE, '--steps', 'signals,handoff,trade'])
+            with _hermetic_main(r) as (posts, feed_msgs, alert_msgs, dashboard_calls):
+                po._resolve_script = lambda script, run_date: (['true'], 5)
+                orig_run_step = po.run_step
+
+                def _tracking_run_step(script, run_date, env, renew=None):
+                    ran_scripts.append(script)
+                    return orig_run_step(script, run_date, env, renew=renew)
+
+                po.run_step = _tracking_run_step
+                rc = po.main(['--date', DATE, '--steps', 'signals,handoff,trade'])
         finally:
-            (po.get_redis, po.notify, po._resolve_script, po.run_step,
-             po.is_completed_today, po.read_checkpoint) = orig
             run_lock.renew = orig_renew
 
         self.assertEqual(rc, run_lock.LOCK_BUSY_RC)
@@ -257,6 +354,56 @@ class TestRenewLostIsFatal(unittest.TestCase):
         # 'trade' (regime_blended_sizer_live) must never have been attempted
         # at all — the cycle stopped before its step, the actual claim.
         self.assertEqual(ran_scripts, ['engine', 'trade_handoff_builder'])
+        # Aborted mid-cycle — the final action never runs.
+        self.assertEqual(dashboard_calls, [])
+
+
+class TestMainStopsWhenRenewRaisesTwice(unittest.TestCase):
+    """Controller ruling (fix round 1): a renew() that RAISES (rather than
+    cleanly returning False) is tolerated once, 2s later — but if the retry
+    ALSO raises, that is just as fatal as an explicit False. Same shape as
+    TestRenewLostIsFatal, with a raising renew instead of a False-returning
+    one.
+    """
+
+    def test_main_stops_before_the_next_step_when_renew_raises_twice(self):
+        r = FakeRedis()
+        ran_scripts = []
+        renew_calls = []
+        orig_renew = run_lock.renew
+        orig_sleep = po.time.sleep
+        po.time.sleep = lambda s: None   # skip the real 2s retry delay
+
+        def _fake_renew(*a, **kw):
+            renew_calls.append(1)
+            if len(renew_calls) == 1:
+                return True   # first step's renew succeeds cleanly
+            raise ConnectionError('redis blip')   # every renew after that raises
+
+        run_lock.renew = _fake_renew
+        try:
+            with _hermetic_main(r) as (posts, feed_msgs, alert_msgs, dashboard_calls):
+                po._resolve_script = lambda script, run_date: (['true'], 5)
+                orig_run_step = po.run_step
+
+                def _tracking_run_step(script, run_date, env, renew=None):
+                    ran_scripts.append(script)
+                    return orig_run_step(script, run_date, env, renew=renew)
+
+                po.run_step = _tracking_run_step
+                rc = po.main(['--date', DATE, '--steps', 'signals,handoff,trade'])
+        finally:
+            run_lock.renew = orig_renew
+            po.time.sleep = orig_sleep
+
+        self.assertEqual(rc, run_lock.LOCK_BUSY_RC)
+        self.assertEqual(rc, 75)
+        self.assertTrue(any('[lock] lost' in m for _c, m in posts), posts)
+        self.assertEqual(ran_scripts, ['engine', 'trade_handoff_builder'])
+        self.assertEqual(dashboard_calls, [])
+        # 1 success (signals) + 1 raise (handoff, attempt) + 1 raise
+        # (handoff, retry) — exactly one retry before giving up.
+        self.assertEqual(len(renew_calls), 3)
 
 
 if __name__ == '__main__':

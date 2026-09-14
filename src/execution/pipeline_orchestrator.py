@@ -47,6 +47,10 @@ from lib import run_lock as _run_lock          # noqa: E402  (after sys.path set
 
 LOCK_VALUE: str | None = None                  # this process's owned value
 _HOST = _socket.gethostname()
+_LAST_HOLDER: str | None = None                # stashed by acquire_lock() on
+                                                # refusal, so main()'s refusal
+                                                # message doesn't need a second
+                                                # (potentially torn) Redis read
 
 COMPLETED_KEY   = 'pipeline:completed'     # idempotency sentinel; set when all 5 steps done
 COMPLETED_TTL   = 86400  # 24h — covers full-day re-trigger window
@@ -165,16 +169,24 @@ def acquire_lock(r, run_date, ttl_s=None):
     ttl_s defaults to the floor; run_step renews to the step's own timeout
     + 120 s before each step, so the initial value only has to cover the
     gap between acquire and the first step.
+
+    On refusal, stashes the observed holder in `_LAST_HOLDER` so main()'s
+    refusal message can use it directly instead of re-reading Redis — a
+    second read is not just redundant, it can race: the holder could have
+    released between our failed acquire and that re-read, turning an
+    accurate "held by X" into a misleading "held by None."
     """
-    global LOCK_VALUE
+    global LOCK_VALUE, _LAST_HOLDER
     value = _run_lock.make_value(host=_HOST)
     ok, holder = _run_lock.acquire(
         r, run_date, ttl_s or _run_lock.MIN_TTL_SECONDS,
         value=value, host=_HOST, log=log)
     if ok:
         LOCK_VALUE = value
+        _LAST_HOLDER = None
         return True
     LOCK_VALUE = None
+    _LAST_HOLDER = holder
     log(f'[lock] held by {holder} for {run_date}')
     return False
 
@@ -614,22 +626,35 @@ class CycleAbort(Exception):
 
 
 class LockLost(Exception):
-    """Raised when a mid-cycle renew reports we no longer own the run lock
-    (QD E1 controller ruling, carried from Task 1's review): the lock lapsed
-    and nobody re-took it, or another launcher's takeover won the race. This
-    is FATAL — distinct from a renew() that merely *raised* (a transient
-    Redis hiccup, which run_step logs and otherwise ignores) — so main()
-    stops the cycle before the next step runs rather than pressing on under
-    a lock we no longer hold."""
+    """Raised when we can no longer be sure we own the run lock (QD E1
+    controller ruling, carried from Task 1's review and sharpened in fix
+    round 1). Two ways in:
+      * `renew()` cleanly reports the lock lapsed and was not re-taken, or
+        someone else's takeover already won — unambiguous, raised directly,
+        no retry.
+      * `renew()` RAISES (e.g. a dropped Redis connection) on both its
+        first attempt and its one 2s-later retry. A single raise is
+        tolerated as a transient blip (killing the cycle over one dropped
+        connection would be worse than the bug this task fixes), but two
+        in a row is treated exactly like an explicit False — we no longer
+        know we hold the lock.
+    Either way this is FATAL — main() stops the cycle before the next step
+    runs rather than pressing on under a lock we can't confirm we hold."""
 
 
 def _renew_or_lose(r, run_date, step_timeout_s):
-    """run_step's `renew` hook: extend our lock, or raise LockLost.
+    """run_step's `renew` hook: extend our lock, or raise.
 
-    `renew_lock` propagates Redis exceptions (run_lock.renew fails closed);
-    an explicit False return means the key lapsed and was not re-taken, or
-    someone else's takeover already won — either way we no longer own the
-    lock and must not continue into the next step.
+    Two distinct failure shapes reach the caller (run_step), which handles
+    them differently per the QD E1 controller ruling:
+      * `renew_lock` returns False — the key lapsed and was not re-taken, or
+        someone else's takeover already won. Unambiguous: raise LockLost
+        directly here, no retry.
+      * `renew_lock` (via `_run_lock.renew`) RAISES — propagated as-is,
+        uncaught here. `run_lock.renew()` fails closed by design (it must
+        never guess), but a single raise is not yet proof we lost the
+        lock, so it's run_step's job to retry once before treating it as
+        fatal, not this function's.
     """
     if not renew_lock(r, run_date, _run_lock.ttl_for(step_timeout_s)):
         raise LockLost(f'renew failed for {run_date} — lock lapsed or taken over')
@@ -658,10 +683,28 @@ def run_step(script, run_date, env, renew=None):
             # Controller ruling (QD E1 review): a renew that reports we no
             # longer own the lock is FATAL — propagate so main() stops the
             # cycle before this step runs, rather than treating it like an
-            # ordinary (transient) renew hiccup.
+            # ordinary (transient) renew hiccup. Unambiguous: no retry.
             raise
-        except Exception as e:      # a renew failure must never kill a step
-            log(f'[lock] renew before {script} failed: {e}')
+        except Exception as e:
+            # A RAISING renew (e.g. a dropped Redis connection) is not yet
+            # proof we lost the lock — run_lock.renew()/acquire() fail
+            # closed by raising, on purpose, but treating every raise as
+            # instantly fatal would kill a whole cycle over one blip.
+            # Controller ruling (fix round 1): tolerate exactly ONE such
+            # blip — retry 2s later — and if the retry ALSO fails (raises
+            # again, or now cleanly reports lock loss), that is fatal, same
+            # as an explicit False.
+            log(f'[lock] renew before {script} failed ({e}) — retrying once in 2s')
+            time.sleep(2)
+            try:
+                renew(timeout)
+            except LockLost:
+                raise
+            except Exception as e2:
+                raise LockLost(
+                    f'renew failed twice before {script} ({run_date}) — '
+                    f'first: {e!r}; retry: {e2!r}'
+                ) from e2
     # Stdout-idle watchdog: if the subprocess emits nothing for this many
     # seconds we treat it as wedged and SIGTERM it. The 2026-04-29 cycle
     # got stuck in collector Phase 3 (options) for 30+ minutes with zero
@@ -734,7 +777,6 @@ def run_step(script, run_date, env, renew=None):
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main(argv=None):
-    global LOCK_VALUE
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--date',         default=str(date.today()))
@@ -854,9 +896,7 @@ def main(argv=None):
     lock_ttl = _run_lock.ttl_for(max(_resolve_script(s, run_date)[1] for _k, s in effective_steps))
     if not args.force_resume:
         if not acquire_lock(r, run_date, lock_ttl):
-            holder = r.get(_run_lock.lock_key(run_date))
-            if isinstance(holder, bytes):
-                holder = holder.decode('utf-8', 'replace')
+            holder = _LAST_HOLDER
             msg = (f'{reason_tag}🔒 **Pipeline lock held — run refused** | {run_date}\n'
                    f'`[lock] held by {holder}`\n'
                    f'Exit rc={_run_lock.LOCK_BUSY_RC}. Use `--force-resume` to override.')
@@ -864,18 +904,24 @@ def main(argv=None):
             notify(msg, channel='pipeline-feed')
             return _run_lock.LOCK_BUSY_RC
     else:
-        # Operator override. Loud, because it deliberately runs beside whatever
-        # already holds the lock — the one path that can still produce two
-        # concurrent cycles.
-        prior = r.get(_run_lock.lock_key(run_date))
-        if isinstance(prior, bytes):
-            prior = prior.decode('utf-8', 'replace')
-        LOCK_VALUE = _run_lock.make_value(host=_HOST)
-        r.set(_run_lock.lock_key(run_date), LOCK_VALUE, ex=lock_ttl)
-        log(f'[lock] FORCE-RESUME — overriding lock (prior holder: {prior}) '
-            f'with {LOCK_VALUE}; a concurrent run is possible')
-        notify(f'{reason_tag}⚠️ **--force-resume: run lock overridden** | {run_date}\n'
-               f'Prior holder: `{prior}` → now `{LOCK_VALUE}`', channel='pipeline-feed')
+        # Controller ruling (fix round 1): --force-resume must NOT acquire,
+        # write, overwrite, or release the lock — AT ALL. The prior version
+        # of this branch wrote an OWNED value over whatever was already
+        # there; scripts/redeploy_pipeline.py hardcodes --force-resume onto
+        # every intraday redeploy, so that write could clobber the DAILY
+        # CYCLE's own lock value mid-run and kill it at its very next
+        # renew — a failure mode this task introduced and did not exist
+        # before it. Zero lock interaction preserves the old "runs beside
+        # the holder" semantics without ever being able to harm it:
+        # LOCK_VALUE is simply never assigned here, so every release_lock()
+        # call below (including the top-level `finally`) is a no-op.
+        holder = r.get(_run_lock.lock_key(run_date))
+        if isinstance(holder, bytes):
+            holder = holder.decode('utf-8', 'replace')
+        log(f'[lock] --force-resume: running beside holder {holder}')
+        notify(f'{reason_tag}⚠️ **--force-resume: running beside holder** | {run_date}\n'
+               f'`[lock] --force-resume: running beside holder {holder}`',
+               channel='pipeline-feed')
 
     subset_tag = ' [subset run]' if is_subset else ''
     log(f'{reason_tag}Pipeline starting for {run_date}{subset_tag} | steps: {[k for k, _ in effective_steps]}')
