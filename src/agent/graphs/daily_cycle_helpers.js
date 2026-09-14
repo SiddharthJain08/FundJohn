@@ -43,7 +43,13 @@ function strictMode(env) {
 // currently held — via `runLock.setCurrent` in daily-cycle.js — so tests
 // and one-off runs that never acquire a lock behave exactly as before.
 async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, step, memoryMax } = {}) {
-  const lockOk = await runLock.renewCurrent(timeoutSec);
+  // QD wave-1 fix item 1 (2026-09-14): pass a logger. Without one,
+  // `renewCurrent`'s default no-op `log` discarded the only diagnostic that
+  // names WHY the renew failed — run_lock.renew's "[lock] renew skipped —
+  // <key> held by <other>, not us (<ours>)" line, i.e. exactly who took the
+  // lock over — leaving the operator with a bare rc=75 and nothing else.
+  const lockOk = await runLock.renewCurrent(timeoutSec,
+                                            { log: (m) => console.warn(`[daily-cycle] ${m}`) });
   if (!lockOk) {
     return {
       rc:          runLock.LOCK_BUSY_RC,

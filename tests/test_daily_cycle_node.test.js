@@ -17,9 +17,13 @@ const LOGGING_PATH  = require.resolve(path.join(ROOT, 'src/execution/pipeline_lo
 const TRACEBUS_PATH = require.resolve(path.join(ROOT, 'src/agent/traceBus.js'));
 
 // Build a stubbed makeNode by injecting fake helpers + logger + traceBus
-function makeStubbedFactory({ rc, stderrTail = '', durationMs = 100, throwSpawn = false, timedOut = false } = {}) {
+function makeStubbedFactory({ rc, stderrTail = '', durationMs = 100, throwSpawn = false,
+                              timedOut = false, lockLost = false } = {}) {
   const traceEvents = [];
   const logCalls    = [];
+  // `attempts` counts runSubprocess invocations — the signals step's bounded
+  // retry calls it twice, and the lock-lost path must call it exactly once.
+  const attempts    = [];
 
   require.cache[HELPERS_PATH] = {
     id: HELPERS_PATH, filename: HELPERS_PATH, loaded: true,
@@ -32,9 +36,10 @@ function makeStubbedFactory({ rc, stderrTail = '', durationMs = 100, throwSpawn 
         return false;
       },
       strictMode: (env) => env.OPENCLAW_STRICT_EXIT_CODES === '1',
-      runSubprocess: async () => {
+      runSubprocess: async (argv, opts) => {
+        attempts.push(opts && opts.step);
         if (throwSpawn) throw new Error('spawn explode');
-        return { rc, stderrTail, durationMs, stdout: '', timedOut };
+        return { rc, stderrTail, durationMs, stdout: '', timedOut, lockLost };
       },
     },
   };
@@ -60,7 +65,7 @@ function makeStubbedFactory({ rc, stderrTail = '', durationMs = 100, throwSpawn 
   };
   delete require.cache[require.resolve(NODE_PATH)];
   const { makeStepNode } = require(NODE_PATH);
-  return { makeStepNode, traceEvents, logCalls };
+  return { makeStepNode, traceEvents, logCalls, attempts };
 }
 
 const BASE_STATE = {
@@ -166,22 +171,82 @@ test('activation rc=2 (hard fail) → still warn, NO throw', async () => {
   assert.ok(logCalls.some(([fn]) => fn === 'notifyFailure'));
 });
 
-// QD E1 (2026-09-14): runSubprocess now returns rc=75/lockLost when the
+// QD E1 (2026-09-14): runSubprocess returns rc=75 + lockLost:true when the
 // shared run lock (src/lib/run_lock.js) is lost before a step spawns. rc=75
-// is >=2, so the ordinary path throws (abort) — EXCEPT the pre-existing
-// sentiment/activation exemption above, which swallows ANY non-zero rc into
-// 'warn' regardless of cause. This is a known, pre-existing gap the QD E1
-// controller ruling did not ask this task to close (daily_cycle_node.js's
-// exemption block is untouched): a lock lost during sentiment/activation
-// does not abort immediately — it is caught one step later, when the next
-// (non-exempt) step's own renewCurrent() call also observes the lost lock.
-// Documented here as a regression check, not a fix.
-test('KNOWN GAP: rc=75 (lock lost) during the exempted "sentiment" step does NOT abort', async () => {
-  const { makeStepNode, logCalls } = makeStubbedFactory({ rc: 75, stderrTail: '[lock] lost before sentiment' });
+// is >=2, so the ordinary path throws (abort) — but the sentiment/activation
+// exemption used to swallow ANY non-zero rc into 'warn' regardless of cause,
+// so a lock lost during those two steps let the production cycle carry on
+// into signals/trade/alpaca under a lock another process owns. Wave-1 fix
+// item 1 carves `lockLost` out of the exemption (and out of the signals
+// retry): a lost lock ALWAYS aborts, at every step.
+test('rc=75 + lockLost during the exempted "sentiment" step DOES abort', async () => {
+  const { makeStepNode, logCalls } = makeStubbedFactory({
+    rc: 75, lockLost: true, stderrTail: '[lock] lost before sentiment' });
   const node = makeStepNode('sentiment', 'run_sentiment_step');
-  const out = await node({ ...BASE_STATE, env: {} });
-  assert.equal(out.completedSteps[0].status, 'warn'); // swallowed, NOT aborted
-  assert.ok(logCalls.some(([fn]) => fn === 'notifyFailure')); // alert still fires
+  await assert.rejects(
+    () => node({ ...BASE_STATE, env: {} }),
+    (err) => {
+      assert.equal(err.step, 'sentiment');
+      assert.equal(err.rc, 75);
+      assert.equal(err.lockLost, true);
+      assert.match(err.stderrTail, /\[lock\] lost before sentiment/);
+      return true;
+    },
+  );
+  // The abort path fires: notifyFailure carries the [lock] stderr tail, and
+  // the step is NEVER recorded as a completed 'warn'.
+  const failCall = logCalls.find(([fn]) => fn === 'notifyFailure');
+  assert.ok(failCall);
+  assert.match(failCall[1][3], /\[lock\] lost before sentiment/);
+  assert.ok(!logCalls.some(([fn, args]) => fn === 'feedEnd' && args[1] === 'warn'));
+});
+
+test('rc=75 + lockLost during the exempted "activation" step DOES abort', async () => {
+  const { makeStepNode, logCalls } = makeStubbedFactory({
+    rc: 75, lockLost: true, stderrTail: '[lock] lost before activation' });
+  const node = makeStepNode('activation', 'activation_apply');
+  await assert.rejects(
+    () => node({ ...BASE_STATE, env: { OPENCLAW_STRICT_EXIT_CODES: '1' } }),
+    (err) => {
+      assert.equal(err.step, 'activation');
+      assert.equal(err.rc, 75);
+      assert.equal(err.lockLost, true);
+      return true;
+    },
+  );
+  assert.ok(logCalls.some(([fn]) => fn === 'notifyFailure'));
+  assert.ok(!logCalls.some(([fn, args]) => fn === 'feedEnd' && args[1] === 'warn'));
+});
+
+// The exemption itself is untouched for every OTHER cause — an ordinary
+// failure of these gap-filler steps still warns and lets the chain continue
+// (the `activation rc=1/rc=2` tests above pin that for activation).
+test('rc=2 WITHOUT lockLost during "sentiment" still warns (exemption intact)', async () => {
+  const { makeStepNode } = makeStubbedFactory({ rc: 2, stderrTail: 'scrape blew the budget' });
+  const node = makeStepNode('sentiment', 'run_sentiment_step');
+  const out = await node({ ...BASE_STATE, env: { OPENCLAW_STRICT_EXIT_CODES: '1' } });
+  assert.equal(out.completedSteps[0].status, 'warn');
+});
+
+test('lockLost on "signals" aborts after EXACTLY one attempt (no bounded retry)', async () => {
+  const { makeStepNode, attempts, logCalls } = makeStubbedFactory({
+    rc: 75, lockLost: true, stderrTail: '[lock] lost before signals' });
+  const node = makeStepNode('signals', 'engine');
+  await assert.rejects(
+    () => node({ ...BASE_STATE, env: {} }),
+    (err) => { assert.equal(err.rc, 75); assert.equal(err.lockLost, true); return true; },
+  );
+  // The retry would renew the same lost lock again — and retrying is exactly
+  // the "keep going" reflex that must not survive a lock we no longer own.
+  assert.equal(attempts.length, 1);
+  assert.ok(!logCalls.some(([fn, args]) => fn === 'notifyFailure' && /attempt 1\/2/.test(args[0])));
+});
+
+test('a NON-lock failure on "signals" still gets its one bounded retry', async () => {
+  const { makeStepNode, attempts } = makeStubbedFactory({ rc: 124, timedOut: true, stderrTail: 'timed out' });
+  const node = makeStepNode('signals', 'engine');
+  await assert.rejects(() => node({ ...BASE_STATE, env: {} }), (err) => err.rc === 124);
+  assert.equal(attempts.length, 2);
 });
 
 test('rc=75 (lock lost) during a non-exempt step (e.g. signals) DOES abort', async () => {

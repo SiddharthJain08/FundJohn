@@ -135,6 +135,29 @@ test('value format matches the Python twin exactly', () => {
   assert.equal(runLock.parseValue(''), null);
 });
 
+// QD wave-1 fix item 7 (2026-09-14): the pid slice must be digits-only.
+// `Number('')` is 0 and `Number.isInteger(0)` is true, so `host::iso` used to
+// parse here as pid 0 while the Python twin rejected it — and since
+// `pidAlive(0)` is false, a same-host racer would have treated a corrupted
+// value as a DEAD holder and taken the live lock over.
+test('parseValue rejects a non-numeric pid slice (twin parity with run_lock.py)', () => {
+  assert.equal(runLock.parseValue('vps1::2026-09-14T10:00:00+00:00'), null); // empty pid
+  assert.equal(runLock.parseValue('vps1:abc:2026-09-14T10:00:00+00:00'), null);
+  assert.equal(runLock.parseValue('vps1: 42:2026-09-14T10:00:00+00:00'), null);
+  assert.equal(runLock.parseValue('vps1:-5:2026-09-14T10:00:00+00:00'), null);
+  assert.equal(runLock.parseValue('vps1:4.2:2026-09-14T10:00:00+00:00'), null);
+  // …and still accepts a well-formed one.
+  assert.deepEqual(runLock.parseValue('vps1:42:2026-09-14T10:00:00+00:00'),
+                   { host: 'vps1', pid: 42, startedAt: '2026-09-14T10:00:00+00:00' });
+});
+
+test('an empty-pid holder is never taken over (it is not parseable at all)', async () => {
+  const r = new FakeRedis({ [KEY]: 'vps1::T0' });
+  const out = await runLock.acquire(r, DATE, 300, { host: 'vps1', value: 'vps1:1234:T1' });
+  assert.equal(out.ok, false);
+  assert.equal(r.store[KEY], 'vps1::T0');   // byte-identical, not taken over
+});
+
 test('ttlFor = timeout + 120 with a 300s floor', () => {
   assert.equal(runLock.ttlFor(9000), 9120);
   assert.equal(runLock.ttlFor(300), 420);

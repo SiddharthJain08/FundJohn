@@ -201,12 +201,33 @@ async function runDailyCycleGraph(input) {
     }
   }
 
-  const { ready } = getCheckpointer();
-  await ready;
-  const compiled = getCompiled();
+  // QD wave-1 fix item 2 (2026-09-14): everything between the acquire above
+  // and the `try` below used to run UNGUARDED. A throw in any of it (the
+  // PostgresSaver constructor/setup, graph compile, traceBus, or the Discord
+  // cycleStart post) escaped `runDailyCycleGraph` without ever reaching the
+  // `finally` that releases — leaving a LIVE-PID lock value in Redis for the
+  // full TTL (~9120 s, so no takeover is possible: `acquire` only takes over
+  // a DEAD pid) and a stale `_current` handle inside this long-lived johnbot
+  // process. The Python twin then refused every run for that date with rc=75
+  // for 2.5 h. Release explicitly and rethrow, so the caller sees exactly the
+  // same error it saw before — only the lock is no longer leaked.
+  let compiled;
+  try {
+    const { ready } = getCheckpointer();
+    await ready;
+    compiled = getCompiled();
 
-  traceBus.startRun(runId, { cycleDate: runDate, threadId, graph: 'daily-cycle' });
-  await pipelineLog.cycleStart(runDate, reason, runId);
+    traceBus.startRun(runId, { cycleDate: runDate, threadId, graph: 'daily-cycle' });
+    await pipelineLog.cycleStart(runDate, reason, runId);
+  } catch (err) {
+    if (lock) {
+      console.error(`[daily-cycle] startup failed before the graph ran (${err.message}) — releasing the run lock`);
+      await lock.release().catch(() => {});
+      lock = null;   // the `finally` below is unreachable from here, but a
+                     // future restructure must never double-release.
+    }
+    throw err;
+  }
 
   const statePayload = {
     runDate,

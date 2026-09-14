@@ -62,9 +62,17 @@ function parseValue(raw) {
   if (i < 1) return null;
   const j = s.indexOf(':', i + 1);
   if (j < 0) return null;
-  const host = s.slice(0, i);
-  const pid  = Number(s.slice(i + 1, j));
+  const host   = s.slice(0, i);
+  const pidRaw = s.slice(i + 1, j);
   const startedAt = s.slice(j + 1);
+  // QD wave-1 fix item 7 (2026-09-14): digits-only, never `Number()` alone.
+  // `Number('')` is 0 and `Number.isInteger(0)` is true, so a corrupted
+  // `host::iso` value used to parse as pid 0 here — and `pidAlive(0)` is
+  // false, so a same-host racer would have treated it as a DEAD holder and
+  // taken the lock over. The Python twin rejects the same bytes (`int('')`
+  // raises), so accepting them was a twin divergence as well as a bug.
+  if (!/^\d+$/.test(pidRaw)) return null;
+  const pid = Number(pidRaw);
   if (!host || !startedAt || !Number.isInteger(pid)) return null;
   return { host, pid, startedAt };
 }
