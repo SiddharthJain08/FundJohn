@@ -142,6 +142,57 @@ class TestMainBusyLock(unittest.TestCase):
         self.assertEqual(r.store[KEY], f'{po._HOST}:{os.getpid()}:T0')
 
 
+class TestForceResume(unittest.TestCase):
+    """--force-resume must write an OWNED value (not the literal '1', not the
+    prior holder) and log/post loudly — and, critically, that value must
+    actually be released when the cycle finishes. `main()` assigns the
+    module-level LOCK_VALUE inside this branch via `global LOCK_VALUE`; if
+    that declaration were missing or misplaced, every other test in this file
+    would still pass (they exercise the non-force path), but in production
+    the `finally: release_lock()` would see LOCK_VALUE as None, refuse to
+    delete, and leave a lock that lingers for the full lock_ttl after an
+    operator override — the exact silent-lingering-lock class of bug this
+    task exists to eliminate. The final assertNotIn(KEY, r.store) is the one
+    that would catch that regression.
+    """
+
+    def test_force_resume_writes_an_owned_value_and_releases_it_on_exit(self):
+        posts = []
+        r = FakeRedis({KEY: 'otherbox:99999:T0'})   # some prior (stale) holder
+        captured_lock_value = []
+        orig = (po.get_redis, po.notify, po.run_step,
+                po.is_completed_today, po.read_checkpoint)
+        po.get_redis = lambda: r
+        po.notify = lambda msg, channel='pipeline-feed': posts.append((channel, msg))
+
+        def _fake_run_step(script, run_date, env, **kw):
+            # Snapshot LOCK_VALUE while the cycle is mid-flight, before the
+            # `finally` clears it on release.
+            captured_lock_value.append(po.LOCK_VALUE)
+            return (True, 0)
+
+        po.run_step = _fake_run_step
+        po.is_completed_today = lambda _r, _d: False
+        po.read_checkpoint = lambda _r: None
+        os.environ.setdefault('POSTGRES_URI', 'postgresql://stub/stub')
+        try:
+            rc = po.main(['--date', DATE, '--force-resume', '--steps', 'report'])
+        finally:
+            (po.get_redis, po.notify, po.run_step,
+             po.is_completed_today, po.read_checkpoint) = orig
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(any('force-resume' in m.lower() for _c, m in posts), posts)
+        self.assertEqual(len(captured_lock_value), 1)
+        parsed = run_lock.parse_value(captured_lock_value[0])
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed[1], os.getpid())
+        self.assertNotEqual(captured_lock_value[0], '1')
+        self.assertNotEqual(captured_lock_value[0], 'otherbox:99999:T0')
+        # The owned value must have been released on the way out.
+        self.assertNotIn(KEY, r.store)
+
+
 class TestRenewLostIsFatal(unittest.TestCase):
     """Controller ruling (Task 1 review, carried into this task's brief):
     a renew() that reports we no longer own the lock is FATAL — the
