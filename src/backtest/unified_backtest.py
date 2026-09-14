@@ -39,6 +39,7 @@ import inspect as _inspect
 import json
 import math
 import os
+import statistics
 import subprocess
 import sys
 import uuid
@@ -433,6 +434,85 @@ def _bar_exit(direction: int, high: float, low: float,
     if s_hit:
         return float(stop_loss), 'stop'
     return None, None
+
+
+def exit_reason_census(trades) -> dict:
+    """{exit_reason: {n, mean_pnl_pct, median_hold_days}} over `trades`
+    (spec 2026-09-12 §A3). Never changes a Sharpe — provenance only.
+
+    Hook exits keep their 'strategy_exit:<reason>' prefix on purpose: the
+    prefix is exactly how "65 % of exits were pair_decohered" becomes readable
+    from a stored run instead of a rolled journal.
+
+    Non-finite pnl_pct / holding_days are dropped from the aggregates the same
+    way aggregate_metrics and tail_stats drop them (2026-06-15 BRK-B: one
+    corrupt price bar must not NaN a whole stat) — the trade still counts in n.
+    A reason with no finite observation reports None, never a fabricated 0.0.
+    """
+    buckets: dict = {}
+    for t in trades or []:
+        reason = str(t.get('exit_reason') or 'unknown')
+        slot = buckets.setdefault(reason, {'n': 0, 'pnl': [], 'hold': []})
+        slot['n'] += 1
+        p = t.get('pnl_pct')
+        try:
+            if p is not None and math.isfinite(float(p)):
+                slot['pnl'].append(float(p))
+        except (TypeError, ValueError):
+            pass
+        h = t.get('holding_days')
+        try:
+            if h is not None and math.isfinite(float(h)):
+                slot['hold'].append(float(h))
+        except (TypeError, ValueError):
+            pass
+    out: dict = {}
+    for reason, slot in buckets.items():
+        out[reason] = {
+            'n': slot['n'],
+            'mean_pnl_pct': (sum(slot['pnl']) / len(slot['pnl'])) if slot['pnl'] else None,
+            'median_hold_days': statistics.median(slot['hold']) if slot['hold'] else None,
+        }
+    return out
+
+
+def cost_drag_bps(trades, *, cost_bps_by_ticker: Optional[dict] = None,
+                  flat_bps: float = 0.0) -> Optional[float]:
+    """Modelled round-trip cost as basis points of gross P&L (spec §A3):
+
+        1e4 * Σ cost_i / Σ |gross_i|
+
+    cost_i = 2 * bps_i / 1e4 — one adverse entry fill plus one adverse exit
+    fill, with bps_i resolved exactly as _per_bar_simulate resolves it
+    (cost_bps_by_ticker.get(ticker, flat_bps)). gross_i = pnl_pct_i + cost_i,
+    a first-order un-netting: pnl_pct compounds and the two cost legs do not
+    net out exactly, which is immaterial at ≤ 30 bps and is why this is
+    provenance and never a gate input.
+
+    Returns None (never 0.0, never ZeroDivisionError) when no trade carries a
+    finite pnl_pct or when Σ|gross| is 0.
+    """
+    num = 0.0
+    den = 0.0
+    seen = False
+    for t in trades or []:
+        p = t.get('pnl_pct')
+        try:
+            p = float(p)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(p):
+            continue
+        bps = float(flat_bps)
+        if cost_bps_by_ticker:
+            bps = float(cost_bps_by_ticker.get(t.get('ticker'), flat_bps))
+        cost = 2.0 * bps / 1e4
+        num += cost
+        den += abs(p + cost)
+        seen = True
+    if not seen or den <= 0.0:
+        return None
+    return 1e4 * num / den
 
 
 def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
@@ -1495,6 +1575,14 @@ def run_backtest(strategy_id: str, *,
                 # straight from the env at persist time rather than importing
                 # aux_data_loader — no new cross-module dependency here.
                 'financials_pit': os.environ.get('OPENCLAW_FINANCIALS_PIT', '0') == '1',
+                # Exit-reason census + modelled cost drag (2026-09-12 §A3).
+                # Provenance only — never a Sharpe, never a gate input. Hook
+                # exits appear as 'strategy_exit:<reason>'.
+                'exit_reasons': exit_reason_census(trades),
+                'cost_drag_bps': cost_drag_bps(
+                    trades,
+                    cost_bps_by_ticker=_sim_kwargs.get('cost_bps_by_ticker'),
+                    flat_bps=_slippage_bps),
                 'exit_hook':   bool(getattr(instance, 'exit_hook', False)),
                 'hook_exits':  int(sim.get('hook_exits', 0)),
                 # Persisted, not just logged: a run whose hook raised on every
