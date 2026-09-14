@@ -7,10 +7,16 @@ was re-bought on the next cycle. run_exit_fill_reporter now closes every HELD
 ledger row on that ticker/side via drop_signal_close(reason='stop_loss').
 
 Fix round 1 (review) adds two more layers on top of the original wiring:
-  - a recency gate (watermark + rolling window) so a chronologically-ancient
-    fill surfacing for the first time via the Task-1 symbol-scoped read is
-    never posted/closed against today's fresh position — see
-    ``_wire_recency`` and the "recency gate" tests below.
+  - a recency gate — `now - 48h` ONLY (see "recency gate" tests below) — so a
+    chronologically-ancient fill surfacing for the first time via the Task-1
+    symbol-scoped read is never posted/closed against today's fresh position.
+    Round 1 first tried folding a persisted `watermark` into the cutoff
+    (`max(watermark, now-48h)`); fix round 2 reverted that after the
+    coordinator confirmed it was a defect — the closed-order window can
+    surface an OLDER fill after a NEWER one already advanced the watermark,
+    and folding the watermark into the cutoff would wrongly gate that
+    still-legitimate fill out forever. `watermark` is kept in the state JSON
+    purely as an informational "newest filled_at processed", never as a gate.
   - a `pending` retry list so a fill whose close FAILS (DB blip) is retried on
     a later tick instead of being silently dropped — see the "pending retry"
     tests below.
@@ -347,6 +353,10 @@ def test_stale_fill_is_skipped_but_marked_seen(monkeypatch, tmp_path):
 
 
 def test_recent_fill_is_posted_and_closed_and_watermark_advances(monkeypatch, tmp_path):
+    """Since fix round 2 the watermark is informational only — it does not
+    gate anything (see test_fill_older_than_watermark_but_within_48h_is_
+    posted_and_closed below). This test pins that the informational contract
+    still holds: a processed fill's filled_at still gets recorded."""
     closed = []
     fill_iso = _recent(minutes=30)
     order = _stop_order(filled_at=fill_iso, oid='new1')
@@ -363,48 +373,20 @@ def test_recent_fill_is_posted_and_closed_and_watermark_advances(monkeypatch, tm
     assert wm >= fill_dt
 
 
-def test_watermark_raises_cutoff_above_the_default_window(monkeypatch, tmp_path):
-    """The steady-state case the review flagged: once the watermark has
-    advanced past a fill's filled_at, that fill stays gated forever even
-    though it is still inside the default 48h rolling window — e.g. its id
-    aged out of the 800-entry seen cap and it resurfaced as "new". Here the
-    fill is only 20h old (well within the default 48h floor on its own) but
-    the persisted watermark (10h ago) is newer, so it must still be gated."""
+def test_fill_older_than_watermark_but_within_48h_is_posted_and_closed(monkeypatch, tmp_path):
+    """Ruling revised in fix round 2: the watermark must NOT participate in
+    the recency cutoff — only `now - 48h` gates. The closed-order window can
+    surface an OLDER fill after a NEWER one already advanced the watermark
+    (e.g. a 10:00 fill missed by the 10:10 read but present at 10:20, after a
+    10:15 fill advanced the watermark) — that fill must still be posted and
+    closed. Here the persisted watermark (1h ago) is newer than this fill
+    (20h ago), but 20h is still well within the 48h floor."""
     closed = []
-    fill_iso = _stale(hours=20)                       # inside the 48h default
-    order = _stop_order(filled_at=fill_iso, oid='evicted1')
+    watermark = _iso(datetime.now(timezone.utc) - timedelta(hours=1))   # newer than the fill
+    fill_iso = _stale(hours=20)                                          # older than watermark, inside 48h
+    order = _stop_order(filled_at=fill_iso, oid='older_than_watermark')
     _wire(monkeypatch, tmp_path, order, closed)
-    watermark = _iso(datetime.now(timezone.utc) - timedelta(hours=10))  # newer than the fill
     _seed_state(tmp_path, watermark=watermark)
-    stats = ah.run_exit_fill_reporter(dry_run=False)
-    assert stats['reported'] == 0
-    assert stats['signals_closed'] == 0
-    assert closed == []
-
-
-def test_first_run_seed_does_not_gate_a_later_legitimately_late_fill(monkeypatch, tmp_path):
-    """Advisor-caught fix-round-1.1 regression: the watermark must only
-    advance on a fill actually PROCESSED (posted this run), never on a
-    stale-skipped or first-run-seeded one. Task 1's combined read is
-    "newest-first PER READ but NOT globally re-sorted", and
-    _open_signal_tickers fails closed to [] on any DB blip — so the arrival
-    stream is not strictly monotonic in filled_at: a fill can legitimately
-    surface on a LATER run with an EARLIER filled_at than one already seeded.
-    If the first run's seed had advanced the watermark to its (very recent)
-    filled_at, this later-but-chronologically-earlier fill would be wrongly
-    gated as stale despite being brand new and well inside 48h."""
-    closed = []
-    seed_order = _stop_order(filled_at=_recent(minutes=5), oid='seed1')
-    _wire(monkeypatch, tmp_path, seed_order, closed)
-    ah.run_exit_fill_reporter(dry_run=False)              # first run: seeds only
-
-    st = json.loads(_state_path(tmp_path).read_text())
-    assert not st.get('watermark')          # nothing was processed — no floor set
-
-    # A different, never-before-seen fill surfaces on the NEXT run with an
-    # earlier filled_at than the seeded one above, still well inside 48h.
-    late_order = _stop_order(filled_at=_recent(minutes=10), oid='late1')
-    _wire(monkeypatch, tmp_path, late_order, closed)
     stats = ah.run_exit_fill_reporter(dry_run=False)
     assert stats['reported'] == 1
     assert stats['signals_closed'] == 1

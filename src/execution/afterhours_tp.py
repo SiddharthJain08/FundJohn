@@ -616,17 +616,26 @@ def classify_exit_fills(orders) -> list:
 # that would arm the stop-out cooldown against a name that worked.
 _CLOSING_FILL_KINDS = ('stop', 'ah_exit')
 
-# Recency gate (review fix round 1, finding 1): fetch_recent_closed_orders'
-# per-symbol scoped window (Task 1) can surface an order that has NEVER been
-# in `seen` yet is chronologically ancient — e.g. a ticker that rarely trades
-# still has last quarter's stop fill inside its own fresh 500-row window. Such
-# an id is genuinely "new" by the seen-set check alone, so without a time
-# floor it would be posted AND closed against TODAY's fresh position on that
-# same ticker at an ancient price — the mass-close class safety rule #2
-# forbids. `_RECENCY_WINDOW_HOURS` is the fallback floor when no watermark is
-# persisted yet; the watermark then ratchets the floor forward permanently so
-# an id that later ages out of the 800-entry seen cap can never resurface as
-# "new" and get reprocessed, independent of the rolling window.
+# Recency gate (review fix round 1, finding 1; cutoff definition REVISED in
+# fix round 2). fetch_recent_closed_orders' per-symbol scoped window (Task 1)
+# can surface an order that has NEVER been in `seen` yet is chronologically
+# ancient — e.g. a ticker that rarely trades still has last quarter's stop
+# fill inside its own fresh 500-row window. Such an id is genuinely "new" by
+# the seen-set check alone, so without a time floor it would be posted AND
+# closed against TODAY's fresh position on that same ticker at an ancient
+# price — the mass-close class safety rule #2 forbids.
+#
+# `cutoff = now - _RECENCY_WINDOW_HOURS` ONLY. Round-1 tried folding a
+# persisted `watermark` into the cutoff (`max(watermark, now-48h)`) to close a
+# steady-state gap (an id aging out of the 800-entry seen cap). That was
+# itself a bug: the closed-order window can surface an OLDER fill AFTER a
+# NEWER one has already been processed and watermarked (e.g. a 10:00 fill
+# missed by the 10:10 read but present at 10:20, after a 10:15 fill advanced
+# the watermark) — folding the watermark into the cutoff would wrongly gate
+# that still-legitimate 10:00 fill out forever. The watermark is now kept
+# purely INFORMATIONAL (newest filled_at of a fill actually processed —
+# useful for logs/diagnostics) and never participates in `is_stale`. The
+# seen-set plus the rolling 48h floor are the only gates.
 _RECENCY_WINDOW_HOURS = 48
 _SEEN_CAP = 800
 _PENDING_CAP = 200
@@ -743,23 +752,24 @@ def run_exit_fill_reporter(dry_run: bool) -> dict:
     would otherwise mass-close every historical fill's signals in a single tick
     (the 2026-05-22 empty-signals blowout class).
 
-    Recency gate (review fix round 1, finding 1): a fill is only posted/closed
-    if its filled_at is NEWER than `cutoff = max(persisted watermark, now -
-    _RECENCY_WINDOW_HOURS)`. A fill at or before cutoff is still added to
-    `seen` (so it never resurfaces) but is otherwise ignored. This protects
-    against the symbol-scoped read (Task 1) surfacing an order that is
-    genuinely new to `seen` yet chronologically ancient — without the gate
-    that would post + close against today's fresh position on the same
-    ticker at a stale price. The watermark is persisted and only advances to
-    the filled_at of a fill actually POSTED this run (never on a stale-
-    skipped or first-run-seeded one — advancing on those would gain nothing,
-    since their ids are already in `seen`, while risking gating out a fill
-    that legitimately surfaces late: Task 1's combined read is "newest-first
-    PER READ but NOT globally re-sorted", and _open_signal_tickers fails
-    closed to [] on any DB blip, so the arrival stream is not strictly
-    monotonic in filled_at). This still closes the steady-state gap: an id
-    that ages out of the 800-entry seen cap can't resurface as "new" once the
-    watermark has passed its filled_at.
+    Recency gate (review fix round 1, finding 1; cutoff definition REVISED in
+    fix round 2): a fill is only posted/closed if its filled_at is NEWER than
+    `cutoff = now - _RECENCY_WINDOW_HOURS`. A fill at or before cutoff is
+    still added to `seen` (so it never resurfaces) but is otherwise ignored.
+    This protects against the symbol-scoped read (Task 1) surfacing an order
+    that is genuinely new to `seen` yet chronologically ancient — without the
+    gate that would post + close against today's fresh position on the same
+    ticker at a stale price.
+
+    The cutoff is DELIBERATELY a plain rolling window, not `max(watermark,
+    now-48h)` (round 1's design): the closed-order window can surface an
+    OLDER fill after a NEWER one has already been processed (e.g. a 10:00
+    fill missed by the 10:10 read but present at 10:20, after a 10:15 fill
+    already advanced a hypothetical watermark) — folding a watermark into the
+    cutoff would wrongly gate that still-legitimate 10:00 fill out forever.
+    `watermark` is persisted purely as an INFORMATIONAL "newest filled_at of a
+    fill actually processed" (useful for logs/diagnostics) and never affects
+    `is_stale`.
 
     Pending retry (review fix round 1, finding 2): a closing-kind fill whose
     close attempt FAILS (DB blip; _close_signals_for_fill returns -1, not a
@@ -768,8 +778,8 @@ def run_exit_fill_reporter(dry_run: bool) -> dict:
     retries the close for any pending id still present in that run's fill
     window, clearing it on success.
 
-    Idempotency has three layers: the seen-set file, the watermark, and
-    drop_signal_close flipping execution_signals to 'closed' so
+    Idempotency has two gating layers — the seen-set file and the 48h rolling
+    floor — plus drop_signal_close flipping execution_signals to 'closed' so
     _held_signal_rows stops returning the row even if the state file is lost."""
     from execution.stop_reattach import _post_alert, fetch_recent_closed_orders
     stats = {'fills_seen': 0, 'reported': 0, 'signals_closed': 0}
@@ -792,8 +802,7 @@ def run_exit_fill_reporter(dry_run: bool) -> dict:
     watermark_dt = _parse_fill_time(state.get('watermark'))
 
     now = datetime.now(timezone.utc)
-    default_cutoff = now - timedelta(hours=_RECENCY_WINDOW_HOURS)
-    cutoff = max(watermark_dt, default_cutoff) if watermark_dt else default_cutoff
+    cutoff = now - timedelta(hours=_RECENCY_WINDOW_HOURS)  # watermark does NOT gate (fix round 2)
 
     seen = set(seen_list)
 
@@ -814,6 +823,11 @@ def run_exit_fill_reporter(dry_run: bool) -> dict:
         pending_list = still_pending
 
     new = [f for f in fills if f['id'] and f['id'] not in seen]
+    # `newest_dt` (persisted as `watermark`) is monotonic-informational only —
+    # it does NOT feed `cutoff` (fix round 2). Kept as a "newest filled_at
+    # actually processed" diagnostic for logs; a future reader should not
+    # fold it back into the gate (see the module comment above _RECENCY_
+    # WINDOW_HOURS for why that was tried and reverted).
     newest_dt = watermark_dt
     for f in new:
         seen.add(f['id'])
@@ -822,16 +836,11 @@ def run_exit_fill_reporter(dry_run: bool) -> dict:
         is_stale = fill_dt is None or fill_dt <= cutoff
         if first_run or is_stale:
             continue                     # seed / stale: neither posted nor closed
-        # Only a fill we actually ACT on (post, and close if eligible) may
-        # advance the watermark. Task 1's combined read is "newest-first PER
-        # READ but NOT globally re-sorted", and _open_signal_tickers fails
-        # closed to [] on any DB blip — so the arrival stream is not
-        # monotonic in filled_at: a fill can legitimately surface late (e.g.
-        # its ticker dropped out of scope for one tick). Advancing the
-        # watermark on a stale-skipped or first-run-seeded fill would ratchet
-        # the cutoff forward with nothing gained (its id is already in
-        # `seen`) while risking gating out that kind of late, still-eligible
-        # fill on a future run.
+        # Only advance the informational watermark for a fill we actually
+        # ACT on — advancing it on a fill nothing was done with (stale-skipped
+        # or first-run-seeded) would make the diagnostic misleading (it would
+        # claim to have "processed" a fill it never touched) for no benefit,
+        # since that fill's id is already in `seen` regardless.
         if newest_dt is None or fill_dt > newest_dt:
             newest_dt = fill_dt
         lvl = f" (level {f['level']:.2f})" if f['level'] else ''
