@@ -1,0 +1,133 @@
+"""B2 exit-leg slippage: what the exit actually cost vs the level it aimed at.
+
+Sign convention matches execution_signals.fill_slippage_bps (migration 145):
+dir_sign * (level - price) / level * 1e4, dir_sign = +1 LONG / -1 SHORT, so a
+POSITIVE number always means "worse than the level we wanted".
+"""
+from __future__ import annotations
+
+import sys
+from datetime import date
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'src'))
+
+from execution import alpaca_reconcile as ar  # noqa: E402
+
+
+class _Cursor:
+    def __init__(self, rows=()):
+        self.rows = list(rows)
+        self.calls = []
+
+    def execute(self, sql, params=None):
+        self.calls.append((' '.join(sql.split()), params))
+
+    def fetchall(self):
+        return self.rows
+
+    def updates(self):
+        return [c for c in self.calls if c[0].startswith('UPDATE signal_pnl')]
+
+
+# ── which level was this exit aiming at ────────────────────────────────────
+
+def test_ahsx_coid_scores_against_the_stop_not_the_target():
+    """ahsx_ exits are marketable LIMITS emulating a stop (classify_exit_fills
+    tags them 'ah_exit'); typing alone would score them against target_1."""
+    assert ar.exit_level_kind('limit', 'ahsx_AAA_1') == 'stop'
+
+
+def test_ahtp_coid_scores_against_the_target():
+    assert ar.exit_level_kind('limit', 'ahtp_AAA_1') == 'target'
+
+
+def test_stop_and_stop_limit_order_types_score_against_the_stop():
+    assert ar.exit_level_kind('stop', None) == 'stop'
+    assert ar.exit_level_kind('STOP_LIMIT', '') == 'stop'
+
+
+def test_a_plain_limit_leg_scores_against_the_target():
+    assert ar.exit_level_kind('limit', 'oc_AAA_1_tp') == 'target'
+
+
+# ── signed adverse-positive bp ─────────────────────────────────────────────
+
+def test_long_exit_below_its_level_is_positive_adverse():
+    assert abs(ar.exit_slippage_bps('LONG', 10.0, 9.95) - 50.0) < 1e-6
+
+
+def test_long_exit_above_its_level_is_favourable_negative():
+    assert abs(ar.exit_slippage_bps('LONG', 10.0, 10.05) + 50.0) < 1e-6
+
+
+def test_short_exit_above_its_level_is_positive_adverse():
+    assert abs(ar.exit_slippage_bps('SHORT', 10.0, 10.05) - 50.0) < 1e-6
+
+
+def test_short_exit_below_its_level_is_favourable_negative():
+    assert abs(ar.exit_slippage_bps('SHORT', 10.0, 9.95) + 50.0) < 1e-6
+
+
+def test_missing_or_nonpositive_inputs_return_none():
+    assert ar.exit_slippage_bps('LONG', None, 10.0) is None
+    assert ar.exit_slippage_bps('LONG', 0.0, 10.0) is None
+    assert ar.exit_slippage_bps('LONG', 10.0, None) is None
+    assert ar.exit_slippage_bps('LONG', 10.0, 'nope') is None
+
+
+# ── plan_exit_slippage ─────────────────────────────────────────────────────
+
+def _row(otype, coid, price, direction='LONG', stop=10.0, tgt=12.0,
+         sig='sig-1', pnl=date(2026, 9, 11), aid='act-3'):
+    return (aid, otype, coid, price, sig, direction, stop, tgt, pnl)
+
+
+def test_plan_uses_the_stop_for_a_stop_leg():
+    plan = ar.plan_exit_slippage([_row('stop', 'oc_1_sl', 9.95)])
+    assert plan == [('sig-1', date(2026, 9, 11), 50.0)]
+
+
+def test_plan_uses_the_target_for_a_tp_leg():
+    plan = ar.plan_exit_slippage([_row('limit', 'oc_1_tp', 11.94)])
+    assert plan[0][0] == 'sig-1'
+    assert abs(plan[0][2] - 50.0) < 1e-6
+
+
+def test_plan_uses_the_stop_for_an_ahsx_limit():
+    plan = ar.plan_exit_slippage([_row('limit', 'ahsx_AAA_1', 9.95)])
+    assert abs(plan[0][2] - 50.0) < 1e-6
+
+
+def test_plan_skips_rows_with_no_usable_level():
+    assert ar.plan_exit_slippage([_row('stop', 'oc_1_sl', 9.95, stop=None)]) == []
+
+
+# ── backfill_exit_slippage ─────────────────────────────────────────────────
+
+def test_backfill_updates_only_null_rows_and_releases_its_savepoint():
+    cur = _Cursor([_row('stop', 'oc_1_sl', 9.95)])
+    assert ar.backfill_exit_slippage(cur, '2026-09-11') == 1
+    sql, params = cur.updates()[0]
+    assert 'exit_slippage_bps IS NULL' in sql
+    assert params == (50.0, 'sig-1', date(2026, 9, 11))
+    assert any(c[0] == 'RELEASE SAVEPOINT sp_exit_slip' for c in cur.calls)
+
+
+def test_backfill_dry_run_plans_but_writes_nothing():
+    cur = _Cursor([_row('stop', 'oc_1_sl', 9.95)])
+    assert ar.backfill_exit_slippage(cur, '2026-09-11', dry_run=True) == 1
+    assert cur.updates() == []
+
+
+def test_backfill_rolls_back_and_returns_zero_on_failure():
+    class _Boom(_Cursor):
+        def execute(self, sql, params=None):
+            super().execute(sql, params)
+            if sql.strip().upper().startswith('SELECT'):
+                raise RuntimeError('relation broker_fills does not exist')
+    cur = _Boom()
+    assert ar.backfill_exit_slippage(cur, '2026-09-11') == 0
+    assert any(c[0] == 'ROLLBACK TO SAVEPOINT sp_exit_slip' for c in cur.calls)

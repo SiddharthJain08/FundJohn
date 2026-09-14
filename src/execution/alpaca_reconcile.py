@@ -389,6 +389,123 @@ def ingest_broker_fills(cur, fills, order_meta=None, *, dry_run: bool = False) -
     return n
 
 
+# ── B2: exit-leg slippage join (spec item 14) ────────────────────────────────
+_EXIT_CANDIDATE_SQL = """
+    SELECT bf.activity_id, bf.order_type, bf.client_order_id, bf.price,
+           es.id, es.direction, es.stop_loss, es.target_1, sp.pnl_date
+      FROM broker_fills bf
+      JOIN alpaca_submissions s ON s.alpaca_order_id = bf.parent_order_id
+      JOIN execution_signals es ON es.target_date = s.run_date
+                               AND es.ticker = s.ticker
+                               AND es.strategy_id = s.strategy_id
+      JOIN LATERAL (
+            SELECT pnl_date, exit_slippage_bps
+              FROM signal_pnl
+             WHERE signal_id = es.id
+             ORDER BY pnl_date DESC
+             LIMIT 1
+           ) sp ON TRUE
+     WHERE bf.parent_order_id IS NOT NULL
+       AND bf.filled_at >= %s::date - %s
+       AND sp.exit_slippage_bps IS NULL
+"""
+
+
+def exit_level_kind(order_type, client_order_id) -> str:
+    """'stop' or 'target' — which bracket level this exit fill was aiming at.
+
+    client_order_id WINS over order_type: the after-hours monitor's ahsx_ exits
+    are marketable LIMITS that emulate a stop (afterhours_tp.classify_exit_fills
+    tags them 'ah_exit'), so typing alone would score them against target_1 and
+    report a 20 % "slippage" on every emulated stop."""
+    coid = str(client_order_id or '')
+    if coid.startswith('ahsx_'):
+        return 'stop'
+    if coid.startswith('ahtp_'):
+        return 'target'
+    if str(order_type or '').lower() in ('stop', 'stop_limit'):
+        return 'stop'
+    return 'target'
+
+
+def exit_slippage_bps(direction, level, price):
+    """Signed adverse-positive slippage of an exit fill vs its intended level.
+
+    LONG exits (sell): filling BELOW the level is adverse -> +bp.
+    SHORT exits (buy): filling ABOVE the level is adverse -> +bp.
+    Both collapse to dir_sign * (level - price) / level * 10000 with
+    dir_sign = +1 for LONG, -1 for SHORT — the same convention
+    execution_signals.fill_slippage_bps uses for entries (migration 145,
+    parity_mark.backfill_broker_fill_truth:317-322).
+
+    None when the level or the price is missing or non-positive."""
+    try:
+        lvl = float(level)
+        px = float(price)
+    except (TypeError, ValueError):
+        return None
+    if lvl <= 0 or px <= 0:
+        return None
+    sign = 1.0 if str(direction or '').upper() in ('LONG', 'BUY', 'BUY_VOL') else -1.0
+    return sign * (lvl - px) / lvl * 10000.0
+
+
+def plan_exit_slippage(rows) -> list:
+    """Pure: candidate rows from _EXIT_CANDIDATE_SQL -> [(signal_id, pnl_date, bps)].
+    Row shape: (activity_id, order_type, client_order_id, price, signal_id,
+    direction, stop_loss, target_1, pnl_date)."""
+    out = []
+    for r in (rows or []):
+        (_aid, otype, coid, price, sig_id, direction, stop_loss, target_1, pnl_date) = r
+        level = stop_loss if exit_level_kind(otype, coid) == 'stop' else target_1
+        bps = exit_slippage_bps(direction, level, price)
+        if bps is None:
+            continue
+        out.append((sig_id, pnl_date, round(bps, 4)))
+    return out
+
+
+def backfill_exit_slippage(cur, run_date, *, lookback_days: int = 5,
+                            dry_run: bool = False) -> int:
+    """Attribute broker exit-leg fills to signals and persist exit_slippage_bps
+    on each signal's LATEST signal_pnl row (migration 155).
+
+    Attribution: broker_fills.parent_order_id = alpaca_submissions.alpaca_order_id
+    identifies the submission whose bracket produced this exit leg, and the
+    submission maps to its signal by (run_date -> target_date, ticker,
+    strategy_id) — the same key parity_mark.backfill_broker_fill_truth:323-332
+    uses for the entry twin. Idempotent: only rows still NULL are written.
+    Savepoint-isolated; returns rows planned (0 on any failure).
+
+    dry_run reads and reports but issues no UPDATE — reconcile()'s docstring
+    promises dry-run "exits cleanly without touching the DB", and
+    PIPELINE_DRY_RUN=1 appends --dry-run to every pipeline step
+    (pipeline_orchestrator._resolve_script:491-496), so that path is reachable."""
+    cur.execute('SAVEPOINT sp_exit_slip')
+    try:
+        cur.execute(_EXIT_CANDIDATE_SQL, (run_date, int(lookback_days)))
+        plan = plan_exit_slippage(cur.fetchall() or [])
+        if not dry_run:
+            for sig_id, pnl_date, bps in plan:
+                cur.execute(
+                    'UPDATE signal_pnl SET exit_slippage_bps = %s '
+                    'WHERE signal_id = %s AND pnl_date = %s AND exit_slippage_bps IS NULL',
+                    (bps, sig_id, pnl_date))
+        cur.execute('RELEASE SAVEPOINT sp_exit_slip')
+        if plan:
+            log(f'exit slippage: {len(plan)} exit-leg bp value(s)'
+                f'{" (DRY-RUN, not written)" if dry_run else " persisted"}')
+        return len(plan)
+    except Exception as exc:  # noqa: BLE001
+        log(f'exit slippage backfill failed ({type(exc).__name__}: {exc}) — skipped')
+        try:
+            cur.execute('ROLLBACK TO SAVEPOINT sp_exit_slip')
+            cur.execute('RELEASE SAVEPOINT sp_exit_slip')
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
+
+
 def reconcile(run_date: str, conn, dry_run: bool = False,
               poll_timeout_s: int = 30, poll_interval_s: int = 3):
     """Update alpaca_submissions rows for `run_date` with broker fill state.
@@ -501,6 +618,7 @@ def reconcile(run_date: str, conn, dry_run: bool = False,
         _ok_meta, _orders = fetch_recent_closed_orders(_syms, include_unscoped=False)
         ingest_broker_fills(cur, fills, build_order_meta(_orders) if _ok_meta else {},
                             dry_run=dry_run)
+        backfill_exit_slippage(cur, run_date, dry_run=dry_run)
         cur.execute('RELEASE SAVEPOINT sp_broker_fills')
     except Exception as exc:  # noqa: BLE001
         log(f'broker_fills ingest skipped ({type(exc).__name__}: {exc})')
