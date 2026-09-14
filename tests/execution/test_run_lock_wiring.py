@@ -77,6 +77,18 @@ class FakeRedis:
     def publish(self, *a, **kw):
         return 0
 
+    def eval(self, _script, _numkeys, key, expected, new, ttl):
+        """Emulates run_lock.py's takeover CAS (a Lua GET+SET in real Redis):
+        writes `new` iff the key's CURRENT value still equals `expected`.
+        NOT Python's builtin eval — this is the Redis client's EVAL command
+        method name; no code is executed here (same fake as
+        tests/lib/test_run_lock.py carries)."""
+        if self.store.get(key) == expected:
+            self.store[key] = new
+            self.ttls[key] = int(ttl)
+            return True
+        return None
+
 
 DATE = '2026-09-14'
 KEY = f'pipeline:run_lock:{DATE}'
@@ -272,17 +284,26 @@ class TestMainBusyLock(unittest.TestCase):
 
 
 class TestForceResume(unittest.TestCase):
-    """Controller ruling (fix round 1): --force-resume must NOT acquire,
-    write, overwrite, or release the lock at all. The pre-fix-round-1
-    version of this branch wrote an OWNED value over whatever was already
-    there; since scripts/redeploy_pipeline.py hardcodes --force-resume onto
-    every intraday redeploy, that write could clobber the DAILY CYCLE's own
-    lock value mid-run and kill it at its very next renew — a failure mode
-    this task introduced and that did not exist before it. Zero lock
-    interaction preserves the old "runs beside the holder" semantics
-    without ever being able to harm it: `LOCK_VALUE` is simply never
-    assigned in this branch, so every `release_lock()` call (including the
-    top-level `finally`) is a no-op.
+    """Controller ruling, wave-1 fix item 5 — SUPERSEDES the fix-round-1
+    "zero lock interaction" rule tested here before.
+
+    Fix round 1 had --force-resume skip the lock entirely. That left the
+    COMMON case unlocked: the key is usually free, and
+    scripts/redeploy_pipeline.py hardcodes --force-resume onto every intraday
+    redeploy, so a redeploy could run `trade`/`alpaca` concurrently with the
+    15:00 cycle — a double-submission shape.
+
+    The ruling now is:
+      * key FREE      → acquire normally (owned value, per-step renew,
+                        value-checked release) — i.e. just fall through to
+                        the same `acquire_lock()` every other run uses;
+      * DEAD same-host holder → taken over by that same `acquire_lock()`;
+      * LIVE holder   → run BESIDE it without touching the key at all (log +
+                        post `[lock] --force-resume: running beside holder
+                        <value>`). `LOCK_VALUE` stays unset in this case, so
+                        every `release_lock()` call — including the top-level
+                        `finally` — remains a no-op and the holder's own value
+                        is never overwritten or deleted.
     """
 
     def setUp(self):
@@ -291,30 +312,99 @@ class TestForceResume(unittest.TestCase):
     def tearDown(self):
         po.LOCK_VALUE = None
 
-    def _run(self, r):
+    def _run(self, r, snap=None):
+        """Drive main() with --force-resume and a stubbed run_step.
+
+        `snap`, when given, records the lock state as observed from INSIDE the
+        first step — the only way to tell "acquired then released" from "never
+        acquired", since both end with the key absent.
+        """
         with _hermetic_main(r) as (posts, feed_msgs, alert_msgs, dashboard_calls):
-            po.run_step = lambda *a, **kw: (True, 0)
+            def _run_step(script, run_date, env, renew=None):
+                if snap is not None and 'key' not in snap:
+                    snap['key'] = r.store.get(KEY)
+                    snap['lock_value'] = po.LOCK_VALUE
+                return (True, 0)
+            po.run_step = _run_step
             rc = po.main(['--date', DATE, '--force-resume', '--steps', 'report'])
         return rc, posts, dashboard_calls
 
+    def test_force_resume_with_a_free_key_acquires_an_owned_value(self):
+        r = FakeRedis()
+        snap = {}
+        rc, posts, dashboard_calls = self._run(r, snap)
+        self.assertEqual(rc, 0)
+        # Mid-run: an owned value really was held (not the beside-holder path).
+        self.assertIsNotNone(snap['key'])
+        self.assertEqual(snap['key'], snap['lock_value'])
+        self.assertEqual(run_lock.parse_value(snap['key'])[1], os.getpid())
+        self.assertFalse(any('running beside holder' in m for _c, m in posts), posts)
+        # …and released at the end of the run.
+        self.assertNotIn(KEY, r.store)
+        self.assertIsNone(po.LOCK_VALUE)
+        self.assertEqual(dashboard_calls, [DATE])
+
+    def test_force_resume_takes_over_a_dead_same_host_holder(self):
+        r = FakeRedis({KEY: f'{po._HOST}:999999:T0'})   # our host, dead pid
+        snap = {}
+        rc, posts, dashboard_calls = self._run(r, snap)
+        self.assertEqual(rc, 0)
+        self.assertNotEqual(snap['key'], f'{po._HOST}:999999:T0')  # taken over
+        self.assertEqual(snap['key'], snap['lock_value'])
+        self.assertFalse(any('running beside holder' in m for _c, m in posts), posts)
+        self.assertNotIn(KEY, r.store)                  # and released
+        self.assertEqual(dashboard_calls, [DATE])
+
     def test_force_resume_with_live_holder_leaves_it_byte_identical(self):
         r = FakeRedis({KEY: 'otherbox:99999:T0'})   # some other live holder
-        rc, posts, dashboard_calls = self._run(r)
+        snap = {}
+        rc, posts, dashboard_calls = self._run(r, snap)
         self.assertEqual(rc, 0)
-        # Byte-identical — not overwritten, not deleted.
+        # Byte-identical — not overwritten, not deleted, at no point.
+        self.assertEqual(snap['key'], 'otherbox:99999:T0')
+        self.assertIsNone(snap['lock_value'])
         self.assertEqual(r.store[KEY], 'otherbox:99999:T0')
         self.assertIsNone(po.LOCK_VALUE)
         self.assertTrue(any('running beside holder' in m for _c, m in posts), posts)
         self.assertTrue(any('otherbox:99999:T0' in m for _c, m in posts), posts)
         self.assertEqual(dashboard_calls, [DATE])   # cycle still ran to completion
 
-    def test_force_resume_with_no_holder_writes_nothing(self):
-        r = FakeRedis()
-        rc, posts, dashboard_calls = self._run(r)
+    def test_force_resume_beside_a_live_holder_still_runs_every_step(self):
+        """With the REAL run_step (renew wiring live, `true` as the script):
+        holding no lock must not abort the run at the first `_renew_or_lose`.
+        """
+        r = FakeRedis({KEY: 'otherbox:99999:T0'})
+        ran_scripts = []
+        with _hermetic_main(r) as (posts, feed_msgs, alert_msgs, dashboard_calls):
+            po._resolve_script = lambda script, run_date: (['true'], 5)
+            orig_run_step = po.run_step
+
+            def _tracking_run_step(script, run_date, env, renew=None):
+                ran_scripts.append(script)
+                return orig_run_step(script, run_date, env, renew=renew)
+
+            po.run_step = _tracking_run_step
+            rc = po.main(['--date', DATE, '--force-resume',
+                          '--steps', 'signals,handoff'])
         self.assertEqual(rc, 0)
-        self.assertNotIn(KEY, r.store)               # nothing written
+        self.assertEqual(ran_scripts, ['engine', 'trade_handoff_builder'])
+        self.assertEqual(r.store[KEY], 'otherbox:99999:T0')
         self.assertIsNone(po.LOCK_VALUE)
-        self.assertTrue(any('running beside holder' in m for _c, m in posts), posts)
+
+    def test_without_force_resume_a_free_key_is_still_acquired(self):
+        """Regression guard: the refusal path must only trigger on a real
+        holder, and the ordinary (no-flag) run is unchanged by item 5."""
+        r = FakeRedis()
+        snap = {}
+        with _hermetic_main(r) as (posts, feed_msgs, alert_msgs, dashboard_calls):
+            def _run_step(script, run_date, env, renew=None):
+                snap.setdefault('key', r.store.get(KEY))
+                return (True, 0)
+            po.run_step = _run_step
+            rc = po.main(['--date', DATE, '--steps', 'report'])
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(snap['key'])
+        self.assertNotIn(KEY, r.store)
         self.assertEqual(dashboard_calls, [DATE])
 
 

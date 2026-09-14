@@ -656,6 +656,16 @@ def _renew_or_lose(r, run_date, step_timeout_s):
         lock, so it's run_step's job to retry once before treating it as
         fatal, not this function's.
     """
+    if not LOCK_VALUE:
+        # We deliberately hold NO lock: the only way to get here is
+        # `--force-resume` running beside a LIVE holder (wave-1 fix item 5),
+        # where acquire_lock() refused and left LOCK_VALUE unset on purpose.
+        # There is nothing to renew and nothing to lose, so this is a no-op
+        # success — exactly like the JS twin's `renewCurrent()`, which
+        # returns true when no lock is published. Without this, renew_lock()'s
+        # `if not LOCK_VALUE: return False` would raise LockLost at the very
+        # first step and kill the run the beside-holder path exists to allow.
+        return
     if not renew_lock(r, run_date, _run_lock.ttl_for(step_timeout_s)):
         raise LockLost(f'renew failed for {run_date} — lock lapsed or taken over')
 
@@ -901,31 +911,31 @@ def main(argv=None):
     # `return 0` — cron and systemd both recorded a successful cycle that never
     # ran. It now exits rc=75 (EX_TEMPFAIL) and posts, so the failure notifier
     # and #pipeline-feed both see it.
+    #
+    # --force-resume (controller ruling, wave-1 fix item 5 — supersedes the
+    # fix-round-1 "zero lock interaction" rule): it ACQUIRES normally whenever
+    # the key is free, with an owned value, per-step renew and a value-checked
+    # release, i.e. it simply falls through to the same acquire_lock() as every
+    # other run — and a dead same-host holder is taken over by that same call.
+    # Fix round 1 had it skip the lock entirely, which left the common case
+    # (key free) UNLOCKED: scripts/redeploy_pipeline.py hardcodes
+    # --force-resume, so an intraday redeploy could run `trade`/`alpaca`
+    # concurrently with the 15:00 cycle — a double-submission shape. The
+    # narrow escape hatch it was really for survives below: when the key is
+    # held by a LIVE holder, --force-resume runs BESIDE it without touching the
+    # key (no write, no overwrite, no delete). LOCK_VALUE stays unset in that
+    # case, so every release_lock() call below — including the top-level
+    # `finally` — is a no-op and the holder's own value is never harmed.
     lock_ttl = _run_lock.ttl_for(max(_resolve_script(s, run_date)[1] for _k, s in effective_steps))
-    if not args.force_resume:
-        if not acquire_lock(r, run_date, lock_ttl):
-            holder = _LAST_HOLDER
+    if not acquire_lock(r, run_date, lock_ttl):
+        holder = _LAST_HOLDER
+        if not args.force_resume:
             msg = (f'{reason_tag}🔒 **Pipeline lock held — run refused** | {run_date}\n'
                    f'`[lock] held by {holder}`\n'
                    f'Exit rc={_run_lock.LOCK_BUSY_RC}. Use `--force-resume` to override.')
             log(f'[lock] held by {holder} for {run_date} — exiting rc={_run_lock.LOCK_BUSY_RC}')
             notify(msg, channel='pipeline-feed')
             return _run_lock.LOCK_BUSY_RC
-    else:
-        # Controller ruling (fix round 1): --force-resume must NOT acquire,
-        # write, overwrite, or release the lock — AT ALL. The prior version
-        # of this branch wrote an OWNED value over whatever was already
-        # there; scripts/redeploy_pipeline.py hardcodes --force-resume onto
-        # every intraday redeploy, so that write could clobber the DAILY
-        # CYCLE's own lock value mid-run and kill it at its very next
-        # renew — a failure mode this task introduced and did not exist
-        # before it. Zero lock interaction preserves the old "runs beside
-        # the holder" semantics without ever being able to harm it:
-        # LOCK_VALUE is simply never assigned here, so every release_lock()
-        # call below (including the top-level `finally`) is a no-op.
-        holder = r.get(_run_lock.lock_key(run_date))
-        if isinstance(holder, bytes):
-            holder = holder.decode('utf-8', 'replace')
         log(f'[lock] --force-resume: running beside holder {holder}')
         notify(f'{reason_tag}⚠️ **--force-resume: running beside holder** | {run_date}\n'
                f'`[lock] --force-resume: running beside holder {holder}`',
