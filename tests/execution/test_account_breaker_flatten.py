@@ -118,6 +118,23 @@ def test_flatten_benchmark_exemption_is_case_insensitive(monkeypatch):
     assert closed == ['AAPL', 'AMD']
 
 
+def test_flatten_aborts_when_bench_tickers_is_none(monkeypatch):
+    """Fail-closed, second gate: bench_tickers(conn) returning None means the
+    lookup failed. flatten_alpha must ABORT — submit and journal nothing —
+    rather than silently treating None as 'no benchmarks', which would
+    flatten the exempt sleeve too (the worst outcome this action exists to
+    prevent)."""
+    def _boom(*_a, **_k):
+        raise AssertionError('must not submit when the bench lookup failed')
+
+    monkeypatch.setattr(rl, '_close_symbol', _boom)
+    cur = FakeCursor()
+    out = ab.flatten_alpha(POSITIONS, None, cur=cur, live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert out == {'ok': 0, 'fail': 0, 'pending': False, 'tickers': []}
+    assert cur.fires() == []
+
+
 def test_second_call_after_full_flatten_submits_nothing(monkeypatch):
     """Idempotency (binding safety constraint): once a position's broker qty
     reads back as 0 (post-flatten), a repeat call must submit nothing."""

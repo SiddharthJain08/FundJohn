@@ -403,10 +403,23 @@ def flatten_alpha(positions: dict, bench_tkrs, *, cur, live: bool, rule: str,
     normalized — the symbol journalled to circuit_breaker_fires and passed to
     _close_symbol keeps the broker's original casing, since that column is
     what _load_recent_risk_exits and open_reconcile._closed_today_tickers
-    join on."""
+    join on.
+
+    `bench_tkrs=None` is a second, defense-in-depth fail-closed gate (the
+    primary one is the caller checking bench_tickers(conn) for None before
+    ever calling this function): treating None the way `set(x or ())` would
+    — as "no benchmarks" — would flatten the exempt sleeve on the exact
+    failure this whole action exists to prevent, so None ABORTS with nothing
+    submitted and nothing journalled rather than degrading to an empty set."""
     from execution.regime_liquidator import _close_symbol
 
-    bench_norm = {str(t).strip().upper() for t in (bench_tkrs or ())}
+    if bench_tkrs is None:
+        logger.error('[account_breaker] flatten ABORTED: benchmark ticker '
+                     'set is None (lookup failed upstream); refusing to '
+                     'treat unknown sleeve membership as empty')
+        return {'ok': 0, 'fail': 0, 'pending': False, 'tickers': []}
+
+    bench_norm = {str(t).strip().upper() for t in bench_tkrs}
     threshold = rule_threshold(rule)
     ok = fail = 0
     touched: list = []
