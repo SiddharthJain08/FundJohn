@@ -34,6 +34,9 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import psycopg2
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / 'src') not in sys.path:
@@ -49,6 +52,14 @@ DEFAULT_NAV_OHLC_PATH = ROOT / 'logs' / 'pnl_daily_ohlc.json'
 DD_LIMIT = -0.10        # alpha-sleeve drawdown from the rolling peak
 DAILY_LIMIT = -0.03     # total-equity loss vs the session's opening equity
 BENCH_LOOKBACK_DAYS = 30
+
+_ET = ZoneInfo('America/New_York')
+
+# F-5 (deferred from Task 5's fix round 1, folded into Task 7 by the brief
+# supplement items 8/11): after this many CONSECUTIVE 5-minute ticks with a
+# still-pending flatten, run_once() posts ONE escalation to #trade-reports
+# (not a repeat every tick after) — see flatten_attempts (migration 158).
+FLATTEN_ESCALATE_AFTER = 12    # ~1 hour at the 5-minute RTH cron cadence
 
 # Float-equality tolerance for the boundary comparisons below: a ratio that is
 # mathematically exactly -0.10 (e.g. 90_000 / 100_000 - 1) lands on
@@ -133,6 +144,13 @@ def evaluate(alpha: float, peak, equity: float, opening_equity) -> dict:
 # `sp_broker_fills` savepoint. Reads fail open to a documented default and log
 # a WARNING; writes fail open (swallow, log ERROR) since a lost write here
 # must never abort the 5-minute cron tick, only be missed until next tick.
+#
+# Callers must supply a cursor inside a TRANSACTION BLOCK — autocommit
+# disables every savepoint guard above (a SAVEPOINT outside a transaction is
+# meaningless, and RELEASE/ROLLBACK TO SAVEPOINT lose their point), which
+# would turn one failed query into a connection that poisons the rest of the
+# caller's tick. run_once() asserts `conn.autocommit is False` before the
+# first guarded call for exactly this reason (brief supplement item 4).
 
 _STATE_COLS = ('halted', 'reason', 'breached_at', 'peak_alpha_nav', 'dd',
                'daily', 'pending_flatten')
@@ -186,22 +204,53 @@ def load_state(cur) -> dict:
 
 
 def save_state(cur, *, halted, reason, breached_at, peak, dd, daily,
-               pending_flatten) -> None:
-    """Persist the singleton latch. A failed write (e.g. migration 157 not
-    yet applied) is logged as an ERROR and swallowed — the caller's cycle
-    tick must still complete and retry the write on the next tick."""
+               pending_flatten, flatten_attempts=None) -> bool:
+    """Persist the singleton latch. Returns True iff the write actually
+    landed (supplement item 2) — every caller in run_once() must check this,
+    because a failed write here (e.g. migration 157 not yet applied) is
+    logged as an ERROR and swallowed rather than raised; the caller's cycle
+    tick must still be able to complete and retry the write on the next
+    tick, but the ONE call that gates a broker action (the pre-flatten latch
+    in run_once()) must see the failure to refuse that action.
+
+    `flatten_attempts` (migration 158, F-5) is None by default, meaning
+    "leave the consecutive-pending-tick counter untouched" — COALESCE keeps
+    whatever is already stored so existing callers that never pass it (every
+    branch except the two that actually attempt a flatten) don't reset it."""
     def _write():
         cur.execute(
             """
             UPDATE account_breaker_state
                SET halted = %s, reason = %s, breached_at = %s, peak_alpha_nav = %s,
-                   dd = %s, daily = %s, pending_flatten = %s, updated_at = NOW()
+                   dd = %s, daily = %s, pending_flatten = %s,
+                   flatten_attempts = COALESCE(%s, flatten_attempts), updated_at = NOW()
              WHERE id = 1
             """,
-            (bool(halted), reason, breached_at, peak, dd, daily, bool(pending_flatten)),
+            (bool(halted), reason, breached_at, peak, dd, daily, bool(pending_flatten),
+             flatten_attempts),
         )
 
-    _savepoint_guarded(cur, 'sp_ab_save_state', _write, on_error_level=logging.ERROR)
+    ok, _ = _savepoint_guarded(cur, 'sp_ab_save_state', _write, on_error_level=logging.ERROR)
+    return ok
+
+
+def load_flatten_attempts(cur) -> int:
+    """Consecutive-tick counter for a still-pending flatten (additive column
+    `flatten_attempts`, migration 158 — deferred F-5, folded into Task 7 by
+    the brief supplement). A SEPARATE SELECT from load_state's fixed
+    7-column query — load_state's row shape is a contract several existing
+    callers/tests are keyed to, so this reads the new column independently
+    rather than widening that tuple. Fails open to 0: a lost read only
+    delays the one-time escalation post by a tick, it never blocks the
+    retry itself."""
+    def _read():
+        cur.execute('SELECT flatten_attempts FROM account_breaker_state WHERE id = 1')
+        return cur.fetchone()
+
+    ok, row = _savepoint_guarded(cur, 'sp_ab_load_attempts', _read)
+    if not ok or not row or row[0] is None:
+        return 0
+    return int(row[0])
 
 
 def opening_equity(cur, session_date, equity, path=None) -> tuple[float, str]:
@@ -273,23 +322,31 @@ def rearm_requested(state: dict) -> bool:
     return token in _iso_variants(state.get('breached_at'))
 
 
-def clear_halt(cur, alpha: float) -> None:
+def clear_halt(cur, alpha: float) -> bool:
     """Operator re-arm: drop the latch and reset the rolling peak to the
-    current alpha NAV, so the next drawdown is measured from here. A failed
-    write is logged as an ERROR and swallowed, same as save_state."""
+    current alpha NAV, so the next drawdown is measured from here. Also
+    resets flatten_attempts to 0 — a fresh arm should not inherit a stale
+    retry count from the halt it just cleared (a literal, not a bound
+    param, so it never disturbs the existing `params[0] == alpha` contract
+    callers already rely on). Returns True iff the write landed (supplement
+    item 2); a failed write is logged as an ERROR and swallowed, same as
+    save_state — run_once() checks this and lets the same operator token
+    retry the re-arm on the next tick rather than silently doing nothing."""
     def _write():
         cur.execute(
             """
             UPDATE account_breaker_state
                SET halted = FALSE, reason = NULL, breached_at = NULL,
                    peak_alpha_nav = %s, pending_flatten = FALSE,
+                   flatten_attempts = 0,
                    rearmed_at = NOW(), updated_at = NOW()
              WHERE id = 1
             """,
             (float(alpha),),
         )
 
-    _savepoint_guarded(cur, 'sp_ab_clear_halt', _write, on_error_level=logging.ERROR)
+    ok, _ = _savepoint_guarded(cur, 'sp_ab_clear_halt', _write, on_error_level=logging.ERROR)
+    return ok
 
 
 def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
@@ -300,9 +357,17 @@ def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
     is appended at the END when `flatten` is given (flatten.get, not flatten[] —
     this line must never KeyError on every-tick emission)."""
     daily = 'n/a' if st.get('daily') is None else f"{st['daily']:.4f}"
+    # peak/dd render 'n/a' rather than raising on None (supplement item 5):
+    # the line must be emitted on EVERY tick — a missing line is the signal
+    # the process died — so a defensive None here (e.g. a future caller that
+    # hasn't seeded a peak yet) must never itself take the process down.
+    peak_v = st.get('peak')
+    peak_txt = 'n/a' if peak_v is None else f"{float(peak_v):.2f}"
+    dd_v = st.get('dd')
+    dd_txt = 'n/a' if dd_v is None else f"{float(dd_v):.4f}"
     line = (f"[account_breaker] {mode} equity={float(equity):.2f} "
             f"bench_mv={float(bench_mv):.2f} alpha_nav={float(alpha):.2f} "
-            f"peak={float(st['peak']):.2f} dd={float(st['dd']):.4f} "
+            f"peak={peak_txt} dd={dd_txt} "
             f"open_equity={float(open_equity):.2f} open_src={open_src} "
             f"daily={daily} rule={st['rule']} breach={int(bool(st['breach']))} "
             f"halted={int(bool(halted))}")
@@ -705,3 +770,295 @@ def flatten_alpha(positions: dict, bench_tkrs, *, cur, live: bool, rule: str,
     return {'ok': ok, 'fail': fail, 'partial': partial,
            'pending': fail > 0 or partial > 0, 'aborted': False,
            'tickers': touched}
+
+
+# ── entry point (C1e, Task 7) ────────────────────────────────────────────────
+
+def _post(channel: str, msg: str) -> None:
+    """Best-effort Discord post — a webhook failure must never abort a tick."""
+    try:
+        from execution.regime_liquidator import _post_to_discord
+        _post_to_discord(channel, msg)
+    except Exception as e:  # noqa: BLE001
+        logger.warning('[account_breaker] Discord post failed: %s', e)
+
+
+def _commit(conn) -> bool:
+    """conn.commit() that fails OPEN and LOUD. A commit failure here must
+    never crash the 5-minute tick (the caller decides what to do next), but
+    supplement item 2 requires every caller to be able to tell it happened —
+    this is what the pre-flatten gate in run_once() checks."""
+    try:
+        conn.commit()
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.error('[account_breaker] commit failed (%s: %s)', type(e).__name__, e)
+        return False
+
+
+def run_once(session_date=None) -> int:
+    """One 5-minute evaluation. 0 = evaluated, 1 = soft failure (no
+    evaluation this tick, retried in 5 minutes), 2 = misconfiguration.
+
+    CRITICAL ordering on a NEW breach in ARMED mode (brief supplement item 1
+    — overrides the plan's draft, which flattened first and persisted after):
+    the halt latch (halted=True, pending_flatten=True) is persisted and
+    COMMITTED *before* any broker action; only then does flatten_alpha run;
+    only then is the outcome (pending_flatten, flatten_attempts) persisted in
+    a SECOND write. If the pre-flatten persist or its commit fails: NO broker
+    action is taken this tick, a "detected but NOT latched" warning is posted
+    instead of "HALTED" as accomplished fact, and the tick returns 1 so the
+    next tick re-evaluates cleanly — a crash between "halt written" and
+    "flatten attempted" must never leave the DB believing the account is
+    still open for new alpha risk while positions are actually mid-close (or
+    vice versa: never believing it's halted when nothing was ever recorded).
+
+    The empty/unavailable-book guard (supplement item 11, and the
+    coordinator's clarification during Task 7) sits ahead of EVERY other DB
+    interaction — including `load_state` — so it uniformly protects both the
+    fresh-evaluation branch and the already-halted retry branch: neither may
+    ever call flatten_alpha with an empty positions mapping, because
+    flatten_alpha's own "nothing to close" outcome (pending=False) would
+    then be misread as "fully flattened" when it was actually just a failed
+    broker read, clearing pending_flatten on a halted breaker that never
+    re-evaluates and so would never retry the real flatten.
+    """
+    from execution.alpaca_trader import _alpaca_session, _fetch_account_state
+    from execution.regime_liquidator import _load_broker_positions, _market_is_open
+
+    uri = os.environ.get('POSTGRES_URI')
+    if not uri:
+        logger.error('[account_breaker] POSTGRES_URI not set; aborting')
+        return 2
+    if not _market_is_open():
+        logger.info('[account_breaker] market closed; skipping')
+        return 0
+
+    try:
+        equity = float(_fetch_account_state(_alpaca_session())['equity'])
+    except Exception as e:  # noqa: BLE001
+        logger.error('[account_breaker] account fetch failed (%s: %s); aborting',
+                     type(e).__name__, e)
+        return 1
+    if equity <= 0:
+        # _fetch_account_state returns zeros on failure — never evaluate on that.
+        logger.error('[account_breaker] equity=%s unusable; aborting', equity)
+        return 1
+
+    positions = _load_broker_positions()
+    if not positions:
+        # supplement item 11 (+ coordinator clarification): an empty/None
+        # book must not evaluate AT ALL — bench_mv would read 0 and alpha_nav
+        # would silently become total equity (a 10% ALPHA rule turning into
+        # a 10% TOTAL-NAV rule), and nothing could be flattened either way.
+        # Checked before load_state/the halted branch even exists, so a
+        # pending flatten from a PRIOR tick is left completely untouched —
+        # no state write happens on this path at all.
+        logger.error('[account_breaker] positions read empty/unavailable — '
+                     'skipping tick')
+        return 1
+
+    live = armed()
+    mode = 'armed' if live else 'shadow'
+    session = session_date or datetime.now(_ET).date()
+
+    conn = psycopg2.connect(uri)
+    try:
+        # Every read/write below relies on SAVEPOINT-guarded queries
+        # composing with the caller's own transaction (module docstring,
+        # supplement item 4): autocommit would disable that guard entirely,
+        # silently turning one failed query into a poisoned connection for
+        # the rest of the tick.
+        assert getattr(conn, 'autocommit', False) is False, (
+            '[account_breaker] connection must be non-autocommit — every '
+            'savepoint guard in this module depends on it')
+
+        cur = conn.cursor()
+        bench_raw = bench_tickers(cur)
+        if bench_raw is None:
+            logger.error('[account_breaker] benchmark ticker lookup failed; '
+                         'NO evaluation and NO flatten this tick')
+            return 1
+        # Defense-in-depth normalization at the call site too (supplement
+        # item 7) — alpha_nav/flatten_alpha already normalize internally;
+        # this just means every consumer downstream of this point sees the
+        # same casing, not a functional change.
+        bench = {str(t).strip().upper() for t in bench_raw}
+        alpha, bench_mv = alpha_nav(equity, positions, bench)
+
+        state = load_state(cur)
+
+        if rearm_requested(state):
+            rearmed = clear_halt(cur, alpha)
+            if not rearmed:
+                logger.error('[account_breaker] re-arm write failed; will '
+                             'retry next tick on the same operator token')
+            _commit(conn)
+            if rearmed:
+                logger.info('[account_breaker] re-armed by operator token; '
+                            'peak reset to %.2f', alpha)
+                state = {'halted': False, 'reason': None, 'breached_at': None,
+                         'peak': alpha, 'dd': None, 'daily': None,
+                         'pending_flatten': False}
+
+        open_eq, open_src = opening_equity(cur, session, equity)
+
+        if state['halted']:
+            # Latched. Never re-evaluate and never move the peak — only
+            # retry a flatten that failed to submit or was left partially
+            # open on an earlier tick.
+            st = {'peak': alpha if state['peak'] is None else state['peak'],
+                  'dd': 0.0 if state['dd'] is None else state['dd'],
+                  'daily': state['daily'], 'rule': state['reason'] or 'none',
+                  'breach': True}
+            flat = None
+            prior_attempts = attempts = 0
+            if state['pending_flatten'] and live:
+                prior_attempts = load_flatten_attempts(cur)
+                flat = flatten_alpha(positions, bench, cur=cur, live=True,
+                                     rule=st['rule'],
+                                     magnitude=rule_magnitude(st['rule'], st))
+                attempts = prior_attempts + 1 if flat['pending'] else 0
+                if not save_state(cur, halted=True, reason=state['reason'],
+                                  breached_at=state['breached_at'], peak=st['peak'],
+                                  dd=st['dd'], daily=st['daily'],
+                                  pending_flatten=flat['pending'],
+                                  flatten_attempts=attempts):
+                    logger.error('[account_breaker] failed to persist the '
+                                 'flatten-retry status; will retry next tick')
+            _commit(conn)
+
+            logger.debug('[account_breaker] bench_mv=%.2f bench_tickers=%s',
+                         bench_mv, sorted(bench))
+            logger.info(format_line(mode, equity=equity, bench_mv=bench_mv,
+                                    alpha=alpha, st=st, open_equity=open_eq,
+                                    open_src=open_src, halted=True, flatten=flat))
+
+            if flat is not None and prior_attempts < FLATTEN_ESCALATE_AFTER <= attempts:
+                _post('trade-reports',
+                      ':rotating_light: **Account breaker flatten still PENDING** '
+                      f"after {attempts} consecutive 5-minute ticks "
+                      f"(~{attempts * 5} min). Residual symbols: "
+                      f"{sorted(flat['tickers'])}. Operator attention needed — "
+                      'check broker positions directly; the breaker keeps '
+                      'retrying automatically.')
+            return 0
+
+        st = evaluate(alpha, state['peak'], equity, open_eq)
+
+        if not st['breach']:
+            flat = None
+            if not save_state(cur, halted=False, reason=None, breached_at=None,
+                              peak=st['peak'], dd=st['dd'], daily=st['daily'],
+                              pending_flatten=False):
+                logger.error('[account_breaker] clean-tick state write '
+                             'failed; will retry next tick')
+            _commit(conn)
+
+        elif not live:
+            # SHADOW breach: compute the would-be flatten counts for the log
+            # line ONLY. Never latch, never journal — _apply_account_breaker_
+            # gate reads `halted`, so latching here would change routing
+            # with the arming flag off (module docstring).
+            flat = flatten_alpha(positions, bench, cur=cur, live=False,
+                                 rule=st['rule'], magnitude=rule_magnitude(st['rule'], st),
+                                 journal=False)
+            if not save_state(cur, halted=False, reason=None, breached_at=None,
+                              peak=st['peak'], dd=st['dd'], daily=st['daily'],
+                              pending_flatten=False):
+                logger.error('[account_breaker] shadow-tick state write '
+                             'failed; will retry next tick')
+            _commit(conn)
+
+        else:
+            # NEW breach, ARMED — supplement item 1's critical ordering.
+            breached_at = datetime.now(timezone.utc)
+            persisted = save_state(cur, halted=True, reason=st['rule'],
+                                   breached_at=breached_at, peak=st['peak'],
+                                   dd=st['dd'], daily=st['daily'],
+                                   pending_flatten=True)
+            committed = _commit(conn)
+            if not persisted or not committed:
+                logger.error('[account_breaker] failed to persist the halt '
+                             'latch before flattening (rule=%s) — refusing '
+                             'all broker action this tick', st['rule'])
+                _post('trade-reports',
+                      ':warning: **Account breaker breach detected but NOT '
+                      f"latched** rule={st['rule']} — state persistence "
+                      'failed, so NO broker action was taken this tick. '
+                      'Will re-evaluate cleanly next tick.')
+                return 1
+
+            flat = flatten_alpha(positions, bench, cur=cur, live=True,
+                                 rule=st['rule'], magnitude=rule_magnitude(st['rule'], st),
+                                 journal=True)
+
+            prior_attempts = load_flatten_attempts(cur)
+            attempts = prior_attempts + 1 if flat['pending'] else 0
+            if not save_state(cur, halted=True, reason=st['rule'],
+                              breached_at=breached_at, peak=st['peak'],
+                              dd=st['dd'], daily=st['daily'],
+                              pending_flatten=flat['pending'],
+                              flatten_attempts=attempts):
+                logger.error('[account_breaker] failed to persist the '
+                             'post-flatten status; latch stays halted+'
+                             'pending from the pre-flatten write, next '
+                             'tick retries the flatten')
+            _commit(conn)
+
+            daily_txt = 'n/a' if st['daily'] is None else f"{st['daily'] * 100:.2f}%"
+            # attempted = len(tickers), NOT ok+fail (supplement item 9) — an
+            # ok-but-still-held symbol moves into partial only, so ok+fail
+            # can undercount. This is the Discord post only: format_line's
+            # ok/fail/partial/pending tail is the byte-exact grep contract
+            # (supplement item 2) and stays exactly as it is.
+            attempted = len(flat['tickers'])
+            _post('trade-reports',
+                  ':rotating_light: **Account breaker HALTED** '
+                  f"rule={st['rule']}\n"
+                  f"• alpha NAV ${alpha:,.0f} vs peak ${st['peak']:,.0f} "
+                  f"(dd {st['dd'] * 100:.2f}%, limit {DD_LIMIT * 100:.0f}%)\n"
+                  f"• equity ${equity:,.0f} vs session open ${open_eq:,.0f} "
+                  f"(daily {daily_txt}, limit {DAILY_LIMIT * 100:.0f}%)\n"
+                  f"• flattened {flat['ok']}/{attempted} alpha positions "
+                  f"(fail={flat['fail']} partial={flat['partial']} "
+                  f"pending={int(flat['pending'])}); benchmark sleeve "
+                  f"untouched ({sorted(bench)})\n"
+                  f"• re-arm (operator only): set "
+                  f"OPENCLAW_ACCOUNT_BREAKER_REARM={breached_at.isoformat()} in .env\n"
+                  '• OPENCLAW_ACCOUNT_BREAKER is read by BOTH the breaker '
+                  "cron and the sizer's trade step (supplement item 10) — "
+                  'flip it PROCESS-WIDE in .env and restart user-scope '
+                  'johnbot, never as a per-unit Environment= drop-in')
+
+            if prior_attempts < FLATTEN_ESCALATE_AFTER <= attempts:
+                _post('trade-reports',
+                      ':rotating_light: **Account breaker flatten still PENDING** '
+                      f"after {attempts} consecutive 5-minute ticks "
+                      f"(~{attempts * 5} min). Residual symbols: "
+                      f"{sorted(flat['tickers'])}. Operator attention needed — "
+                      'check broker positions directly; the breaker keeps '
+                      'retrying automatically.')
+
+        logger.debug('[account_breaker] bench_mv=%.2f bench_tickers=%s',
+                     bench_mv, sorted(bench))
+        logger.info(format_line(mode, equity=equity, bench_mv=bench_mv,
+                                alpha=alpha, st=st, open_equity=open_eq,
+                                open_src=open_src,
+                                halted=bool(live and st['breach']), flatten=flat))
+        return 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def main(argv=None) -> int:
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s %(levelname)s %(message)s')
+    return run_once()
+
+
+if __name__ == '__main__':
+    sys.exit(main())
