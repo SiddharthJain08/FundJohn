@@ -163,22 +163,27 @@ ST_BREACH = {'peak': 171_200.0, 'dd': -0.1291, 'daily': -0.0727,
 
 
 def test_shadow_line_is_byte_exact():
+    """Fix round 1, item 1: format_line now appends flatten_partial=<n> at the
+    end when a flatten dict is given — main() passes one even in SHADOW
+    (journal=False computes the counts without writing)."""
     line = ab.format_line('shadow', equity=203_145.22, bench_mv=41_000.0,
                           alpha=162_145.22, st=ST_CLEAN, open_equity=205_000.0,
-                          open_src='stored', halted=False)
+                          open_src='stored', halted=False,
+                          flatten={'ok': 0, 'fail': 0, 'partial': 0, 'pending': False})
     assert line == (
         '[account_breaker] shadow equity=203145.22 bench_mv=41000.00 '
         'alpha_nav=162145.22 peak=171200.00 dd=-0.0529 open_equity=205000.00 '
-        'open_src=stored daily=-0.0090 rule=none breach=0 halted=0')
+        'open_src=stored daily=-0.0090 rule=none breach=0 halted=0 '
+        'flatten_ok=0 flatten_fail=0 pending=0 flatten_partial=0')
 
 
 def test_armed_line_carries_the_flatten_tail():
     line = ab.format_line('armed', equity=190_100.0, bench_mv=41_000.0,
                           alpha=149_100.0, st=ST_BREACH, open_equity=205_000.0,
                           open_src='estimated', halted=True,
-                          flatten={'ok': 6, 'fail': 1, 'pending': True})
+                          flatten={'ok': 6, 'fail': 1, 'partial': 2, 'pending': True})
     assert line.endswith('rule=drawdown breach=1 halted=1 '
-                         'flatten_ok=6 flatten_fail=1 pending=1')
+                         'flatten_ok=6 flatten_fail=1 pending=1 flatten_partial=2')
     assert line.startswith('[account_breaker] armed ')
 
 

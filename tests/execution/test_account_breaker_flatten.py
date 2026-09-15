@@ -1,9 +1,17 @@
 """C1 flatten action: benchmark positions are never closed, the lookup fails
-CLOSED, failed submits leave pending_flatten set for the next tick, and every
-attempt is journalled to circuit_breaker_fires (shadow rows carry dry_run=true
-so the sizer's risk-exit cooldown ignores them).
+CLOSED, failed/partial/stuck closes leave pending_flatten set for the next
+tick, and every real attempt is journalled to circuit_breaker_fires (shadow
+rows carry dry_run=true so the sizer's risk-exit cooldown ignores them).
 
-_close_symbol is always patched — no test may reach the alpaca CLI.
+_close_symbol, _load_open_orders and _load_broker_positions are ALWAYS
+patched (see the autouse fixture below) — no test may reach the alpaca CLI.
+
+Fix round 1 (2026-09-12 qd-stream-c-risk, task 5): flatten_alpha's return
+shape gained 'partial' and 'aborted'; a post-loop broker re-read now catches
+submit-ok-but-still-held positions; a pre-loop open-orders check skips
+resubmitting a symbol that already has a working close order; bench_tickers
+now takes `cur` (not `conn`) and fails CLOSED when a benchmark-sleeve
+strategy resolves to zero tickers.
 """
 from __future__ import annotations
 
@@ -42,23 +50,6 @@ class FakeCursor:
         return [p for s, p in self.calls if 'INSERT INTO circuit_breaker_fires' in s]
 
 
-class FakeConn:
-    def __init__(self, cur):
-        self._cur = cur
-
-    def cursor(self):
-        conn_cur = self._cur
-
-        class _Ctx:
-            def __enter__(self_inner):
-                return conn_cur
-
-            def __exit__(self_inner, *_a):
-                return False
-
-        return _Ctx()
-
-
 POSITIONS = {
     'SPY':  {'qty': 200.0,  'side': 'long',  'market_value': '41000'},
     'AAPL': {'qty': 100.0,  'side': 'long',  'market_value': '22000'},
@@ -69,30 +60,50 @@ ST = {'peak': 171_200.0, 'dd': -0.1291, 'daily': -0.0727,
       'rule': 'drawdown', 'breach': True}
 
 
+@pytest.fixture(autouse=True)
+def _no_real_broker_calls(monkeypatch):
+    """Default double for every new broker touchpoint flatten_alpha added in
+    fix round 1: no working close orders resting, and the post-loop re-read
+    shows every touched symbol gone from the book (i.e. the close 'stuck').
+    Individual tests override via monkeypatch for their own scenario. Also
+    kills the real 0.5s settle sleep so the suite doesn't pay it 20+ times.
+    No test may reach the real alpaca CLI."""
+    monkeypatch.setattr(ab.time, 'sleep', lambda s: None)
+    monkeypatch.setattr(rl, '_load_open_orders', lambda: [])
+    monkeypatch.setattr(rl, '_load_broker_positions', lambda: {})
+
+
 # ── benchmark ticker lookup ─────────────────────────────────────────────────
 
 def test_bench_tickers_reads_registry_then_recent_signals():
     cur = FakeCursor([[('S_beta_spy',)], [('SPY',)]])
-    conn = FakeConn(cur)
-    assert ab.bench_tickers(conn) == {'SPY'}
+    assert ab.bench_tickers(cur) == {'SPY'}
     assert any('strategy_registry' in s for s, _ in cur.calls)
     assert any('execution_signals' in s for s, _ in cur.calls)
 
 
 def test_bench_tickers_no_sleeve_is_an_empty_set_not_none():
     cur = FakeCursor([[]])
-    assert ab.bench_tickers(FakeConn(cur)) == set()
+    assert ab.bench_tickers(cur) == set()
+
+
+def test_bench_tickers_ids_present_but_zero_tickers_resolved_is_none():
+    """Fix round 1, item 2: a benchmark-sleeve strategy id EXISTS but
+    execution_signals has nothing recent for it — that is NOT the same as
+    "no sleeve configured" and must fail CLOSED, not degrade to set()."""
+    cur = FakeCursor([[('S_beta_spy',)], []])
+    assert ab.bench_tickers(cur) is None
 
 
 def test_bench_tickers_fails_closed_to_none_on_error():
-    class Boom:
-        def cursor(self):
+    class BoomCursor:
+        def execute(self, *_a, **_k):
             raise RuntimeError('db down')
 
-    assert ab.bench_tickers(Boom()) is None
+    assert ab.bench_tickers(BoomCursor()) is None
 
 
-# ── flatten ─────────────────────────────────────────────────────────────────
+# ── flatten: benchmark/zero-qty/option/crypto exemptions ────────────────────
 
 def test_flatten_skips_benchmark_and_zero_qty_positions(monkeypatch):
     closed = []
@@ -102,7 +113,8 @@ def test_flatten_skips_benchmark_and_zero_qty_positions(monkeypatch):
     out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=cur, live=True,
                            rule='drawdown', magnitude=ST['dd'])
     assert closed == ['AAPL', 'AMD']          # sorted, SPY and FLAT excluded
-    assert out == {'ok': 2, 'fail': 0, 'pending': False, 'tickers': ['AAPL', 'AMD']}
+    assert out == {'ok': 2, 'fail': 0, 'partial': 0, 'pending': False,
+                   'aborted': False, 'tickers': ['AAPL', 'AMD']}
 
 
 def test_flatten_benchmark_exemption_is_case_insensitive(monkeypatch):
@@ -116,36 +128,6 @@ def test_flatten_benchmark_exemption_is_case_insensitive(monkeypatch):
                      rule='drawdown', magnitude=ST['dd'])
     assert 'SPY' not in closed
     assert closed == ['AAPL', 'AMD']
-
-
-def test_flatten_aborts_when_bench_tickers_is_none(monkeypatch):
-    """Fail-closed, second gate: bench_tickers(conn) returning None means the
-    lookup failed. flatten_alpha must ABORT — submit and journal nothing —
-    rather than silently treating None as 'no benchmarks', which would
-    flatten the exempt sleeve too (the worst outcome this action exists to
-    prevent)."""
-    def _boom(*_a, **_k):
-        raise AssertionError('must not submit when the bench lookup failed')
-
-    monkeypatch.setattr(rl, '_close_symbol', _boom)
-    cur = FakeCursor()
-    out = ab.flatten_alpha(POSITIONS, None, cur=cur, live=True,
-                           rule='drawdown', magnitude=ST['dd'])
-    assert out == {'ok': 0, 'fail': 0, 'pending': False, 'tickers': []}
-    assert cur.fires() == []
-
-
-def test_second_call_after_full_flatten_submits_nothing(monkeypatch):
-    """Idempotency (binding safety constraint): once a position's broker qty
-    reads back as 0 (post-flatten), a repeat call must submit nothing."""
-    monkeypatch.setattr(rl, '_close_symbol',
-                        lambda *_a, **_k: (_ for _ in ()).throw(
-                            AssertionError('nothing left to close')))
-    flat_positions = {'AAPL': {'qty': 0.0, 'market_value': '0'},
-                      'SPY': {'qty': 200.0, 'market_value': '41000'}}
-    out = ab.flatten_alpha(flat_positions, {'SPY'}, cur=FakeCursor(), live=True,
-                           rule='drawdown', magnitude=ST['dd'])
-    assert out == {'ok': 0, 'fail': 0, 'pending': False, 'tickers': []}
 
 
 def test_flatten_skips_option_and_crypto_symbols(monkeypatch):
@@ -162,6 +144,56 @@ def test_flatten_skips_option_and_crypto_symbols(monkeypatch):
     assert closed == ['MSFT']
 
 
+# ── abort / nothing-to-close ─────────────────────────────────────────────────
+
+def test_flatten_aborts_when_bench_tickers_is_none(monkeypatch):
+    """Fail-closed, second gate: bench_tickers(cur) returning None means the
+    lookup failed. flatten_alpha must ABORT — submit and journal nothing —
+    rather than silently treating None as 'no benchmarks'. Fix round 1, item
+    4: the abort outcome is now distinguishable from nothing-to-close:
+    pending=True and aborted=True (not the old pending=False)."""
+    def _boom(*_a, **_k):
+        raise AssertionError('must not submit when the bench lookup failed')
+
+    monkeypatch.setattr(rl, '_close_symbol', _boom)
+    cur = FakeCursor()
+    out = ab.flatten_alpha(POSITIONS, None, cur=cur, live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert out == {'ok': 0, 'fail': 0, 'partial': 0, 'pending': True,
+                   'aborted': True, 'tickers': []}
+    assert cur.fires() == []
+
+
+def test_second_call_after_full_flatten_submits_nothing(monkeypatch):
+    """Idempotency (binding safety constraint): once a position's broker qty
+    reads back as 0 (post-flatten), a repeat call must submit nothing — this
+    is also the 'nothing to close' outcome, distinct from 'aborted'."""
+    monkeypatch.setattr(rl, '_close_symbol',
+                        lambda *_a, **_k: (_ for _ in ()).throw(
+                            AssertionError('nothing left to close')))
+    flat_positions = {'AAPL': {'qty': 0.0, 'market_value': '0'},
+                      'SPY': {'qty': 200.0, 'market_value': '41000'}}
+    out = ab.flatten_alpha(flat_positions, {'SPY'}, cur=FakeCursor(), live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert out == {'ok': 0, 'fail': 0, 'partial': 0, 'pending': False,
+                   'aborted': False, 'tickers': []}
+
+
+def test_nothing_to_close_vs_aborted_are_distinguishable():
+    nothing = ab.flatten_alpha({'SPY': {'qty': 200.0, 'market_value': '41000'}},
+                               {'SPY'}, cur=FakeCursor(), live=True,
+                               rule='drawdown', magnitude=ST['dd'])
+    aborted = ab.flatten_alpha(POSITIONS, None, cur=FakeCursor(), live=True,
+                               rule='drawdown', magnitude=ST['dd'])
+    assert nothing == {'ok': 0, 'fail': 0, 'partial': 0, 'pending': False,
+                       'aborted': False, 'tickers': []}
+    assert aborted == {'ok': 0, 'fail': 0, 'partial': 0, 'pending': True,
+                       'aborted': True, 'tickers': []}
+    assert nothing != aborted
+
+
+# ── failures, exceptions ─────────────────────────────────────────────────────
+
 def test_failed_submit_counts_and_sets_pending(monkeypatch):
     def _close(sym, qty, market_open=None):
         if sym == 'AMD':
@@ -171,7 +203,8 @@ def test_failed_submit_counts_and_sets_pending(monkeypatch):
     monkeypatch.setattr(rl, '_close_symbol', _close)
     out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
                            rule='drawdown', magnitude=ST['dd'])
-    assert out['ok'] == 1 and out['fail'] == 1 and out['pending'] is True
+    assert out['ok'] == 1 and out['fail'] == 1 and out['partial'] == 0
+    assert out['pending'] is True
 
 
 def test_close_symbol_raising_is_a_failure_not_a_crash(monkeypatch):
@@ -182,18 +215,176 @@ def test_close_symbol_raising_is_a_failure_not_a_crash(monkeypatch):
     out = ab.flatten_alpha({'AAPL': {'qty': 1.0, 'market_value': '100'}}, set(),
                            cur=FakeCursor(), live=True, rule='daily_loss',
                            magnitude=-0.05)
-    assert out['fail'] == 1 and out['pending'] is True
+    assert out['fail'] == 1 and out['partial'] == 0 and out['pending'] is True
 
+
+# ── partial: payload flag, working close order, post-loop re-read ───────────
+
+def test_partial_flatten_payload_counts_as_partial_and_pending(monkeypatch):
+    """_close_symbol's own partial-fill payload (cancel-then-close hostage
+    residual) is counted as partial immediately, not ok."""
+    def _close(sym, qty, market_open=None):
+        if sym == 'AMD':
+            return True, {'partial_flatten': True, 'closed_qty': 30, 'hostage_qty': 20}
+        return True, {'status': 'filled'}
+
+    monkeypatch.setattr(rl, '_close_symbol', _close)
+    out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert out['ok'] == 1 and out['fail'] == 0
+    assert out['partial'] == 1 and out['pending'] is True
+
+
+def test_submit_ok_but_still_held_on_reread_is_partial(monkeypatch):
+    """_close_symbol ok=True means SUBMITTED, not filled: if the post-loop
+    re-read still shows the position, the symbol must move ok -> partial."""
+    monkeypatch.setattr(rl, '_close_symbol',
+                        lambda sym, qty, market_open=None: (True, {'status': 'accepted'}))
+    monkeypatch.setattr(rl, '_load_broker_positions',
+                        lambda: {'AMD': {'qty': -50.0, 'market_value': '-7000'}})
+    out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert out['ok'] == 1                      # AAPL: gone from the re-read
+    assert out['partial'] == 1 and out['fail'] == 0   # AMD: still held
+    assert out['pending'] is True
+
+
+def test_reread_treats_unparseable_qty_as_still_open(monkeypatch):
+    monkeypatch.setattr(rl, '_close_symbol',
+                        lambda sym, qty, market_open=None: (True, {'status': 'accepted'}))
+    monkeypatch.setattr(rl, '_load_broker_positions',
+                        lambda: {'AMD': {'qty': 'not-a-number', 'market_value': '-7000'}})
+    out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert out['ok'] == 1 and out['partial'] == 1 and out['pending'] is True
+
+
+def test_reread_failure_treats_every_attempted_symbol_as_still_open(monkeypatch):
+    monkeypatch.setattr(rl, '_close_symbol',
+                        lambda sym, qty, market_open=None: (True, {'status': 'filled'}))
+
+    def _boom():
+        raise RuntimeError('cli timeout')
+
+    monkeypatch.setattr(rl, '_load_broker_positions', _boom)
+    out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert out['ok'] == 0 and out['partial'] == 2 and out['pending'] is True
+
+
+def test_fail_and_partial_can_both_count_the_same_symbol(monkeypatch):
+    """A submit failure (fail bucket) whose position genuinely still shows
+    non-zero on the re-read ALSO increments partial — fail answers 'did the
+    submit work', partial answers 'is it flat'. Nothing sums the two against
+    len(tickers) (Task 7 reads only `pending`), so this double-count is
+    deliberate, not a bug — see flatten_alpha's docstring."""
+    monkeypatch.setattr(rl, '_close_symbol',
+                        lambda sym, qty, market_open=None: (False, {'error': 'insufficient qty'}))
+    monkeypatch.setattr(rl, '_load_broker_positions', lambda: dict(POSITIONS))
+    out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert out['fail'] == 2 and out['partial'] == 2 and out['ok'] == 0
+    assert out['pending'] is True
+
+
+def test_working_close_order_is_not_resubmitted(monkeypatch):
+    """Retry safety: a symbol with a WORKING order already resting on the
+    close side must not be resubmitted or cancelled — just counted partial,
+    with no fire row for the no-op attempt."""
+    def _boom(sym, qty, market_open=None):
+        if sym == 'AMD':
+            raise AssertionError('must not resubmit a working close order')
+        return True, {'status': 'filled'}
+
+    monkeypatch.setattr(rl, '_close_symbol', _boom)
+    monkeypatch.setattr(rl, '_load_open_orders',
+                        lambda: [{'symbol': 'AMD', 'side': 'buy', 'status': 'open'}])
+    cur = FakeCursor()
+    out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=cur, live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert out['ok'] == 1 and out['partial'] == 1 and out['pending'] is True
+    fired_tickers = {p[1] for p in cur.fires()}
+    assert 'AMD' not in fired_tickers           # no-op attempt: no fire row
+    assert 'AAPL' in fired_tickers
+
+
+def test_working_close_order_symbol_match_is_case_insensitive(monkeypatch):
+    def _boom(sym, qty, market_open=None):
+        if sym == 'AMD':
+            raise AssertionError('must not resubmit a working close order')
+        return True, {'status': 'filled'}
+
+    monkeypatch.setattr(rl, '_close_symbol', _boom)
+    monkeypatch.setattr(rl, '_load_open_orders',
+                        lambda: [{'symbol': 'amd', 'side': 'buy', 'status': 'open'}])
+    out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert out['partial'] == 1
+
+
+def test_working_order_on_the_wrong_side_does_not_block_resubmit(monkeypatch):
+    """An open order on a symbol that is NOT on the close side (e.g. a stray
+    buy resting on a position we are also buying to close, i.e. AMD short ->
+    close side is buy — so give AAPL, a long, a resting BUY, which is not its
+    sell-to-close side) must not suppress the resubmit."""
+    closed = []
+    monkeypatch.setattr(rl, '_close_symbol',
+                        lambda sym, qty, market_open=None: (closed.append(sym), (True, {'status': 'filled'}))[1])
+    monkeypatch.setattr(rl, '_load_open_orders',
+                        lambda: [{'symbol': 'AAPL', 'side': 'buy', 'status': 'open'}])
+    out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert 'AAPL' in closed
+    assert out['ok'] == 2 and out['partial'] == 0
+
+
+def test_full_flatten_is_pending_false(monkeypatch):
+    monkeypatch.setattr(rl, '_close_symbol',
+                        lambda sym, qty, market_open=None: (True, {'status': 'filled'}))
+    out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert out == {'ok': 2, 'fail': 0, 'partial': 0, 'pending': False,
+                   'aborted': False, 'tickers': ['AAPL', 'AMD']}
+
+
+# ── _record_fire resilience ──────────────────────────────────────────────────
+
+class BoomOnFireInsertCursor(FakeCursor):
+    """Raises only on the circuit_breaker_fires INSERT — SAVEPOINT/ROLLBACK/
+    RELEASE calls from _savepoint_guarded succeed normally, so this exercises
+    exactly the guarded write failing without poisoning the whole cursor."""
+
+    def execute(self, sql, params=None):
+        if 'INSERT INTO circuit_breaker_fires' in sql:
+            raise RuntimeError('db down')
+        super().execute(sql, params)
+
+
+def test_record_fire_raising_does_not_stop_remaining_closes(monkeypatch):
+    monkeypatch.setattr(rl, '_close_symbol',
+                        lambda sym, qty, market_open=None: (True, {'status': 'filled'}))
+    cur = BoomOnFireInsertCursor()
+    out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=cur, live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert out == {'ok': 2, 'fail': 0, 'partial': 0, 'pending': False,
+                   'aborted': False, 'tickers': ['AAPL', 'AMD']}
+    assert cur.fires() == []                    # every INSERT failed + was swallowed
+
+
+# ── shadow mode ───────────────────────────────────────────────────────────────
 
 def test_shadow_mode_submits_nothing_and_journals_dry_run(monkeypatch):
     def _boom(*_a, **_k):
         raise AssertionError('shadow mode must not submit an order')
 
     monkeypatch.setattr(rl, '_close_symbol', _boom)
+    monkeypatch.setattr(rl, '_load_open_orders', _boom)
+    monkeypatch.setattr(rl, '_load_broker_positions', _boom)
     cur = FakeCursor()
     out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=cur, live=False,
                            rule='drawdown', magnitude=ST['dd'])
-    assert out == {'ok': 2, 'fail': 0, 'pending': False, 'tickers': ['AAPL', 'AMD']}
+    assert out == {'ok': 2, 'fail': 0, 'partial': 0, 'pending': False,
+                   'aborted': False, 'tickers': ['AAPL', 'AMD']}
     payloads = [json.loads(p[5]) for p in cur.fires()]
     assert payloads and all(p['dry_run'] is True for p in payloads)
     assert all(p['account_breaker'] is True and p['rule'] == 'drawdown'
