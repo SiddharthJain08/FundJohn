@@ -18,6 +18,8 @@ import os
 import re
 from datetime import date
 
+import psycopg2
+
 from execution.signal_cadence_gate import filter_by_cadence, advance_last_fire
 from execution.alpaca_executor import _spot_price
 
@@ -2360,7 +2362,8 @@ def _load_ownership_blocklist() -> tuple:
     there's nothing to block, which is not the same failure as staleness.
     This is what `_apply_entry_hygiene_gate`'s `applied=` line prints; the
     resolver's own `candidates=` line (`_ownership_blocklist_from`) keeps
-    reporting the raw flag regardless of ledger health — the two lines are
+    reporting the raw flag, except on the stale branch, where this loader
+    forces `enforcing=False` into it (see below) — the two lines are
     intentionally different views (intent vs. effect), see both docstrings.
 
     Fail-open (empty set, None, False) on ANY error — including one raised by
@@ -2611,6 +2614,84 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
     return out
 
 
+# ── Only-shed clamp, shared by the C1 breaker gate and the C3 event gate ────
+# Same semantics as _apply_entry_hygiene_gate's inner _shed (above), lifted
+# to module scope so the two new gates cannot drift from it: not held -> drop the
+# target (an open is refused); opposite sign -> zero it (the close leg survives,
+# the re-open leg dies); same-sign larger -> cap at the held size (no growth);
+# same-sign smaller -> untouched (a reduction is an exit and is never blocked).
+def _clamp_to_held(out: dict, tkr: str, broker: dict) -> str:
+    """Mutates `out[tkr]` in place. Returns 'blocked' | 'unflipped' | 'capped'
+    | 'none' so callers can report exactly what they did."""
+    target = out.get(tkr)
+    if target is None:
+        return 'none'
+    current = (broker or {}).get(tkr, 0.0)
+    if current == 0.0:
+        del out[tkr]
+        return 'blocked'
+    if (target > 0 > current) or (target < 0 < current):
+        out[tkr] = 0.0
+        return 'unflipped'
+    if abs(target) > abs(current):
+        out[tkr] = (1.0 if current > 0 else -1.0) * abs(current)
+        return 'capped'
+    return 'none'
+
+
+def _load_account_breaker_halted() -> bool:
+    """account_breaker_state.halted (spec 2026-09-12 C1).
+
+    FAIL-OPEN (False) on any error, matching _load_recent_risk_exits: the hard
+    stop is the breaker's own flatten, which runs in its own 5-minute process.
+    A Postgres hiccup must not silently freeze the whole fleet's entries."""
+    try:
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            cur.execute('SELECT halted FROM account_breaker_state WHERE id = 1')
+            row = cur.fetchone()
+            return bool(row and row[0])
+    except Exception as e:  # noqa: BLE001
+        logger.warning('account_breaker: halted lookup failed (%s: %s); '
+                       'treating as NOT halted', type(e).__name__, e)
+        return False
+
+
+def _apply_account_breaker_gate(target_usd, broker, *, halted=None,
+                                bench_tkrs=None):
+    """While the account breaker is halted, alpha OPENS and ADDS are refused.
+
+    Exits, reductions and orphan closes are structurally unblockable (orphan
+    closes never enter target_usd). Benchmark-sleeve tickers are exempt: ruling
+    R2 halts the ALPHA book, and S_beta_spy positions and entries stay
+    untouched. Option legs and crypto pairs are out of scope. `halted` and
+    `bench_tkrs` are injectable for tests."""
+    if not target_usd:
+        return target_usd
+    if halted is None:
+        halted = _load_account_breaker_halted()
+    if not halted:
+        return target_usd
+
+    bench_tkrs = set(bench_tkrs or ())
+    out = dict(target_usd)
+    blocked, unflipped, capped = [], [], []
+    for tkr in [t for t in target_usd
+                if t not in bench_tkrs and not _is_occ_symbol(t) and '/' not in t]:
+        action = _clamp_to_held(out, tkr, broker)
+        if action == 'blocked':
+            blocked.append(tkr)
+        elif action == 'unflipped':
+            unflipped.append(tkr)
+        elif action == 'capped':
+            capped.append(tkr)
+    if blocked or unflipped or capped:
+        logger.warning(
+            '[breaker] HALTED — alpha opens blocked=%s, flips converted '
+            'to close-only=%s, adds capped at held size=%s (benchmark exempt=%s)',
+            sorted(blocked), sorted(unflipped), sorted(capped), sorted(bench_tkrs))
+    return out
+
+
 def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_groups,
                               sharpe_by_strat, eff_weight_by_strat, opt_active,
                               weight_by_strat, scale, account_state, broker=None,
@@ -2655,6 +2736,11 @@ def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_gr
         ownership_blocked=_ownership_raw - set(bench_tkrs or ()),
         ownership_cycle_date=_ownership_cycle_date,
         ownership_enforcing=_ownership_enforcing)
+    # C1 (spec 2026-09-12): while the account breaker is halted, alpha opens and
+    # adds are refused. Benchmark tickers are exempt (ruling R2 halts the ALPHA
+    # book). Inert when not halted — byte-identical routing.
+    target_usd = _apply_account_breaker_gate(target_usd, broker,
+                                             bench_tkrs=bench_tkrs)
     # Net cap runs LAST: the per-name gates above can re-skew net (dropping an
     # unshortable short leg raises net-long) — the emitted book must respect it.
     target_usd = _apply_net_exposure_cap(target_usd)
