@@ -43,6 +43,16 @@ def _deterministic_sizer_gates(request, monkeypatch):
     # (set(), None, False), consistent with the flag being unset/empty here.
     if request.path.name != 'test_ownership_sizer_block.py':
         monkeypatch.setattr(rbs, '_load_ownership_blocklist', lambda: (set(), None, False))
+    # C1 (Task 6 fix round 1): _apply_account_breaker_gate calls
+    # _load_account_breaker_halted() whenever halted is left None (the
+    # production path, reached by every e2e test whose target_usd is
+    # non-empty at the emission tail) — which, with OPENCLAW_ACCOUNT_BREAKER
+    # armed in the environment, opens a REAL psycopg2.connect(POSTGRES_URI).
+    # Stub it the same way as the ownership loader above. SKIPPED for its own
+    # test file: stubbing the subject-under-test out from under its own unit
+    # tests would make the fail-open/flag-gate tests there pass vacuously.
+    if request.path.name != 'test_account_breaker_sizer_gate.py':
+        monkeypatch.setattr(rbs, '_load_account_breaker_halted', lambda: False)
     # §8 (2026-08-06): production .env carries OPENCLAW_SAMEDAY_SIGNAL_TARGET=1
     # and some test module's import-time load_dotenv pulls it into os.environ
     # during collection. The resolver lets the new flag WIN over the legacy

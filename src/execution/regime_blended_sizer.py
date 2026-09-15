@@ -2642,16 +2642,25 @@ def _clamp_to_held(out: dict, tkr: str, broker: dict) -> str:
 def _load_account_breaker_halted() -> bool:
     """account_breaker_state.halted (spec 2026-09-12 C1).
 
+    Fix round 1 item 3, belt-and-braces: short-circuits to False, with no DB
+    read at all, unless OPENCLAW_ACCOUNT_BREAKER=1 is armed. halted can only
+    ever be SET by the breaker's own save_state, whose caller gates on
+    account_breaker.armed() — so this is a redundant guard against a stray or
+    stale row, not a new way to reach True.
+
     FAIL-OPEN (False) on any error, matching _load_recent_risk_exits: the hard
     stop is the breaker's own flatten, which runs in its own 5-minute process.
     A Postgres hiccup must not silently freeze the whole fleet's entries."""
+    if os.environ.get('OPENCLAW_ACCOUNT_BREAKER') != '1':
+        return False
     try:
-        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+        with psycopg2.connect(os.environ['POSTGRES_URI'], connect_timeout=5) as c, \
+                c.cursor() as cur:
             cur.execute('SELECT halted FROM account_breaker_state WHERE id = 1')
             row = cur.fetchone()
             return bool(row and row[0])
     except Exception as e:  # noqa: BLE001
-        logger.warning('account_breaker: halted lookup failed (%s: %s); '
+        logger.warning('[account_breaker] halted lookup failed (%s: %s); '
                        'treating as NOT halted', type(e).__name__, e)
         return False
 
@@ -2686,7 +2695,7 @@ def _apply_account_breaker_gate(target_usd, broker, *, halted=None,
             capped.append(tkr)
     if blocked or unflipped or capped:
         logger.warning(
-            '[breaker] HALTED — alpha opens blocked=%s, flips converted '
+            '[account_breaker] HALTED — alpha opens blocked=%s, flips converted '
             'to close-only=%s, adds capped at held size=%s (benchmark exempt=%s)',
             sorted(blocked), sorted(unflipped), sorted(capped), sorted(bench_tkrs))
     return out
