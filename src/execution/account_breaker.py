@@ -112,3 +112,193 @@ def evaluate(alpha: float, peak, equity: float, opening_equity) -> dict:
     return {'peak': peak, 'dd': dd, 'daily': daily,
             'rule': '+'.join(rules) if rules else 'none',
             'breach': bool(rules)}
+
+
+# ── state layer (C1b) ────────────────────────────────────────────────────────
+#
+# Every function below shares a `cur` owned by the caller (run_once(), Task 7)
+# rather than opening its own connection. Migration 157 may not have been
+# applied yet wherever this module first runs (deploy and migration-apply are
+# separate steps), so each DB path here is SAVEPOINT-isolated: a failed query
+# (e.g. "relation account_breaker_state does not exist") must not poison the
+# rest of the caller's transaction the way an unguarded failure would in
+# Postgres — the same problem alpaca_reconcile.py solves with its
+# `sp_broker_fills` savepoint. Reads fail open to a documented default and log
+# a WARNING; writes fail open (swallow, log ERROR) since a lost write here
+# must never abort the 5-minute cron tick, only be missed until next tick.
+
+_STATE_COLS = ('halted', 'reason', 'breached_at', 'peak_alpha_nav', 'dd',
+               'daily', 'pending_flatten')
+_EMPTY_STATE = {'halted': False, 'reason': None, 'breached_at': None,
+                'peak': None, 'dd': None, 'daily': None, 'pending_flatten': False}
+
+
+def _savepoint_guarded(cur, name, thunk, *, on_error_level=logging.WARNING):
+    """Run `thunk()` (a zero-arg callable issuing one or more cur.execute()
+    calls) inside a named SAVEPOINT. Returns (ok, result). On failure, rolls
+    back to the savepoint (so the caller's outer transaction survives) and
+    logs at `on_error_level` — it never re-raises, because nothing in this
+    module may abort the caller's cycle step."""
+    try:
+        cur.execute(f'SAVEPOINT {name}')
+        result = thunk()
+        cur.execute(f'RELEASE SAVEPOINT {name}')
+        return True, result
+    except Exception as e:  # noqa: BLE001 — a DB path here must fail open
+        logger.log(on_error_level,
+                   '[account_breaker] %s failed (%s: %s); rolling back to savepoint',
+                   name, type(e).__name__, e)
+        try:
+            cur.execute(f'ROLLBACK TO SAVEPOINT {name}')
+            cur.execute(f'RELEASE SAVEPOINT {name}')
+        except Exception:  # noqa: BLE001 — cursor may already be unusable
+            pass
+        return False, None
+
+
+def load_state(cur) -> dict:
+    """The singleton latch. A missing row (pre-migration, or a DB that has
+    never run the breaker) is a clean, un-halted default. A query failure
+    (e.g. migration 157 not yet applied) fails open to the same default,
+    logged as a WARNING rather than raised."""
+    def _read():
+        cur.execute(
+            'SELECT halted, reason, breached_at, peak_alpha_nav, dd, daily, '
+            'pending_flatten FROM account_breaker_state WHERE id = 1')
+        return cur.fetchone()
+
+    ok, row = _savepoint_guarded(cur, 'sp_ab_load_state', _read)
+    if not ok or not row:
+        return dict(_EMPTY_STATE)
+    halted, reason, breached_at, peak, dd, daily, pending = row
+    return {'halted': bool(halted), 'reason': reason, 'breached_at': breached_at,
+            'peak': None if peak is None else float(peak),
+            'dd': None if dd is None else float(dd),
+            'daily': None if daily is None else float(daily),
+            'pending_flatten': bool(pending)}
+
+
+def save_state(cur, *, halted, reason, breached_at, peak, dd, daily,
+               pending_flatten) -> None:
+    """Persist the singleton latch. A failed write (e.g. migration 157 not
+    yet applied) is logged as an ERROR and swallowed — the caller's cycle
+    tick must still complete and retry the write on the next tick."""
+    def _write():
+        cur.execute(
+            """
+            UPDATE account_breaker_state
+               SET halted = %s, reason = %s, breached_at = %s, peak_alpha_nav = %s,
+                   dd = %s, daily = %s, pending_flatten = %s, updated_at = NOW()
+             WHERE id = 1
+            """,
+            (bool(halted), reason, breached_at, peak, dd, daily, bool(pending_flatten)),
+        )
+
+    _savepoint_guarded(cur, 'sp_ab_save_state', _write, on_error_level=logging.ERROR)
+
+
+def opening_equity(cur, session_date, equity, path=None) -> tuple[float, str]:
+    """(opening_equity, source) for `session_date`, snapshotting it on first use.
+
+    Order: the stored account_daily_open row -> the session's candle `open` in
+    logs/pnl_daily_ohlc.json -> the current equity. The OHLC `open` is the
+    PRIOR session's close by construction (the sampler rolls candles at
+    midnight ET so consecutive candles touch — server.js:2599-2626), which is
+    exactly the opening equity for this rule, hence estimated=False. Only the
+    current-equity fallback is marked estimated.
+
+    Both the stored-row read and the snapshot write are savepoint-isolated:
+    a missing account_daily_open table (migration 157 not yet applied) must
+    not stop this function from returning a usable value, and must not
+    poison the caller's transaction for whatever it does with `cur` next."""
+    def _read_stored():
+        cur.execute('SELECT opening_equity FROM account_daily_open '
+                    'WHERE session_date = %s', (session_date,))
+        return cur.fetchone()
+
+    ok, row = _savepoint_guarded(cur, 'sp_ab_open_read', _read_stored)
+    if ok and row and row[0] is not None:
+        return float(row[0]), 'stored'
+
+    value, source, estimated = None, None, True
+    try:
+        days = json.loads(Path(path or nav_ohlc_path()).read_text()).get('days') or {}
+        day = days.get(session_date.isoformat())
+        if isinstance(day, dict) and day.get('open') is not None:
+            value, source, estimated = float(day['open']), 'ohlc', False
+    except Exception as e:  # noqa: BLE001 — a missing/broken store is not fatal
+        logger.warning('[account_breaker] pnl_daily_ohlc unreadable (%s: %s)',
+                       type(e).__name__, e)
+    if value is None:
+        value, source, estimated = float(equity), 'equity', True
+
+    def _write_snapshot():
+        cur.execute(
+            'INSERT INTO account_daily_open (session_date, opening_equity, estimated) '
+            'VALUES (%s, %s, %s) ON CONFLICT (session_date) DO NOTHING',
+            (session_date, value, estimated))
+
+    _savepoint_guarded(cur, 'sp_ab_open_write', _write_snapshot,
+                       on_error_level=logging.ERROR)
+    return value, source
+
+
+def _iso_variants(dt) -> set:
+    """Spellings of `breached_at` the operator may paste into .env."""
+    if dt is None:
+        return set()
+    if getattr(dt, 'tzinfo', None) is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    return {dt.isoformat(),
+            dt.replace(microsecond=0).isoformat(),
+            dt.isoformat().replace('+00:00', 'Z'),
+            dt.replace(microsecond=0).isoformat().replace('+00:00', 'Z')}
+
+
+def rearm_requested(state: dict) -> bool:
+    """True iff the operator echoed back THIS halt's breached_at. Scoping the
+    token to the exact breach is what stops a stale .env line from silently
+    re-arming a later, different halt."""
+    token = (os.environ.get(REARM_ENV) or '').strip()
+    if not token or not state.get('halted'):
+        return False
+    return token in _iso_variants(state.get('breached_at'))
+
+
+def clear_halt(cur, alpha: float) -> None:
+    """Operator re-arm: drop the latch and reset the rolling peak to the
+    current alpha NAV, so the next drawdown is measured from here. A failed
+    write is logged as an ERROR and swallowed, same as save_state."""
+    def _write():
+        cur.execute(
+            """
+            UPDATE account_breaker_state
+               SET halted = FALSE, reason = NULL, breached_at = NULL,
+                   peak_alpha_nav = %s, pending_flatten = FALSE,
+                   rearmed_at = NOW(), updated_at = NOW()
+             WHERE id = 1
+            """,
+            (float(alpha),),
+        )
+
+    _savepoint_guarded(cur, 'sp_ab_clear_halt', _write, on_error_level=logging.ERROR)
+
+
+def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
+                open_src, halted, flatten=None) -> str:
+    """The operator greps `[account_breaker] shadow` / `[account_breaker] armed`.
+    Emitted on EVERY tick — a missing line means the process died, which is why
+    rule=none exists. Do not reorder or rename tokens."""
+    daily = 'n/a' if st.get('daily') is None else f"{st['daily']:.4f}"
+    line = (f"[account_breaker] {mode} equity={float(equity):.2f} "
+            f"bench_mv={float(bench_mv):.2f} alpha_nav={float(alpha):.2f} "
+            f"peak={float(st['peak']):.2f} dd={float(st['dd']):.4f} "
+            f"open_equity={float(open_equity):.2f} open_src={open_src} "
+            f"daily={daily} rule={st['rule']} breach={int(bool(st['breach']))} "
+            f"halted={int(bool(halted))}")
+    if flatten is not None:
+        line += (f" flatten_ok={int(flatten['ok'])} "
+                 f"flatten_fail={int(flatten['fail'])} "
+                 f"pending={int(bool(flatten['pending']))}")
+    return line
