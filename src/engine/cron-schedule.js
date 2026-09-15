@@ -206,8 +206,12 @@ async function checkPipelineResume() {
         const runDate    = checkpoint.run_date;
         if (!runDate) return;
 
-        // Check if pipeline lock still active (already running)
-        const locked = await r.get(`pipeline:running:${runDate}`);
+        // Check if the shared run lock is still held (a cycle is running).
+        // QD E1: this read used the dead `pipeline:running` key (per run
+        // date); the orchestrator and the LangGraph cycle now share the
+        // `pipeline:run_lock` key (src/lib/run_lock_key.json).
+        const runLock = require('../lib/run_lock');
+        const locked = await r.get(runLock.lockKey(runDate));
         if (locked) return;
 
         // Check budget is OK before resuming
@@ -220,7 +224,12 @@ async function checkPipelineResume() {
         log(`Budget recovered (${mode}) — resuming pipeline for ${runDate}`);
 
         const orchestrator = path.join(ROOT, 'src', 'execution', 'pipeline_orchestrator.py');
-        const proc = spawn('python3', [orchestrator, '--date', runDate, '--force-resume'], {
+        // QD E2 fix round 1: single resolver — stepMemoryMax() reads
+        // and validates OPENCLAW_STEP_MEMORY_MAX (src/lib/capped_spawn.js).
+        const capped = require('../lib/capped_spawn');
+        const w = capped.wrapCapped('python3', [orchestrator, '--date', runDate, '--force-resume'],
+                             { memoryMax: capped.stepMemoryMax(), fallback: capped.DEFAULT_STEP_MEMORY_MAX });
+        const proc = spawn(w.cmd, w.args, {
             cwd:      ROOT,
             env:      { ...process.env, PYTHONPATH: ROOT },
             detached: true,
@@ -308,7 +317,12 @@ function start(swarm, generateId, notifyDiscord) {
             try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
             const logPath = path.join(logDir, `pipeline_orchestrator_${today}.log`);
             const logFd = fs.openSync(logPath, 'a');
-            const child = spawn(PYTHON, ['scripts/run_pipeline.py', '--date', today], {
+            // QD E2 fix round 1: single resolver — stepMemoryMax() reads
+            // and validates OPENCLAW_STEP_MEMORY_MAX (src/lib/capped_spawn.js).
+            const capped = require('../lib/capped_spawn');
+            const w = capped.wrapCapped(PYTHON, ['scripts/run_pipeline.py', '--date', today],
+                                 { memoryMax: capped.stepMemoryMax(), fallback: capped.DEFAULT_STEP_MEMORY_MAX });
+            const child = spawn(w.cmd, w.args, {
                 cwd: ROOT,
                 env: { ...process.env },
                 detached: true,

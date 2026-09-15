@@ -1,9 +1,18 @@
 """W3: extended-hours take-profit placement (limit/day/extended_hours)."""
 from __future__ import annotations
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'src'))
 from execution import afterhours_tp as ah
+
+
+def _recent_ts() -> str:
+    """A filled_at inside run_exit_fill_reporter's recency-gate window (review
+    fix round 1, finding 1) — real broker fills always carry a filled_at, and
+    the gate now treats a missing/stale one as stale, so fixtures exercising
+    the reporter need one."""
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
 def test_desired_tps_long_and_short():
@@ -373,7 +382,7 @@ _CLOSED_ORDERS = [
      'legs': [
          {'id': 'tp1', 'symbol': 'MU', 'type': 'limit', 'status': 'filled',
           'side': 'sell', 'filled_qty': '3', 'filled_avg_price': '918.54',
-          'limit_price': '886.23'},
+          'limit_price': '886.23', 'filled_at': _recent_ts()},
          {'id': 'st1', 'symbol': 'MU', 'type': 'stop', 'status': 'canceled',
           'side': 'sell', 'filled_qty': '0', 'stop_price': '813.05'},
      ]},
@@ -383,12 +392,13 @@ _CLOSED_ORDERS = [
      'limit_price': '10.69', 'client_order_id': 'oco_BW_1',
      'legs': [{'id': 'st2', 'symbol': 'BW', 'type': 'stop',
                'status': 'filled', 'side': 'sell', 'filled_qty': '275',
-               'filled_avg_price': '9.70', 'stop_price': '9.75'}]},
+               'filled_avg_price': '9.70', 'stop_price': '9.75',
+               'filled_at': _recent_ts()}]},
     # Ext-hours emulated exit (ahsx_) filled.
     {'id': 'x3', 'symbol': 'AXTI', 'type': 'limit', 'order_class': 'simple',
      'status': 'filled', 'side': 'sell', 'filled_qty': '59',
      'filled_avg_price': '51.74', 'limit_price': '51.74',
-     'client_order_id': 'ahsx_AXTI_1'},
+     'client_order_id': 'ahsx_AXTI_1', 'filled_at': _recent_ts()},
     # Plain filled entry (simple market) — must NOT be reported.
     {'id': 'e4', 'symbol': 'HPE', 'type': 'market', 'order_class': 'simple',
      'status': 'filled', 'side': 'buy', 'filled_qty': '50',
@@ -405,10 +415,19 @@ def test_classify_exit_fills_kinds_and_entry_exclusion():
 
 
 def _reporter_env(monkeypatch, tmp_path, orders):
+    # B1 (spec item 3): run_exit_fill_reporter now reads orders via
+    # stop_reattach.fetch_recent_closed_orders (Task 1) instead of ah._cli, and
+    # scopes the read to _open_signal_tickers(); stub both so these
+    # reporting-only tests never touch the real CLI or Postgres. Stubbing
+    # _close_signals_for_fill keeps them scoped to reporting — the close path
+    # has its own coverage in test_b_stop_fill_close.py.
     import execution.stop_reattach as sr
     monkeypatch.setenv('OPENCLAW_EXIT_FILLS_STATE', str(tmp_path / 'fills.json'))
     posts = []
-    monkeypatch.setattr(ah, '_cli', lambda a, timeout=15: (True, orders, None))
+    monkeypatch.setattr(sr, 'fetch_recent_closed_orders',
+                        lambda *a, **k: (True, orders))
+    monkeypatch.setattr(ah, '_open_signal_tickers', lambda **k: [])
+    monkeypatch.setattr(ah, '_close_signals_for_fill', lambda f, **k: 0)
     monkeypatch.setattr(sr, '_post_alert',
                         lambda msg, channel='data-alerts':
                         posts.append((channel, msg)))
@@ -418,7 +437,7 @@ def _reporter_env(monkeypatch, tmp_path, orders):
 def test_fill_reporter_first_run_seeds_silently(monkeypatch, tmp_path):
     posts = _reporter_env(monkeypatch, tmp_path, _CLOSED_ORDERS)
     stats = ah.run_exit_fill_reporter(dry_run=False)
-    assert stats == {'fills_seen': 3, 'reported': 0}
+    assert stats == {'fills_seen': 3, 'reported': 0, 'signals_closed': 0}
     assert posts == []
     st = _json.loads((tmp_path / 'fills.json').read_text())
     assert set(st['seen']) == {'tp1', 'st2', 'x3'}
@@ -437,6 +456,45 @@ def test_fill_reporter_posts_new_fills_to_trade_reports_once(monkeypatch, tmp_pa
     posts.clear()
     stats = ah.run_exit_fill_reporter(dry_run=False)
     assert stats['reported'] == 0 and posts == []
+
+
+# ── --monitor tick isolation (wave-1 fix item 4) ────────────────────────────
+# `main(--monitor)` ran the fill reporter UNGUARDED before the stop monitor.
+# The reporter is best-effort reporting + ledger bookkeeping; the stop monitor
+# is the book's ONLY downside protection outside RTH. An exception in the
+# former used to take the whole tick down with it and silently skip the latter.
+
+def test_monitor_tick_runs_the_stop_monitor_even_if_the_reporter_raises(monkeypatch):
+    calls = []
+
+    def _boom(dry_run):
+        calls.append('reporter')
+        raise RuntimeError('state file exploded')
+
+    monkeypatch.setattr(ah, 'run_exit_fill_reporter', _boom)
+    monkeypatch.setattr(ah, 'run_stop_monitor',
+                        lambda dry_run: calls.append('monitor') or {'checked': 0})
+    logs = []
+    monkeypatch.setattr(ah, 'log', lambda m: logs.append(str(m)))
+    rc = ah.main(['--monitor', '--dry-run'])
+    assert rc == 0
+    assert calls == ['reporter', 'monitor']
+    assert any('fill-reporter raised' in m and 'RuntimeError' in m for m in logs), logs
+
+
+def test_monitor_tick_is_unchanged_when_the_reporter_succeeds(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ah, 'run_exit_fill_reporter',
+                        lambda dry_run: calls.append('reporter') or {'fills_seen': 0})
+    monkeypatch.setattr(ah, 'run_stop_monitor',
+                        lambda dry_run: calls.append('monitor') or {'checked': 0})
+    logs = []
+    monkeypatch.setattr(ah, 'log', lambda m: logs.append(str(m)))
+    rc = ah.main(['--monitor', '--dry-run'])
+    assert rc == 0
+    assert calls == ['reporter', 'monitor']
+    assert any(m.startswith('fill-reporter: ') for m in logs), logs
+    assert not any('raised' in m for m in logs), logs
 
 
 # ── quote-based exit pricing (2026-07-21) ───────────────────────────────────

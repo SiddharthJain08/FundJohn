@@ -65,12 +65,33 @@ logger = logging.getLogger(__name__)
 WORKSPACE = os.environ.get('WORKSPACE_ID', 'default')
 
 
+def _coerce_close_date(value, fallback):
+    """Broker fill timestamps arrive as ISO strings ('2026-09-11T19:31:02.4Z'),
+    datetimes, or dates. signal_pnl.closed_at is a DATE column (012:64), so
+    return a `date`. Anything unparseable falls back rather than raising — this
+    runs inside an exit path that must never abort."""
+    if value is None:
+        return fallback
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).strip().replace('Z', '+00:00')).date()
+    except (TypeError, ValueError):
+        logger.warning('drop_signal_close: unparseable closed_at %r — using %s',
+                       value, fallback)
+        return fallback
+
+
 def drop_signal_close(
     cur,
     signal_id: str,
     ticker: str,
     closed_price: float,
     reason: str = 'signal_dropped',
+    *,
+    closed_at=None,
 ) -> None:
     """Close a signal that was dropped (e.g. position flattened at the open).
 
@@ -85,6 +106,11 @@ def drop_signal_close(
         ticker:       ticker symbol (context only; signal_id is the key)
         closed_price: market price at which the signal is being closed
         reason:       close_reason written to signal_pnl (default 'signal_dropped')
+        closed_at:    when the close actually happened (broker fill timestamp;
+                      ISO string / datetime / date). Defaults to today. Only
+                      signal_pnl.closed_at moves — pnl_date stays today so the
+                      ON CONFLICT (signal_id, pnl_date) key, and therefore
+                      same-day idempotency, is unchanged.
 
     Returns:
         None. Raises on DB error.
@@ -163,6 +189,7 @@ def drop_signal_close(
 
     # ── 4. Compute days_held (mirrors engine.py:1154–1158) ───────────────
     run_date = date.today()
+    close_date = _coerce_close_date(closed_at, run_date)
     if target_dt is not None and isinstance(target_dt, date):
         days_held = (run_date - target_dt).days
     elif sig_date is not None and isinstance(sig_date, date):
@@ -195,7 +222,7 @@ def drop_signal_close(
             closed_price, round(realized_pct, 6), days_held,
             'closed',
             closed_price,
-            run_date,          # closed_at is DATE in signal_pnl schema
+            close_date,        # closed_at is DATE in signal_pnl schema
             reason,
             round(realized_pct, 6),
         ),

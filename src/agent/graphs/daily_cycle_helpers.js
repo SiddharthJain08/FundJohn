@@ -3,11 +3,24 @@
  *
  *   skipForSubset(step, state) → true if state.requestedSteps excludes this step
  *   strictMode(env)            → boolean from OPENCLAW_STRICT_EXIT_CODES
- *   runSubprocess(argv, opts)  → Promise<{rc, stdout, stderrTail, durationMs, timedOut}>
+ *   runSubprocess(argv, opts)  → Promise<{rc, stdout, stderrTail, durationMs, timedOut, lockLost?, memoryMax}>
+ *     opts.step names the caller's step for the `[lock] lost before <step>`
+ *     message if the shared run lock (src/lib/run_lock.js) is lost before
+ *     spawning — see runSubprocess's own comment (QD E1, 2026-09-14).
+ *     opts.memoryMax overrides the MemoryMax cap wrapCapped applies around
+ *     the spawn (undefined → stepMemoryMax(), '0' → uncapped); see
+ *     stepMemoryMax()'s own comment (QD E2b, 2026-09-12).
  */
 'use strict';
 
 const { spawn } = require('node:child_process');
+const runLock    = require('../../lib/run_lock');
+// QD E2 fix round 1 (2026-09-14): stepMemoryMax() now lives in capped_spawn.js
+// itself — the single resolver for OPENCLAW_STEP_MEMORY_MAX, shared with
+// cron-schedule.js's two orchestrator spawns and validated against a
+// systemd-size-string regex (mirrors capped_spawn.py). Re-exported here
+// under its original name for backward compatibility with existing callers.
+const { wrapCapped, stepMemoryMax, DEFAULT_STEP_MEMORY_MAX } = require('../../lib/capped_spawn');
 
 function skipForSubset(step, state) {
   if (!state || !state.requestedSteps) return false;
@@ -22,10 +35,42 @@ function strictMode(env) {
   return (env && env.OPENCLAW_STRICT_EXIT_CODES) === '1';
 }
 
-function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd } = {}) {
+// QD E1 controller ruling (2026-09-14): this graph IS the production cycle
+// whenever OPENCLAW_LANGGRAPH_ORCHESTRATOR=1 (the prod default — see
+// cron-schedule.js), so every step spawned here must renew the shared run
+// lock first, exactly like pipeline_orchestrator.py's run_step does before
+// each script. `renewCurrent` is a no-op (returns true) when no lock is
+// currently held — via `runLock.setCurrent` in daily-cycle.js — so tests
+// and one-off runs that never acquire a lock behave exactly as before.
+async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, step, memoryMax } = {}) {
+  // QD wave-1 fix item 1 (2026-09-14): pass a logger. Without one,
+  // `renewCurrent`'s default no-op `log` discarded the only diagnostic that
+  // names WHY the renew failed — run_lock.renew's "[lock] renew skipped —
+  // <key> held by <other>, not us (<ours>)" line, i.e. exactly who took the
+  // lock over — leaving the operator with a bare rc=75 and nothing else.
+  const lockOk = await runLock.renewCurrent(timeoutSec,
+                                            { log: (m) => console.warn(`[daily-cycle] ${m}`) });
+  if (!lockOk) {
+    return {
+      rc:          runLock.LOCK_BUSY_RC,
+      stdout:      '',
+      stderrTail:  `[lock] lost before ${step || 'step'}`,
+      durationMs:  0,
+      timedOut:    false,
+      lockLost:    true,
+      memoryMax:   null,
+    };
+  }
   return new Promise((resolve) => {
     const startedAt = Date.now();
-    const [cmd, ...args] = argv;
+    const cap = (memoryMax === undefined) ? stepMemoryMax() : memoryMax;
+    // fallback: DEFAULT_STEP_MEMORY_MAX — if `cap` reached here malformed
+    // (an explicit opts.memoryMax bypassing stepMemoryMax()'s own
+    // validation), it must fall back to the STEP default, never wrapCapped's
+    // own backtest-oriented default.
+    const wrapped = wrapCapped(argv[0], argv.slice(1), { memoryMax: cap, fallback: DEFAULT_STEP_MEMORY_MAX });
+    const cmd  = wrapped.cmd;
+    const args = wrapped.args;
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -56,6 +101,7 @@ function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd } = {}) 
         stderrTail: stderr.slice(-4000),
         durationMs,
         timedOut,
+        memoryMax: wrapped.memoryMax,
       });
     });
 
@@ -67,6 +113,7 @@ function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd } = {}) 
         stderrTail: `spawn failed: ${e.message}`,
         durationMs: Date.now() - startedAt,
         timedOut: false,
+        memoryMax: wrapped.memoryMax,
       });
     });
   });
@@ -181,6 +228,6 @@ async function postAbortAlert(payload, deps = {}) {
 }
 
 module.exports = {
-  skipForSubset, strictMode, runSubprocess,
+  skipForSubset, strictMode, runSubprocess, stepMemoryMax,
   formatAbortAlert, postAbortAlert,
 };

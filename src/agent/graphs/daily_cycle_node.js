@@ -56,7 +56,7 @@ function makeStepNode(STEP, scriptName) {
     const { argv, timeoutSec } = resolveScript(SCRIPT, state.runDate, env);
 
     const runOnce = async (attempt) => {
-      const res = await runSubprocess(argv, { timeoutSec, env });
+      const res = await runSubprocess(argv, { timeoutSec, env, step: STEP });
 
       // Persist the step's stdout AND stderr tails on EVERY completion (success
       // included). rc=0 zero-order days were un-diagnosable twice (2026-06-02/03):
@@ -85,7 +85,15 @@ function makeStepNode(STEP, scriptName) {
       return res;
     };
 
-    let { rc, stdout, stderrTail, durationMs, timedOut } = await runOnce(1);
+    // `lockLost` (QD wave-1 fix item 1, 2026-09-14) is set by runSubprocess
+    // when the shared run lock's pre-spawn renew reported the lock gone. It
+    // is NOT an ordinary step failure: the step never spawned, and another
+    // process now owns this run date. It must suppress BOTH of the two
+    // "keep going anyway" paths below (the signals retry and the sentiment/
+    // activation exemption) — before this, a lock lost during `sentiment` or
+    // `activation` was swallowed into 'warn' and the production cycle
+    // carried on into signals/trade/alpaca under someone else's lock.
+    let { rc, stdout, stderrTail, durationMs, timedOut, lockLost } = await runOnce(1);
 
     // §5 (2026-08-06 remediation spec): ONE bounded retry for the signals
     // step. Before this, any abort-worthy rc lost the entire trading day's
@@ -97,13 +105,17 @@ function makeStepNode(STEP, scriptName) {
     // inside the 15:00→15:55 ET same-day compute→execute gap. The alert below
     // is distinct from the abort alert so a silently-degrading step that
     // passes only on retry stays visible. Kill switch: OPENCLAW_SIGNALS_RETRY=0.
+    // `!lockLost` (fix item 1): a second attempt is pointless and unsafe — the
+    // renew would fail again, and retrying is exactly the "keep going" reflex
+    // that must not survive a lock we no longer own.
     if (STEP === 'signals'
         && env.OPENCLAW_SIGNALS_RETRY !== '0'
+        && !lockLost
         && rc !== 0 && !(rc === 1 && !strictMode(env))) {
       console.warn(`[daily_cycle_node] signals rc=${rc}${timedOut ? ' (timeout)' : ''} — one bounded retry`);
       await pipelineLog.notifyFailure(`${STEP} (attempt 1/2 failed — retrying once)`,
                                       state.runDate, rc, stderrTail);
-      ({ rc, stdout, stderrTail, durationMs, timedOut } = await runOnce(2));
+      ({ rc, stdout, stderrTail, durationMs, timedOut, lockLost } = await runOnce(2));
     }
 
     const completion = {
@@ -161,7 +173,16 @@ function makeStepNode(STEP, scriptName) {
     // leaves last week's eligibility in place (still a valid book) and must
     // never cost the day's COMPUTED set — under OPENCLAW_STRICT_EXIT_CODES=1
     // (live) every other step's rc=1 aborts, so this exemption is load-bearing.
-    if (STEP === 'sentiment' || STEP === 'activation') {
+    //
+    // `!lockLost` (QD wave-1 fix item 1, 2026-09-14) carves the ONE cause out
+    // of this exemption that it must never swallow. The exemption exists
+    // because a failed gap-filler is cheaper than a lost COMPUTED set — but a
+    // lost run lock is not a failed gap-filler: the step never ran, and
+    // another process owns this date. Continuing would take the cycle into
+    // signals/trade/alpaca under someone else's lock (a double-submission
+    // shape). Falling through to the throw below hands the abort path the
+    // `[lock] lost before <step>` stderrTail already posted by notifyFailure.
+    if ((STEP === 'sentiment' || STEP === 'activation') && !lockLost) {
       completion.status = 'warn';
       await pipelineLog.feedEnd(STEP, 'warn', state.runDate, durationMs);
       return { completedSteps: [...(state.completedSteps || []), completion] };
@@ -172,6 +193,7 @@ function makeStepNode(STEP, scriptName) {
     err.rc         = rc;
     err.stderrTail = stderrTail;
     err.timedOut   = timedOut || false;
+    err.lockLost   = lockLost || false;
     throw err;
   };
 }

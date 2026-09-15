@@ -50,6 +50,7 @@ _EARNINGS_DF: Optional[pd.DataFrame] = None
 _VOL_INDICES_DF: Optional[pd.DataFrame] = None
 _MACRO_SERIES: Optional[dict] = None
 _FIN_DF: Optional[pd.DataFrame] = None
+_FIN_AVAIL_DF: Optional[pd.DataFrame] = None
 _SENT_DF = None
 
 # camelCase aliases MUST mirror engine.py load_aux_data exactly — strategies
@@ -441,6 +442,91 @@ def _load_financials() -> pd.DataFrame:
     return _FIN_DF
 
 
+def _reset_financials_caches() -> None:
+    """Clear every module-level cache `_financials_slice` depends on
+    (`_FIN_DF`, `_EARNINGS_DF`, `_FIN_AVAIL_DF`). Test-fixture convenience —
+    the three must be busted together whenever a test swaps
+    `FINANCIALS_PATH`/`EARNINGS_PATH`, since `_FIN_AVAIL_DF` is derived from
+    the other two."""
+    global _FIN_DF, _EARNINGS_DF, _FIN_AVAIL_DF
+    _FIN_DF = None
+    _EARNINGS_DF = None
+    _FIN_AVAIL_DF = None
+
+
+# ── Point-in-time fundamentals availability (spec 2026-09-12 §A1) ────────────
+# financials.parquet's `date` is the FMP statement PERIOD END, not a filing
+# date (src/pipeline/backfillers/fmp.py::build_financial_rows stores no filing
+# date), so slicing on it lets a backtest bar read numbers that were not public
+# for weeks — look-ahead the live path cannot have. `available_at` is the first
+# earnings report date in earnings.parquet STRICTLY AFTER the period end and
+# within FINANCIALS_PIT_MAX_LAG_DAYS; with no such row it is period end +
+# FINANCIALS_PIT_FALLBACK_DAYS (the SEC 10-Q deadline neighbourhood).
+FINANCIALS_PIT_MAX_LAG_DAYS = 120
+FINANCIALS_PIT_FALLBACK_DAYS = 60
+
+
+def _financials_pit_enabled() -> bool:
+    """OPENCLAW_FINANCIALS_PIT=1 selects the availability-date slice. Unset (or
+    any other value) keeps the legacy period-end slice, byte-identical."""
+    return os.environ.get('OPENCLAW_FINANCIALS_PIT', '0') == '1'
+
+
+def _financials_with_availability() -> pd.DataFrame:
+    """``_load_financials()`` plus an ``available_at`` datetime64 column.
+
+    Module-cached: ``_financials_slice`` is uncached and called once per
+    backtest bar, so an un-memoised merge_asof here would cost the fleet a
+    merge per bar per strategy over a ~53 h serial epoch.
+    """
+    global _FIN_AVAIL_DF
+    if _FIN_AVAIL_DF is not None:
+        return _FIN_AVAIL_DF
+    fin = _load_financials()
+    if fin.empty:
+        _FIN_AVAIL_DF = fin
+        return _FIN_AVAIL_DF
+    df = fin.copy()
+    df['date'] = pd.to_datetime(df['date'])
+    earn = _load_earnings()
+    if earn.empty or 'date' not in earn.columns:
+        df['available_at'] = df['date'] + pd.Timedelta(days=FINANCIALS_PIT_FALLBACK_DAYS)
+    else:
+        # dropna: a null period-end (collector can write one — collector.js
+        # store.js) must not reach merge_asof, which raises ValueError on a
+        # NaT left key. Legacy silently drops such rows via `date <= ts`;
+        # dropping them from `keys` only (not `df`) preserves that — the row
+        # gets no `report_date` match, `available_at` falls back to
+        # `NaT + 60d` = NaT, and `available_at <= ts` is False, hiding it
+        # exactly as legacy does. "aux is best-effort, never fatal."
+        keys = (df[['ticker', 'date']].drop_duplicates().dropna(subset=['date'])
+                  .sort_values('date', kind='mergesort').reset_index(drop=True))
+        right = earn[['ticker', 'date']].dropna().rename(columns={'date': 'report_date'})
+        right['report_date'] = pd.to_datetime(right['report_date'])
+        right = right.sort_values('report_date', kind='mergesort').reset_index(drop=True)
+        matched = pd.merge_asof(
+            keys, right, left_on='date', right_on='report_date', by='ticker',
+            direction='forward', allow_exact_matches=False,
+            tolerance=pd.Timedelta(days=FINANCIALS_PIT_MAX_LAG_DAYS))
+        # Merge back onto `df` under a name that cannot already exist on it —
+        # financials.parquet may one day gain its own `report_date` (or even
+        # `available_at`) column (CLAUDE.md: columns may be added at any
+        # time), and merging two same-named columns would otherwise
+        # pandas-suffix them (`_x`/`_y`) and silently break the `df['...']`
+        # lookup below instead of erroring loudly or, worse, quietly reading
+        # the wrong one.
+        matched = matched[['ticker', 'date', 'report_date']].rename(
+            columns={'report_date': '_pit_report_date'})
+        df = df.merge(matched, on=['ticker', 'date'], how='left')
+        df['available_at'] = df['_pit_report_date'].fillna(
+            df['date'] + pd.Timedelta(days=FINANCIALS_PIT_FALLBACK_DAYS))
+        df = df.drop(columns=['_pit_report_date'])
+    _FIN_AVAIL_DF = df.sort_values('date', kind='mergesort')
+    log.info('aux_data_loader: financials availability built rows=%d (pit lag<=%dd, fallback %dd)',
+             len(_FIN_AVAIL_DF), FINANCIALS_PIT_MAX_LAG_DAYS, FINANCIALS_PIT_FALLBACK_DAYS)
+    return _FIN_AVAIL_DF
+
+
 def _financials_slice(date_str: str) -> dict:
     """Point-in-time financials: latest reported row per ticker with
     period date <= as-of date, shaped {ticker: {field: value, ...camelCase
@@ -452,11 +538,15 @@ def _financials_slice(date_str: str) -> dict:
     real as-of snapshot. Added 2026-07-03 so financials strategies (S10,
     S_bankruptcy) are no longer structurally backtest-blind.
     """
-    df = _load_financials()
+    _pit = _financials_pit_enabled()
+    df = _financials_with_availability() if _pit else _load_financials()
     if df.empty:
         return {}
     ts = pd.to_datetime(date_str)
-    asof = df[df['date'] <= ts]
+    # PIT (spec §A1): a row is visible once it was FILED. Legacy: visible at
+    # its period end. The prior-year / prior-quarter transforms below stay on
+    # `date` either way — "≥3 quarters older" is a statement about periods.
+    asof = df[df['available_at'] <= ts] if _pit else df[df['date'] <= ts]
     if asof.empty:
         return {}
     latest = asof.groupby('ticker').last()
@@ -469,26 +559,31 @@ def _financials_slice(date_str: str) -> dict:
     # stocks, S_accrual_anomaly) skip the ticker. Mirrors engine.py
     # load_aux_data exactly (the live twin).
     _latest_date = asof.groupby('ticker')['date'].transform('max')
-    _py = asof[asof['date'] <= _latest_date - pd.Timedelta(days=250)] \
-        .groupby('ticker')[['total_assets', 'working_capital']].last().to_dict('index')
-    _pq = asof[asof['date'] <= _latest_date - pd.Timedelta(days=60)] \
-        .groupby('ticker')[['total_assets']].last().to_dict('index')
+    # Tolerate a frame missing total_assets/working_capital (synthetic test
+    # fixtures, or a coverage gap) — groupby[[...]] raises KeyError eagerly on
+    # an absent column even when the row-filter above would leave it unused.
+    _py_cols = [c for c in ('total_assets', 'working_capital') if c in asof.columns]
+    _py = (asof[asof['date'] <= _latest_date - pd.Timedelta(days=250)]
+           .groupby('ticker')[_py_cols].last().to_dict('index')) if _py_cols else {}
+    _pq_cols = [c for c in ('total_assets',) if c in asof.columns]
+    _pq = (asof[asof['date'] <= _latest_date - pd.Timedelta(days=60)]
+           .groupby('ticker')[_pq_cols].last().to_dict('index')) if _pq_cols else {}
     out: dict = {}
     for ticker, row in latest.iterrows():
         d = {
             k: (float(v) if pd.notna(v) else None)
             for k, v in row.items()
-            if k not in ('date', 'period') and not isinstance(v, str)
+            if k not in ('date', 'period', 'available_at') and not isinstance(v, str)
         }
         for camel, snake in _FIN_CAMEL_ALIASES.items():
             d[camel] = d.get(snake)
         py, pq = _py.get(ticker), _pq.get(ticker)
-        d['totalAssetsPriorYear'] = (
-            float(py['total_assets']) if py is not None and pd.notna(py['total_assets']) else None)
-        d['workingCapitalPriorYear'] = (
-            float(py['working_capital']) if py is not None and pd.notna(py['working_capital']) else None)
-        d['totalAssetsPriorQuarter'] = (
-            float(pq['total_assets']) if pq is not None and pd.notna(pq['total_assets']) else None)
+        _py_ta = py.get('total_assets') if py is not None else None
+        _py_wc = py.get('working_capital') if py is not None else None
+        _pq_ta = pq.get('total_assets') if pq is not None else None
+        d['totalAssetsPriorYear'] = float(_py_ta) if pd.notna(_py_ta) else None
+        d['workingCapitalPriorYear'] = float(_py_wc) if pd.notna(_py_wc) else None
+        d['totalAssetsPriorQuarter'] = float(_pq_ta) if pd.notna(_pq_ta) else None
         out[ticker] = d
     return out
 

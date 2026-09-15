@@ -14,6 +14,7 @@ import importlib
 import pytest
 
 rbs = importlib.import_module("execution.regime_blended_sizer")
+capped_spawn = importlib.import_module("lib.capped_spawn")
 
 
 @pytest.fixture(autouse=True)
@@ -64,3 +65,67 @@ def _isolate_shadow_log(monkeypatch, tmp_path):
     a live flip-gate log. A test that wants to assert on the file overrides
     this env var itself, which wins (monkeypatch is last-write-wins)."""
     monkeypatch.setenv('OPENCLAW_SHADOW_LOG_DIR', str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
+def _capped_spawn_hermetic(monkeypatch):
+    """QD E2 fix round 2 (task-4 review finding 1): every `run_step()` call
+    now goes through `capped_spawn.wrap_capped()`, whose module-global
+    `_STATE['available']` defaults to None (unresolved). The FIRST
+    unresolved call in a pytest process shells out to a REAL
+    `systemd-run --scope --collect --quiet -p MemoryMax=64M -- /bin/true`
+    probe (`capped_spawn._real_probe`) — on this box (uid 0, systemd-run
+    installed) that is a genuine transient scope, not a mock, created by a
+    plain test run. Review caught this: `test_orchestrator_exit_codes.py`
+    patches only `pipeline_orchestrator.subprocess.Popen`, which does not
+    intercept `capped_spawn`'s OWN `subprocess.run` reference.
+
+    Two independent layers close this for every test under tests/execution/:
+      1. OPENCLAW_STEP_MEMORY_MAX=0 makes `wrap_capped`'s own '0'-disables
+         short-circuit fire before it ever looks at availability.
+      2. `capped_spawn._reset(available=False)` additionally pins the
+         (already-unreachable, given #1) availability decision, so any
+         future code path that calls `wrap_capped` with an explicit
+         non-'0' `memory_max` still can't reach the probe.
+
+    A test that wants the "available" branch (`TestRunStepIsCapped` in
+    test_run_lock_wiring.py) overrides both the env var and the pin in its
+    own setUp/tearDown — a per-test override that wins for the duration of
+    that test. This fixture's teardown calls the bare `_reset()` (unpins to
+    None) rather than re-pinning False; that is fine because the NEXT
+    test's setup — this same autouse fixture, run again — re-pins False
+    before any of that next test's own code executes.
+
+    Belt and suspenders: wrap `capped_spawn.subprocess.run` with a counting
+    proxy and assert no call whose argv starts with 'systemd-run' happened
+    during the test. This is the direct regression check for the leak the
+    review caught — it is scoped to 'systemd-run' specifically (not "any
+    subprocess.run call") so it does not false-positive on the many OTHER
+    tests in this directory that legitimately shell out via subprocess.run
+    (node/python3 smoke tests, docker health checks, etc.) — those calls
+    are still forwarded to the real subprocess.run unchanged.
+    """
+    monkeypatch.setenv('OPENCLAW_STEP_MEMORY_MAX', '0')
+    capped_spawn._reset(available=False)
+
+    systemd_calls = []
+    real_run = capped_spawn.subprocess.run
+
+    def _counting_run(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get('args')
+        head = cmd[0] if isinstance(cmd, (list, tuple)) and cmd else cmd
+        if head == 'systemd-run':
+            systemd_calls.append((args, kwargs))
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(capped_spawn.subprocess, 'run', _counting_run)
+    try:
+        yield
+    finally:
+        capped_spawn._reset()
+    assert not systemd_calls, (
+        f'capped_spawn triggered {len(systemd_calls)} REAL systemd-run '
+        f'call(s) during this test — the exact leak task-4 review finding 1 '
+        f'caught (a real 64M scope created on the production box). '
+        f'calls={systemd_calls!r}'
+    )

@@ -44,6 +44,70 @@ _ET = ZoneInfo('America/New_York')
 
 STRICT_AUTOCLOSE_VERDICTS = {'bearish_news_driven', 'bearish_idiosyncratic'}
 
+SOCIAL_MAX_AGE_DAYS_ENV = 'OPENCLAW_PREMARKET_SOCIAL_MAX_AGE_DAYS'
+DEFAULT_SOCIAL_MAX_AGE_DAYS = 3
+
+
+def _social_max_age_days() -> int:
+    """How stale a ticker_sentiment_daily row may be and still be used.
+
+    The social stages (Reddit + StockTwits, run_sentiment_step.py:239-264) run
+    inside the afternoon compute chain, so the freshest row on a 07:30 ET scan
+    is normally YESTERDAY's. 3 days covers a long weekend; anything older is
+    treated as absent."""
+    try:
+        return max(0, int(os.environ.get(SOCIAL_MAX_AGE_DAYS_ENV,
+                                         DEFAULT_SOCIAL_MAX_AGE_DAYS)))
+    except (TypeError, ValueError):
+        return DEFAULT_SOCIAL_MAX_AGE_DAYS
+
+
+def _social_rows_from_cursor(cur, tickers, today, max_age_days: int) -> dict:
+    """Newest ticker_sentiment_daily social row per ticker within the window.
+
+    Pure over an open cursor so tests can drive it with a fake. Returns
+    {ticker: {social_posts_24h, social_bear_ratio, social_source}}; tickers
+    with no row in range are simply absent from the map."""
+    cur.execute(
+        """
+        SELECT DISTINCT ON (ticker)
+               ticker, date, social_posts_24h, social_bear_ratio
+          FROM ticker_sentiment_daily
+         WHERE ticker = ANY(%s)
+           AND date <= %s
+           AND date >= %s
+         ORDER BY ticker, date DESC
+        """,
+        (list(tickers), today, today - timedelta(days=max_age_days)),
+    )
+    out: dict = {}
+    for row in cur.fetchall() or []:
+        ticker, row_date, posts, bear = row[0], row[1], row[2], row[3]
+        out[ticker] = {
+            'social_posts_24h': int(posts or 0),
+            'social_bear_ratio': float(bear) if bear is not None else 0.0,
+            'social_source': f'ticker_sentiment_daily:{row_date}',
+        }
+    return out
+
+
+def _load_social_for_tickers(tickers, today) -> dict:
+    """Fail-open owner of the connection. {} on ANY failure — a scan that
+    cannot reach Postgres must still score the news term (the status quo
+    before item 16), never abort."""
+    tickers = list(tickers or [])
+    if not tickers:
+        return {}
+    try:
+        dsn = os.environ['POSTGRES_URI']
+        with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+            return _social_rows_from_cursor(cur, tickers, today,
+                                            _social_max_age_days())
+    except Exception as e:  # noqa: BLE001 — social is flavour, never fatal
+        log.warning('[premarket] social load failed (%s: %s); scoring with social=0',
+                    type(e).__name__, e)
+        return {}
+
 
 class GateConfigError(RuntimeError):
     pass
@@ -179,20 +243,31 @@ def _post_discord(url: str, content: str) -> None:
 
 
 def _evaluate_ticker(position: dict, cfg: ScanConfig, scan_ts: datetime,
-                     scan_label: str, window_start: datetime) -> dict:
+                     scan_label: str, window_start: datetime,
+                     social: dict | None = None) -> dict:
     ticker = position['symbol']
     news_rows = score_news_for_tickers([ticker], window_start)
     n = news_rows[0] if news_rows else None
+
+    soc = (social or {}).get(ticker) or {}
+    social_posts = int(soc.get('social_posts_24h') or 0)
+    social_bear = float(soc.get('social_bear_ratio') or 0.0)
+    social_source = soc.get('social_source') or 'absent'
 
     inputs = ScoreInputs(
         news_count_window=int(n['news_count_24h'] or 0) if n else 0,
         news_finbert_neg_ratio=float(n['news_finbert_neg'] or 0.0) if n else 0.0,
         news_finbert_mean_score=float(n['news_mean_score'] or 0.0) if n else 0.0,
-        social_post_count_window=0,    # MVP: social pulled in handoff future iteration
-        social_bear_ratio=0.0,
+        social_post_count_window=social_posts,
+        social_bear_ratio=social_bear,
     )
     score = panic_score(inputs)
     advisory = score >= cfg.advisory_threshold
+
+    log.info('[premarket] ticker=%s news=%d neg=%.3f social_posts=%d '
+             'social_bear=%.3f social_source=%s score=%.1f advisory=%s',
+             ticker, inputs.news_count_window, inputs.news_finbert_neg_ratio,
+             social_posts, social_bear, social_source, score, advisory)
 
     row: dict = {
         'scan_ts': scan_ts,
@@ -204,8 +279,8 @@ def _evaluate_ticker(position: dict, cfg: ScanConfig, scan_ts: datetime,
         'news_count_window': inputs.news_count_window,
         'news_finbert_neg_ratio': inputs.news_finbert_neg_ratio,
         'news_finbert_mean_score': inputs.news_finbert_mean_score,
-        'social_post_count_window': 0,
-        'social_bear_ratio': 0.0,
+        'social_post_count_window': social_posts,
+        'social_bear_ratio': social_bear,
         'panic_score': score,
         'advisory_fired': advisory,
         'sonnet_verdict': None,
@@ -228,7 +303,7 @@ def _evaluate_ticker(position: dict, cfg: ScanConfig, scan_ts: datetime,
                 ticker=ticker, held_qty=position['qty'], panic_score=score,
                 news_count=inputs.news_count_window,
                 finbert_neg_ratio=inputs.news_finbert_neg_ratio,
-                social_bear_ratio=0.0,
+                social_bear_ratio=social_bear,
                 top_headlines=top,
             ),
             max_budget_usd=cfg.confirmer_budget_usd,
@@ -273,8 +348,10 @@ def run_scan(scan_label: str, ticker_override: list[str] | None = None) -> int:
 
     scan_ts = datetime.now(timezone.utc)
     window_start = _premarket_window_start_utc(scan_ts)
+    social = _load_social_for_tickers(
+        [p['symbol'] for p in positions], scan_ts.astimezone(_ET).date())
     rows = [
-        _evaluate_ticker(p, cfg, scan_ts, scan_label, window_start)
+        _evaluate_ticker(p, cfg, scan_ts, scan_label, window_start, social=social)
         for p in positions
     ]
 

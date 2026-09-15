@@ -1,0 +1,6 @@
+{
+  "prefix": "pipeline:run_lock",
+  "ttl_slack_seconds": 120,
+  "min_ttl_seconds": 300,
+  "_comment": "Single source of truth for the daily-cycle run lock. Read verbatim by src/lib/run_lock.py and src/lib/run_lock.js. Changing the prefix changes BOTH twins at once; that is the point (QD spec 2026-09-12 section 5, E1)."
+}
