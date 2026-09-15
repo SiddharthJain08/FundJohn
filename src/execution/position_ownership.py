@@ -303,6 +303,25 @@ def latest_status_map(cur) -> dict:
     return {r[0]: r[1] for r in (cur.fetchall() or []) if r and r[0]}
 
 
+def latest_status_map_with_date(cur) -> tuple:
+    """(status_map, cycle_date) at the newest cycle_date, or ({}, None) when the
+    table is empty. Sibling of latest_status_map(cur) — added fix round 1 item 2
+    so the sizer's staleness bound (OPENCLAW_OWNERSHIP_MAX_AGE_DAYS) can compare
+    the ledger's own cycle_date against today: an unbounded MAX(cycle_date) lets
+    a reconcile hook that silently stops running freeze a stale blocklist in
+    place while it keeps gating order flow. One bounded query (same WHERE
+    cycle_date = MAX(cycle_date) predicate as latest_status_map, unchanged),
+    the date just comes along for free since every row in that result shares
+    it. latest_status_map's own semantics are untouched."""
+    cur.execute(
+        'SELECT ticker, status, cycle_date FROM position_ownership WHERE cycle_date = '
+        '(SELECT MAX(cycle_date) FROM position_ownership)')
+    rows = cur.fetchall() or []
+    status_map = {r[0]: r[1] for r in rows if r and r[0]}
+    cycle_date = rows[0][2] if rows else None
+    return status_map, cycle_date
+
+
 def run_ownership_pass(conn, cycle_date, *, dry_run: bool = False,
                        account_qty=None, log_fn=None) -> dict:
     """The reconcile-step hook. Returns

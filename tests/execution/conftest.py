@@ -33,8 +33,13 @@ def _deterministic_sizer_gates(request, monkeypatch):
     # SKIPPED for its own test file, same reasoning as the benchmark stubs
     # below: stubbing the subject-under-test out from under its own unit
     # tests would make them vacuously pass.
+    # Fix round 1 item 2: _load_ownership_blocklist() now returns
+    # (blocklist, cycle_date) instead of a bare set — the call site unpacks
+    # it, so a stub returning a bare set() would raise ValueError (0 elements
+    # to unpack into 2 names) in every e2e test that reaches the emission
+    # tail. Extended minimally to match.
     if request.path.name != 'test_ownership_sizer_block.py':
-        monkeypatch.setattr(rbs, '_load_ownership_blocklist', lambda: set())
+        monkeypatch.setattr(rbs, '_load_ownership_blocklist', lambda: (set(), None))
     # §8 (2026-08-06): production .env carries OPENCLAW_SAMEDAY_SIGNAL_TARGET=1
     # and some test module's import-time load_dotenv pulls it into os.environ
     # during collection. The resolver lets the new flag WIN over the legacy
