@@ -166,6 +166,22 @@ class _FakeBreakerConn:
         return _FakeBreakerCursor(self._row)
 
 
+def test_flag_set_connect_uses_a_5s_timeout(monkeypatch):
+    """Item 3: connect_timeout=5 on the psycopg2.connect call — a hung DB
+    must not hang the sizer's emission tail."""
+    monkeypatch.setenv('OPENCLAW_ACCOUNT_BREAKER', '1')
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://fake/db')
+    seen = {}
+
+    def _connect(*a, **k):
+        seen.update(k)
+        return _FakeBreakerConn((False,))
+
+    monkeypatch.setattr(rbs.psycopg2, 'connect', _connect)
+    rbs._load_account_breaker_halted()
+    assert seen.get('connect_timeout') == 5
+
+
 def test_flag_unset_short_circuits_with_no_connect_attempt(monkeypatch):
     """Item 3: with the flag unset, no DB read is even attempted."""
     monkeypatch.delenv('OPENCLAW_ACCOUNT_BREAKER', raising=False)
