@@ -288,9 +288,12 @@ def test_fail_and_partial_can_both_count_the_same_symbol(monkeypatch):
 
 
 def test_working_close_order_is_not_resubmitted(monkeypatch):
-    """Retry safety: a symbol with a WORKING order already resting on the
-    close side must not be resubmitted or cancelled — just counted partial,
-    with no fire row for the no-op attempt."""
+    """Retry safety: a symbol with a WORKING market close already resting on
+    the close side must not be resubmitted or cancelled — just counted
+    partial, with no fire row for the no-op attempt. type='market' is what
+    distinguishes this from an ordinary protective bracket leg (see the
+    paired negative test below) — _close_symbol's own close is always a
+    market order."""
     def _boom(sym, qty, market_open=None):
         if sym == 'AMD':
             raise AssertionError('must not resubmit a working close order')
@@ -298,7 +301,8 @@ def test_working_close_order_is_not_resubmitted(monkeypatch):
 
     monkeypatch.setattr(rl, '_close_symbol', _boom)
     monkeypatch.setattr(rl, '_load_open_orders',
-                        lambda: [{'symbol': 'AMD', 'side': 'buy', 'status': 'open'}])
+                        lambda: [{'symbol': 'AMD', 'side': 'buy', 'type': 'market',
+                                  'status': 'open'}])
     cur = FakeCursor()
     out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=cur, live=True,
                            rule='drawdown', magnitude=ST['dd'])
@@ -316,7 +320,8 @@ def test_working_close_order_symbol_match_is_case_insensitive(monkeypatch):
 
     monkeypatch.setattr(rl, '_close_symbol', _boom)
     monkeypatch.setattr(rl, '_load_open_orders',
-                        lambda: [{'symbol': 'amd', 'side': 'buy', 'status': 'open'}])
+                        lambda: [{'symbol': 'amd', 'side': 'buy', 'type': 'market',
+                                  'status': 'open'}])
     out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
                            rule='drawdown', magnitude=ST['dd'])
     assert out['partial'] == 1
@@ -331,11 +336,38 @@ def test_working_order_on_the_wrong_side_does_not_block_resubmit(monkeypatch):
     monkeypatch.setattr(rl, '_close_symbol',
                         lambda sym, qty, market_open=None: (closed.append(sym), (True, {'status': 'filled'}))[1])
     monkeypatch.setattr(rl, '_load_open_orders',
-                        lambda: [{'symbol': 'AAPL', 'side': 'buy', 'status': 'open'}])
+                        lambda: [{'symbol': 'AAPL', 'side': 'buy', 'type': 'market',
+                                  'status': 'open'}])
     out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
                            rule='drawdown', magnitude=ST['dd'])
     assert 'AAPL' in closed
     assert out['ok'] == 2 and out['partial'] == 0
+
+
+def test_protective_bracket_legs_do_not_block_resubmit(monkeypatch):
+    """The blocker an advisor review caught: a bracketed long's resting
+    take-profit (SELL LIMIT) and stop-loss (SELL STOP) are both on the
+    position's own close side — side alone would flag them as "already
+    closing" and the breaker would never actually flatten a bracketed
+    position (which is the normal state of the whole OpenClaw book, since
+    every entry is bracketed). type=='market' is what excludes them."""
+    closed = []
+    monkeypatch.setattr(rl, '_close_symbol',
+                        lambda sym, qty, market_open=None: (closed.append(sym), (True, {'status': 'filled'}))[1])
+    monkeypatch.setattr(rl, '_load_open_orders',
+                        lambda: [
+                            {'symbol': 'AAPL', 'side': 'sell', 'type': 'limit',
+                             'status': 'open', 'client_order_id': 'AX123'},
+                            {'symbol': 'AAPL', 'side': 'sell', 'type': 'stop',
+                             'status': 'open', 'client_order_id': 'AX124'},
+                            {'symbol': 'AMD', 'side': 'buy', 'type': 'stop_limit',
+                             'status': 'open', 'client_order_id': 'AX125'},
+                        ])
+    out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert closed == ['AAPL', 'AMD']            # both resubmitted, not skipped
+    assert out == {'ok': 2, 'fail': 0, 'partial': 0, 'pending': False,
+                   'aborted': False, 'tickers': ['AAPL', 'AMD']}
 
 
 def test_full_flatten_is_pending_false(monkeypatch):

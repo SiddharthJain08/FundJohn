@@ -453,8 +453,8 @@ def flatten_alpha(positions: dict, bench_tkrs, *, cur, live: bool, rule: str,
     minutes.
 
     Retry safety (live only, fix round 1, item 1): before resubmitting a
-    symbol we check for an already-WORKING order on that symbol on the CLOSE
-    side (opposite the position's own side) via
+    symbol we check for an already-WORKING **market close** on that symbol
+    (side opposite the position's own side, type=='market') via
     regime_liquidator._load_open_orders() — read once, not per symbol. If one
     is resting we do NOT resubmit or cancel it (an orphaned resubmit could
     double the close, and cancelling a working close order is the opposite of
@@ -466,6 +466,21 @@ def flatten_alpha(positions: dict, bench_tkrs, *, cur, live: bool, rule: str,
     something that didn't happen this tick. A log line records the skip
     instead. The order-symbol comparison is upper-cased on both sides, same
     precedent as the benchmark-membership check below.
+
+    type=='market' is the deliberate, NOT optional, second half of this
+    check (advisor review, post-draft): side-alone is a false-positive trap
+    — a normal bracketed long's take-profit is a SELL LIMIT and its stop-
+    loss a SELL STOP, both on the position's own close side, and every
+    OpenClaw entry is bracketed by alpaca_executor. Side-only would flag
+    ordinary protective legs as "already closing" on the very first breach
+    tick, forever, on every bracketed symbol — the breaker would never
+    actually flatten anything. `_close_symbol` submits its own close via
+    `alpaca position close`, which is a market order; resting protective
+    legs are limit/stop/stop_limit and never market. Filtering to
+    type=='market' also sidesteps needing to walk `legs[]` (the way
+    _collect_openclaw_orders_to_cancel does for cancellation): a real close
+    order is a standalone market submission, never itself a bracket parent
+    with nested legs, so scanning only top-level orders is sufficient here.
 
     After the live submit loop we sleep 0.5s (mirrors regime_liquidator's own
     settle pattern before its re-read, liquidate_on_regime_change:683) then
@@ -554,7 +569,16 @@ def flatten_alpha(positions: dict, bench_tkrs, *, cur, live: bool, rule: str,
             if orig_sym is None:
                 continue
             close_side = 'sell' if qty_by_sym[orig_sym] > 0 else 'buy'
-            if str(o.get('side') or '').strip().lower() == close_side:
+            side_matches = str(o.get('side') or '').strip().lower() == close_side
+            # type=='market' is load-bearing, not decorative: side alone
+            # also matches an ordinary resting take-profit (sell LIMIT) or
+            # stop-loss (sell STOP) on a bracketed long — every OpenClaw
+            # entry is bracketed, so side-only would flag protection as "a
+            # close in flight" forever and the breaker would never actually
+            # submit a close. _close_symbol's own close (`alpaca position
+            # close`) is a market order; protective legs never are.
+            is_market_close = str(o.get('type') or '').strip().lower() == 'market'
+            if side_matches and is_market_close:
                 working_close_syms.add(orig_sym)
 
     for sym in touched:
