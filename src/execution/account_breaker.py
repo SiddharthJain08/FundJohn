@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -307,3 +308,139 @@ def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
                  f"flatten_fail={int(flatten['fail'])} "
                  f"pending={int(bool(flatten['pending']))}")
     return line
+
+
+# ── action layer (C1c) ───────────────────────────────────────────────────────
+#
+# Mirrors regime_blended_sizer._OCC_RE (:923) — option legs and crypto pairs are
+# out of scope for the equity flatten; the option book has its own lifecycle.
+_OCC_RE = re.compile(r'^[A-Z.]{1,6}\d{6}[CP]\d{8}$')
+
+
+def _is_equity_symbol(sym) -> bool:
+    s = str(sym or '').strip().upper()
+    return bool(s) and '/' not in s and not _OCC_RE.match(s)
+
+
+def bench_tickers(conn):
+    """Tickers of the benchmark (beta) sleeve, or None when the lookup FAILED.
+
+    None is load-bearing: the caller must refuse to flatten on None rather than
+    treat "unknown" as "no benchmark", which would close the very sleeve C1 is
+    required to leave untouched. The registry query is issued here (rather than
+    via benchmark_sleeve.load_benchmark_sleeve_ids, which fails OPEN to an empty
+    set) precisely so a DB error is distinguishable from an empty sleeve."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM strategy_registry "
+                        "WHERE (parameters ->> 'benchmark_sleeve') = 'true'")
+            ids = sorted({r[0] for r in (cur.fetchall() or []) if r and r[0]})
+            if not ids:
+                return set()
+            cur.execute(
+                """
+                SELECT DISTINCT ticker FROM execution_signals
+                 WHERE strategy_id = ANY(%s)
+                   AND target_date >= (CURRENT_DATE - %s::int)
+                """,
+                (ids, BENCH_LOOKBACK_DAYS))
+            return {r[0] for r in (cur.fetchall() or []) if r and r[0]}
+    except Exception as e:  # noqa: BLE001 — fail CLOSED, see docstring
+        logger.warning('[account_breaker] benchmark ticker lookup failed '
+                       '(%s: %s); refusing to flatten this tick',
+                       type(e).__name__, e)
+        return None
+
+
+def rule_threshold(rule: str) -> float:
+    """The magnitude of the limit that tripped, for circuit_breaker_fires.
+    Drawdown wins when both rules fire."""
+    return abs(DD_LIMIT) if str(rule).startswith('drawdown') else abs(DAILY_LIMIT)
+
+
+def rule_magnitude(rule: str, st: dict) -> float:
+    """The measured breach fraction that goes into
+    circuit_breaker_fires.unrealized_pnl_pct_nav. The account breaker fires on
+    ACCOUNT state, not on the position's own P&L, so the account-level ratio is
+    the honest value to journal (the column is only read by
+    _load_recent_risk_exits, which uses ticker + position_qty)."""
+    if str(rule).startswith('drawdown'):
+        return float(st.get('dd') or 0.0)
+    return float(st.get('daily') or 0.0)
+
+
+def _record_fire(cur, ticker, qty, magnitude, threshold, payload) -> None:
+    cur.execute(
+        """
+        INSERT INTO circuit_breaker_fires
+          (ts_utc, ticker, unrealized_pnl_pct_nav, threshold_pct, position_qty,
+           close_result_json)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (datetime.now(timezone.utc), ticker, float(magnitude), float(threshold),
+         float(qty), json.dumps(payload)),
+    )
+
+
+def flatten_alpha(positions: dict, bench_tkrs, *, cur, live: bool, rule: str,
+                  magnitude: float, journal: bool = True) -> dict:
+    """Close every NON-benchmark equity position. RTH-only — the caller gates
+    on regime_liquidator._market_is_open(); _close_symbol assumes RTH.
+
+    Returns {'ok', 'fail', 'pending', 'tickers'}. `pending` True means at least
+    one submit failed, so the caller leaves account_breaker_state.pending_flatten
+    set and the next 5-minute tick retries. In SHADOW (live=False) nothing is
+    submitted and `ok` counts what WOULD have been closed; journalled rows then
+    carry dry_run=true. `journal=False` writes nothing at all — main() uses that
+    in shadow, where the spec allows a log line only and a sustained breach
+    would otherwise append rows every 5 minutes.
+
+    The benchmark exemption is compared case-insensitively (mirrors
+    alpha_nav's I-1 fix, commit 4dcf6693): `bench_tkrs` comes from
+    execution_signals.ticker while `positions` keys come from the broker, and
+    a casing mismatch between them must never silently flatten the sleeve
+    this action is required to leave alone. Only the COMPARISON is
+    normalized — the symbol journalled to circuit_breaker_fires and passed to
+    _close_symbol keeps the broker's original casing, since that column is
+    what _load_recent_risk_exits and open_reconcile._closed_today_tickers
+    join on."""
+    from execution.regime_liquidator import _close_symbol
+
+    bench_norm = {str(t).strip().upper() for t in (bench_tkrs or ())}
+    threshold = rule_threshold(rule)
+    ok = fail = 0
+    touched: list = []
+
+    for sym in sorted(positions or {}):
+        if str(sym).strip().upper() in bench_norm or not _is_equity_symbol(sym):
+            continue
+        try:
+            qty = float((positions[sym] or {}).get('qty') or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if qty == 0.0:
+            continue
+        touched.append(sym)
+
+        if live:
+            try:
+                closed, payload = _close_symbol(sym, qty, market_open=True)
+            except Exception as e:  # noqa: BLE001 — one bad symbol must not abort the flatten
+                closed, payload = False, {'error': f'{type(e).__name__}: {e}'}
+            payload = dict(payload) if isinstance(payload, dict) else {'result': payload}
+            payload.update({'account_breaker': True, 'rule': rule, 'dry_run': False})
+        else:
+            closed = True
+            payload = {'account_breaker': True, 'rule': rule, 'dry_run': True,
+                       'would_close_qty': qty}
+
+        if journal and cur is not None:
+            _record_fire(cur, sym, qty, magnitude, threshold, payload)
+        if closed:
+            ok += 1
+        else:
+            fail += 1
+            logger.warning('[account_breaker] close FAILED %s qty=%s: %s',
+                           sym, qty, payload)
+
+    return {'ok': ok, 'fail': fail, 'pending': fail > 0, 'tickers': touched}
