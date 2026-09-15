@@ -215,3 +215,172 @@ def test_line_renders_a_missing_daily_as_na():
     line = ab.format_line('shadow', equity=1.0, bench_mv=0.0, alpha=1.0, st=st,
                           open_equity=0.0, open_src='equity', halted=False)
     assert ' daily=n/a ' in line
+
+
+def test_line_renders_a_missing_peak_and_dd_as_na():
+    """Supplement item 5 (task 7): format_line must never raise on a None
+    peak/dd — the line has to be emitted on EVERY tick, so a defensive None
+    here (e.g. a future caller that hasn't seeded a peak yet) must not take
+    the process down."""
+    st = dict(ST_CLEAN, peak=None, dd=None)
+    line = ab.format_line('shadow', equity=1.0, bench_mv=0.0, alpha=1.0, st=st,
+                          open_equity=0.0, open_src='equity', halted=False)
+    assert ' peak=n/a dd=n/a ' in line
+
+
+# ── return values (supplement item 2) ────────────────────────────────────────
+
+def test_save_state_returns_true_on_success():
+    cur = FakeCursor()
+    assert ab.save_state(cur, halted=False, reason=None, breached_at=None,
+                         peak=1.0, dd=-0.01, daily=None, pending_flatten=False) is True
+
+
+def test_clear_halt_returns_true_on_success():
+    cur = FakeCursor()
+    assert ab.clear_halt(cur, 100_000.0) is True
+
+
+def test_clear_halt_resets_flatten_attempts_to_zero_as_a_literal():
+    """The re-arm must not inherit a stale retry count from the halt it just
+    cleared, and MUST do so as a SQL literal (not a bound %s param) so it
+    never disturbs the existing `params[0] == alpha` contract other tests
+    already rely on."""
+    cur = FakeCursor()
+    ab.clear_halt(cur, 149_100.0)
+    (sql, params), = cur.sql_matching('UPDATE account_breaker_state')
+    assert 'flatten_attempts = 0' in sql
+    assert params == (149_100.0,)
+
+
+# ── ON CONFLICT / Z-spelling pins (supplement item 3) ────────────────────────
+
+def test_opening_equity_insert_has_on_conflict_do_nothing(tmp_path):
+    cur = FakeCursor([None])
+    path = _ohlc(tmp_path, {'2026-09-16': {'open': 205_000.0}})
+    ab.opening_equity(cur, SESSION, 190_000.0, path=path)
+    (sql, _params), = cur.sql_matching('INSERT INTO account_daily_open')
+    assert 'ON CONFLICT (session_date) DO NOTHING' in sql
+
+
+def test_iso_variants_include_the_z_spellings():
+    variants = ab._iso_variants(BREACHED)
+    assert '2026-09-16T17:42:11Z' in variants
+    assert '2026-09-16T17:42:11+00:00' in variants
+
+
+def test_rearm_accepts_the_z_spelling(monkeypatch):
+    monkeypatch.setenv(ab.REARM_ENV, '2026-09-16T17:42:11Z')
+    assert ab.rearm_requested(_halted()) is True
+
+
+# ── fails-open under a raising cursor (supplement item 3) ────────────────────
+
+class RaisingCursor:
+    """SAVEPOINT/RELEASE/ROLLBACK succeed; a named payload statement raises —
+    proves every read/write here fails OPEN under a real Postgres error
+    without poisoning the caller's transaction."""
+
+    def __init__(self, raise_needle, rows=None):
+        self._raise_needle = raise_needle
+        self._rows = list(rows or [])
+        self.calls = []
+
+    def execute(self, sql, params=None):
+        flat = ' '.join(sql.split())
+        self.calls.append((flat, params))
+        if self._raise_needle in flat:
+            raise RuntimeError('db down')
+
+    def fetchone(self):
+        return self._rows.pop(0) if self._rows else None
+
+    def fetchall(self):
+        out, self._rows = list(self._rows), []
+        return out
+
+    def sql_matching(self, needle):
+        return [c for c in self.calls if needle in c[0]]
+
+
+def test_load_state_raising_cursor_fails_open_and_rolls_back():
+    cur = RaisingCursor('SELECT halted')
+    assert ab.load_state(cur) == ab._EMPTY_STATE
+    assert cur.sql_matching('ROLLBACK TO SAVEPOINT') != []
+
+
+def test_opening_equity_stored_read_failure_falls_back_to_ohlc(tmp_path):
+    cur = RaisingCursor('SELECT opening_equity')
+    path = _ohlc(tmp_path, {'2026-09-16': {'open': 205_000.0}})
+    value, src = ab.opening_equity(cur, SESSION, 190_000.0, path=path)
+    assert (value, src) == (205_000.0, 'ohlc')
+
+
+def test_opening_equity_stored_read_failure_falls_back_to_equity(tmp_path):
+    cur = RaisingCursor('SELECT opening_equity')
+    path = _ohlc(tmp_path, {})
+    value, src = ab.opening_equity(cur, SESSION, 190_000.0, path=path)
+    assert (value, src) == (190_000.0, 'equity')
+
+
+def test_opening_equity_insert_failure_still_returns_a_value(tmp_path):
+    cur = RaisingCursor('INSERT INTO account_daily_open')
+    path = _ohlc(tmp_path, {'2026-09-16': {'open': 205_000.0}})
+    value, src = ab.opening_equity(cur, SESSION, 190_000.0, path=path)
+    assert (value, src) == (205_000.0, 'ohlc')
+
+
+def test_save_state_raising_cursor_returns_false_not_raise():
+    cur = RaisingCursor('UPDATE account_breaker_state')
+    assert ab.save_state(cur, halted=True, reason='drawdown', breached_at=None,
+                         peak=1.0, dd=-0.1, daily=None, pending_flatten=True) is False
+
+
+def test_clear_halt_raising_cursor_returns_false_not_raise():
+    cur = RaisingCursor('UPDATE account_breaker_state')
+    assert ab.clear_halt(cur, 100_000.0) is False
+
+
+def test_dead_cursor_savepoint_itself_raises_no_propagation():
+    """SAVEPOINT itself raising (a genuinely dead cursor/connection) must
+    still not propagate — the ROLLBACK/RELEASE attempts in the except branch
+    also raise here and are swallowed too."""
+    cur = RaisingCursor('SAVEPOINT')
+    assert ab.load_state(cur) == ab._EMPTY_STATE
+
+
+# ── flatten_attempts (F-5, additive column, migration 158) ──────────────────
+
+def test_load_flatten_attempts_defaults_to_zero_on_a_missing_row():
+    assert ab.load_flatten_attempts(FakeCursor([])) == 0
+
+
+def test_load_flatten_attempts_reads_the_stored_value():
+    cur = FakeCursor([(4,)])
+    assert ab.load_flatten_attempts(cur) == 4
+
+
+def test_load_flatten_attempts_fails_open_to_zero_on_a_raising_cursor():
+    cur = RaisingCursor('SELECT flatten_attempts')
+    assert ab.load_flatten_attempts(cur) == 0
+
+
+def test_save_state_flatten_attempts_defaults_to_untouched():
+    """flatten_attempts=None (the default) must COALESCE to the stored
+    value, not clobber it — only the two run_once() call sites that attempt
+    a flatten pass an explicit new count."""
+    cur = FakeCursor()
+    ab.save_state(cur, halted=False, reason=None, breached_at=None,
+                  peak=1.0, dd=-0.01, daily=None, pending_flatten=False)
+    (sql, params), = cur.sql_matching('UPDATE account_breaker_state')
+    assert 'COALESCE' in sql
+    assert params[-1] is None
+
+
+def test_save_state_flatten_attempts_explicit_value_is_persisted():
+    cur = FakeCursor()
+    ab.save_state(cur, halted=True, reason='drawdown', breached_at=None,
+                  peak=1.0, dd=-0.1, daily=None, pending_flatten=True,
+                  flatten_attempts=3)
+    (_sql, params), = cur.sql_matching('UPDATE account_breaker_state')
+    assert params[-1] == 3
