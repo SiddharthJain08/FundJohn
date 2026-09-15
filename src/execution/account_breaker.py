@@ -74,11 +74,16 @@ def alpha_nav(equity: float, positions: dict, bench_tickers) -> tuple[float, flo
     `positions` is regime_liquidator._load_broker_positions() shape:
     {symbol: {'qty': float, 'side': str, 'market_value': str}}. A short
     benchmark leg has a negative market value and correctly RAISES alpha NAV.
-    Unparseable market values are skipped (logged by the caller's line)."""
-    bench_tickers = set(bench_tickers or ())
+    Unparseable market values are skipped (logged by the caller's line).
+
+    Membership is compared case-insensitively on both sides: a casing
+    mismatch between the caller's bench_tickers set and the broker's symbol
+    casing must never silently degrade the 10% alpha-sleeve drawdown rule
+    into a total-NAV rule."""
+    bench_tickers = {str(t).strip().upper() for t in (bench_tickers or ())}
     bench_mv = 0.0
     for sym, p in (positions or {}).items():
-        if sym not in bench_tickers:
+        if str(sym).strip().upper() not in bench_tickers:
             continue
         try:
             bench_mv += float((p or {}).get('market_value') or 0.0)

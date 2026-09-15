@@ -32,6 +32,8 @@ def test_migration_creates_both_tables_idempotently():
     assert re.search(r"INSERT INTO account_breaker_state\s*\(id\)\s*VALUES\s*\(1\)", sql)
     assert 'ON CONFLICT' in sql
     assert 'DROP ' not in sql.upper()          # append-only invariant
+    assert 'DELETE ' not in sql.upper()        # append-only invariant
+    assert 'TRUNCATE ' not in sql.upper()      # append-only invariant
 
 
 def test_migration_number_does_not_collide_with_stream_b():
@@ -69,6 +71,12 @@ def test_alpha_nav_handles_short_benchmark_and_junk_values():
     assert alpha == 125_000.0
 
 
+def test_alpha_nav_bench_ticker_match_is_case_insensitive():
+    alpha, bench_mv = ab.alpha_nav(200_000.0, _pos(SPY=40_000, AAPL=30_000), {'spy'})
+    assert bench_mv == 40_000.0
+    assert alpha == 160_000.0
+
+
 # ── evaluate ────────────────────────────────────────────────────────────────
 
 def test_no_breach_inside_both_limits():
@@ -86,6 +94,11 @@ def test_drawdown_rule_trips_at_minus_ten_percent():
 
 def test_drawdown_just_inside_the_limit_does_not_trip():
     st = ab.evaluate(90_001.0, 100_000.0, 200_000.0, 200_000.0)
+    assert st['breach'] is False
+
+
+def test_daily_loss_just_inside_the_limit_does_not_trip():
+    st = ab.evaluate(100_000.0, 100_000.0, 194_020.0, 200_000.0)  # daily = -0.0299
     assert st['breach'] is False
 
 
