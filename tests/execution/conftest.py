@@ -38,8 +38,11 @@ def _deterministic_sizer_gates(request, monkeypatch):
     # it, so a stub returning a bare set() would raise ValueError (0 elements
     # to unpack into 2 names) in every e2e test that reaches the emission
     # tail. Extended minimally to match.
+    # Fix round 2: _load_ownership_blocklist() now returns a third value —
+    # the effective enforcing bool — extended again minimally to
+    # (set(), None, False), consistent with the flag being unset/empty here.
     if request.path.name != 'test_ownership_sizer_block.py':
-        monkeypatch.setattr(rbs, '_load_ownership_blocklist', lambda: (set(), None))
+        monkeypatch.setattr(rbs, '_load_ownership_blocklist', lambda: (set(), None, False))
     # §8 (2026-08-06): production .env carries OPENCLAW_SAMEDAY_SIGNAL_TARGET=1
     # and some test module's import-time load_dotenv pulls it into os.environ
     # during collection. The resolver lets the new flag WIN over the legacy

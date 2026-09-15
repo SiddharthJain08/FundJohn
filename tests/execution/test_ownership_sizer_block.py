@@ -32,7 +32,8 @@ PARAMS = {
 }
 
 
-def _gate(target, broker, *, ownership_blocked=None, ownership_cycle_date=None):
+def _gate(target, broker, *, ownership_blocked=None, ownership_cycle_date=None,
+          ownership_enforcing=None):
     # Every lookup is injected: an omitted one falls through to the REAL
     # Postgres on this box (modules under src/execution load .env at import).
     return rbs._apply_entry_hygiene_gate(
@@ -40,7 +41,8 @@ def _gate(target, broker, *, ownership_blocked=None, ownership_cycle_date=None):
         stopouts={}, liq=({}, {}), params=dict(PARAMS),
         risk_exits={}, premarket_vetoes=set(),
         ownership_blocked=set(ownership_blocked or ()),
-        ownership_cycle_date=ownership_cycle_date)
+        ownership_cycle_date=ownership_cycle_date,
+        ownership_enforcing=ownership_enforcing)
 
 
 # ── shed semantics ─────────────────────────────────────────────────────────
@@ -160,12 +162,17 @@ def test_the_single_production_call_site_supplies_the_blocklist():
     Fix round 1: _load_ownership_blocklist() now returns (blocklist,
     cycle_date) — the call site unpacks it rather than inlining the call as
     the ownership_blocked= value, so the pin is on the unpack + the kwarg
-    both being present, not on one literal substring."""
+    both being present, not on one literal substring.
+
+    Fix round 2: _load_ownership_blocklist() now returns a third value (the
+    effective enforcing bool), also threaded through as ownership_enforcing=
+    — pinned the same way."""
     import inspect
     tail = inspect.getsource(rbs._emit_orders_from_targets)
     assert '_load_ownership_blocklist()' in tail
     assert 'ownership_blocked=' in tail
     assert 'ownership_cycle_date=' in tail
+    assert 'ownership_enforcing=' in tail
     assert inspect.getsource(rbs).count('_apply_entry_hygiene_gate(') == 2
 
 
@@ -317,9 +324,10 @@ def test_load_ownership_blocklist_fresh_ledger_is_unchanged(monkeypatch):
                         status_rows=[("AAA", po.STATUS_UNALLOCATED, _TODAY),
                                      ("BBB", po.STATUS_OK, _TODAY)],
                         age_rows=[(1,)])
-    blocked, cycle_date = rbs._load_ownership_blocklist()
+    blocked, cycle_date, enforcing = rbs._load_ownership_blocklist()
     assert blocked == {"AAA"}
     assert cycle_date == _TODAY
+    assert enforcing is True   # fresh + flag on -> effective enforcing (fix round 2)
 
 
 def test_load_ownership_blocklist_stale_ledger_fails_open(monkeypatch, caplog):
@@ -331,9 +339,12 @@ def test_load_ownership_blocklist_stale_ledger_fails_open(monkeypatch, caplog):
                         status_rows=[("AAA", po.STATUS_UNALLOCATED, _TODAY)],
                         age_rows=[(4,)])
     with caplog.at_level("WARNING", logger=rbs.logger.name):
-        blocked, cycle_date = rbs._load_ownership_blocklist()
+        blocked, cycle_date, enforcing = rbs._load_ownership_blocklist()
     assert blocked == set()
     assert cycle_date == _TODAY
+    # Fix round 2: a stale ledger is not effectively enforcing even with the
+    # flag on — this is what makes the gate's applied= line honest.
+    assert enforcing is False
     assert any("stale" in r.getMessage() and "age_days=4" in r.getMessage()
               for r in caplog.records)
 
@@ -345,26 +356,33 @@ def test_load_ownership_blocklist_age_env_override_honoured(monkeypatch):
     _patch_ownership_db(monkeypatch,
                         status_rows=[("AAA", po.STATUS_UNALLOCATED, _TODAY)],
                         age_rows=[(4,)])
-    blocked, _ = rbs._load_ownership_blocklist()
+    blocked, _, enforcing = rbs._load_ownership_blocklist()
     assert blocked == {"AAA"}
+    assert enforcing is True
 
     # age_days=2 is fresh at the default (3) but stale at an override of 1.
     monkeypatch.setenv("OPENCLAW_OWNERSHIP_MAX_AGE_DAYS", "1")
     _patch_ownership_db(monkeypatch,
                         status_rows=[("AAA", po.STATUS_UNALLOCATED, _TODAY)],
                         age_rows=[(2,)])
-    blocked, _ = rbs._load_ownership_blocklist()
+    blocked, _, enforcing = rbs._load_ownership_blocklist()
     assert blocked == set()
+    assert enforcing is False
 
 
 def test_load_ownership_blocklist_no_rows_is_empty_as_today(monkeypatch):
     """No rows at all (cycle_date None) skips the age check entirely —
-    unchanged from before this fix."""
+    unchanged from before this fix. Fix round 2: no rows is still
+    EFFECTIVELY enforcing when the flag is on — nothing to block is not a
+    staleness failure, and this is the one sub-case that reads backwards
+    (empty set, yet enforcing=True), so it is pinned explicitly rather than
+    discarded with `_`."""
     monkeypatch.setenv("OPENCLAW_OWNERSHIP_BLOCK", "1")
     _patch_ownership_db(monkeypatch, status_rows=[])
-    blocked, cycle_date = rbs._load_ownership_blocklist()
+    blocked, cycle_date, enforcing = rbs._load_ownership_blocklist()
     assert blocked == set()
     assert cycle_date is None
+    assert enforcing is True
 
 
 # ── item 3: fail-open literalism ─────────────────────────────────────────────
@@ -412,7 +430,9 @@ def test_load_ownership_blocklist_fails_open_when_the_lookup_raises(monkeypatch,
 
     with caplog.at_level("WARNING", logger=rbs.logger.name):
         result = rbs._load_ownership_blocklist()
-    assert result == (set(), None)
+    # Fix round 2: enforcing=False too — a loader exception must never leave
+    # the applied= line claiming enforcement.
+    assert result == (set(), None, False)
     assert any("latest-status lookup failed" in r.getMessage() for r in caplog.records)
 
 
@@ -434,7 +454,7 @@ def test_load_ownership_blocklist_fails_open_when_the_resolver_itself_raises(mon
 
     with caplog.at_level("WARNING", logger=rbs.logger.name):
         result = rbs._load_ownership_blocklist()
-    assert result == (set(), None)
+    assert result == (set(), None, False)
     assert any("latest-status lookup failed" in r.getMessage() for r in caplog.records)
 
 
@@ -463,8 +483,13 @@ def test_full_emit_ownership_flag_unset_is_byte_identical_to_flag_set_empty_map(
     exercises the actual wiring rather than two independently-stubbed
     outcomes that merely happen to agree."""
     _stub_hygiene_loaders(monkeypatch)
+    # Fix round 2: third element is the effective enforcing bool — mirrors
+    # the real loader's "no rows -> enforcing = raw flag" case (evaluated
+    # lazily so it tracks the env flag this test flips between the two calls
+    # below, same as _ownership_blocklist_from({}) already does for blocked).
     monkeypatch.setattr(rbs, "_load_ownership_blocklist",
-                        lambda: (rbs._ownership_blocklist_from({}), None))
+                        lambda: (rbs._ownership_blocklist_from({}), None,
+                                 rbs._ownership_block_on()))
 
     ticker_meta = {
         'AAA': {'strategies': ['S1'], 'directions': [1],
@@ -499,7 +524,7 @@ def test_full_emit_bench_ticker_survives_the_ownership_block(monkeypatch, caplog
     _stub_hygiene_loaders(monkeypatch)
     monkeypatch.setenv("OPENCLAW_OWNERSHIP_BLOCK", "1")
     monkeypatch.setattr(rbs, "_load_ownership_blocklist",
-                        lambda: ({"SPY", "AAA"}, _TODAY))
+                        lambda: ({"SPY", "AAA"}, _TODAY, True))
 
     ticker_meta = {
         'AAA': {'strategies': ['S1'], 'directions': [1],
@@ -532,3 +557,100 @@ def test_full_emit_bench_ticker_survives_the_ownership_block(monkeypatch, caplog
     lines = _applied_lines(caplog)
     assert lines
     assert "SPY" not in lines[-1] and "AAA" in lines[-1] and "n_applied=1" in lines[-1]
+    # Fix round 2: fresh + flag on + hygiene active -> enforcing=True on the
+    # applied= line itself (threaded through from the stubbed loader's third
+    # value), not just on the (now-removed) resolver-only read.
+    assert "enforcing=True" in lines[-1]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Fix round 2 — enforcing= on the applied= line must be the EFFECTIVE state
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Fix round 1 left two lies standing on the gate's own applied= line: (a) on
+# a stale-ledger cycle the loader already knows nothing was applied
+# (enforcing=False), yet the gate re-read the raw env flag and printed
+# enforcing=True; (b) with OPENCLAW_ENTRY_HYGIENE=0 the whole gate
+# short-circuits (nothing CAN be applied), yet the early return also printed
+# the raw flag. Both are fixed by threading the loader's EFFECTIVE boolean
+# (`_load_ownership_blocklist()`'s new third return value) through as
+# `ownership_enforcing=`, defaulting to `_ownership_block_on()` only when a
+# caller omits it (the direct-call tests above and in
+# test_entry_hygiene_gate.py / test_sameday_premarket_protection.py).
+
+def test_applied_line_enforcing_false_when_hygiene_gate_off_even_with_fresh_flag_on(
+        monkeypatch, caplog):
+    """hygiene gate off + flag on + fresh: the early-return line must print
+    enforcing=False (literal, not the raw flag) — nothing CAN be applied when
+    the gate itself is short-circuited, regardless of flag/ledger state."""
+    monkeypatch.setenv("OPENCLAW_OWNERSHIP_BLOCK", "1")
+    monkeypatch.setenv("OPENCLAW_ENTRY_HYGIENE", "0")
+    with caplog.at_level("INFO", logger=rbs.logger.name):
+        out = _gate({"AAA": 5000.0}, {}, ownership_blocked=["AAA"],
+                    ownership_enforcing=True)   # as if the loader said "fresh, enforcing"
+    assert out["AAA"] == 5000.0   # early return: unchanged
+    lines = _applied_lines(caplog)
+    assert lines and "enforcing=False" in lines[-1] and "n_applied=0" in lines[-1]
+
+
+def test_applied_line_enforcing_true_when_fresh_flag_on_and_hygiene_on(caplog, monkeypatch):
+    """fresh + flag on + hygiene on: enforcing=True, with applied=[] when
+    nothing is actually held/blocked. ownership_enforcing is omitted here to
+    also pin the fallback-to-_ownership_block_on() default path."""
+    monkeypatch.setenv("OPENCLAW_OWNERSHIP_BLOCK", "1")
+    with caplog.at_level("INFO", logger=rbs.logger.name):
+        out = _gate({"AAA": 5000.0}, {}, ownership_blocked=[])
+    assert out["AAA"] == 5000.0
+    lines = _applied_lines(caplog)
+    assert lines and "applied=[]" in lines[-1] and "n_applied=0" in lines[-1]
+    assert "enforcing=True" in lines[-1]
+
+
+def test_applied_line_enforcing_false_when_flag_off(caplog, monkeypatch):
+    """flag off: enforcing=False on the applied= line regardless of what's in
+    ownership_blocked or whether the gate is otherwise active."""
+    monkeypatch.delenv("OPENCLAW_OWNERSHIP_BLOCK", raising=False)
+    with caplog.at_level("INFO", logger=rbs.logger.name):
+        out = _gate({"AAA": 5000.0}, {"AAA": 4000.0}, ownership_blocked=["AAA"])
+    lines = _applied_lines(caplog)
+    assert lines and "enforcing=False" in lines[-1]
+
+
+def test_applied_line_enforcing_reflects_stale_ledger_end_to_end(monkeypatch, caplog):
+    """stale ledger + flag on: threads the real _load_ownership_blocklist()
+    (against a fake stale DB) straight into the gate, and asserts the
+    resulting applied= line says enforcing=False — not just that the loader's
+    return value is False in isolation (already pinned above), but that
+    wiring the two together produces the honest line an operator watches."""
+    monkeypatch.setenv("OPENCLAW_OWNERSHIP_BLOCK", "1")
+    _patch_ownership_db(monkeypatch,
+                        status_rows=[("AAA", po.STATUS_UNALLOCATED, _TODAY)],
+                        age_rows=[(4,)])
+    blocked, cycle_date, enforcing = rbs._load_ownership_blocklist()
+    assert enforcing is False   # sanity: this is the stale case
+
+    with caplog.at_level("INFO", logger=rbs.logger.name):
+        out = _gate({"AAA": 5000.0}, {"AAA": 4000.0}, ownership_blocked=blocked,
+                    ownership_cycle_date=cycle_date, ownership_enforcing=enforcing)
+    assert out["AAA"] == 5000.0   # blocked set is empty (stale -> fail open) -> untouched
+    lines = _applied_lines(caplog)
+    assert lines and "enforcing=False" in lines[-1] and "applied=[]" in lines[-1]
+
+
+def test_load_ownership_blocklist_exception_enforcing_is_false(monkeypatch, caplog):
+    """loader exception ⇒ enforcing=False. Restates
+    test_load_ownership_blocklist_fails_open_when_the_lookup_raises's (set(),
+    None, False) assertion as an explicit, named pin for this item's own test
+    matrix rather than relying on reading it off item 3's test."""
+    monkeypatch.setenv("OPENCLAW_OWNERSHIP_BLOCK", "1")
+    monkeypatch.setenv("POSTGRES_URI", "postgresql://fake/db")
+    import psycopg2
+    monkeypatch.setattr(psycopg2, "connect", lambda *a, **k: _FakeCtxConn())
+
+    def _boom(cur):
+        raise RuntimeError("connection refused")
+    monkeypatch.setattr(po, "latest_status_map_with_date", _boom)
+
+    with caplog.at_level("WARNING", logger=rbs.logger.name):
+        blocked, cycle_date, enforcing = rbs._load_ownership_blocklist()
+    assert (blocked, cycle_date, enforcing) == (set(), None, False)

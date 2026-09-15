@@ -2352,10 +2352,19 @@ _OWNERSHIP_MAX_AGE_DAYS_DEFAULT = 3
 
 def _load_ownership_blocklist() -> tuple:
     """Read the newest position_ownership cycle and resolve the blocklist.
-    Returns (blocklist, cycle_date).
+    Returns (blocklist, cycle_date, enforcing).
 
-    Fail-open (empty set, None) on ANY error — including one raised by the
-    resolve step itself (fix round 1 item 3: the prior code called
+    `enforcing` (fix round 2) is the EFFECTIVE state, not the raw env flag:
+    flag on AND the ledger is fresh (not stale) AND the load path raised no
+    exception. No rows at all is still "enforcing" when the flag is on —
+    there's nothing to block, which is not the same failure as staleness.
+    This is what `_apply_entry_hygiene_gate`'s `applied=` line prints; the
+    resolver's own `candidates=` line (`_ownership_blocklist_from`) keeps
+    reporting the raw flag regardless of ledger health — the two lines are
+    intentionally different views (intent vs. effect), see both docstrings.
+
+    Fail-open (empty set, None, False) on ANY error — including one raised by
+    the resolve step itself (fix round 1 item 3: the prior code called
     `_ownership_blocklist_from(status_map)` AFTER the try/except, so a bug in
     the resolver would propagate uncaught instead of failing open; the resolve
     now happens inside the try). A ledger read must never stop the book from
@@ -2373,8 +2382,9 @@ def _load_ownership_blocklist() -> tuple:
     still run the resolver — with `enforcing=False` forced regardless of the
     flag, so the candidates= line keeps showing what the stale ledger claims
     without the enforcing=True/nothing-applied lie item 1 exists to kill —
-    then return its (empty, by construction) result. No rows at all
-    (cycle_date is None) skips the age check entirely: `set()` as today."""
+    then return its (empty, by construction) result — `enforcing=False`,
+    fix round 2. No rows at all (cycle_date is None) skips the age check
+    entirely: `set()` as today, `enforcing=` still the raw flag."""
     try:
         import psycopg2
         from execution.position_ownership import latest_status_map_with_date
@@ -2395,11 +2405,12 @@ def _load_ownership_blocklist() -> tuple:
                                age_days, max_age)
                 return (_ownership_blocklist_from(status_map, enforcing=False,
                                                   cycle_date=cycle_date),
-                        cycle_date)
-        return _ownership_blocklist_from(status_map, cycle_date=cycle_date), cycle_date
+                        cycle_date, False)
+        return (_ownership_blocklist_from(status_map, cycle_date=cycle_date),
+                cycle_date, _ownership_block_on())
     except Exception as e:  # noqa: BLE001
         logger.warning('[ownership] latest-status lookup failed (%s) — no block applied', e)
-        return set(), None
+        return set(), None, False
 
 
 def _load_liquidity_stats():
@@ -2445,7 +2456,8 @@ def _load_premarket_vetoes():
 
 def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, params=None,
                               premarket_vetoes=None, risk_exits=None,
-                              ownership_blocked=None, ownership_cycle_date=None):
+                              ownership_blocked=None, ownership_cycle_date=None,
+                              ownership_enforcing=None):
     """Apply premarket veto + cooldowns + liquidity floor + participation cap to
     targets. Only-shed semantics per blocked ticker: not held → target dropped;
     flip → close-only; same-sign increase → capped at held size. The
@@ -2469,6 +2481,17 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
     applied=...` line can report which day's ledger produced the (possibly
     empty) block.
 
+    `ownership_enforcing` (fix round 2) is a separate, logging-only param —
+    the EFFECTIVE enforcing state (see the ownership loader's docstring):
+    the raw flag AND ledger-fresh AND no load exception. Omitted
+    callers (the direct-call tests in test_entry_hygiene_gate.py and
+    test_sameday_premarket_protection.py) fall back to `_ownership_block_on()`
+    — the raw flag — which keeps those tests valid since they never exercise
+    staleness. The printed `enforcing=` on the `applied=` line is this value
+    AND-ed with "the hygiene gate is actually active": always `False` on the
+    OPENCLAW_ENTRY_HYGIENE=0 / empty-target early return below, since nothing
+    CAN be applied on that path regardless of the flag.
+
     The premarket veto is what makes pre-market protection actually protective.
     Without it the 09:25 reconcile closes a news-vetoed position at the open and
     the SAME DAY's 15:00 chain re-opens it six hours later — the pattern
@@ -2480,8 +2503,19 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
         # effect line must say so — n_applied=0 — even though the resolver's
         # own candidates= line (logged before this gate ever runs) may say
         # enforcing=True. Always fires exactly once here.
-        logger.info('[ownership] applied=[] n_applied=0 enforcing=%s cycle_date=%s',
-                    _ownership_block_on(), ownership_cycle_date)
+        #
+        # Fix round 2: enforcing= is hardcoded False here, NOT the raw flag
+        # and NOT ownership_enforcing — the hygiene gate itself is not active
+        # on this path, so nothing can be applied regardless of flag/ledger
+        # state. This is deliberate, not a placeholder: do not "fix" it back
+        # to _ownership_block_on() or ownership_enforcing. One consequence:
+        # the zero-conviction flatten path (_emit_orders_from_targets calling
+        # this gate with target_usd={}) always hits this branch, so it always
+        # prints enforcing=False here even on a cycle where enforcement is
+        # genuinely armed — that is correct (nothing is ever shed on an
+        # empty-target call), not a bug.
+        logger.info('[ownership] applied=[] n_applied=0 enforcing=False cycle_date=%s',
+                    ownership_cycle_date)
         return target_usd
     params = params or _load_entry_hygiene_params()
     if stopouts is None:
@@ -2495,6 +2529,12 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
     if liq is None:
         liq = _load_liquidity_stats()
     ownership_blocked = ownership_blocked or frozenset()
+    # Fix round 2: `is None`, never `or` — a caller (the production call
+    # site) legitimately passes False (a stale or failed ledger with the flag
+    # on), and `ownership_enforcing or _ownership_block_on()` would silently
+    # restore True for that exact case, which is the bug this round fixes.
+    if ownership_enforcing is None:
+        ownership_enforcing = _ownership_block_on()
     adv, px = liq if liq else ({}, {})
     out = dict(target_usd)
     cooled, illiquid, part_capped, vetoed, risk_cooled, own_blocked = [], [], [], [], [], []
@@ -2559,8 +2599,14 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
     # subtracts bench_tkrs from ownership_blocked before calling this gate.
     # Always logs once, even when own_blocked is empty, so this line can never
     # be conflated with the resolver's candidates=/enforcing=True intent line.
+    #
+    # Fix round 2: enforcing= is the resolved ownership_enforcing (EFFECTIVE
+    # state — see the docstring), not a fresh _ownership_block_on() read. The
+    # gate reaches this line only when it is actually active, so this is the
+    # "AND the hygiene gate is active" half of the AND already satisfied —
+    # ownership_enforcing alone is the correct value to print.
     logger.info('[ownership] applied=%s n_applied=%d enforcing=%s cycle_date=%s',
-                sorted(own_blocked), len(own_blocked), _ownership_block_on(),
+                sorted(own_blocked), len(own_blocked), bool(ownership_enforcing),
                 ownership_cycle_date)
     return out
 
@@ -2599,11 +2645,16 @@ def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_gr
     # like any other ticker, exemption lost), the same fail-direction class as
     # the sleeve bracket and the cap/similarity exemptions. Intentional, no
     # code change.
-    _ownership_raw, _ownership_cycle_date = _load_ownership_blocklist()
+    # Fix round 2: _load_ownership_blocklist() now returns a third value —
+    # the EFFECTIVE enforcing state (flag on AND ledger fresh AND no load
+    # exception) — threaded straight through so the gate's applied= line
+    # never claims enforcing=True on a stale or failed ledger.
+    _ownership_raw, _ownership_cycle_date, _ownership_enforcing = _load_ownership_blocklist()
     target_usd = _apply_entry_hygiene_gate(
         target_usd, broker,
         ownership_blocked=_ownership_raw - set(bench_tkrs or ()),
-        ownership_cycle_date=_ownership_cycle_date)
+        ownership_cycle_date=_ownership_cycle_date,
+        ownership_enforcing=_ownership_enforcing)
     # Net cap runs LAST: the per-name gates above can re-skew net (dropping an
     # unshortable short leg raises net-long) — the emitted book must respect it.
     target_usd = _apply_net_exposure_cap(target_usd)
