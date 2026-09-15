@@ -162,19 +162,42 @@ ST_BREACH = {'peak': 171_200.0, 'dd': -0.1291, 'daily': -0.0727,
              'rule': 'drawdown', 'breach': True}
 
 
-def test_shadow_line_is_byte_exact():
-    """Fix round 1, item 1: format_line now appends flatten_partial=<n> at the
-    end when a flatten dict is given — main() passes one even in SHADOW
-    (journal=False computes the counts without writing)."""
+def test_breaching_shadow_line_is_byte_exact_with_flatten_tail():
+    """Fix round 1, item 1: format_line appends flatten_partial=<n> at the
+    end when a flatten dict is given. main() only builds and passes a
+    flatten dict on a tick where a rule breach was evaluated — SHADOW mode
+    still calls flatten_alpha (with journal=False, to compute the counts
+    without writing) on a BREACHING tick. (Fix round 2, nit: this is no
+    longer the only shadow-line test — see
+    test_clean_shadow_line_is_byte_exact_without_flatten_tail below for the
+    non-breach case, where the plan's main() passes flat=None and
+    format_line must omit the tail entirely; the previous single test here
+    paired a non-breaching ST_CLEAN with a flatten dict, which main() never
+    actually does.)"""
+    line = ab.format_line('shadow', equity=190_100.0, bench_mv=41_000.0,
+                          alpha=149_100.0, st=ST_BREACH, open_equity=205_000.0,
+                          open_src='estimated', halted=False,
+                          flatten={'ok': 2, 'fail': 0, 'partial': 0, 'pending': False})
+    assert line == (
+        '[account_breaker] shadow equity=190100.00 bench_mv=41000.00 '
+        'alpha_nav=149100.00 peak=171200.00 dd=-0.1291 open_equity=205000.00 '
+        'open_src=estimated daily=-0.0727 rule=drawdown breach=1 halted=0 '
+        'flatten_ok=2 flatten_fail=0 pending=0 flatten_partial=0')
+
+
+def test_clean_shadow_line_is_byte_exact_without_flatten_tail():
+    """Fix round 2, nit: restores the pre-fix-round-1 byte-exact coverage for
+    the ordinary, non-breach tick. The plan's main() passes flat=None (it
+    never calls flatten_alpha at all when nothing breached), so format_line
+    must render exactly the base line with NO flatten_* tokens — not
+    flatten_partial=0, not a trailing space, nothing."""
     line = ab.format_line('shadow', equity=203_145.22, bench_mv=41_000.0,
                           alpha=162_145.22, st=ST_CLEAN, open_equity=205_000.0,
-                          open_src='stored', halted=False,
-                          flatten={'ok': 0, 'fail': 0, 'partial': 0, 'pending': False})
+                          open_src='stored', halted=False)
     assert line == (
         '[account_breaker] shadow equity=203145.22 bench_mv=41000.00 '
         'alpha_nav=162145.22 peak=171200.00 dd=-0.0529 open_equity=205000.00 '
-        'open_src=stored daily=-0.0090 rule=none breach=0 halted=0 '
-        'flatten_ok=0 flatten_fail=0 pending=0 flatten_partial=0')
+        'open_src=stored daily=-0.0090 rule=none breach=0 halted=0')
 
 
 def test_armed_line_carries_the_flatten_tail():

@@ -12,6 +12,11 @@ submit-ok-but-still-held positions; a pre-loop open-orders check skips
 resubmitting a symbol that already has a working close order; bench_tickers
 now takes `cur` (not `conn`) and fails CLOSED when a benchmark-sleeve
 strategy resolves to zero tickers.
+
+Fix round 2: an EMPTY post-loop re-read ({} — _load_broker_positions'
+primary failure mode) is now treated as UNKNOWN (still open), never as "all
+flat"; the settle delay is a module constant `_SETTLE_S` tests zero out
+directly instead of patching `time.sleep`.
 """
 from __future__ import annotations
 
@@ -63,14 +68,22 @@ ST = {'peak': 171_200.0, 'dd': -0.1291, 'daily': -0.0727,
 @pytest.fixture(autouse=True)
 def _no_real_broker_calls(monkeypatch):
     """Default double for every new broker touchpoint flatten_alpha added in
-    fix round 1: no working close orders resting, and the post-loop re-read
-    shows every touched symbol gone from the book (i.e. the close 'stuck').
-    Individual tests override via monkeypatch for their own scenario. Also
-    kills the real 0.5s settle sleep so the suite doesn't pay it 20+ times.
-    No test may reach the real alpaca CLI."""
-    monkeypatch.setattr(ab.time, 'sleep', lambda s: None)
+    fix round 1/2: no working close orders resting, and the post-loop
+    re-read returns a realistic non-empty book (just the always-held SPY
+    benchmark leg) that never contains a touched symbol — i.e. every
+    submitted close reads back as genuinely flat, not "unknown". This must
+    be non-empty: fix round 2, item 1 makes an EMPTY {} re-read mean
+    "unknown, treat every attempted symbol as still open", so a `{}` default
+    here would flip most of this file's happy-path assertions to
+    pending=True. Individual tests override via monkeypatch for their own
+    scenario. Also zeroes the settle delay via the module constant (fix
+    round 2, nit 1 — `_SETTLE_S`, not `time.sleep` itself) so the suite
+    doesn't pay it 20+ times. No test may reach the real alpaca CLI."""
+    monkeypatch.setattr(ab, '_SETTLE_S', 0)
     monkeypatch.setattr(rl, '_load_open_orders', lambda: [])
-    monkeypatch.setattr(rl, '_load_broker_positions', lambda: {})
+    monkeypatch.setattr(rl, '_load_broker_positions',
+                        lambda: {'SPY': {'qty': 200.0, 'side': 'long',
+                                         'market_value': '41000'}})
 
 
 # ── benchmark ticker lookup ─────────────────────────────────────────────────
@@ -257,6 +270,41 @@ def test_reread_treats_unparseable_qty_as_still_open(monkeypatch):
     out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
                            rule='drawdown', magnitude=ST['dd'])
     assert out['ok'] == 1 and out['partial'] == 1 and out['pending'] is True
+
+
+def test_reread_empty_mapping_is_unknown_not_flat(monkeypatch, caplog):
+    """Fix round 2, item 1 (the Important item): `_load_broker_positions()`
+    returns {} (no exception) on a non-zero CLI exit or a non-list payload —
+    its PRIMARY failure mode. An empty mapping must be treated as UNKNOWN
+    (every attempted symbol still counts as open), never as "the book is
+    empty so everything is flat" — the latter would silently clear
+    pending_flatten on a halted breaker that never re-evaluates, so an
+    unfilled close would never be retried. See the paired test below for the
+    genuinely-flat case this must stay distinguishable from."""
+    monkeypatch.setattr(rl, '_close_symbol',
+                        lambda sym, qty, market_open=None: (True, {'status': 'filled'}))
+    monkeypatch.setattr(rl, '_load_broker_positions', lambda: {})
+    with caplog.at_level('WARNING'):
+        out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
+                               rule='drawdown', magnitude=ST['dd'])
+    assert out['pending'] is True
+    assert out['partial'] == len(out['tickers']) == 2
+    assert any('flatten re-read unavailable' in r.message for r in caplog.records)
+
+
+def test_reread_non_empty_book_without_touched_symbols_is_flat(monkeypatch):
+    """The distinguishing case for the fix above: a non-empty re-read that
+    simply no longer contains the touched symbols means the book WAS
+    successfully read and the close really is done — pending=False, unlike
+    the {} case above, which must stay pending=True."""
+    monkeypatch.setattr(rl, '_close_symbol',
+                        lambda sym, qty, market_open=None: (True, {'status': 'filled'}))
+    monkeypatch.setattr(rl, '_load_broker_positions',
+                        lambda: {'SPY': {'qty': 200.0, 'market_value': '41000'}})
+    out = ab.flatten_alpha(POSITIONS, {'SPY'}, cur=FakeCursor(), live=True,
+                           rule='drawdown', magnitude=ST['dd'])
+    assert out['pending'] is False
+    assert out['partial'] == 0
 
 
 def test_reread_failure_treats_every_attempted_symbol_as_still_open(monkeypatch):

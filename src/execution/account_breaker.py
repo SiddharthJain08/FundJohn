@@ -320,6 +320,14 @@ def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
 # out of scope for the equity flatten; the option book has its own lifecycle.
 _OCC_RE = re.compile(r'^[A-Z.]{1,6}\d{6}[CP]\d{8}$')
 
+# Settle delay between the live submit loop and the post-loop broker re-read
+# (fix round 2, item nit-1). A module constant rather than a bare
+# `time.sleep(0.5)` call so tests can zero it out by monkeypatching the
+# attribute (`monkeypatch.setattr(ab, '_SETTLE_S', 0)`) instead of patching
+# `time.sleep` itself, which would also silence any *other* sleep this module
+# grows later.
+_SETTLE_S = 0.5
+
 
 def _is_equity_symbol(sym) -> bool:
     s = str(sym or '').strip().upper()
@@ -482,19 +490,35 @@ def flatten_alpha(positions: dict, bench_tkrs, *, cur, live: bool, rule: str,
     order is a standalone market submission, never itself a bracket parent
     with nested legs, so scanning only top-level orders is sufficient here.
 
-    After the live submit loop we sleep 0.5s (mirrors regime_liquidator's own
-    settle pattern before its re-read, liquidate_on_regime_change:683) then
-    take ONE regime_liquidator._load_broker_positions() re-read — never a
-    per-symbol _poll_to_terminal, which belongs to the operator-triggered
+    After the live submit loop we sleep _SETTLE_S (mirrors regime_liquidator's
+    own settle pattern before its re-read, liquidate_on_regime_change:683)
+    then take ONE regime_liquidator._load_broker_positions() re-read — never
+    a per-symbol _poll_to_terminal, which belongs to the operator-triggered
     liquidator's 90s budget, not this 5-minute tick. EVERY attempted symbol
     (all of `tickers`, not just the ones that reported success) is checked
-    against the re-read: still non-zero, or an unparseable qty (fail SAFE —
-    treat as still open, same instinct as the working-close-order check), and
-    not already bucketed `partial`, counts into `partial` (and, if it had
-    been bucketed `ok`, moves out of `ok`). This is what catches a submission
-    that was accepted (_close_symbol ok=True, no partial_flatten flag) but
-    the order was actually rejected, expired, or only partially filled by
-    the broker — `_close_symbol`'s `ok=True` means SUBMITTED, not filled.
+    against the re-read (case-normalised lookup, same precedent as the
+    benchmark and open-orders comparisons): still non-zero, or an
+    unparseable qty (fail SAFE — treat as still open, same instinct as the
+    working-close-order check), and not already bucketed `partial`, counts
+    into `partial` (and, if it had been bucketed `ok`, moves out of `ok`).
+    This is what catches a submission that was accepted (_close_symbol
+    ok=True, no partial_flatten flag) but the order was actually rejected,
+    expired, or only partially filled by the broker — `_close_symbol`'s
+    `ok=True` means SUBMITTED, not filled.
+
+    An EMPTY re-read is UNKNOWN, never "all flat" (fix round 2, item 1):
+    `_load_broker_positions()` returns {} (no exception) on a non-zero CLI
+    exit or a non-list payload — its PRIMARY failure mode. Both a raised
+    exception AND an empty mapping put every attempted symbol (not already
+    bucketed `partial`) into `partial` and log ONE WARNING line
+    ("flatten re-read unavailable — treating N attempted symbol(s) as still
+    open"); treating {} as "every position is flat" would have cleared
+    pending_flatten on a halted breaker that never re-evaluates, so an
+    unfilled close would never be retried. The benchmark sleeve is always
+    held, so a truly empty book is near-impossible — the cost of this fail-
+    safe reading is one extra pending tick, after which a retry that
+    genuinely finds nothing left to close returns pending=False on its own
+    (the `if not touched` early return above).
 
     The benchmark exemption is compared case-insensitively (mirrors
     alpha_nav's I-1 fix, commit 4dcf6693): `bench_tkrs` comes from
@@ -560,12 +584,12 @@ def flatten_alpha(positions: dict, bench_tkrs, *, cur, live: bool, rule: str,
                            '(%s: %s); proceeding without the retry-safety '
                            'check', type(e).__name__, e)
             open_orders = []
-        qty_by_sym_norm = {sym.strip().upper(): sym for sym in touched}
+        orig_sym_by_norm = {sym.strip().upper(): sym for sym in touched}
         for o in open_orders:
             if not isinstance(o, dict):
                 continue
             osym_norm = str(o.get('symbol') or '').strip().upper()
-            orig_sym = qty_by_sym_norm.get(osym_norm)
+            orig_sym = orig_sym_by_norm.get(osym_norm)
             if orig_sym is None:
                 continue
             close_side = 'sell' if qty_by_sym[orig_sym] > 0 else 'buy'
@@ -621,22 +645,47 @@ def flatten_alpha(positions: dict, bench_tkrs, *, cur, live: bool, rule: str,
             _record_fire(cur, sym, qty, magnitude, threshold, payload)
 
     if live:
-        time.sleep(0.5)
+        time.sleep(_SETTLE_S)
         try:
             reread = _load_broker_positions()
-        except Exception as e:  # noqa: BLE001 — a failed re-read must fail SAFE (still-open)
+        except Exception as e:  # noqa: BLE001 — a failed re-read must fail SAFE (unknown)
             logger.warning('[account_breaker] post-flatten broker re-read '
-                           'failed (%s: %s); treating every attempted symbol '
-                           'as still open (safe default)', type(e).__name__, e)
+                           'raised (%s: %s)', type(e).__name__, e)
             reread = None
+
+        # `_load_broker_positions()` returns {} (no exception) on a non-zero
+        # CLI exit or a non-list payload — its PRIMARY failure mode (fix
+        # round 2, item 1). An empty mapping must be treated exactly like a
+        # raised exception: UNKNOWN, never "the book is empty so every
+        # position is flat". Under the prior code reread=={} fell into the
+        # "symbol not in the dict" branch below and every touched symbol read
+        # back as flat, which would have cleared pending_flatten on a halted
+        # breaker that never re-evaluates — an unfilled close would then
+        # never be retried. The benchmark sleeve is always held, so a truly
+        # empty book is near-impossible; the cost of treating {} as unknown
+        # is one extra pending tick, after which a retry that genuinely finds
+        # nothing left to close returns pending=False on its own (the
+        # `if not touched` early return above).
+        reread_unknown = reread is None or not reread
+        reread_norm = ({str(k).strip().upper(): v for k, v in reread.items()}
+                       if reread else {})
+        if reread_unknown:
+            logger.warning(
+                '[account_breaker] flatten re-read unavailable — treating '
+                '%d attempted symbol(s) as still open', len(touched))
 
         for sym in touched:
             if outcome.get(sym) == 'partial':
                 continue  # already the safe bucket; the re-read adds nothing
-            if reread is None:
+            if reread_unknown:
                 still_open = True
             else:
-                pos = reread.get(sym)
+                # Case-normalised lookup — same precedent as the benchmark
+                # membership check and the open-orders symbol match above:
+                # `touched` comes from one broker read and `reread` from a
+                # second, independent one, so a casing mismatch between them
+                # must never be misread as "flat".
+                pos = reread_norm.get(sym.strip().upper())
                 if pos is None:
                     still_open = False   # gone from the book entirely: flat
                 else:
