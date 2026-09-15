@@ -2463,10 +2463,11 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
                        know who owns these shares", not "this side lost". Opt-in
                        via OPENCLAW_OWNERSHIP_BLOCK=1; the default resolves to an
                        empty set, so unset == today's behaviour.
-                       `ownership_cycle_date` (fix round 1) is logging-only —
-                       the ledger's own cycle_date, carried through so the
-                       `[ownership] applied=...` line can report which day's
-                       ledger produced the (possibly empty) block.
+
+    `ownership_cycle_date` (fix round 1) is a separate, logging-only param —
+    the ledger's own cycle_date, carried through so the `[ownership]
+    applied=...` line can report which day's ledger produced the (possibly
+    empty) block.
 
     The premarket veto is what makes pre-market protection actually protective.
     Without it the 09:25 reconcile closes a news-vetoed position at the open and
