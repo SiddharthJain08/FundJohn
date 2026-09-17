@@ -124,8 +124,13 @@ def _t_minus_one(session):
     try:
         return prev_session(session)
     except Exception as e:  # noqa: BLE001
-        log.warning('[macro_events] prev_session(%s) failed (%s); T-1 skipped',
-                    session, e)
+        # ERROR, not WARNING (T8 review + T10): the calendar's own weekday
+        # fallback already degrades silently — this except must not compound
+        # that by being quiet too. A caller of gating_event/gated_sessions
+        # still gets a usable (T-only) result; it is the operator who needs
+        # to hear about the degradation loudly.
+        log.error('[macro_events] prev_session(%s) failed (%s); T-1 skipped',
+                  session, e)
         return None
 
 

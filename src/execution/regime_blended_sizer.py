@@ -2701,6 +2701,98 @@ def _apply_account_breaker_gate(target_usd, broker, *, halted=None,
     return out
 
 
+# ── C3 (spec 2026-09-12 §3, ruling R3): T-1..T macro-event entry block ─────
+EVENT_GATE_ENV = 'OPENCLAW_EVENT_GATE'
+EVENT_GATE_EXEMPT_BENCH_ENV = 'OPENCLAW_EVENT_GATE_EXEMPT_BENCH'
+
+
+def _event_gate_enabled() -> bool:
+    return os.environ.get(EVENT_GATE_ENV) == '1'
+
+
+def _event_gate_exempt_bench() -> bool:
+    """Operator switch, ruling R3: the benchmark sleeve is NOT exempt by
+    default (consistent with the 09-04 premarket-veto ruling)."""
+    return os.environ.get(EVENT_GATE_EXEMPT_BENCH_ENV) == '1'
+
+
+def _load_macro_event_gating(session):
+    """lib.macro_events.gating_event(session), isolated to a single call site
+    so conftest can stub it the same way as _load_account_breaker_halted /
+    _load_ownership_blocklist above (Task 6 / Task 8's idiom) — without this
+    indirection, every sizer e2e test that reaches the emission tail would
+    read the real data/master/macro_events.parquet off disk on every run.
+    The import stays INSIDE this function rather than hoisted to module
+    scope: test_macro_event_gate.py's calendar-failure test patches
+    lib.macro_events.gating_event directly, which only takes effect if the
+    name is looked up fresh on every call.
+
+    FAIL-OPEN (None) on any error: a gate that cannot read its calendar must
+    not block trading. Logged at ERROR, not WARNING — mirrors the T8/T10
+    ERROR bump on lib.macro_events._t_minus_one: a calendar failure here
+    must be loud, not papered over."""
+    try:
+        from lib.macro_events import gating_event
+        return gating_event(session)
+    except Exception as e:  # noqa: BLE001
+        logger.error('event_gate: calendar unreadable (%s: %s); inert',
+                     type(e).__name__, e)
+        return None
+
+
+def _apply_macro_event_gate(target_usd, broker, *, session=None, events=None,
+                            bench_tkrs=None):
+    """Ruling R3: drop every NEW open/add from T-1 through the release session
+    of a high-importance macro event (FOMC_DECISION, CPI, NFP).
+
+    Exits, reductions and orphan closes are untouched (orphan closes never
+    enter target_usd). ALWAYS ACTIVE, independent of any market-condition
+    classification — this function takes no branch on it. Benchmark tickers
+    are included unless OPENCLAW_EVENT_GATE_EXEMPT_BENCH=1.
+
+    SHADOW unless OPENCLAW_EVENT_GATE=1: the ORIGINAL dict is returned and
+    only the `[event_gate] shadow ...` line is emitted, so routing is
+    byte-identical. The line is emitted on EVERY cycle, including non-event
+    sessions (events=none) — its absence must mean "the sizer did not run",
+    never "nothing was gated".
+
+    Blocked conviction is SHAVED, not redistributed (same philosophy as the
+    per-ticker and cluster caps). `session`, `events` and `bench_tkrs` are
+    injectable for tests; a calendar failure is inert (see
+    _load_macro_event_gating)."""
+    if session is None:
+        session = date.today()
+    if events is None:
+        events = _load_macro_event_gating(session)
+
+    applying = _event_gate_enabled()
+    exempt_bench = _event_gate_exempt_bench()
+    exempt = set(bench_tkrs or ()) if exempt_bench else set()
+
+    work = dict(target_usd or {})
+    blocked, capped = [], []
+    if events:
+        for tkr in [t for t in (target_usd or {})
+                    if t not in exempt and not _is_occ_symbol(t) and '/' not in t]:
+            action = _clamp_to_held(work, tkr, broker)
+            if action in ('blocked', 'unflipped'):
+                # both are "this entry is refused"; the shadow line reports
+                # them together under blocked= (byte-exact contract, plan
+                # lines 141-168). Divergence from _apply_account_breaker_gate's
+                # three-bucket line is intentional here — flagged for review.
+                blocked.append(tkr)
+            elif action == 'capped':
+                capped.append(tkr)
+
+    affected = sorted(set(blocked) | set(capped))
+    logger.info('[event_gate] %s session=%s events=%s blocked=%d capped=%d '
+                'tickers=%s bench_exempt=%d',
+                'armed' if applying else 'shadow', session, events or 'none',
+                len(blocked), len(capped), ','.join(affected[:20]),
+                int(exempt_bench))
+    return work if applying else target_usd
+
+
 def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_groups,
                               sharpe_by_strat, eff_weight_by_strat, opt_active,
                               weight_by_strat, scale, account_state, broker=None,
@@ -2750,6 +2842,10 @@ def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_gr
     # book). Inert when not halted — byte-identical routing.
     target_usd = _apply_account_breaker_gate(target_usd, broker,
                                              bench_tkrs=bench_tkrs)
+    # C3 (spec 2026-09-12, ruling R3): T-1..T macro-event entry block. All
+    # regimes; benchmark included unless OPENCLAW_EVENT_GATE_EXEMPT_BENCH=1.
+    # SHADOW (line only) unless OPENCLAW_EVENT_GATE=1.
+    target_usd = _apply_macro_event_gate(target_usd, broker, bench_tkrs=bench_tkrs)
     # Net cap runs LAST: the per-name gates above can re-skew net (dropping an
     # unshortable short leg raises net-long) — the emitted book must respect it.
     target_usd = _apply_net_exposure_cap(target_usd)

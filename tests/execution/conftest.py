@@ -53,6 +53,15 @@ def _deterministic_sizer_gates(request, monkeypatch):
     # tests would make the fail-open/flag-gate tests there pass vacuously.
     if request.path.name != 'test_account_breaker_sizer_gate.py':
         monkeypatch.setattr(rbs, '_load_account_breaker_halted', lambda: False)
+    # C3 (Task 10): _apply_macro_event_gate calls _load_macro_event_gating()
+    # whenever `events` is left None (the production path, reached by every
+    # e2e test whose target_usd is non-empty at the emission tail) — which
+    # reads the real data/master/macro_events.parquet off disk. Stub it the
+    # same way as the two loaders above. SKIPPED for its own test file:
+    # stubbing the subject-under-test out from under its own unit tests would
+    # make the calendar-failure / non-event-session tests there vacuous.
+    if request.path.name != 'test_macro_event_gate.py':
+        monkeypatch.setattr(rbs, '_load_macro_event_gating', lambda session: None)
     # §8 (2026-08-06): production .env carries OPENCLAW_SAMEDAY_SIGNAL_TARGET=1
     # and some test module's import-time load_dotenv pulls it into os.environ
     # during collection. The resolver lets the new flag WIN over the legacy
