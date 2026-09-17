@@ -18,9 +18,11 @@ const path     = require('node:path');
 
 const ps = require(path.join(path.resolve(__dirname, '..', '..'), 'src/data/parquet_store.js'));
 
-test('write_options gets a multi-minute timeout, small ops keep 30 s', () => {
+test('write_options and write_prices get multi-minute timeouts, small ops keep 30 s', () => {
   assert.equal(ps._opTimeoutMs('write_options', {}), 20 * 60_000);
-  assert.equal(ps._opTimeoutMs('write_prices', {}), 30_000);
+  // 2026-09-16: the prices master is rewritten in full on every flush; 30 s
+  // was killed on both 09-15 and 09-16 under load (EOD collect failed twice).
+  assert.equal(ps._opTimeoutMs('write_prices', {}), 5 * 60_000);
   assert.equal(ps._opTimeoutMs('row_count', {}), 30_000);
 });
 
