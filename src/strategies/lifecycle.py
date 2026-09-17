@@ -82,6 +82,13 @@ VALID_TRANSITIONS: Dict[Tuple[StrategyState, StrategyState], str] = {
     (StrategyState.MONITORING, StrategyState.DEPRECATED):  "demote from monitoring",
     (StrategyState.MONITORING, StrategyState.CANDIDATE):   "auto-demote: negative Sharpe across all eligible regimes",
     (StrategyState.DEPRECATED, StrategyState.ARCHIVED):    "archive after review period",
+    # Revival (2026-09-12, spec docs/specs/2026-09-12-quantdinger-adoptions-spec.md
+    # §A4 hygiene). ARCHIVED is normally terminal, but a strategy shelved
+    # because a data source was believed dead has to be able to come back when
+    # the source is alive again — otherwise the only route is a hand-edited
+    # manifest that bypasses this state machine entirely. It lands at CANDIDATE
+    # (never LIVE): every promotion guard downstream is unchanged.
+    (StrategyState.ARCHIVED,   StrategyState.CANDIDATE):   "revive: the data gap that caused archival is closed",
 }
 
 # Backtest thresholds required for candidate → live promotion (formerly paper → live).

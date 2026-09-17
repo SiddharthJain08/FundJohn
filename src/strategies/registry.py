@@ -145,7 +145,6 @@ _IMPL_MAP = {
     'S_earnings_news_specific_momentum': ('strategies.implementations.s_earnings_news_specific_momentum', 'S_earnings_news_specific_momentum'),
     'S_price_filter_rule_trend': ('strategies.implementations.S_price_filter_rule_trend', 'PriceFilterRuleTrend'),
     'S_ivol_cross_section_quintile': ('strategies.implementations.S_ivol_cross_section_quintile', 'IvolCrossSectionQuintile'),
-    'S_fomc_presell_spy_long': ('strategies.implementations.S_fomc_presell_spy_long', 'FomcPresellSpyLong'),
     'S_labor_day_week_momentum_reversal': ('strategies.implementations.S_labor_day_week_momentum_reversal', 'LaborDayWeekMomentumReversal'),
     'S_financial_constraint_kz_factor': ('strategies.implementations.S_financial_constraint_kz_factor', 'FinancialConstraintKZFactor'),
     'S_january_btm_size_seasonal': ('strategies.implementations.S_january_btm_size_seasonal', 'JanuaryBTMSizeSeasonal'),
