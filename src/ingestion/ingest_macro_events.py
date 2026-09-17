@@ -567,12 +567,9 @@ def run_deactivate(specs, *, master_path: Path = MASTER_PATH, fetched_at=None,
             print(df.to_string(), flush=True)
         return 0, {'deactivated': int(len(df)), 'unmatched': [], 'master_rows_after': None}
 
-    if not df.empty:
-        ok, reason = _calendar_covers(df['session_date'])
-        if not ok:
-            logger.error('[macro-events] --deactivate refusing to write: %s', reason)
-            return 3, {'deactivated': 0, 'unmatched': [], 'master_rows_after': None}
-
+    # Key pre-check FIRST (needs no calendar) so an operator with BOTH a
+    # mistyped ISO and a too-narrow calendar sees both problems in one round
+    # trip, rather than fixing the calendar only to then discover the typo.
     existing_keys = set()
     if Path(master_path).exists():
         try:
@@ -589,11 +586,17 @@ def run_deactivate(specs, *, master_path: Path = MASTER_PATH, fetched_at=None,
                      'writing an inert row anyway (never a delete), but this almost '
                      'certainly means the ISO does not exactly match the ingested '
                      'scheduled_at', e, ts.isoformat())
+    unmatched_str = [f'{e}={ts.isoformat()}' for e, ts in unmatched]
+
+    if not df.empty:
+        ok, reason = _calendar_covers(df['session_date'])
+        if not ok:
+            logger.error('[macro-events] --deactivate refusing to write: %s', reason)
+            return 3, {'deactivated': 0, 'unmatched': unmatched_str, 'master_rows_after': None}
 
     m = merge_into_master(df, master_path=master_path)
     print(f"[macro-events] deactivate: rows={m['rows']} new_rows={m['new_rows']} "
           f"master_rows_after={m['master_rows_after']}", flush=True)
-    unmatched_str = [f'{e}={ts.isoformat()}' for e, ts in unmatched]
     return (4 if unmatched else 0), {'deactivated': int(len(df)),
                                      'unmatched': unmatched_str,
                                      'master_rows_after': m['master_rows_after']}

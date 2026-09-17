@@ -277,7 +277,17 @@ def test_deactivate_round_trip_reader_and_no_resurrection(tmp_path, monkeypatch)
 
     # Re-ingesting the SAME fed page must not resurrect the deactivated row —
     # a normal parse never carries active=True explicitly (see _row()).
-    mod.merge_into_master(df, master_path=master)
+    m = mod.merge_into_master(df, master_path=master)
+    # Direct proof the sticky-deactivation JOIN actually matched the existing
+    # key (not just "gating happens to still be absent for some other
+    # reason"): no new row was created, and the one row at this exact key is
+    # still active=False after the re-ingest, not overwritten with NULL.
+    assert m['new_rows'] == 0
+    out = pd.read_parquet(master)
+    hit = out[(out['event'] == 'FOMC_DECISION') & (out['scheduled_at'] == row['scheduled_at'])]
+    assert len(hit) == 1
+    assert hit.iloc[0]['active'] == False  # noqa: E712 — nullable bool, definite value
+
     got2 = me.gated_sessions(dt.date(2026, 9, 1), dt.date(2026, 9, 30))
     assert dt.date(2026, 9, 16) not in got2
     assert dt.date(2026, 9, 17) not in got2
