@@ -213,6 +213,40 @@ actions on 2026-09-12 16:14 UTC with these rulings:
   reference note, and tests.
 
 ### C3 Macro-event calendar + T-1 entry block (item 5)
+
+> **Amendment (Task 12, 2026-09-17):** two corrections, landed as-implemented
+> after Task 11's review:
+> 1. The "Backtest mirror" bullet below says the mirror arms with
+>    `OPENCLAW_EVENT_GATE=1`. The tree instead gates
+>    `unified_backtest._per_bar_simulate` on its OWN flag
+>    `OPENCLAW_BT_EVENT_GATE`, with **no fallback** to the live flag — this
+>    keeps the pit-gap epoch (A4) attributable and avoids coupling a
+>    backtest re-gate to whenever the live flag happens to flip. Read
+>    `OPENCLAW_BT_EVENT_GATE` wherever this section says
+>    `OPENCLAW_EVENT_GATE` for the backtest side. The bench-sleeve exemption
+>    (`OPENCLAW_EVENT_GATE_EXEMPT_BENCH`) is NOT mirrored in backtest at all
+>    (no book-level benchmark concept per strategy there) — a documented
+>    live/backtest asymmetry. It costs nothing today because the live
+>    default is not-exempt (parity holds); it would only diverge if the
+>    exempt flag is ever armed live without an equivalent backtest flag
+>    (`OPENCLAW_BT_EVENT_GATE_EXEMPT_BENCH` does not exist — future work if
+>    needed).
+> 2. The "Delete the stale `S_fomc_presell_spy_long` registry row" bullet
+>    below instructs a DELETE, which the repo's CLAUDE.md append-only
+>    invariant forbids for any registry/manifest row ("no code path is
+>    allowed to drop... never a DELETE... any future deprecation must be a
+>    flag"). It was NOT implemented as a delete or a flag: the row has no
+>    `manifest.json` entry at all (checked against all 155 active +
+>    5 decommissioned strategies — no match) and no backing implementation
+>    file, so there is no state row to attach `active=false` to and no
+>    lifecycle-state mechanism to invoke. `registry.py`'s dict entries are
+>    only resolved via a lazy `importlib.import_module` inside
+>    `load_strategy_class`, never at module import time, so the dangling
+>    `src/strategies/registry.py:148` row is inert today — nothing calls it.
+>    Recorded as an operator decision (see the 2026-09-17 changelog entry);
+>    the row is left exactly as-is pending an operator ruling on how to
+>    represent "never had a manifest entry" in the flag scheme.
+
 - Master `data/master/macro_events.parquet` (append-only, dedup on
   (event, scheduled_at)): columns `event` (FOMC_DECISION, CPI, NFP, PCE,
   GDP_ADV, FOMC_MINUTES), `scheduled_at` (UTC), `session_date` (NYSE
