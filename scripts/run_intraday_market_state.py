@@ -272,6 +272,22 @@ def _redis():
         return None
 
 
+def _load_spy_ohlc(prices_path):
+    """SPY OHLC rows from the prices master, read with a pyarrow row filter.
+
+    Memory-bounded: pyarrow evaluates ``ticker == 'SPY'`` per row group and
+    materialises only matching rows, so this is a few thousand rows instead
+    of the whole append-only master. Columns limited to what GK needs.
+    """
+    import pyarrow.parquet as pq
+    table = pq.read_table(
+        str(prices_path),
+        columns=['ticker', 'date', 'open', 'high', 'low', 'close'],
+        filters=[('ticker', '==', 'SPY')],
+    )
+    return table.to_pandas()
+
+
 def _enrich_with_daily_derived(features: dict) -> dict:
     """Inject spy_gk_vol_daily and vvix_level from data/master daily sources.
 
@@ -296,10 +312,15 @@ def _enrich_with_daily_derived(features: dict) -> dict:
         ts = pd.Timestamp(features.get('ts_utc')) if features.get('ts_utc') else pd.Timestamp.now(tz='UTC')
         if ts.tz is None: ts = ts.tz_localize('UTC')
         tick_date = ts.tz_convert('America/New_York').date()
-        # GK daily vol
+        # GK daily vol. Read ONLY SPY rows via pyarrow predicate pushdown —
+        # the whole master is ~19M rows (~2.2 GB as a DataFrame) and this
+        # runs every 5 min through the 15:00 ET cycle; on 2026-09-16 the
+        # full read coincided with the 4.3 GB signals step and the kernel
+        # OOM-killed the cycle (global OOM, 7.9 GB box). Never load the
+        # whole prices.parquet here.
         if prices_path.exists():
-            spy = pd.read_parquet(prices_path)
-            spy = spy[(spy['ticker'] == 'SPY') & spy['low'].notna() & (spy['low'] > 0)]
+            spy = _load_spy_ohlc(prices_path)
+            spy = spy[spy['low'].notna() & (spy['low'] > 0)]
             spy = spy.dropna(subset=['open', 'high', 'low', 'close'])
             spy['date'] = pd.to_datetime(spy['date']).dt.date
             spy = spy[spy['date'] <= tick_date].sort_values('date')

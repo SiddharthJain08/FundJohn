@@ -88,6 +88,11 @@ function _setCached(op, args, value) {
 // PARQUET_OP_TIMEOUT_MS_<OP> (e.g. PARQUET_OP_TIMEOUT_MS_WRITE_OPTIONS).
 const _OP_TIMEOUT_DEFAULTS_MS = {
   write_options: 20 * 60_000,
+  // write_prices rewrites the whole prices master (638 MB / 19M rows on
+  // 2026-09-16) via tmp + os.replace on EVERY flush. 30 s only holds on an
+  // idle box: 2026-09-15 and 09-16 every flush timed out under load and the
+  // EOD collect failed twice, leaving the master two closes behind.
+  write_prices: 5 * 60_000,
 };
 function _opTimeoutMs(op, env = process.env) {
   const raw = env[`PARQUET_OP_TIMEOUT_MS_${String(op).toUpperCase()}`];
