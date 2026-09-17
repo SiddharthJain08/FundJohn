@@ -934,6 +934,7 @@ def _per_bar_simulate(
     days_processed = 0
     days_with_signals = 0
     entries_asset_gated = 0
+    entries_event_gated = 0
     bars_raised = 0
     first_raise: str | None = None
     # Track per-bar universe sizes when resolver is active.
@@ -951,6 +952,22 @@ def _per_bar_simulate(
         raise ValueError('exit_hook strategies support fill_model close/same_close only '
                          '(the open-fill bar-inclusion rule is not modelled in the open book)')
     _dt_priority = os.environ.get('OPENCLAW_BT_DOUBLE_TOUCH', 'stop')
+    # C3 (spec 2026-09-12): the live T-1..T macro-event entry block must have a
+    # backtest twin — the backtest side is authoritative, so a live gate with no
+    # backtest counterpart is forbidden. DELIBERATELY a separate flag from the
+    # live OPENCLAW_EVENT_GATE and with NO fallback to it: spec §0 forbids
+    # stacking epochs, and a shared flag would let a live .env edit silently
+    # re-epoch all 156 strategies mid-fleet. The backtest half enters via the
+    # post-atr_r drop-in, on operator confirmation. Empty dict = inert.
+    _event_gate_sessions: dict = {}
+    if os.environ.get('OPENCLAW_BT_EVENT_GATE') == '1':
+        try:
+            from lib.macro_events import gated_sessions
+            _event_gate_sessions = gated_sessions(start_dt.date(), end_dt.date())
+        except Exception as _e:  # noqa: BLE001
+            print(f'[WARN] event gate calendar unreadable ({type(_e).__name__}: '
+                  f'{_e}) — entries NOT gated', file=sys.stderr)
+            _event_gate_sessions = {}
     open_book: list = []
     hook_counters: dict = {}
     if _use_open_book:
@@ -1058,6 +1075,14 @@ def _per_bar_simulate(
         if not signals:
             continue
         days_with_signals += 1
+
+        if _event_gate_sessions:
+            _cd_gate = current_date.date() if hasattr(current_date, 'date') else current_date
+            if _cd_gate in _event_gate_sessions:
+                # ENTRIES only: the open-book exit walk at the top of this loop
+                # and every simulate_trade already in flight are untouched.
+                entries_event_gated += len(signals[:instance.MAX_SIGNALS])
+                continue
 
         for sig in signals[:instance.MAX_SIGNALS]:
             direction = _signal_to_long_short(sig.direction)
@@ -1217,6 +1242,10 @@ def _per_bar_simulate(
     if entries_asset_gated:
         _log(f'asset gate: skipped {entries_asset_gated} entries on execution-ineligible '
              f'symbols (non-ETB/non-shortable/non-fractionable per today\'s Alpaca universe)')
+    if entries_event_gated:
+        _log(f'event gate: skipped {entries_event_gated} entries on '
+             f'{len(_event_gate_sessions)} macro-event sessions (T-1..T of '
+             f'FOMC_DECISION/CPI/NFP)')
 
     return {
         'trades':           trades,
@@ -1224,6 +1253,7 @@ def _per_bar_simulate(
         'days_processed':   days_processed,
         'days_with_signals': days_with_signals,
         'entries_asset_gated': entries_asset_gated,
+        'entries_event_gated': entries_event_gated,
         'bars_raised':      bars_raised,
         'static_universe':  static_universe,
         'min_lookback':     min_lookback,
@@ -1566,6 +1596,13 @@ def run_backtest(strategy_id: str, *,
                 'asset_gate': (os.environ.get('OPENCLAW_BT_ASSET_GATE', 'parity')
                                if _sim_kwargs.get('asset_gate') else 'off'),
                 'double_touch': os.environ.get('OPENCLAW_BT_DOUBLE_TOUCH', 'stop'),
+                # C3 (spec 2026-09-12): T-1..T macro-event entry block. 'off'
+                # unless OPENCLAW_BT_EVENT_GATE=1 — a SEPARATE flag from the
+                # live OPENCLAW_EVENT_GATE so arming the live gate can never
+                # silently re-epoch the fleet.
+                'event_gate': ('on' if os.environ.get('OPENCLAW_BT_EVENT_GATE') == '1'
+                               else 'off'),
+                'entries_event_gated': int(sim.get('entries_event_gated', 0)),
                 # Gap-fill provenance (2026-09-12 §A2): 'level' = a bracket
                 # touch returns the LEVEL (legacy); 'open' = a bar that opens
                 # beyond the level fills at that open. Read by
