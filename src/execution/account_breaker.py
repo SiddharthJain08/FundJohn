@@ -59,7 +59,18 @@ _ET = ZoneInfo('America/New_York')
 # supplement items 8/11): after this many CONSECUTIVE 5-minute ticks with a
 # still-pending flatten, run_once() posts ONE escalation to #trade-reports
 # (not a repeat every tick after) — see flatten_attempts (migration 158).
-FLATTEN_ESCALATE_AFTER = 12    # ~1 hour at the 5-minute RTH cron cadence
+# Overridable via OPENCLAW_ACCOUNT_BREAKER_FLATTEN_ESCALATE_AFTER (fix round
+# 1 minor item 2 — migration 158's comment named this env var before any
+# code actually read it; read once at import, same posture as the other
+# module-level limits above, with a robust fallback to the 12-tick default
+# on anything unparsable).
+FLATTEN_ESCALATE_AFTER_ENV = 'OPENCLAW_ACCOUNT_BREAKER_FLATTEN_ESCALATE_AFTER'
+try:
+    FLATTEN_ESCALATE_AFTER = int(os.environ.get(FLATTEN_ESCALATE_AFTER_ENV) or 12)
+except (TypeError, ValueError):
+    logger.warning('[account_breaker] %s=%r is not an int; using default 12',
+                   FLATTEN_ESCALATE_AFTER_ENV, os.environ.get(FLATTEN_ESCALATE_AFTER_ENV))
+    FLATTEN_ESCALATE_AFTER = 12    # ~1 hour at the 5-minute RTH cron cadence
 
 # Float-equality tolerance for the boundary comparisons below: a ratio that is
 # mathematically exactly -0.10 (e.g. 90_000 / 100_000 - 1) lands on
@@ -149,8 +160,12 @@ def evaluate(alpha: float, peak, equity: float, opening_equity) -> dict:
 # disables every savepoint guard above (a SAVEPOINT outside a transaction is
 # meaningless, and RELEASE/ROLLBACK TO SAVEPOINT lose their point), which
 # would turn one failed query into a connection that poisons the rest of the
-# caller's tick. run_once() asserts `conn.autocommit is False` before the
-# first guarded call for exactly this reason (brief supplement item 4).
+# caller's tick. run_once() checks `conn.autocommit` and refuses with
+# return 2 before the first guarded call for exactly this reason (brief
+# supplement item 4; fix round 1 item 3 replaced the original `assert` — an
+# `assert` is stripped under `python -O`, and the brief's exit-code
+# contract wants a normal control-flow `return 2`, not an uncaught
+# AssertionError).
 
 _STATE_COLS = ('halted', 'reason', 'breached_at', 'peak_alpha_nav', 'dd',
                'daily', 'pending_flatten')
@@ -796,6 +811,30 @@ def _commit(conn) -> bool:
         return False
 
 
+def _flatten_escalation_msg(attempts: int, flat: dict) -> str:
+    """Shared wording for both 'flatten still PENDING' escalation posts (the
+    already-halted retry branch and the fresh new-breach branch) — fix
+    round 1 items 1+2: `flat['tickers']` is the ATTEMPTED set (every
+    non-benchmark equity symbol flatten_alpha tried to close this tick), NOT
+    the residual/still-open set — residual identities aren't tracked at all,
+    so labelling this list "Residual symbols" (the prior wording) was
+    actively misleading an operator about which symbols are still open.
+    Also repeats the option-book carve-out (item 1): OCC legs are never
+    touched by this breaker, so a still-unhedged option book is exactly the
+    kind of thing an escalated operator page needs to say out loud."""
+    return (
+        ':rotating_light: **Account breaker flatten still PENDING** '
+        f"after {attempts} consecutive 5-minute ticks (~{attempts * 5} min). "
+        f"attempted: {sorted(flat['tickers'])} — fail={flat['fail']} "
+        f"partial={flat['partial']} pending={int(bool(flat['pending']))} "
+        '(still open per the last re-read; residual identities are not '
+        'tracked). Operator attention needed — check broker positions '
+        'directly; the breaker keeps retrying automatically. Option legs '
+        '(OCC) are NOT flattened by the breaker — the option book stays '
+        'open; close by hand if it is now unhedged.'
+    )
+
+
 def run_once(session_date=None) -> int:
     """One 5-minute evaluation. 0 = evaluated, 1 = soft failure (no
     evaluation this tick, retried in 5 minutes), 2 = misconfiguration.
@@ -862,16 +901,24 @@ def run_once(session_date=None) -> int:
     mode = 'armed' if live else 'shadow'
     session = session_date or datetime.now(_ET).date()
 
-    conn = psycopg2.connect(uri)
+    conn = None
     try:
+        conn = psycopg2.connect(uri)
+
         # Every read/write below relies on SAVEPOINT-guarded queries
         # composing with the caller's own transaction (module docstring,
         # supplement item 4): autocommit would disable that guard entirely,
         # silently turning one failed query into a poisoned connection for
-        # the rest of the tick.
-        assert getattr(conn, 'autocommit', False) is False, (
-            '[account_breaker] connection must be non-autocommit — every '
-            'savepoint guard in this module depends on it')
+        # the rest of the tick. A plain `if` + `return 2` (fix round 1 item
+        # 3) rather than `assert` — `assert` is stripped under `python -O`,
+        # and the brief's exit-code contract wants an ordinary return here,
+        # not an uncaught AssertionError. No DB call happens beyond this
+        # check (cur = conn.cursor() is the very next line).
+        if conn.autocommit:
+            logger.error('[account_breaker] connection is autocommit=True; '
+                         'refusing — every savepoint guard in this module '
+                         'depends on non-autocommit')
+            return 2
 
         cur = conn.cursor()
         bench_raw = bench_tickers(cur)
@@ -890,16 +937,23 @@ def run_once(session_date=None) -> int:
 
         if rearm_requested(state):
             rearmed = clear_halt(cur, alpha)
-            if not rearmed:
-                logger.error('[account_breaker] re-arm write failed; will '
-                             'retry next tick on the same operator token')
-            _commit(conn)
-            if rearmed:
+            # fix round 1 item 3: `_commit` is now gated on `rearmed` too —
+            # a failed clear_halt already rolled back to its own savepoint
+            # (nothing to commit), and on a raising/failing commit AFTER a
+            # successful clear_halt write, the pre-clear `state` (still
+            # halted) must be kept rather than optimistically switching to
+            # the un-halted default a write that never durably landed.
+            if rearmed and _commit(conn):
                 logger.info('[account_breaker] re-armed by operator token; '
                             'peak reset to %.2f', alpha)
                 state = {'halted': False, 'reason': None, 'breached_at': None,
                          'peak': alpha, 'dd': None, 'daily': None,
                          'pending_flatten': False}
+            else:
+                logger.error('[account_breaker] re-arm failed to persist '
+                             '(clear_halt=%s); halt latch left in place, '
+                             'will retry next tick on the same operator '
+                             'token', rearmed)
 
         open_eq, open_src = opening_equity(cur, session, equity)
 
@@ -935,13 +989,7 @@ def run_once(session_date=None) -> int:
                                     open_src=open_src, halted=True, flatten=flat))
 
             if flat is not None and prior_attempts < FLATTEN_ESCALATE_AFTER <= attempts:
-                _post('trade-reports',
-                      ':rotating_light: **Account breaker flatten still PENDING** '
-                      f"after {attempts} consecutive 5-minute ticks "
-                      f"(~{attempts * 5} min). Residual symbols: "
-                      f"{sorted(flat['tickers'])}. Operator attention needed — "
-                      'check broker positions directly; the breaker keeps '
-                      'retrying automatically.')
+                _post('trade-reports', _flatten_escalation_msg(attempts, flat))
             return 0
 
         st = evaluate(alpha, state['peak'], equity, open_eq)
@@ -1024,6 +1072,9 @@ def run_once(session_date=None) -> int:
                   f"(fail={flat['fail']} partial={flat['partial']} "
                   f"pending={int(flat['pending'])}); benchmark sleeve "
                   f"untouched ({sorted(bench)})\n"
+                  '• option legs (OCC) are NOT flattened by the breaker — '
+                  'the option book stays open; close by hand if it is now '
+                  'unhedged\n'
                   f"• re-arm (operator only): set "
                   f"OPENCLAW_ACCOUNT_BREAKER_REARM={breached_at.isoformat()} in .env\n"
                   '• OPENCLAW_ACCOUNT_BREAKER is read by BOTH the breaker '
@@ -1032,13 +1083,7 @@ def run_once(session_date=None) -> int:
                   'johnbot, never as a per-unit Environment= drop-in')
 
             if prior_attempts < FLATTEN_ESCALATE_AFTER <= attempts:
-                _post('trade-reports',
-                      ':rotating_light: **Account breaker flatten still PENDING** '
-                      f"after {attempts} consecutive 5-minute ticks "
-                      f"(~{attempts * 5} min). Residual symbols: "
-                      f"{sorted(flat['tickers'])}. Operator attention needed — "
-                      'check broker positions directly; the breaker keeps '
-                      'retrying automatically.')
+                _post('trade-reports', _flatten_escalation_msg(attempts, flat))
 
         logger.debug('[account_breaker] bench_mv=%.2f bench_tickers=%s',
                      bench_mv, sorted(bench))
@@ -1047,11 +1092,19 @@ def run_once(session_date=None) -> int:
                                 open_src=open_src,
                                 halted=bool(live and st['breach']), flatten=flat))
         return 0
+    except Exception as e:  # noqa: BLE001 — fix round 1 item 3: a crash
+        # anywhere in this tick, including psycopg2.connect itself (now
+        # inside this same try), must never propagate as a traceback — it's
+        # caught, logged once, and turned into the same soft-failure return
+        # every other guarded path in this function already uses.
+        logger.error('[account_breaker] tick failed: %s: %s', type(e).__name__, e)
+        return 1
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def main(argv=None) -> int:

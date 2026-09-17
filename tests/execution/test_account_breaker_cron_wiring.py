@@ -97,6 +97,14 @@ class FailFirstUpdateCursor(FakeCursor):
 
 
 class FakeConn:
+    # Explicit, not absent (fix round 1 item 3): run_once() now reads
+    # `conn.autocommit` directly (no getattr default) inside its own
+    # try/except, so a double lacking the attribute entirely would still
+    # "work" by falling into that except and returning 1 — but that masks
+    # the very check this attribute exists to exercise, so every FakeConn
+    # here declares it like a real psycopg2 connection would.
+    autocommit = False
+
     def __init__(self, cur):
         self._cur = cur
         self.committed = 0
@@ -110,6 +118,18 @@ class FakeConn:
 
     def close(self):
         self.closed = True
+
+
+class RaisingCommitConn(FakeConn):
+    """commit() raises — the other half of supplement item 1's persistence
+    gate: save_state's UPDATE can land cleanly while the commit that makes
+    it durable still fails. _commit() catches this internally and returns
+    False, which must gate broker action exactly like a raising UPDATE does
+    (fix round 1 item 4, required test 1)."""
+
+    def commit(self):
+        self.committed += 1
+        raise RuntimeError('commit failed: connection reset')
 
 
 @pytest.fixture
@@ -240,9 +260,12 @@ def test_empty_book_guard_applies_to_the_halted_retry_branch_too(monkeypatch, wi
 
 
 def test_autocommit_true_connection_is_rejected(monkeypatch, wired):
-    """Supplement item 4: run_once() asserts conn.autocommit is False before
-    the first guarded call — a misconfigured autocommit connection would
-    silently disable every savepoint guard in the module."""
+    """Supplement item 4 + fix round 1 item 3: run_once() checks
+    conn.autocommit before the first guarded call — a misconfigured
+    autocommit connection would silently disable every savepoint guard in
+    the module. Fix round 1 replaced the original `assert` (stripped under
+    `python -O`) with a plain `if` + `return 2`, matching the brief's
+    exit-code contract; no DB call may happen beyond the check itself."""
     class BadConn:
         autocommit = True
 
@@ -250,15 +273,14 @@ def test_autocommit_true_connection_is_rejected(monkeypatch, wired):
             pytest.fail('must not reach the cursor with autocommit=True')
 
         def commit(self):
-            pass
+            pytest.fail('must not commit with autocommit=True')
 
         def close(self):
             pass
 
     monkeypatch.setattr(ab.psycopg2, 'connect', lambda *_a, **_k: BadConn())
     monkeypatch.setattr(at, '_fetch_account_state', lambda sess: {'equity': 100_000.0})
-    with pytest.raises(AssertionError):
-        ab.run_once(session_date=SESSION)
+    assert ab.run_once(session_date=SESSION) == 2
 
 
 # ── no breach ───────────────────────────────────────────────────────────────
@@ -313,9 +335,17 @@ def test_armed_breach_flattens_halts_and_posts(monkeypatch, wired, caplog):
 
     # Deviation 4 (module docstring): supplement item 1 requires the halt
     # latch to be persisted+committed BEFORE the flatten and again after —
-    # two UPDATE statements, not one. Inspect the final (post-flatten) row.
+    # two UPDATE statements, not one.
     updates = cur.sql_matching('UPDATE account_breaker_state')
     assert len(updates) == 2
+
+    # Fix round 1, item 4 test 2 (latch-first pinned): the FIRST write must
+    # already carry halted=True and pending_flatten=True — proving the latch
+    # lands BEFORE any broker action, not merely that two writes happened.
+    _sql0, params0 = updates[0]
+    assert params0[0] is True and params0[6] is True
+
+    # Inspect the final (post-flatten) row.
     _sql, params = updates[-1]
     assert params[0] is True
     # Deviation 3: both rules breach at this fixture's numbers (dd=-70.5%,
@@ -328,6 +358,11 @@ def test_armed_breach_flattens_halts_and_posts(monkeypatch, wired, caplog):
     assert channel == 'trade-reports'
     assert 'OPENCLAW_ACCOUNT_BREAKER_REARM=' in msg
     assert 'PROCESS-WIDE' in msg           # supplement item 10
+    # Fix round 1, item 1 test: the HALTED post must say the option book
+    # stays open — _is_equity_symbol/_OCC_RE exclude OCC legs from the
+    # flatten by design, and that must not be left implicit to the operator.
+    assert 'option book stays open' in msg
+    assert 'OCC' in msg
 
 
 def test_already_halted_retries_the_pending_flatten_only(monkeypatch, wired):
@@ -381,6 +416,30 @@ def test_persist_failure_before_flatten_takes_no_broker_action(monkeypatch, wire
     assert 'HALTED' not in msg
 
 
+def test_commit_failure_before_flatten_takes_no_broker_action(monkeypatch, wired):
+    """Fix round 1, item 4 test 1: the OTHER half of supplement item 1's
+    gate — save_state's pre-flatten UPDATE can land cleanly while the
+    commit that makes it durable still fails. A raising conn.commit() must
+    be treated exactly like a raising UPDATE: no broker action, a
+    non-HALTED warning post instead, return 1."""
+    monkeypatch.setenv(ab.ARM_ENV, '1')
+    monkeypatch.setattr(
+        rl, '_close_symbol',
+        lambda *_a, **_k: pytest.fail(
+            'must not submit when the halt latch failed to commit'))
+    cur = FakeCursor(_state(peak=200_000.0), (205_000.0,))
+    conn = RaisingCommitConn(cur)
+    monkeypatch.setattr(ab.psycopg2, 'connect', lambda *_a, **_k: conn)
+    monkeypatch.setattr(at, '_fetch_account_state', lambda sess: {'equity': 100_000.0})
+    assert ab.run_once(session_date=SESSION) == 1
+    assert cur.sql_matching('INSERT INTO circuit_breaker_fires') == []
+    assert len(wired['posts']) == 1
+    channel, msg = wired['posts'][0]
+    assert channel == 'trade-reports'
+    assert 'NOT latched' in msg
+    assert 'HALTED' not in msg
+
+
 # ── F-5: escalation after N consecutive pending ticks ────────────────────────
 
 def test_flatten_escalation_posts_once_after_the_configured_tick_threshold(monkeypatch, wired):
@@ -403,6 +462,17 @@ def test_flatten_escalation_posts_once_after_the_configured_tick_threshold(monke
     channel, msg = wired['posts'][0]
     assert channel == 'trade-reports'
     assert 'still PENDING' in msg
+    # Fix round 1, item 2: flat['tickers'] is the ATTEMPTED set, never the
+    # residual/still-open set (residual identities aren't tracked at all) —
+    # the old "Residual symbols: [...]" wording must be gone entirely.
+    assert 'Residual symbols' not in msg
+    assert "attempted: ['AAPL']" in msg
+    assert 'fail=1 partial=0 pending=1' in msg
+    assert 'residual identities are not tracked' in msg
+    # Fix round 1, item 1: the escalation post must say the option book
+    # stays open too.
+    assert 'option book stays open' in msg
+    assert 'OCC' in msg
     (_sql, params), = cur.sql_matching('UPDATE account_breaker_state')
     assert params[7] == 2              # flatten_attempts persisted as 2
 
