@@ -116,3 +116,32 @@ def test_unreadable_master_is_inert_not_fatal(tmp_path, monkeypatch):
     p.write_bytes(b'not a parquet')
     monkeypatch.setenv(me.MASTER_PATH_ENV, str(p))
     assert me.load_events() == []
+
+
+# ── T8 fix-round-1 item 1: active=False correctability ──────────────────────
+
+def _master_with_active(tmp_path, monkeypatch, rows):
+    df = pd.DataFrame(rows, columns=['event', 'scheduled_at', 'session_date',
+                                     'source', 'ingested_at', 'active'])
+    p = tmp_path / 'macro_events.parquet'
+    df.to_parquet(p, index=False)
+    monkeypatch.setenv(me.MASTER_PATH_ENV, str(p))
+    return p
+
+
+def test_reader_ignores_an_active_false_row(tmp_path, monkeypatch, calendar):
+    rows = [{**_row('CPI', dt.date(2026, 9, 16)), 'active': False},
+            {**_row('FOMC_DECISION', dt.date(2026, 9, 17)), 'active': True},
+            {**_row('NFP', dt.date(2026, 9, 4)), 'active': None}]  # NULL == active
+    _master_with_active(tmp_path, monkeypatch, rows)
+    got = sorted(r['event'] for r in me.load_events(events=me.EVENTS))
+    assert got == ['FOMC_DECISION', 'NFP']
+
+
+def test_reader_gates_normally_when_active_column_is_missing(tmp_path, monkeypatch, calendar):
+    """Regression: probing for 'active' before projecting it must not raise
+    on a master written before this column existed (the pre-existing
+    _master() fixture below writes exactly 5 columns, no 'active')."""
+    _master(tmp_path, monkeypatch, [_row('CPI', dt.date(2026, 9, 16))])
+    got = me.gated_sessions(dt.date(2026, 9, 1), dt.date(2026, 9, 30))
+    assert got == {dt.date(2026, 9, 15): ['CPI'], dt.date(2026, 9, 16): ['CPI']}

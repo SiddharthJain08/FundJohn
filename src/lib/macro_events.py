@@ -9,6 +9,15 @@ src/ingestion/ingest_macro_events.py. Append-only, dedup key
     session_date  the NYSE session the release lands in (lib.trading_calendar)
     source        'federalreserve.gov' | 'bls.gov' | 'bea.gov'
     ingested_at   UTC timestamp of the fetch
+    active        bool, nullable. False = correctable-without-DELETE marker
+                  written by `ingest_macro_events.py --deactivate` (fix
+                  round 1, T8 item 1). A parsed row NEVER writes this column
+                  explicitly — it stays NULL — so the merge-time rule "never
+                  flip active back to True unless the incoming row carries
+                  True explicitly" (see ingest_macro_events.merge_into_master)
+                  means a routine re-ingest can never silently resurrect a
+                  deactivated event. MISSING column or NULL both count as
+                  active here; only an explicit False is excluded.
 
 Every reader here is INERT (empty result + a warning) when the master is
 missing or unreadable: a gate that cannot read its calendar must not block
@@ -40,7 +49,10 @@ DEFAULT_MASTER = ROOT / 'data' / 'master' / 'macro_events.parquet'
 EVENTS = ('FOMC_DECISION', 'CPI', 'NFP', 'PCE', 'GDP_ADV', 'FOMC_MINUTES')
 # Ruling R3 scopes the entry block to these three.
 HIGH_IMPORTANCE = ('FOMC_DECISION', 'CPI', 'NFP')
-COLUMNS = ['event', 'scheduled_at', 'session_date', 'source', 'ingested_at']
+# NOTE: ingest_macro_events.py holds its own copy of this list (not a shared
+# import) — the two must be changed together. See T8 fix-round-1 item 1.
+COLUMNS = ['event', 'scheduled_at', 'session_date', 'source', 'ingested_at',
+          'active']
 
 
 def master_path() -> Path:
@@ -60,21 +72,45 @@ def _as_date(v):
 
 def load_events(events=HIGH_IMPORTANCE) -> list:
     """[{'event', 'session_date'}] sorted by (session_date, event). [] when the
-    master is absent or unreadable — the gate is then inert, never fatal."""
+    master is absent or unreadable — the gate is then inert, never fatal.
+
+    Rows with active is False are skipped; a MISSING 'active' column (a
+    master written before this fix round) or a NULL value both count as
+    active. `pd.read_parquet(path, columns=[...])` RAISES if a requested
+    column is absent, so 'active' is only added to the projection after a
+    cheap schema probe confirms it exists — projecting it unconditionally
+    would turn "master predates this column" into an unreadable master and
+    silently make the whole gate inert (the exact failure mode this file's
+    module docstring warns against)."""
     p = master_path()
     if not p.exists():
         log.warning('[macro_events] master missing at %s; gate inert', p)
         return []
     try:
         import pandas as pd
-        df = pd.read_parquet(p, columns=['event', 'session_date'])
+        import pyarrow.parquet as pq
+        cols = ['event', 'session_date']
+        try:
+            if 'active' in set(pq.ParquetFile(p).schema_arrow.names):
+                cols.append('active')
+        except Exception:  # noqa: BLE001 — schema probe failure: read without
+            # 'active' rather than give up (a deactivation gets ignored, but
+            # the gate itself keeps working — the inert-gate failure mode is
+            # worse than a missed deactivation).
+            pass
+        df = pd.read_parquet(p, columns=cols)
     except Exception as e:  # noqa: BLE001
         log.warning('[macro_events] master unreadable (%s: %s); gate inert',
                     type(e).__name__, e)
         return []
     wanted = set(events or ())
+    active_col = df['active'] if 'active' in df.columns else None
     out = []
-    for ev, sd in zip(df.get('event', []), df.get('session_date', [])):
+    for i, (ev, sd) in enumerate(zip(df.get('event', []), df.get('session_date', []))):
+        if active_col is not None:
+            a = active_col.iloc[i]
+            if pd.notna(a) and not bool(a):
+                continue
         if wanted and str(ev) not in wanted:
             continue
         d = _as_date(sd)

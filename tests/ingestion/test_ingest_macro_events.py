@@ -169,3 +169,208 @@ def test_run_reports_a_failure_without_raising(tmp_path):
     rc, stats = mod.run(['fed'], master_path=master,
                         from_file={'fed': str(tmp_path / 'missing.html')})
     assert rc == 1 and stats['urls_failed'] == 1 and stats['new_rows'] == 0
+
+
+# ── T8 fix-round-1 item 3a: parser hardening ─────────────────────────────────
+
+def test_fed_furniture_trap_link_text_and_footer_produce_no_spurious_rows():
+    """Three meetings: Jan (minutes complete, link text before the release
+    date), Apr (minutes label present but PENDING — no release date at all,
+    sandwiched between the other two), Sep (minutes complete, link text). A
+    trailing 'Last Update: September 12, 2026' footer. Regression for two
+    bugs at once: (1) a bare 'Month D' (the footer) must never yield a
+    decision, and (2) Apr's dangling 'Minutes:' must not lazily skip across
+    Sep's OWN day-range digits to steal ITS '(Released ...)' clause, which
+    would both mis-pair the minutes date and erase Sep's decision when the
+    over-matched span gets blanked out."""
+    df = mod.parse_fed((FIX / 'fed_furniture_trap.html').read_text(), fetched_at=TS)
+    got = _by_event(df)
+    assert got == {'FOMC_DECISION': [dt.date(2026, 1, 28), dt.date(2026, 4, 29),
+                                     dt.date(2026, 9, 17)],
+                   'FOMC_MINUTES': [dt.date(2026, 2, 18), dt.date(2026, 10, 21)]}
+    assert len(df) == 5
+
+
+def test_single_month_day_is_not_a_decision():
+    html = ('<html><body><h4>2026 FOMC Meeting</h4>'
+            '<p>Last Update: September 12, 2026</p></body></html>')
+    df = mod.parse_fed(html, fetched_at=TS)
+    assert df.empty
+
+
+# ── T8 fix-round-1 item 4c: _iter_datetimes bounds the FIRST record too ─────
+
+def test_iter_datetimes_bounds_the_first_records_context():
+    """Page furniture mentioning 'gross domestic product ... advance' sits
+    well before the first real record, separated from it by neutral padding
+    longer than _CONTEXT_LOOKBACK_CHARS; the record's own title is 'Personal
+    Income and Outlays' (PCE). An unbounded ctx = text[0:m.start()] for the
+    first match would let that distant furniture mis-tag it as GDP_ADV; a
+    properly bounded ctx only reaches back into the neutral padding."""
+    header = ('The Bureau of Economic Analysis publishes a gross domestic '
+             'product advance estimate release schedule for public reference.')
+    padding = 'Neutral padding text with no macro release keywords here. ' * 6
+    assert len(padding) > mod._CONTEXT_LOOKBACK_CHARS   # the trap only bites if this holds
+    html = (f'<html><body><p>{header}</p><p>{padding}</p><ul>'
+            '<li><span class="title">Personal Income and Outlays, July 2026</span> '
+            '<span class="date">August 28, 2026 8:30 a.m. EDT</span></li></ul>'
+            '</body></html>')
+    df = mod.parse_titled(html, mod.BEA_TITLES, 'bea.gov', fetched_at=TS)
+    assert list(df['event']) == ['PCE']
+
+
+# ── T8 fix-round-1 item 2: calendar-coverage guard ──────────────────────────
+
+def test_calendar_guard_refuses_write_when_master_lacks_margin(tmp_path, monkeypatch):
+    """A calendar covering every individual event date (so parsing itself
+    succeeds via is_session's single-date check) but NOT the +-14d margin the
+    write guard requires. The guard must catch this itself, not rely on
+    is_session silently degrading to the (here tripwired) alpaca fallback."""
+    rows = [{'date': d.date(), 'open': '09:30', 'close': '16:00', 'active': True}
+            for d in pd.bdate_range('2026-01-28', '2027-01-27')]
+    cal_p = tmp_path / 'tight_cal.parquet'
+    pd.DataFrame(rows).to_parquet(cal_p, index=False)
+    monkeypatch.setenv(tc.MASTER_PATH_ENV, str(cal_p))
+    tc.clear_cache()
+
+    master = tmp_path / 'macro_events.parquet'
+    rc, stats = mod.run(['fed'], master_path=master,
+                        from_file={'fed': str(FIX / 'fed_fomccalendars.html')})
+    assert rc == 3
+    assert not master.exists()
+
+
+def test_deactivate_refuses_write_when_calendar_lacks_margin(tmp_path, monkeypatch):
+    rows = [{'date': d.date(), 'open': '09:30', 'close': '16:00', 'active': True}
+            for d in pd.bdate_range('2026-09-16', '2026-09-17')]
+    cal_p = tmp_path / 'tight_cal2.parquet'
+    pd.DataFrame(rows).to_parquet(cal_p, index=False)
+    monkeypatch.setenv(tc.MASTER_PATH_ENV, str(cal_p))
+    tc.clear_cache()
+
+    master = tmp_path / 'macro_events.parquet'
+    rc, stats = mod.run_deactivate([('FOMC_DECISION', '2026-09-17T18:00:00Z')],
+                                   master_path=master)
+    assert rc == 3
+    assert not master.exists()
+
+
+# ── T8 fix-round-1 item 1: active=False correctability ──────────────────────
+
+def test_deactivate_round_trip_reader_and_no_resurrection(tmp_path, monkeypatch):
+    master = tmp_path / 'macro_events.parquet'
+    df = mod.parse_fed((FIX / 'fed_fomccalendars.html').read_text(), fetched_at=TS)
+    mod.merge_into_master(df, master_path=master)
+
+    row = df[(df['event'] == 'FOMC_DECISION') &
+             (df['session_date'] == dt.date(2026, 9, 17))].iloc[0]
+    iso = row['scheduled_at'].isoformat()
+    rc, stats = mod.run_deactivate([('FOMC_DECISION', iso)], master_path=master)
+    assert rc == 0
+    assert stats['unmatched'] == []
+
+    from lib import macro_events as me
+    monkeypatch.setenv(me.MASTER_PATH_ENV, str(master))
+    got = me.gated_sessions(dt.date(2026, 9, 1), dt.date(2026, 9, 30))
+    assert dt.date(2026, 9, 16) not in got
+    assert dt.date(2026, 9, 17) not in got
+
+    # Re-ingesting the SAME fed page must not resurrect the deactivated row —
+    # a normal parse never carries active=True explicitly (see _row()).
+    mod.merge_into_master(df, master_path=master)
+    got2 = me.gated_sessions(dt.date(2026, 9, 1), dt.date(2026, 9, 30))
+    assert dt.date(2026, 9, 16) not in got2
+    assert dt.date(2026, 9, 17) not in got2
+
+
+def test_deactivate_with_mismatched_timestamp_is_loud_not_silent(tmp_path, monkeypatch):
+    """An ISO that doesn't match the ingested scheduled_at to the second must
+    not report a quiet success — the operator needs to know the real row is
+    still active."""
+    master = tmp_path / 'macro_events.parquet'
+    df = mod.parse_fed((FIX / 'fed_fomccalendars.html').read_text(), fetched_at=TS)
+    mod.merge_into_master(df, master_path=master)
+
+    rc, stats = mod.run_deactivate([('FOMC_DECISION', '2026-09-17T00:00:00Z')],
+                                   master_path=master)
+    assert rc == 4
+    assert stats['unmatched'] == ['FOMC_DECISION=2026-09-17T00:00:00+00:00']
+
+    from lib import macro_events as me
+    monkeypatch.setenv(me.MASTER_PATH_ENV, str(master))
+    got = me.gated_sessions(dt.date(2026, 9, 1), dt.date(2026, 9, 30))
+    assert got == {dt.date(2026, 9, 16): ['FOMC_DECISION'],
+                   dt.date(2026, 9, 17): ['FOMC_DECISION']}
+
+
+def test_deactivate_refuses_to_combine_with_backfill():
+    rc = mod.main(['--deactivate', 'CPI=2026-09-16T12:30:00Z', '--backfill'])
+    assert rc == 2
+
+
+# ── T8 fix-round-1 item 4b: --from-file matching ─────────────────────────────
+
+def test_from_file_matches_exact_key_and_four_digit_year_suffix():
+    assert mod._from_file_matches('fed', 'fed')
+    assert mod._from_file_matches('fed2020', 'fed')
+    assert not mod._from_file_matches('bls_cpi', 'bls')
+    assert not mod._from_file_matches('bls_empsit', 'bls')
+    assert not mod._from_file_matches('fed20200', 'fed')   # 5 digits, not exactly 4
+    assert not mod._from_file_matches('fedabcd', 'fed')    # not digits
+
+
+def test_unmatched_from_file_key_is_an_error_not_a_silent_live_fetch(tmp_path):
+    master = tmp_path / 'macro_events.parquet'
+    rc, stats = mod.run(['fed'], master_path=master,
+                        from_file={'nonexistent_source': str(FIX / 'fed_fomccalendars.html')})
+    assert rc == 2
+    assert not master.exists()
+
+
+# ── T8 fix-round-1 item 4a: --dry-run prints rows ────────────────────────────
+
+def test_dry_run_prints_rows_and_leaves_the_master_absent(tmp_path, capsys):
+    master = tmp_path / 'macro_events.parquet'
+    rc, stats = mod.run(['fed'], master_path=master, dry_run=True,
+                        from_file={'fed': str(FIX / 'fed_fomccalendars.html')})
+    assert rc == 0
+    assert not master.exists()
+    out = capsys.readouterr().out
+    assert 'DRY-RUN fed: 7 rows' in out
+    assert 'FOMC_DECISION' in out
+
+
+# ── T8 fix-round-1 item 4d: zero-row parse is a soft failure ────────────────
+
+def test_zero_row_parse_is_a_soft_failure_unless_allow_empty(tmp_path):
+    master = tmp_path / 'macro_events.parquet'
+    empty_html = tmp_path / 'empty.html'
+    empty_html.write_text('<html><body>nothing here</body></html>')
+
+    rc, stats = mod.run(['fed'], master_path=master, from_file={'fed': str(empty_html)})
+    assert rc == 1
+    assert stats['urls_ok'] == 1
+    assert stats['urls_empty'] == 1
+    assert stats['urls_failed'] == 0
+
+    rc2, stats2 = mod.run(['fed'], master_path=master, from_file={'fed': str(empty_html)},
+                          allow_empty=True)
+    assert rc2 == 0
+    assert stats2['urls_empty'] == 1
+
+
+# ── T8 fix-round-1 item 4e: _jobs() bounded by --end-year ───────────────────
+
+def test_jobs_bounded_by_end_year_for_backfill():
+    jobs = mod._jobs({'fed'}, backfill=True, start_year=2020, end_year=2022)
+    assert [k for k, _, _ in jobs] == ['fed', 'fed2020', 'fed2021', 'fed2022']
+
+    jobs2 = mod._jobs({'bls'}, backfill=True, start_year=2025, end_year=2025)
+    assert [k for k, _, _ in jobs2] == ['bls_cpi', 'bls_empsit', 'bls2025']
+
+
+def test_jobs_full_backfill_matches_the_22_archive_pages_the_report_cites():
+    jobs = mod._jobs({'fed', 'bls', 'bea'}, backfill=True, start_year=2017, end_year=2027)
+    assert len(jobs) == 26
+    archive = [k for k, _, _ in jobs if k not in ('fed', 'bls_cpi', 'bls_empsit', 'bea')]
+    assert len(archive) == 22

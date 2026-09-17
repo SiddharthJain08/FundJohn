@@ -26,11 +26,30 @@ inspect the parsed rows; `--from-file SOURCE=PATH` exists precisely so a saved
 page can stand in when a URL 404s, blocks, or the real markup diverges from
 these fixtures.
 
+CORRECTABILITY WITHOUT DELETE (fix round 1, T8 item 1): the master is
+append-only, so a bad row can never be removed. `--deactivate EVENT=ISO`
+appends the SAME (event, scheduled_at) key with active=False via the usual
+mode='replace' upsert. A normal parsed row never writes 'active' explicitly
+(it stays NULL, read as "active" by src/lib/macro_events.py); merge_into_master
+only ever flips active back to True when the INCOMING row carries True
+explicitly, which no parser here does — so a routine re-ingest of the same
+event can never silently resurrect a deactivated one.
+
+CALENDAR-COVERAGE GUARD (fix round 1, T8 item 2): before any write — a
+source merge or a --deactivate — run() and run_deactivate() assert that
+trading_calendar's master genuinely covers [min(parsed session dates) - 14d,
+max + 14d] via the calendar's own covers()/first/last range, NOT via
+is_session (which silently degrades to weekday-only arithmetic outside the
+master's range). A too-narrow calendar refuses the write outright (rc 3): a
+wrong session_date written under the weekday fallback could never be
+corrected later (no DELETE).
+
 Usage:
   python3 src/ingestion/ingest_macro_events.py                       # forward refresh
   python3 src/ingestion/ingest_macro_events.py --sources fed
   python3 src/ingestion/ingest_macro_events.py --from-file fed=/tmp/fomc.html
   python3 src/ingestion/ingest_macro_events.py --backfill --start-year 2017 --end-year 2027
+  python3 src/ingestion/ingest_macro_events.py --deactivate FOMC_DECISION=2026-09-17T18:00:00+00:00
 """
 from __future__ import annotations
 
@@ -46,6 +65,7 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -57,8 +77,14 @@ logger = logging.getLogger(__name__)
 
 MASTER_PATH = ROOT / 'data' / 'master' / 'macro_events.parquet'
 KEY_COLS = ['event', 'scheduled_at']
-COLUMNS = ['event', 'scheduled_at', 'session_date', 'source', 'ingested_at']
+# NOTE: src/lib/macro_events.py holds its own copy of this list (not a
+# shared import) — the two must be changed together. See T8 fix-round-1
+# item 1. A parsed row never sets 'active' explicitly (stays NULL); only
+# --deactivate writes an explicit False. See _frame()/run_deactivate().
+COLUMNS = ['event', 'scheduled_at', 'session_date', 'source', 'ingested_at',
+          'active']
 SLEEP_BETWEEN_URLS_S = 1.0
+_CALENDAR_MARGIN_DAYS = 14
 _ET = ZoneInfo('America/New_York')
 
 # ── the one URL block (edit here, nowhere else) ─────────────────────────────
@@ -100,11 +126,22 @@ _DATETIME_RE = re.compile(
     rf'({_MONTH_RE})\s+(\d{{1,2}}),\s*(20\d{{2}})\s+(\d{{1,2}}):(\d{{2}})\s*'
     r'([AaPp])\.?\s*[Mm]\.?')
 _FED_YEAR_RE = re.compile(r'(20\d{2})\s+FOMC\s+Meeting')
+# The gap between 'Minutes:' and '(Released ...)' tolerates short link text
+# ('HTML', 'PDF', 'Implementation Note') but EXCLUDES DIGITS on purpose: a
+# meeting whose minutes are still pending (no release date at all) must
+# never let this gap skip forward across a later meeting's OWN day-range
+# digits to steal ITS '(Released ...)' clause — that would both mis-pair the
+# minutes date and erase the intervening meeting's day-range when the match
+# is blanked out below (T8 fix-round-1 item 3a; see the furniture-trap test).
 _FED_MINUTES_RE = re.compile(
-    rf'Minutes\s*:?\s*\(?\s*released\s+({_MONTH_RE})\s+(\d{{1,2}}),\s*(20\d{{2}})\s*\)?',
+    rf'Minutes\s*:?\s*[^\d]{{0,80}}?\(?\s*released\s+({_MONTH_RE})\s+(\d{{1,2}}),\s*(20\d{{2}})\s*\)?',
     re.I)
+# The day-range group is MANDATORY: a bare 'Month D' (e.g. a page footer
+# like 'Last Update: September 12, 2026') must never yield a decision row —
+# only 'Month D-D' or 'Month D-Month D' does, and the decision day is always
+# the SECOND day (T8 fix-round-1 item 3a).
 _FED_MEETING_RE = re.compile(
-    rf'({_MONTH_RE})\s+(\d{{1,2}})(?:\s*[-–]\s*(?:({_MONTH_RE})\s+)?(\d{{1,2}}))?')
+    rf'({_MONTH_RE})\s+(\d{{1,2}})\s*[-–]\s*(?:({_MONTH_RE})\s+)?(\d{{1,2}})')
 
 
 # ── text + time helpers ─────────────────────────────────────────────────────
@@ -140,13 +177,23 @@ def _row(event: str, naive_et: dt.datetime, source: str, fetched_at) -> dict:
 def _frame(rows) -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=COLUMNS)
     if df.empty:
+        df['active'] = pd.array([], dtype='boolean')
         return df
     df = df.drop_duplicates(subset=KEY_COLS, keep='last')
     df['event'] = df['event'].astype('string')
     df['source'] = df['source'].astype('string')
     df['scheduled_at'] = pd.to_datetime(df['scheduled_at'], utc=True)
     df['ingested_at'] = pd.to_datetime(df['ingested_at'], utc=True)
+    # A normal parsed row never sets this key (see _row()), so it lands here
+    # as NaN and casts to <NA> — "unset", read as active by the reader. Only
+    # run_deactivate() ever puts an explicit False into the input rows.
+    df['active'] = df['active'].astype('boolean')
     return df.reset_index(drop=True)
+
+
+_CONTEXT_LOOKBACK_CHARS = 200  # every fixture's own record title sits well
+# under 100 chars before its date; 200 is generous headroom for a real page
+# while still excluding page furniture (title/nav/a stray mention elsewhere).
 
 
 def _iter_datetimes(text: str):
@@ -155,10 +202,15 @@ def _iter_datetimes(text: str):
     `context` is the text between the PREVIOUS match and this one, which is the
     natural record boundary on a schedule page — a fixed-width lookback would
     let the previous row's title re-tag this row (the BEA advance/second
-    estimate trap)."""
-    prev_end = 0
+    estimate trap). The FIRST record has no previous match to bound it, so it
+    is instead bounded to the last _CONTEXT_LOOKBACK_CHARS before its date —
+    an unbounded ctx = text[0:m.start()] would let page furniture (a title, a
+    nav breadcrumb) ahead of the very first record mis-tag it, an asymmetry
+    every later record doesn't share (T8 fix-round-1 item 4c)."""
+    prev_end = None
     for m in _DATETIME_RE.finditer(text):
-        ctx = text[prev_end:m.start()]
+        start = prev_end if prev_end is not None else max(0, m.start() - _CONTEXT_LOOKBACK_CHARS)
+        ctx = text[start:m.start()]
         prev_end = m.end()
         hour, minute = int(m.group(4)), int(m.group(5))
         ap = m.group(6).lower()
@@ -280,12 +332,85 @@ def _jobs(sources, *, backfill: bool, start_year: int, end_year: int) -> list:
     return out
 
 
+def _from_file_matches(job_key: str, from_file_key: str) -> bool:
+    """Exact key match, or <key><4-digit-year> — the backfill archive jobs
+    ONLY (T8 fix-round-1 item 4b). A plain prefix match ('startswith') let an
+    unrelated key like 'bls' silently swallow both 'bls_cpi' and
+    'bls_empsit', which are separate single-release pages, not year-suffixed
+    archives — this is stricter on purpose."""
+    if job_key == from_file_key:
+        return True
+    if job_key.startswith(from_file_key):
+        suffix = job_key[len(from_file_key):]
+        return len(suffix) == 4 and suffix.isdigit()
+    return False
+
+
+# ── calendar-coverage guard ─────────────────────────────────────────────────
+
+def _calendar_covers(session_dates) -> tuple:
+    """(True, '') iff trading_calendar's master genuinely covers
+    [min(session_dates) - 14d, max(session_dates) + 14d] via the calendar's
+    OWN covers()/first/last range — NEVER via is_session, which silently
+    degrades to weekday-only arithmetic outside the master's coverage. A
+    write must refuse outright when this fails: a wrong session_date slipped
+    in under the weekday fallback could never be corrected later (no DELETE
+    on an append-only master). T8 fix-round-1 item 2."""
+    dates = [d for d in session_dates if d is not None]
+    if not dates:
+        return True, ''
+    lo = min(dates) - dt.timedelta(days=_CALENDAR_MARGIN_DAYS)
+    hi = max(dates) + dt.timedelta(days=_CALENDAR_MARGIN_DAYS)
+    from lib.trading_calendar import _calendar
+    cal = _calendar()
+    if cal is None or not cal.covers(lo) or not cal.covers(hi):
+        have = f'{cal.first}..{cal.last}' if (cal is not None and cal.first) else 'no master'
+        return False, (f'trading_calendar does not cover the required window '
+                       f'[{lo}, {hi}] (have {have})')
+    return True, ''
+
+
+def _apply_sticky_deactivation(df: pd.DataFrame, master_path: Path) -> pd.DataFrame:
+    """An append-only master has no DELETE, so an --deactivate active=False
+    row is the only correction mechanism — a routine re-ingest of the SAME
+    (event, scheduled_at) must not silently resurrect it. We only flip
+    active back to True when the INCOMING row explicitly carries True; a
+    normal parse never does (see _row()/_frame()), so this only ever bites
+    a genuinely explicit reactivation, which nothing in this module's CLI
+    currently issues. T8 fix-round-1 item 1 ('document the choice')."""
+    master_path = Path(master_path)
+    if not master_path.exists() or 'active' not in df.columns or df.empty:
+        return df
+    try:
+        names = set(pq.ParquetFile(master_path).schema_arrow.names)
+    except Exception:  # noqa: BLE001
+        return df
+    if 'active' not in names:
+        return df
+    existing = pd.read_parquet(master_path, columns=['event', 'scheduled_at', 'active'])
+    inactive_mask = existing['active'].fillna(True) == False  # noqa: E712
+    if not inactive_mask.any():
+        return df
+    inactive_keys = set(zip(existing.loc[inactive_mask, 'event'],
+                            existing.loc[inactive_mask, 'scheduled_at']))
+    df = df.copy()
+    explicit_true = (df['active'] == True).fillna(False)  # noqa: E712
+    for i in df.index:
+        key = (df.at[i, 'event'], df.at[i, 'scheduled_at'])
+        if key in inactive_keys and not bool(explicit_true.loc[i]):
+            df.loc[i, 'active'] = False
+    return df
+
+
 def merge_into_master(df: pd.DataFrame, *, master_path: Path = MASTER_PATH) -> dict:
     from src.data.parquet_store import append_dedup, row_count
 
     before = row_count(master_path)
-    after = append_dedup(master_path, df, KEY_COLS, mode='replace') \
-        if not df.empty else before
+    if df.empty:
+        return {'rows': 0, 'new_rows': 0, 'replaced_rows': 0,
+                'master_rows_after': int(before)}
+    df = _apply_sticky_deactivation(df, master_path)
+    after = append_dedup(master_path, df, KEY_COLS, mode='replace')
     new_rows = int(after - before)
     return {'rows': int(len(df)), 'new_rows': new_rows,
             'replaced_rows': int(len(df) - new_rows),
@@ -294,21 +419,46 @@ def merge_into_master(df: pd.DataFrame, *, master_path: Path = MASTER_PATH) -> d
 
 def run(sources, *, from_file=None, backfill: bool = False,
         start_year: int = 2017, end_year: int = 2027,
-        master_path: Path = MASTER_PATH, dry_run: bool = False) -> tuple:
-    """Fetch + parse + merge. A failed URL is COUNTED and skipped; rc=1 only
-    when every job failed (mirrors ingest_nasdaq_earnings_calendar)."""
+        master_path: Path = MASTER_PATH, dry_run: bool = False,
+        allow_empty: bool = False) -> tuple:
+    """Fetch + parse every job first (phase 1), THEN — once, over every
+    non-empty parsed frame combined — run the calendar-coverage guard before
+    any write (phase 2). This makes a multi-job run (e.g. --backfill)
+    all-or-nothing: if the calendar can't be trusted for the parsed window,
+    NOTHING gets written, not just the offending job (T8 fix-round-1 item 2;
+    a deviation from the original brief's per-job fetch-then-immediately-
+    merge loop, which could leave a partial write behind a mid-run failure).
+
+    rc=2  a --from-file key matches no job in this run (checked BEFORE any
+          fetch — never a silent live fetch, item 4b).
+    rc=3  trading_calendar does not genuinely cover the parsed window — no
+          write at all (item 2).
+    rc=1  every job failed, OR any job parsed zero rows (soft failure,
+          logged and counted separately as urls_empty) unless allow_empty.
+    rc=0  otherwise.
+    """
     from_file = dict(from_file or {})
-    stats = {'urls': 0, 'urls_ok': 0, 'urls_failed': 0, 'rows': 0,
-             'new_rows': 0, 'replaced_rows': 0, 'master_rows_after': None}
+    stats = {'urls': 0, 'urls_ok': 0, 'urls_failed': 0, 'urls_empty': 0,
+             'rows': 0, 'new_rows': 0, 'replaced_rows': 0,
+             'master_rows_after': None}
     jobs = _jobs(set(sources), backfill=backfill, start_year=start_year,
                  end_year=end_year)
-    # An explicit --from-file key replaces every job whose key starts with it,
-    # so `--from-file fed=...` also satisfies the backfill's fed<year> jobs.
     stats['urls'] = len(jobs)
+
+    job_keys = [k for k, _, _ in jobs]
+    unmatched = [k for k in from_file
+                if not any(_from_file_matches(jk, k) for jk in job_keys)]
+    if unmatched:
+        logger.error('[macro-events] --from-file key(s) %s match no job in this run '
+                     '(job keys: %s) — refusing rather than risk a silent live fetch',
+                     unmatched, job_keys)
+        return 2, stats
+
     fetched_at = pd.Timestamp.now(tz='UTC')
+    parsed = []  # [(key, df)] — populated in phase 1, written in phase 2.
 
     for i, (key, url, parse) in enumerate(jobs):
-        override = next((p for k, p in from_file.items() if key.startswith(k)), None)
+        override = next((from_file[k] for k in from_file if _from_file_matches(key, k)), None)
         html = None
         if override:
             try:
@@ -339,22 +489,114 @@ def run(sources, *, from_file=None, backfill: bool = False,
             stats['urls_failed'] += 1
             continue
         stats['urls_ok'] += 1
-        if dry_run:
+        if df.empty:
+            stats['urls_empty'] += 1
+            logger.warning('%s: parsed 0 rows', key)
+        parsed.append((key, df))
+
+    if dry_run:
+        # Print the ROWS, not just a count — a count alone can't be inspected
+        # for the parser-hardening acceptance checks (T8 fix-round-1 item 4a).
+        for key, df in parsed:
             print(f'[macro-events] DRY-RUN {key}: {len(df)} rows', flush=True)
+            if not df.empty:
+                print(df.to_string(), flush=True)
             stats['rows'] += len(df)
-            continue
-        m = merge_into_master(df, master_path=master_path)
-        for k in ('rows', 'new_rows', 'replaced_rows'):
-            stats[k] += m[k]
-        stats['master_rows_after'] = m['master_rows_after']
-        print(f"[macro-events] {key}: rows={m['rows']} new_rows={m['new_rows']} "
-              f"master_rows_after={m['master_rows_after']}", flush=True)
+    else:
+        non_empty = [df for _, df in parsed if not df.empty]
+        if non_empty:
+            all_dates = pd.concat([d['session_date'] for d in non_empty],
+                                  ignore_index=True).tolist()
+            ok, reason = _calendar_covers(all_dates)
+            if not ok:
+                logger.error('[macro-events] refusing to write: %s', reason)
+                return 3, stats
+        for key, df in parsed:
+            m = merge_into_master(df, master_path=master_path)
+            for k in ('rows', 'new_rows', 'replaced_rows'):
+                stats[k] += m[k]
+            stats['master_rows_after'] = m['master_rows_after']
+            print(f"[macro-events] {key}: rows={m['rows']} new_rows={m['new_rows']} "
+                  f"master_rows_after={m['master_rows_after']}", flush=True)
 
     if stats['master_rows_after'] is None and not dry_run:
         from src.data.parquet_store import row_count
         stats['master_rows_after'] = row_count(master_path)
-    rc = 1 if jobs and stats['urls_ok'] == 0 else 0
+
+    if jobs and stats['urls_ok'] == 0:
+        rc = 1
+    elif stats['urls_empty'] and not allow_empty:
+        rc = 1
+    else:
+        rc = 0
     return rc, stats
+
+
+def run_deactivate(specs, *, master_path: Path = MASTER_PATH, fetched_at=None,
+                   dry_run: bool = False) -> tuple:
+    """--deactivate EVENT=<ISO scheduled_at> (repeatable). Writes ONLY
+    active=False rows — never source jobs — via the existing mode='replace'
+    upsert on the (event, scheduled_at) key: never a DELETE. Same
+    calendar-coverage guard as run() (item 2): refused (rc 3, no write) when
+    trading_calendar does not genuinely cover the window.
+
+    rc=3  calendar guard failed — no write.
+    rc=4  the write went through, but at least one spec's (event,
+          scheduled_at) matched NO existing master row — it was still
+          appended (harmless on an append-only master, and it will bite if
+          that exact event is ingested later), but this is almost always an
+          operator error (ISO doesn't match the ingested scheduled_at to the
+          second) and must be loud, not a silent apparent success. This rc
+          is a fix-round-1 hardening beyond the letter of the brief.
+    rc=0  every spec matched an existing row and was deactivated.
+    """
+    fetched_at = pd.Timestamp(fetched_at) if fetched_at is not None else pd.Timestamp.now(tz='UTC')
+    rows = []
+    for event, iso in specs:
+        ts = pd.Timestamp(iso)
+        ts = ts.tz_localize('UTC') if ts.tzinfo is None else ts.tz_convert('UTC')
+        rows.append({'event': event, 'scheduled_at': ts,
+                     'session_date': session_date_for(ts.to_pydatetime()),
+                     'source': 'operator_deactivate', 'ingested_at': fetched_at,
+                     'active': False})
+    df = _frame(rows)
+
+    if dry_run:
+        print(f'[macro-events] DRY-RUN deactivate: {len(df)} row(s)', flush=True)
+        if not df.empty:
+            print(df.to_string(), flush=True)
+        return 0, {'deactivated': int(len(df)), 'unmatched': [], 'master_rows_after': None}
+
+    if not df.empty:
+        ok, reason = _calendar_covers(df['session_date'])
+        if not ok:
+            logger.error('[macro-events] --deactivate refusing to write: %s', reason)
+            return 3, {'deactivated': 0, 'unmatched': [], 'master_rows_after': None}
+
+    existing_keys = set()
+    if Path(master_path).exists():
+        try:
+            existing = pd.read_parquet(master_path, columns=KEY_COLS)
+            existing_keys = set(zip(existing['event'], existing['scheduled_at']))
+        except Exception as e:  # noqa: BLE001
+            logger.warning('[macro-events] could not pre-check existing keys (%s: %s)',
+                           type(e).__name__, e)
+
+    unmatched = [(e, ts) for e, ts in zip(df['event'], df['scheduled_at'])
+                if (e, ts) not in existing_keys]
+    for e, ts in unmatched:
+        logger.error('[macro-events] --deactivate %s=%s matches NO existing master row — '
+                     'writing an inert row anyway (never a delete), but this almost '
+                     'certainly means the ISO does not exactly match the ingested '
+                     'scheduled_at', e, ts.isoformat())
+
+    m = merge_into_master(df, master_path=master_path)
+    print(f"[macro-events] deactivate: rows={m['rows']} new_rows={m['new_rows']} "
+          f"master_rows_after={m['master_rows_after']}", flush=True)
+    unmatched_str = [f'{e}={ts.isoformat()}' for e, ts in unmatched]
+    return (4 if unmatched else 0), {'deactivated': int(len(df)),
+                                     'unmatched': unmatched_str,
+                                     'master_rows_after': m['master_rows_after']}
 
 
 def main(argv=None) -> int:
@@ -369,9 +611,33 @@ def main(argv=None) -> int:
     ap.add_argument('--start-year', type=int, default=2017)
     ap.add_argument('--end-year', type=int, default=2027)
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--allow-empty', action='store_true',
+                    help='do not rc=1 when a source parses to zero rows')
+    ap.add_argument('--deactivate', action='append', default=[],
+                    metavar='EVENT=ISO',
+                    help='append an active=False row for this (event, '
+                         'scheduled_at) key — never a delete (repeatable). '
+                         'Writes nothing else; refuses to combine with --backfill.')
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s %(levelname)s %(message)s')
+
+    if args.deactivate:
+        if args.backfill:
+            logger.error('[macro-events] --deactivate refuses to combine with --backfill')
+            return 2
+        specs = []
+        for item in args.deactivate:
+            event, sep, iso = item.partition('=')
+            if not sep or not event or not iso:
+                logger.error('[macro-events] malformed --deactivate %r (want EVENT=ISO)', item)
+                return 2
+            specs.append((event, iso))
+        rc, s = run_deactivate(specs, master_path=MASTER_PATH, dry_run=args.dry_run)
+        print(f"[macro-events] deactivate={s.get('deactivated', 0)} "
+              f"unmatched={s.get('unmatched', [])} "
+              f"master_rows_after={s.get('master_rows_after')} rc={rc}", flush=True)
+        return rc
 
     from_file = {}
     for item in args.from_file:
@@ -382,9 +648,10 @@ def main(argv=None) -> int:
     rc, s = run([x.strip() for x in args.sources.split(',') if x.strip()],
                 from_file=from_file, backfill=args.backfill,
                 start_year=args.start_year, end_year=args.end_year,
-                master_path=MASTER_PATH, dry_run=args.dry_run)
+                master_path=MASTER_PATH, dry_run=args.dry_run,
+                allow_empty=args.allow_empty)
     print(f"[macro-events] urls={s['urls']} ok={s['urls_ok']} failed={s['urls_failed']} "
-          f"rows={s['rows']} new_rows={s['new_rows']} "
+          f"empty={s['urls_empty']} rows={s['rows']} new_rows={s['new_rows']} "
           f"master_rows_after={s['master_rows_after']} rc={rc}", flush=True)
     return rc
 
