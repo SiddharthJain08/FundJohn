@@ -890,6 +890,12 @@ def _per_bar_simulate(
     walk (H/L of the fill bar are eligible for bracket exits, since they
     occur after the open fill). Raises ValueError on any other value.
 
+    The macro-event entry gate (OPENCLAW_BT_EVENT_GATE) keys on the SIGNAL
+    bar (cur_d), so it lines up exactly with the T-1/T sessions it gates
+    under the default 'same_close' fill model but is effectively shifted one
+    session relative to the fill date under the legacy
+    OPENCLAW_BT_FILL_MODEL=close|open.
+
     Returns a dict with keys:
       - trades: list[dict]
       - universe_sizes: list[int]  (non-empty only when resolver is not None)
@@ -1076,20 +1082,21 @@ def _per_bar_simulate(
             continue
         days_with_signals += 1
 
-        if _event_gate_sessions:
-            _cd_gate = current_date.date() if hasattr(current_date, 'date') else current_date
-            if _cd_gate in _event_gate_sessions:
-                # ENTRIES only: the open-book exit walk at the top of this loop
-                # and every simulate_trade already in flight are untouched.
-                entries_event_gated += len(signals[:instance.MAX_SIGNALS])
-                continue
-
         for sig in signals[:instance.MAX_SIGNALS]:
             direction = _signal_to_long_short(sig.direction)
             if direction == 0:
                 continue
             ticker = sig.ticker
             if ticker not in bars_by_ticker:
+                continue
+            if _event_gate_sessions and _is_equity_ticker(ticker) and cur_d in _event_gate_sessions:
+                # ENTRIES only, equity only (fix round 1, C3 T11): mirrors the
+                # live per-ticker gate exactly — crypto (BTC-USD, dash form)
+                # and OCC option symbols are never blocked, and a mixed
+                # equity+crypto bar loses only the equity signal. The
+                # open-book exit walk above and every simulate_trade already
+                # in flight are untouched; this only ever skips a NEW entry.
+                entries_event_gated += 1
                 continue
             if asset_gate is not None:
                 _long_ok, _short_ok = asset_gate.get(ticker, (True, True))
@@ -1243,7 +1250,7 @@ def _per_bar_simulate(
         _log(f'asset gate: skipped {entries_asset_gated} entries on execution-ineligible '
              f'symbols (non-ETB/non-shortable/non-fractionable per today\'s Alpaca universe)')
     if entries_event_gated:
-        _log(f'event gate: skipped {entries_event_gated} entries on '
+        _log(f'event gate: skipped {entries_event_gated} equity entries on '
              f'{len(_event_gate_sessions)} macro-event sessions (T-1..T of '
              f'FOMC_DECISION/CPI/NFP)')
 
@@ -1599,8 +1606,12 @@ def run_backtest(strategy_id: str, *,
                 # C3 (spec 2026-09-12): T-1..T macro-event entry block. 'off'
                 # unless OPENCLAW_BT_EVENT_GATE=1 — a SEPARATE flag from the
                 # live OPENCLAW_EVENT_GATE so arming the live gate can never
-                # silently re-epoch the fleet.
-                'event_gate': ('on' if os.environ.get('OPENCLAW_BT_EVENT_GATE') == '1'
+                # silently re-epoch the fleet. Also 'off' whenever _sim_fn is
+                # not _per_bar_simulate (fix round 1, T11 item 2): an options
+                # run never calls _per_bar_simulate at all, so it must never
+                # be misreported as gated even with the flag set.
+                'event_gate': ('on' if (os.environ.get('OPENCLAW_BT_EVENT_GATE') == '1'
+                                        and _sim_fn is _per_bar_simulate)
                                else 'off'),
                 'entries_event_gated': int(sim.get('entries_event_gated', 0)),
                 # Gap-fill provenance (2026-09-12 §A2): 'level' = a bracket
