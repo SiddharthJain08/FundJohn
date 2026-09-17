@@ -23,37 +23,39 @@ S_TR06_baltussen_eod_reversal:
   2. Revives both strategies ARCHIVED -> CANDIDATE through
      LifecycleStateMachine.transition() (guarded by
      VALID_TRANSITIONS[(ARCHIVED, CANDIDATE)]), naming the REAL blocker:
-     both strategies read `market_data['*_30m_bars']`, a kwarg the backtest
-     never passes (they never read `aux_data['prices_30m']`), so a
-     candidate slot today would buy a 0-trade run. That fact is recorded
-     both in the transition reason/history metadata AND in a top-level
-     `backtest_quarantine` flag — confirmed read by
+     both strategies read `market_data['spy_30m_bars']` /
+     `['intraday_30m_bars']` (str04_zarattini_intraday_spy.py,
+     str06_baltussen_eod_reversal.py), which
+     CohortBaseStrategy._build_cohort_dicts (src/strategies/cohort_base.py)
+     builds from `aux['prices_30m']`. Live trading already works: the live
+     engine populates `aux['prices_30m']` every cycle
+     (src/execution/engine.py::load_aux_data) and that flows straight
+     through cohort_base into market_data. The backtest is the one that
+     starves them — its own aux builder, src/strategies/aux_data_loader.py
+     ::load_aux_data, returns a dict with no `prices_30m` key at all, so
+     `aux.get('prices_30m')` is always None there and the 30m-bars block in
+     `_build_cohort_dicts` never fires. A candidate slot today would
+     therefore buy a 0-trade backtest run, not a real live-trading gap.
+     That fact is recorded both in the transition reason/history metadata
+     AND in a top-level `backtest_quarantine` flag — confirmed read by
      scripts/refresh_backtests_resumable.js's `allStrategies()`
      (filters out `e.backtest_quarantine` entries from the nightly work
      queue) — so the revived candidates do NOT consume a nightly fleet
      slot while the wiring gap stands. The same fact is mirrored into the
      strategy's `metadata` (which round-trips through
-     LifecycleStateMachine.to_dict(), unlike an ad-hoc top-level key — see
-     to_dict()'s fixed key set) so it survives a later unrelated
-     save_manifest() even if `backtest_quarantine` itself does not.
+     LifecycleStateMachine.to_dict() regardless) so it is discoverable two
+     ways.
 
-     KNOWN FRAGILITY (confirmed, not hypothetical): `backtest_quarantine`
-     WILL be silently dropped the next time
-     `strategies.lifecycle.auto_demote_negative_sharpe()` demotes ANY
-     live/monitoring strategy elsewhere in the fleet — it loads the whole
-     manifest via `from_manifest`, which does not carry unknown top-level
-     keys into StrategyRecord, then calls `save_manifest()` -> `to_dict()`,
-     whose fixed key set omits `backtest_quarantine` for every entry it
-     touches (i.e. all of them, since `to_dict()` re-emits every loaded
-     record). That auto-demote path runs from the daily
-     execution.strategy_weights rebuild and is plausible within days.
-     `metadata.revival_2026_09_13` DOES survive that (metadata is part of
-     the schema), so a wiped `backtest_quarantine` is detectable and this
-     script is safe to re-run to restore just that flag — see the
-     'requarantine' phase below. This is the Task-9-OWED `to_dict()` gap;
-     this script works around it rather than fixing it (fixing it means
-     changing `to_dict()`'s fixed key set for every manifest writer, which
-     is out of this task's scope).
+     `backtest_quarantine` PRESERVATION: `StrategyRecord` now carries
+     `backtest_quarantine` as a first-class (default-None) field —
+     `from_manifest` loads it when present and `to_dict()` re-emits it only
+     when set, so an unrelated `save_manifest()` elsewhere in the fleet
+     (e.g. `auto_demote_negative_sharpe()` demoting some other strategy) no
+     longer silently drops it. This closes what was the Task-9-OWED
+     `to_dict()` gap. The script's `requarantine` phase (below) is kept as
+     harmless belt-and-braces for any manifest entry that predates this fix
+     or was touched by an older binary, but is no longer expected to fire
+     in the steady state.
 
 Usage:
     python3 scripts/apply_qd_manifest_hygiene.py [--manifest PATH] [--dry-run]
@@ -61,8 +63,15 @@ Usage:
 
 --dry-run is the DEFAULT: it reads the manifest, prints whether it is
 byte-stable under write_atomic (see NON-ASCII NOTE below), computes the
-change on an in-memory copy, and prints a unified diff. It writes nothing
-and takes no lock. --apply performs the real read-modify-write, through
+change on an in-memory copy, and prints a unified diff. It writes nothing,
+takes no lock, and touches no database: POSTGRES_URI is popped from the
+environment for the duration of the preview computation (restored
+afterwards in a `finally`) so the LifecycleStateMachine.transition() call
+used internally to compute the 'pending' preview cannot reach
+_persist_lifecycle_event()'s real Postgres INSERT — a dry-run is DB-free by
+construction, not merely by convention.
+
+--apply performs the real read-modify-write, through
 _manifest_lock.with_manifest_lock (the same cross-process lock JS writers —
 saturday_brain.js, the finisher, approvals — use), preserving the file's
 exact serialization convention (json.dumps(indent=2), no trailing newline,
@@ -86,9 +95,11 @@ this before running --apply and is not surprised by the diff size.
 
 Idempotent: a strategy already in the fully-applied state (candidate,
 corrected reason, quarantined, revival metadata present) is left alone —
-running --apply twice in a row is a no-op the second time. If the flag
-fragility above has wiped `backtest_quarantine` since the last apply
-(state/reason/metadata still correct, quarantine missing), a re-run
+running --apply twice in a row is a no-op the second time. `backtest_quarantine`
+is now preserved by the state machine itself (StrategyRecord carries it,
+to_dict() re-emits it when set), so nothing in normal operation should ever
+find state/reason/metadata correct but the flag missing — but if it ever
+does (e.g. an older binary writing the manifest, or a hand-edit), a re-run
 restores just that flag ('requarantine' phase) without re-transitioning
 or re-touching history. The whole read-modify-write is a single lock
 acquisition covering BOTH target strategies: if either is not in one of
@@ -97,6 +108,24 @@ and names the offending strategy — and, because both edits share one
 lock, nothing is written for either strategy, so a bad precondition on one
 never leaves the other half-applied. It never changes the parsed value of
 any manifest entry outside the two named strategies.
+
+REFUSAL IS MANIFEST-ATOMIC, NOT SIDE-EFFECT-ATOMIC: the guarantee above is
+about the manifest FILE only. During a real --apply (unlike --dry-run,
+which pops POSTGRES_URI — see above), TARGETS are processed in order and
+each 'pending' target's LifecycleStateMachine.transition() call reaches
+_persist_lifecycle_event() before the next target is even looked at. If an
+earlier target (e.g. S_TR04...) is healthy and transitions cleanly, its
+lifecycle_events Postgres row is INSERTed immediately — and is NOT rolled
+back — even if a later target (e.g. S_TR06...) then raises
+PreconditionError and the manifest write for BOTH is refused. A refused
+--apply can therefore still leave a lifecycle_events row for a target whose
+manifest state never actually changed. This is a pre-existing property of
+_persist_lifecycle_event() (no transaction spans the two targets) and of
+the manifest lock only covering the manifest file, not the side effect;
+not something worth adding retry/compensation logic for here, since the
+row correctly records that a transition WAS computed even though it was
+then discarded — but an operator debugging a refused --apply should not be
+surprised to find such a row.
 """
 from __future__ import annotations
 
@@ -104,6 +133,7 @@ import argparse
 import copy
 import difflib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -153,23 +183,45 @@ OLD_REASON = (
 NEW_REASON = (
     "[CORRECTED 2026-09-13] Original reason (2026-04-30): 'Requires prices_30m "
     "which is no longer collected daily' — FALSE: data/master/prices_30m.parquet "
-    "is a live master (refreshed 2026-09-11). The real blocker is different: this "
-    "strategy reads intraday bars from the market_data kwarg, which the backtest "
-    "never passes, and reads no aux_data['prices_30m']. That wiring is owed before "
-    "any backtest of it can produce trades."
+    "is a live master (refreshed 2026-09-11), and the live engine already feeds it "
+    "in: src/execution/engine.py's load_aux_data populates aux['prices_30m'] every "
+    "cycle, and CohortBaseStrategy._build_cohort_dicts (src/strategies/cohort_base.py) "
+    "turns that into market_data['spy_30m_bars']/['intraday_30m_bars'], which this "
+    "strategy reads — live trading is unaffected. The real blocker is the backtest "
+    "only: its aux builder, src/strategies/aux_data_loader.py's load_aux_data (a "
+    "distinct function of the same name), returns no 'prices_30m' key at all, so "
+    "this strategy cannot be backtested until that is wired."
 )
 REVIVAL_REASON = (
     f"Revived {REVIVAL_DATE} (spec {SPEC_REF} A4 hygiene): the stated blocker — "
     "'prices_30m no longer collected' — is false; the master is live and refreshed "
-    "2026-09-11. Queued as a candidate so the research lane can re-gate it. "
-    "Backtest-quarantined until the intraday bars are wired: the strategy reads "
-    "market_data['*_30m_bars'], a kwarg the backtest never passes, so a fleet slot "
-    "today buys a 0-trade run and no information."
+    "2026-09-11, and the strategy is already fed live via CohortBaseStrategy."
+    "_build_cohort_dicts (src/strategies/cohort_base.py), which turns the live "
+    "engine's aux['prices_30m'] (populated by src/execution/engine.py's "
+    "load_aux_data) into market_data['spy_30m_bars']/['intraday_30m_bars']. Queued "
+    "as a candidate so the research lane can re-gate it. Backtest-quarantined "
+    "because src/strategies/aux_data_loader.py's load_aux_data — the backtest's "
+    "own aux builder, a distinct function of the same name — returns no "
+    "'prices_30m' key, so a fleet slot today buys a 0-trade backtest run and no "
+    "information even though live trading already works."
 )
 QUARANTINE_REASON = (
-    "revived 2026-09-13 but reads market_data['*_30m_bars'], which the backtest "
-    "never passes — 0-trade runs until the intraday aux wiring lands"
+    "revived 2026-09-13; fed live via cohort_base's aux['prices_30m'] -> "
+    "market_data wiring, but the backtest's own aux builder "
+    "(src/strategies/aux_data_loader.py::load_aux_data) returns no prices_30m key "
+    "— 0-trade backtest runs until that is wired"
 )
+
+
+# Shared print vocabulary for `_apply_one`'s return phases ('done',
+# 'requarantined', 'applied') — used identically by --dry-run's "Planned:"
+# preview and --apply's "APPLY complete." summary, so the two modes never
+# describe the same phase two different ways.
+PHASE_VERBS = {
+    'done': 'no-op (already applied)',
+    'requarantined': 'requarantined (flag was missing — restored; nothing else touched)',
+    'applied': 'applied',
+}
 
 
 class PreconditionError(RuntimeError):
@@ -191,15 +243,25 @@ def _record_from_entry(sid: str, entry: dict) -> "StrategyRecord":
         eligible_regimes=entry.get('eligible_regimes'),
         universe_filter_ref=(entry.get('metadata', {}) or {}).get('universe_filter_ref'),
         instrument_class=entry.get('instrument_class', 'equity'),
+        backtest_quarantine=entry.get('backtest_quarantine'),
     )
 
 
 def _classify(entry: dict) -> str:
     """'pending' (fresh — ready to apply), 'requarantine' (already revived
     and reasoned, but `backtest_quarantine` is missing — see the module
-    docstring's KNOWN FRAGILITY note: an unrelated auto_demote_negative_sharpe
-    save_manifest() silently drops it), 'done' (fully applied — idempotent
-    no-op), or 'unexpected' (anything else — caller refuses)."""
+    docstring's `backtest_quarantine` PRESERVATION note; normally
+    unreachable now that StrategyRecord/to_dict() preserve the flag, kept
+    as belt-and-braces), 'done' (fully applied — idempotent no-op), or
+    'unexpected' (anything else — caller refuses).
+
+    NEW_REASON is the idempotency key distinguishing 'pending' from
+    'done'/'requarantine' (`has_new` above): every target manifest must be
+    classified with the SAME script version that will --apply it, or a
+    manifest already revived under an earlier NEW_REASON wording (fix
+    round 1 changed this constant's text — see git history) would fail
+    `has_new` and misclassify as 'unexpected', refusing the whole apply.
+    """
     state = entry.get('state')
     history = entry.get('history') or []
     has_old = any(ev.get('reason') == OLD_REASON for ev in history)
@@ -331,12 +393,24 @@ def run(manifest_path: Path, apply: bool) -> int:
         preview = copy.deepcopy(original)
         strategies = preview.setdefault('strategies', {})
         results: dict[str, str] = {}
+        # The 'pending' phase inside _apply_one constructs a throwaway
+        # LifecycleStateMachine and calls .transition() on it purely to
+        # compute the preview — but transition() unconditionally calls
+        # _persist_lifecycle_event(), which INSERTs into the real Postgres
+        # lifecycle_events table whenever POSTGRES_URI is set (it is, on
+        # main). A dry-run must never touch Postgres, so POSTGRES_URI is
+        # popped from the environment for the duration of the preview
+        # computation and restored in `finally`, whatever happens.
+        _saved_pguri = os.environ.pop('POSTGRES_URI', None)
         try:
             for sid in TARGETS:
                 results[sid] = _apply_one(sid, strategies)
         except PreconditionError as exc:
             print(f"[apply_qd_manifest_hygiene] DRY-RUN — would REFUSE: {exc}", file=sys.stderr)
             return 1
+        finally:
+            if _saved_pguri is not None:
+                os.environ['POSTGRES_URI'] = _saved_pguri
 
         unsafe = _semantic_diff_outside_targets(original, preview)
         if unsafe:
@@ -345,16 +419,23 @@ def run(manifest_path: Path, apply: bool) -> int:
             return 1
 
         new_text = json.dumps(preview, indent=2)
-        if new_text == original_text:
+        # Keyed on the phases _apply_one actually computed, NOT on
+        # new_text == original_text: the live manifest is not byte-stable
+        # under write_atomic (see byte-stable line above — non-ASCII
+        # re-escaping churn from a JS writer means json.dumps(...) of an
+        # unchanged parsed value routinely differs from the on-disk bytes),
+        # so a byte-equality check would report "not hygiened" even when
+        # both targets are already fully applied.
+        if all(phase == 'done' for phase in results.values()):
             print("[apply_qd_manifest_hygiene] DRY-RUN: manifest already fully hygiened "
                   "— --apply would be a no-op.")
             for sid, phase in results.items():
-                print(f"  {sid}: {phase}")
+                print(f"  {sid}: {PHASE_VERBS.get(phase, phase)}")
             return 0
 
         print("[apply_qd_manifest_hygiene] DRY-RUN — no changes written. Planned:")
         for sid, phase in results.items():
-            print(f"  {sid}: {phase}")
+            print(f"  {sid}: {PHASE_VERBS.get(phase, phase)}")
         print("[apply_qd_manifest_hygiene] confirmed: no manifest entry outside "
               f"{TARGETS} changes value (byte-level diff below may still show "
               "non-ASCII re-escaping churn elsewhere — see byte-stable line above).")
@@ -393,14 +474,8 @@ def run(manifest_path: Path, apply: bool) -> int:
         return 1
 
     print("[apply_qd_manifest_hygiene] APPLY complete.")
-    verbs = {
-        'done': 'no-op (already applied)',
-        'requarantined': 'requarantined (flag had been wiped by an unrelated '
-                          'save_manifest() — restored; nothing else touched)',
-        'applied': 'applied',
-    }
     for sid, phase in results.items():
-        print(f"  {sid}: {verbs.get(phase, phase)}")
+        print(f"  {sid}: {PHASE_VERBS.get(phase, phase)}")
     return 0
 
 

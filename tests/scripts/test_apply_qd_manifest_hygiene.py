@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -221,7 +222,12 @@ def test_bad_precondition_on_one_target_leaves_the_other_unwritten(tmp_path, cap
     assert m['strategies'][TR06]['state'] == 'archived'   # untouched, not revived
 
 
-def test_dry_run_also_refuses_on_bad_precondition(tmp_path, capsys):
+def test_dry_run_also_refuses_on_bad_precondition(tmp_path, capsys, monkeypatch):
+    # Also exercises the POSTGRES_URI restore on the REFUSAL path: a naive
+    # "restore after the loop" implementation would leak the popped env var
+    # on this early `return 1` (inside the `except`), since the restore
+    # lives in a `finally` specifically so it also runs here.
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://fake-host/fake-db')
     p = _fixture(tmp_path, tr06=_target_entry(state='deprecated'))
     before = p.read_bytes()
 
@@ -229,6 +235,7 @@ def test_dry_run_also_refuses_on_bad_precondition(tmp_path, capsys):
 
     assert rc == 1
     assert p.read_bytes() == before
+    assert os.environ.get('POSTGRES_URI') == 'postgresql://fake-host/fake-db'  # restored
     err = capsys.readouterr().err
     assert TR06 in err
 
@@ -282,6 +289,49 @@ def test_requarantine_restores_only_the_dropped_flag(tmp_path, capsys):
     after_requarantine = p.read_bytes()
     assert hygiene.main(['--manifest', str(p), '--apply']) == 0
     assert p.read_bytes() == after_requarantine
+
+
+def test_dry_run_never_touches_postgres_but_apply_still_persists(tmp_path, monkeypatch):
+    """Fix round 1, item 1. POSTGRES_URI is set (mirroring main's default,
+    where the '_no_postgres' autouse fixture would otherwise mask the real
+    bug). --dry-run's 'pending'-phase preview builds a throwaway
+    LifecycleStateMachine and calls .transition() purely to compute the
+    diff — before the fix, that unconditionally reached
+    _persist_lifecycle_event() and INSERTed into the real Postgres
+    lifecycle_events table on every preview. Assert zero such calls from
+    --dry-run, that POSTGRES_URI is restored to its pre-call value
+    afterwards, and that a real --apply (same env) still persists exactly
+    one call per revived strategy — the fix must not also break the real
+    write path."""
+    p = _fixture(tmp_path)
+    calls = []
+
+    def _recorder(self, strategy_id, event, metadata):
+        # Mirrors the real _persist_lifecycle_event's own gate (it no-ops
+        # without POSTGRES_URI) rather than bypassing it — transition()
+        # calls this method unconditionally either way, so the thing under
+        # test is whether POSTGRES_URI is actually present (i.e. whether a
+        # real implementation would go on to open a Postgres connection),
+        # not whether the Python method was invoked at all.
+        if not os.environ.get('POSTGRES_URI'):
+            return
+        calls.append((strategy_id, event.from_state, event.to_state))
+
+    monkeypatch.setattr(hygiene.LifecycleStateMachine, '_persist_lifecycle_event', _recorder)
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://fake-host/fake-db')
+
+    rc = hygiene.main(['--manifest', str(p), '--dry-run'])
+
+    assert rc == 0
+    assert calls == []                                                       # zero DB calls
+    assert os.environ.get('POSTGRES_URI') == 'postgresql://fake-host/fake-db'  # restored
+
+    rc = hygiene.main(['--manifest', str(p), '--apply'])
+
+    assert rc == 0
+    assert len(calls) == 2                                                   # one per target
+    assert {c[0] for c in calls} == set(hygiene.TARGETS)
+    assert os.environ.get('POSTGRES_URI') == 'postgresql://fake-host/fake-db'
 
 
 def test_dry_run_prints_byte_stability(tmp_path, capsys):
