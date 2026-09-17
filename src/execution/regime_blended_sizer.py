@@ -16,7 +16,8 @@ import logging
 import math
 import os
 import re
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import psycopg2
 
@@ -2727,17 +2728,46 @@ def _load_macro_event_gating(session):
     lib.macro_events.gating_event directly, which only takes effect if the
     name is looked up fresh on every call.
 
-    FAIL-OPEN (None) on any error: a gate that cannot read its calendar must
-    not block trading. Logged at ERROR, not WARNING — mirrors the T8/T10
-    ERROR bump on lib.macro_events._t_minus_one: a calendar failure here
-    must be loud, not papered over."""
+    Returns (events, status) — fix round 1 item 2. status is one of:
+      'ok'      — gating_event(session) completed without raising AND the
+                  master exists. `events` may still be None (no listed
+                  release gates this session — the normal, common case).
+      'missing' — the master parquet is absent on disk. `events` is always
+                  None here: lib.macro_events.load_events() already
+                  degrades a missing file to [] internally, so
+                  gating_event() itself never raises for this — presence is
+                  checked separately, AFTER the read call below, precisely
+                  so a raising gating_event() (mocked or real) is still
+                  caught as 'failed' first, even on a box where the master
+                  is absent (checking existence FIRST would swallow that
+                  case as 'missing' and make 'failed' unreachable here).
+      'failed'  — gating_event(session) itself raised: import failure, a
+                  bug, or any error lib.macro_events did not already
+                  swallow internally.
+    status exists ONLY to change what the shadow line PRINTS
+    (`events=unavailable:<status>` vs `events=<value|none>`). The caller
+    must never branch on status as a truthy sentinel — only the `events`
+    value (always None on 'missing'/'failed') gates anything, so a
+    calendar/master outage fails OPEN, never closed.
+
+    Logged at ERROR, not WARNING, on 'failed' — mirrors the T8/T10 ERROR
+    bump on lib.macro_events._t_minus_one: a calendar failure here must be
+    loud, not papered over. Prefixed `[event_gate]` (fix round 1 item 4) for
+    grep parity with the shadow/armed summary line below."""
     try:
-        from lib.macro_events import gating_event
-        return gating_event(session)
+        from lib.macro_events import gating_event, master_path
+        events = gating_event(session)
     except Exception as e:  # noqa: BLE001
-        logger.error('event_gate: calendar unreadable (%s: %s); inert',
+        logger.error('[event_gate] calendar/master unreadable (%s: %s); inert',
                      type(e).__name__, e)
-        return None
+        return None, 'failed'
+    try:
+        exists = master_path().exists()
+    except Exception as e:  # noqa: BLE001
+        logger.error('[event_gate] calendar/master unreadable (%s: %s); inert',
+                     type(e).__name__, e)
+        return None, 'failed'
+    return (events, 'ok') if exists else (None, 'missing')
 
 
 def _apply_macro_event_gate(target_usd, broker, *, session=None, events=None,
@@ -2748,7 +2778,12 @@ def _apply_macro_event_gate(target_usd, broker, *, session=None, events=None,
     Exits, reductions and orphan closes are untouched (orphan closes never
     enter target_usd). ALWAYS ACTIVE, independent of any market-condition
     classification — this function takes no branch on it. Benchmark tickers
-    are included unless OPENCLAW_EVENT_GATE_EXEMPT_BENCH=1.
+    are included unless OPENCLAW_EVENT_GATE_EXEMPT_BENCH=1. The bench_exempt=
+    token on the line below reports this SWITCH, not the outcome (fix round
+    1 item 4): if bench_tkrs arrives here empty — e.g. a benchmark-registry
+    lookup failure upstream — the switch can read 1 while every ticker,
+    including the sleeve, is gated anyway; fail-closed for the sleeve, the
+    same class as the other gates.
 
     SHADOW unless OPENCLAW_EVENT_GATE=1: the ORIGINAL dict is returned and
     only the `[event_gate] shadow ...` line is emitted, so routing is
@@ -2758,12 +2793,23 @@ def _apply_macro_event_gate(target_usd, broker, *, session=None, events=None,
 
     Blocked conviction is SHAVED, not redistributed (same philosophy as the
     per-ticker and cluster caps). `session`, `events` and `bench_tkrs` are
-    injectable for tests; a calendar failure is inert (see
-    _load_macro_event_gating)."""
+    injectable for tests; a calendar/master outage is inert (see
+    _load_macro_event_gating) and renders on the line as
+    events=unavailable:<missing|failed> rather than silently reading as
+    events=none (fix round 1 item 2) — `if events:` below still branches on
+    the events VALUE only, never on status, so an outage cannot fail
+    closed."""
     if session is None:
-        session = date.today()
+        # Fix round 1 item 1: this host's clock is UTC. date.today() rolls
+        # to the next calendar day at 00:00 UTC — hours before an Eastern
+        # midnight — so a cycle run after 19:00 local Eastern time would key
+        # on TOMORROW's date instead of today's. Use the Eastern calendar
+        # date directly, exactly as account_breaker.py:902 does.
+        session = datetime.now(ZoneInfo('America/New_York')).date()
     if events is None:
-        events = _load_macro_event_gating(session)
+        events, status = _load_macro_event_gating(session)
+    else:
+        status = 'ok'
 
     applying = _event_gate_enabled()
     exempt_bench = _event_gate_exempt_bench()
@@ -2785,9 +2831,14 @@ def _apply_macro_event_gate(target_usd, broker, *, session=None, events=None,
                 capped.append(tkr)
 
     affected = sorted(set(blocked) | set(capped))
+    # Fix round 1 item 2: status ('missing'/'failed') renders as
+    # unavailable:<status> instead of the misleading events=none a bare
+    # falsy `events` would otherwise print — 'ok' keeps the byte-exact
+    # events=<value|none> token healthy cycles print today.
+    events_token = (events or 'none') if status == 'ok' else f'unavailable:{status}'
     logger.info('[event_gate] %s session=%s events=%s blocked=%d capped=%d '
                 'tickers=%s bench_exempt=%d',
-                'armed' if applying else 'shadow', session, events or 'none',
+                'armed' if applying else 'shadow', session, events_token,
                 len(blocked), len(capped), ','.join(affected[:20]),
                 int(exempt_bench))
     return work if applying else target_usd

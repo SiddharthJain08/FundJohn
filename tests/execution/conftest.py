@@ -60,8 +60,14 @@ def _deterministic_sizer_gates(request, monkeypatch):
     # same way as the two loaders above. SKIPPED for its own test file:
     # stubbing the subject-under-test out from under its own unit tests would
     # make the calendar-failure / non-event-session tests there vacuous.
+    # Fix round 1 item 2: _load_macro_event_gating() now returns
+    # (events, status) instead of a bare `events` value — the call site
+    # unpacks it, so a stub returning a bare None would raise (not iterable)
+    # in every e2e test that reaches the emission tail. Extended minimally
+    # to (None, 'ok'), consistent with "no event on this session, healthy
+    # read".
     if request.path.name != 'test_macro_event_gate.py':
-        monkeypatch.setattr(rbs, '_load_macro_event_gating', lambda session: None)
+        monkeypatch.setattr(rbs, '_load_macro_event_gating', lambda session: (None, 'ok'))
     # §8 (2026-08-06): production .env carries OPENCLAW_SAMEDAY_SIGNAL_TARGET=1
     # and some test module's import-time load_dotenv pulls it into os.environ
     # during collection. The resolver lets the new flag WIN over the legacy

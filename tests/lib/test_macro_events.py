@@ -6,6 +6,7 @@ release gates the preceding Friday.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 import pandas as pd
 import pytest
@@ -116,6 +117,22 @@ def test_unreadable_master_is_inert_not_fatal(tmp_path, monkeypatch):
     p.write_bytes(b'not a parquet')
     monkeypatch.setenv(me.MASTER_PATH_ENV, str(p))
     assert me.load_events() == []
+
+
+def test_t_minus_one_logs_at_error_on_a_calendar_failure(monkeypatch, caplog):
+    """Fix round 1 item 4: the calendar's own weekday fallback already
+    degrades silently — _t_minus_one's except must not compound that by
+    being quiet too. ERROR, not WARNING (T8 review + T10)."""
+    def _boom(_session):
+        raise RuntimeError('calendar unreadable')
+
+    monkeypatch.setattr('lib.trading_calendar.prev_session', _boom)
+    with caplog.at_level(logging.INFO, logger=me.log.name):
+        result = me._t_minus_one(dt.date(2026, 9, 16))
+    assert result is None  # fail-open: T-1 is skipped, not fatal
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert error_records, 'expected an ERROR record on prev_session() failure'
+    assert '[macro_events]' in error_records[-1].getMessage()
 
 
 # ── T8 fix-round-1 item 1: active=False correctability ──────────────────────
