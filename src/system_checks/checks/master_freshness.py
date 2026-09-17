@@ -75,15 +75,13 @@ _CADENCES: dict[str, tuple[str | None, int]] = {
 }
 
 # Covered by a dedicated, stricter check — do not double-report here.
-# macro_events.parquet (spec 2026-09-12 §3 C3, ledger row T8): a forward-
-# looking calendar master ("next event >= 30d ahead present"), not a
-# backward-lag one — _CADENCES' max_lag-since-newest-row model is the wrong
-# shape for it. Registered here now (task 8, C3a) so the generic "no
-# declared cadence" WARN does not fire once the operator's Step 12/13
-# backfill creates the file; the dedicated macro_events_fresh check is a
-# separate, later item.
-_COVERED_ELSEWHERE = {'options_aggregates_enriched.parquet',  # options_aux_freshness
-                      'macro_events.parquet'}                # macro_events_fresh (not yet written)
+_COVERED_ELSEWHERE = {
+    'options_aggregates_enriched.parquet',   # options_aux_freshness
+    # macro_events: a calendar master's failure mode is losing FORWARD
+    # coverage, not going stale backwards — macro_events_freshness asserts
+    # a high-importance release >= 30 d ahead instead (spec 2026-09-12 C3).
+    'macro_events.parquet',                  # macro_events_freshness
+}
 
 _SMALL_ENOUGH_FOR_COLUMN_READ = 100 * 1024 * 1024  # bytes
 

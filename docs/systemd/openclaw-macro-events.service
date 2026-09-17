@@ -1,0 +1,26 @@
+[Unit]
+Description=Keyless macro-event calendar ingest (Fed/BLS/BEA -> data/master/macro_events.parquet)
+After=network-online.target
+Wants=network-online.target
+OnFailure=openclaw-failure-notify@%n.service
+
+[Service]
+Type=oneshot
+# User=root: matches every data/master/*.parquet writer (all root:root).
+User=root
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+Environment=PYTHONPATH=/root/openclaw/src
+# Forward refresh only (no --backfill): 4 GETs with browser headers and a 1 s
+# pause between them. A 403/404/empty page is COUNTED (urls_failed) and
+# skipped; the script exits 1 only when EVERY source failed. The 2017->2027
+# backfill is a one-off operator run, never this timer.
+ExecStart=/usr/bin/python3 /root/openclaw/src/ingestion/ingest_macro_events.py --sources fed,bls,bea
+StandardOutput=append:/var/log/openclaw-macro-events.log
+StandardError=append:/var/log/openclaw-macro-events.log
+Nice=19
+TimeoutStartSec=600
+MemoryMax=500M
+
+[Install]
+WantedBy=multi-user.target
