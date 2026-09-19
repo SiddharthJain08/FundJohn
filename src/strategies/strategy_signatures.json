@@ -894,6 +894,46 @@
       "TRANSITIONING"
     ]
   },
+  "S_ito_signature_vol_hedge": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "48cc186c8b1aabe2",
+    "formula_tokens": [
+      "atm",
+      "atr",
+      "beta",
+      "delta",
+      "hv",
+      "quality",
+      "regime",
+      "rv",
+      "skew",
+      "strangle",
+      "vrp",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_iv_spread_skew_regime_dependent": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atm",
+      "atr",
+      "iv_spread",
+      "regime",
+      "skew",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
   "S_kalman_laguerre_trend_crossover": {
     "regime_set_hash": "10b0b5eb7bebe610",
     "direction_hash": "a8f3862b96300e62",
@@ -1242,6 +1282,22 @@
       "TRANSITIONING"
     ]
   },
+  "S_quadratic_risk_tangency_mvo": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "momentum",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
   "S_regime_age_momentum": {
     "regime_set_hash": "c722b3f150c07554",
     "direction_hash": "a8f3862b96300e62",
@@ -1336,6 +1392,39 @@
       "TRANSITIONING"
     ]
   },
+  "S_sector_trend_overlay": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "momentum",
+      "realized_vol",
+      "regime",
+      "tilt",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_sharpe_stability_optimization_tv2": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "dispersion",
+      "regime",
+      "rv",
+      "skew",
+      "tilt",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
   "S_sparse_basis_pursuit_sdf": {
     "regime_set_hash": "c722b3f150c07554",
     "direction_hash": "a8f3862b96300e62",
@@ -1375,6 +1464,41 @@
       "regime",
       "value",
       "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_spx_0dte_opening_range_breakout": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "f9e71aa2500b768e",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "regime",
+      "theta",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_spxw_0dte_ltr_put_ranker": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "6aa6e8223bbe6954",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "delta",
+      "regime",
+      "rv",
+      "skew",
+      "theta",
+      "value",
+      "vrp"
     ],
     "regimes": [
       "HIGH_VOL",

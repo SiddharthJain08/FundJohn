@@ -158,10 +158,16 @@ _IMPL_MAP = {
     'S_commodity_etp_momentum':          ('strategies.implementations.S_commodity_etp_momentum',          'CommodityEtpMomentum'),
     # TradeQuantiX 2026 — pre-holiday drift in energy ETFs (USO/UGA/XLE/XOP)
     'S_holiday_seasonality_energy_etf':  ('strategies.implementations.S_holiday_seasonality_energy_etf',  'HolidaySeasonalityEnergyEtf'),
+    # Kosch & Forsberg 2026 — commodity ETP seasonal rotation via OLS dummy-variable regression
+    'S_commodity_seasonal_ssa_dvr':      ('strategies.implementations.S_commodity_seasonal_ssa_dvr',      'CommoditySeasonalSsaDvr'),
     # Volkova 2025 — linear regression channel mean-reversion on SPY
     'S_linreg_channel_trend':            ('strategies.implementations.S_linreg_channel_trend',            'LinRegChannelTrend'),
     # SP-3.1: BTC momentum — reference strategy for instrument_class='crypto' rails
     'S_btc_momentum':                    ('strategies.implementations.S_btc_momentum',                    'BtcMomentum'),
+    # Zhang & Okoye (2026), The Refutation — negative-result port: naive Supertrend(10,3) flip on BTC
+    'S_btc_supertrend_naive_flip':        ('strategies.implementations.S_btc_supertrend_naive_flip',       'SupertrendNaiveFlip'),
+    # Peng, Khushi, Poon (2026), CAST — cross-asset Kalman filter + uncertainty-penalized MPC drawdown control (variant 1 of 2)
+    'S_cross_asset_kalman_mpc_drawdown':  ('strategies.implementations.S_cross_asset_kalman_mpc_drawdown',  'CrossAssetKalmanMpcDrawdown'),
     # SP-4 Phase 0: short straddle VRP — reference strategy for instrument_class='option' rails
     'S_short_straddle_vrp':              ('strategies.implementations.S_short_straddle_vrp',              'ShortStraddleVRP'),
     # Cotton (2026) — Schur-damped MV/HRP shrinkage portfolio
@@ -410,6 +416,10 @@ _IMPL_MAP = {
     'S_spx_0dte_opening_range_breakout': ('strategies.implementations.S_spx_0dte_opening_range_breakout', 'SpxZeroDteOpeningRangeBreakout'),
     # Wysocki 2026: LTR proxy ranking 8 delta-targeted SPXW 0DTE short puts + SKIP via a regime/tail-risk-aware expected-value score, SPY chain proxy
     'S_spxw_0dte_ltr_put_ranker': ('strategies.implementations.S_spxw_0dte_ltr_put_ranker', 'SpxwZeroDteLtrPutRanker'),
+    # therefutation.com 2026: golden/death cross (SMA50 x SMA200) event-triggered trend signal, OOS negative-result replication, all-regime coverage
+    'S_golden_cross_trend_signal': ('strategies.implementations.S_golden_cross_trend_signal', 'GoldenCrossTrendSignal'),
+    # crackingmarkets.com 2025: 3-day -6% dip + above-200SMA uptrend filter, short-horizon LONG-only bounce (variant 1 of 2)
+    'S_short_term_dip_reversion': ('strategies.implementations.S_short_term_dip_reversion', 'ShortTermDipReversion'),
 }
 
 
