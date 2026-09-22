@@ -825,9 +825,16 @@ def check_orchestrator_lock():
     url = os.environ.get('REDIS_URL', 'redis://localhost:6379')
     try:
         import redis
+        from lib.run_lock import KEY_PREFIX as _LOCK_PREFIX
         r = redis.from_url(url, socket_connect_timeout=2)
-        # The orchestrator stores locks under `pipeline:lock:<run_date>`.
-        keys = list(r.scan_iter('pipeline:lock:*', count=20))
+        # QD E1: the shared key is `pipeline:run_lock:<run_date>`
+        # (src/lib/run_lock_key.json — single source of truth for both the
+        # Python and JS twins; imported here rather than hardcoded so this
+        # check can never drift from it again). This scan used to look for
+        # `pipeline:lock:*`, which matched NEITHER the old Python key
+        # (`pipeline:running:*`) nor the new one — so the check has been
+        # reporting "no locks held" unconditionally since it was written.
+        keys = list(r.scan_iter(f'{_LOCK_PREFIX}:*', count=20))
     except Exception:
         return _warn('orchestrator_lock', 'redis unreachable — skipped')
     if not keys:
@@ -838,9 +845,53 @@ def check_orchestrator_lock():
         # Lock TTL is set to LOCK_TTL (likely 6h). If TTL still high, lock is
         # active. If TTL < 0 or TTL near LOCK_TTL — but still around > 1h — we
         # treat as stale.  Conservative heuristic: report all locks; operator
-        # decides.
-        stale.append(f'{k.decode() if isinstance(k, bytes) else k} (ttl={ttl}s)')
+        # decides. Value is `host:pid:start_iso` (run_lock.py) — surface the
+        # owner so the operator doesn't have to GET the key by hand.
+        val = r.get(k)
+        if isinstance(val, bytes):
+            val = val.decode('utf-8', 'replace')
+        stale.append(f'{k.decode() if isinstance(k, bytes) else k} (ttl={ttl}s, owner={val})')
     return _warn('orchestrator_lock', '; '.join(stale))
+
+
+CO_TENANT_RSS_MB = 1024
+
+
+@_check('co_tenant_memory')
+def check_co_tenant_memory():
+    """Name every python/node co-tenant over 1 GB RSS, by argv (QD E3).
+
+    Pure /proc read — no DB, no Redis, no `ps` shell-out. On an 8 GB no-swap
+    box the question at 3am is always "who else is resident right now"; this
+    answers it in one line of the digest. Context: 2026-09-16's 15:00 ET
+    cycle was OOM-killed with a 2.2 GB intraday-HMM process beside a 4.3 GB
+    signals step; 2026-09-19 ran two concurrent fleet backtests (3.8 GB +
+    2.8 GB). This check makes that situation legible before the kernel OOM
+    killer has to pick a victim. Diagnostic only — always WARN, never FAIL,
+    so it can never abort the `--required-only` pre-flight."""
+    import glob
+    page = os.sysconf('SC_PAGE_SIZE')
+    big = []
+    for statm in glob.glob('/proc/[0-9]*/statm'):
+        pid = statm.split('/')[2]
+        try:
+            with open(statm) as fh:
+                rss = int(fh.read().split()[1]) * page / (1024 * 1024)
+            if rss < CO_TENANT_RSS_MB:
+                continue
+            with open(f'/proc/{pid}/cmdline', 'rb') as fh:
+                argv = fh.read().replace(b'\x00', b' ').decode('utf-8', 'replace').strip()
+        except Exception:
+            continue
+        if not argv:
+            continue
+        big.append((round(rss), pid, argv[:90]))
+    if not big:
+        return _ok('co_tenant_memory', f'no process over {CO_TENANT_RSS_MB} MB RSS')
+    big.sort(reverse=True)
+    detail = '; '.join(f'{mb}MB pid={pid} {argv}' for mb, pid, argv in big[:5])
+    total = sum(mb for mb, _p, _a in big)
+    return _warn('co_tenant_memory', f'{len(big)} co-tenant(s), {total}MB total — {detail}'[:400])
 
 
 REGIME_BLENDED_GATE_STALE_DAYS = 14

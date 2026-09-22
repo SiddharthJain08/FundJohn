@@ -268,6 +268,46 @@ class TestRunStepRenewRetry(unittest.TestCase):
         self.assertEqual(len(calls), 2)   # exactly one retry, no more
 
 
+class TestRunStepHeartbeat(unittest.TestCase):
+    """QD E3: run_step calls the optional `heartbeat` callback with the
+    spawned child's pid and the captured start stamp, and swallows a
+    raising heartbeat rather than letting it break the step — a heartbeat
+    is diagnostics, never load-bearing for step success/failure."""
+
+    def setUp(self):
+        self._orig_resolve = po._resolve_script
+        po._resolve_script = lambda script, run_date: (['true'], 5)
+
+    def tearDown(self):
+        po._resolve_script = self._orig_resolve
+
+    def test_heartbeat_fires_with_the_child_pid_and_a_start_stamp(self):
+        calls = []
+        ok, rc = po.run_step('engine', DATE, dict(os.environ),
+                             heartbeat=lambda pid, started_at: calls.append((pid, started_at)))
+        self.assertTrue(ok)
+        self.assertEqual(rc, 0)
+        self.assertGreaterEqual(len(calls), 1)
+        pid, started_at = calls[0]
+        self.assertIsInstance(pid, int)
+        self.assertGreater(pid, 0)
+        self.assertIsInstance(started_at, str)
+        self.assertTrue(started_at)   # a real (non-empty) ISO stamp
+
+    def test_a_raising_heartbeat_never_breaks_the_step(self):
+        def _boom(pid, started_at):
+            raise RuntimeError('redis down')
+
+        ok, rc = po.run_step('engine', DATE, dict(os.environ), heartbeat=_boom)
+        self.assertTrue(ok)
+        self.assertEqual(rc, 0)
+
+    def test_run_step_without_heartbeat_is_unchanged(self):
+        ok, rc = po.run_step('engine', DATE, dict(os.environ))
+        self.assertTrue(ok)
+        self.assertEqual(rc, 0)
+
+
 class TestMainBusyLock(unittest.TestCase):
     def test_main_returns_75_and_posts_when_another_run_owns_today(self):
         r = FakeRedis({KEY: f'{po._HOST}:{os.getpid()}:T0'})
@@ -320,7 +360,7 @@ class TestForceResume(unittest.TestCase):
         acquired", since both end with the key absent.
         """
         with _hermetic_main(r) as (posts, feed_msgs, alert_msgs, dashboard_calls):
-            def _run_step(script, run_date, env, renew=None):
+            def _run_step(script, run_date, env, renew=None, **_kwargs):
                 if snap is not None and 'key' not in snap:
                     snap['key'] = r.store.get(KEY)
                     snap['lock_value'] = po.LOCK_VALUE
@@ -379,7 +419,7 @@ class TestForceResume(unittest.TestCase):
             po._resolve_script = lambda script, run_date: (['true'], 5)
             orig_run_step = po.run_step
 
-            def _tracking_run_step(script, run_date, env, renew=None):
+            def _tracking_run_step(script, run_date, env, renew=None, **_kwargs):
                 ran_scripts.append(script)
                 return orig_run_step(script, run_date, env, renew=renew)
 
@@ -397,7 +437,7 @@ class TestForceResume(unittest.TestCase):
         r = FakeRedis()
         snap = {}
         with _hermetic_main(r) as (posts, feed_msgs, alert_msgs, dashboard_calls):
-            def _run_step(script, run_date, env, renew=None):
+            def _run_step(script, run_date, env, renew=None, **_kwargs):
                 snap.setdefault('key', r.store.get(KEY))
                 return (True, 0)
             po.run_step = _run_step
@@ -441,7 +481,7 @@ class TestRenewLostIsFatal(unittest.TestCase):
                 po._resolve_script = lambda script, run_date: (['true'], 5)
                 orig_run_step = po.run_step
 
-                def _tracking_run_step(script, run_date, env, renew=None):
+                def _tracking_run_step(script, run_date, env, renew=None, **_kwargs):
                     ran_scripts.append(script)
                     return orig_run_step(script, run_date, env, renew=renew)
 
@@ -490,7 +530,7 @@ class TestMainStopsWhenRenewRaisesTwice(unittest.TestCase):
                 po._resolve_script = lambda script, run_date: (['true'], 5)
                 orig_run_step = po.run_step
 
-                def _tracking_run_step(script, run_date, env, renew=None):
+                def _tracking_run_step(script, run_date, env, renew=None, **_kwargs):
                     ran_scripts.append(script)
                     return orig_run_step(script, run_date, env, renew=renew)
 

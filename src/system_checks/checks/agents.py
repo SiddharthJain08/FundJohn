@@ -69,3 +69,44 @@ def _discord_bot_token_valid():
     if not guilds:
         return Status.WARN, 'authed but bot is in 0 guilds'
     return Status.PASS, f'authed; bot is in {len(guilds)} guild(s)'
+
+
+@check(name='proc_registry', tags=['agents'], requires=['fs'])
+def _proc_registry():
+    """List the live `proc:<host>:<pid>` heartbeats (QD E3).
+
+    Diagnostic, not a gate: PASS with the roster, WARN only when an entry
+    names a process that is no longer alive on this host (a writer that
+    died between refreshes leaves a ghost until its TTL expires — worth
+    seeing, never worth failing a maintenance run over). `requires=['fs']`
+    because the runner has no 'redis' dep key (see registry.py's docstring);
+    Redis reachability is handled here instead, via SKIP.
+    """
+    import socket
+    try:
+        import redis as _redis
+        r = _redis.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379'),
+                            socket_connect_timeout=2, decode_responses=True)
+        keys = sorted(r.scan_iter('proc:*', count=100))
+    except Exception as e:
+        return Status.SKIP, f'redis unreachable ({type(e).__name__}) — no proc registry'
+    if not keys:
+        return Status.PASS, 'no live process heartbeats'
+    me = socket.gethostname()
+    lines, ghosts = [], []
+    for k in keys[:20]:
+        h = r.hgetall(k) or {}
+        lines.append(f"{h.get('step') or '?'}@{h.get('pid') or '?'}"
+                     f"({h.get('rss_mb') or '?'}MB)")
+        if h.get('host') == me:
+            try:
+                os.kill(int(h.get('pid', 0)), 0)
+            except PermissionError:
+                pass
+            except Exception:
+                ghosts.append(k)
+    detail = f'{len(keys)} live: ' + ', '.join(lines)
+    if ghosts:
+        return Status.WARN, (detail + f' | {len(ghosts)} ghost entr'
+                             f'{"y" if len(ghosts) == 1 else "ies"}: {", ".join(ghosts[:3])}')[:200]
+    return Status.PASS, detail[:200]

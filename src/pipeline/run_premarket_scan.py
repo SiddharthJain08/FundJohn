@@ -379,6 +379,17 @@ def run_scan(scan_label: str, ticker_override: list[str] | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # QD E3: this unit is spawned per instance (openclaw-premarket-scan@%i)
+    # and is a routine co-tenant of the 8 GB box — declare it. One write at
+    # start (no loop to tick from here); diagnostics only, never raises.
+    try:
+        import redis as _redis
+        from lib import proc_heartbeat as _ph
+        _ph.write(_redis.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379'),
+                                  decode_responses=True),
+                  step='premarket_scan', argv=sys.argv, ttl_s=900)
+    except Exception:
+        pass
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser()
     parser.add_argument('--scan-label', required=True, choices=['07:30', '09:00'])

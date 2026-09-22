@@ -670,7 +670,7 @@ def _renew_or_lose(r, run_date, step_timeout_s):
         raise LockLost(f'renew failed for {run_date} — lock lapsed or taken over')
 
 
-def run_step(script, run_date, env, renew=None):
+def run_step(script, run_date, env, renew=None, heartbeat=None):
     """
     Spawn a pipeline script. Returns (ok, rc) so callers can route on
     exit-code discipline (Tier 3): 0=success, 1=transient/data error
@@ -680,9 +680,17 @@ def run_step(script, run_date, env, renew=None):
     truthy == success — and that still works because the bool() of a
     tuple is True iff non-empty. Callers that care about rc must
     unpack explicitly; everywhere else `if ok:` continues to work.
+
+    `heartbeat`, if given, is Callable[[int, str], None] taking
+    (child_pid, started_at_iso) — called from the existing 30s poll loop
+    (QD E3). No new thread (spec §0).
     """
     import threading
     cmd, timeout = _resolve_script(script, run_date)
+    # QD E3: capture the real start time once, before the renew/spawn
+    # dance below, so `started_at` reported to proc_heartbeat is a true
+    # start stamp rather than a copy of the first `updated_at`.
+    _hb_started = datetime.now(timezone.utc).isoformat()
     # QD E1: renew the run lock to THIS step's timeout + 120 s before spawning.
     # Done inside run_step (not in main's loop) so the bounded `signals` retry
     # — which calls run_step a second time — renews too.
@@ -739,6 +747,13 @@ def run_step(script, run_date, env, renew=None):
             text=True, bufsize=1,
         )
         last_output_ts = [time.time()]
+        # QD E3: declare who we are, right after spawn and again every 30s
+        # tick below — from the poll loop that already exists, no timer
+        # thread (spec §0). Diagnostics only: never let a heartbeat failure
+        # take down the step.
+        if heartbeat is not None:
+            try: heartbeat(proc.pid, _hb_started)
+            except Exception: pass
         def _pump():
             for line in proc.stdout:
                 last_output_ts[0] = time.time()
@@ -757,7 +772,11 @@ def run_step(script, run_date, env, renew=None):
                     rc = proc.wait(timeout=30)
                     break
                 except subprocess.TimeoutExpired:
-                    pass
+                    # QD E3: declare who we are, every 30s tick, from the
+                    # loop that already exists. No timer thread (spec §0).
+                    if heartbeat is not None:
+                        try: heartbeat(proc.pid, _hb_started)
+                        except Exception: pass
                 now = time.time()
                 if now >= deadline:
                     raise subprocess.TimeoutExpired(cmd, timeout)
@@ -1014,9 +1033,19 @@ def main(argv=None):
             if step_key == 'trade' and not is_subset:
                 step_env = {**env, 'OPENCLAW_FORCE_RESIZE': '1'}
 
+            # QD E3: declare this step's child in Redis from the same poll
+            # loop that already renews the lock — no new thread (spec §0).
+            # Bound as defaults (_k, _s) because the closure outlives this
+            # loop iteration (it's handed to run_step, called below).
+            def _hb(child_pid, started_at, _k=step_key, _s=script):
+                from lib import proc_heartbeat as _ph
+                _ph.write(r, step=_k, argv=[_s], pid=child_pid,
+                          started_at=started_at, ttl_s=_ph.DEFAULT_TTL_S)
+
             # Run the step
             ok, rc = run_step(script, run_date, step_env,
-                              renew=lambda t: _renew_or_lose(r, run_date, t))
+                              renew=lambda t: _renew_or_lose(r, run_date, t),
+                              heartbeat=_hb)
 
             # §5 (2026-08-06 remediation spec): ONE bounded retry for the
             # signals step — twin of daily_cycle_node.js. A failed signals
@@ -1037,7 +1066,8 @@ def main(argv=None):
                     channel=STEP_FAILURE_CHANNEL.get('signals', 'pipeline-feed'),
                 )
                 ok, rc = run_step(script, run_date, step_env,
-                                  renew=lambda t: _renew_or_lose(r, run_date, t))
+                                  renew=lambda t: _renew_or_lose(r, run_date, t),
+                                  heartbeat=_hb)
 
             # Tier 3 exit-code discipline (gated): rc == 2 means auth/config
             # error — abort the cycle without retrying. Behind the
