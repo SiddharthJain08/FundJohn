@@ -18,7 +18,7 @@ const TRACEBUS_PATH = require.resolve(path.join(ROOT, 'src/agent/traceBus.js'));
 
 // Build a stubbed makeNode by injecting fake helpers + logger + traceBus
 function makeStubbedFactory({ rc, stderrTail = '', durationMs = 100, throwSpawn = false,
-                              timedOut = false, lockLost = false } = {}) {
+                              timedOut = false, lockLost = false, wedged = false } = {}) {
   const traceEvents = [];
   const logCalls    = [];
   // `attempts` counts runSubprocess invocations — the signals step's bounded
@@ -39,7 +39,7 @@ function makeStubbedFactory({ rc, stderrTail = '', durationMs = 100, throwSpawn 
       runSubprocess: async (argv, opts) => {
         attempts.push(opts && opts.step);
         if (throwSpawn) throw new Error('spawn explode');
-        return { rc, stderrTail, durationMs, stdout: '', timedOut, lockLost };
+        return { rc, stderrTail, durationMs, stdout: '', timedOut, lockLost, wedged };
       },
     },
   };
@@ -260,4 +260,61 @@ test('a bare rc=75 (no lockLost flag) on a non-exempt step still aborts', async 
     () => node({ ...BASE_STATE, env: {} }),
     (err) => { assert.equal(err.step, 'signals'); assert.equal(err.rc, 75); return true; },
   );
+});
+
+// QD E3b (2026-09-22): runSubprocess returns rc=125 + wedged:true when the
+// stdout-idle watchdog SIGTERMed a silent-but-alive child. Task-8 controller
+// constraint: rc=125 must be treated like other hard failures — NO retry, NO
+// sentiment/activation exemption — mirroring the `lockLost` carve-outs above
+// (a different cause, same "must not be swallowed" requirement). NOTE: this
+// is in tension with the sentiment/activation exemption's own stated
+// rationale (a slow/failed gap-filler should warn, not abort) — flagged as a
+// concern in the task-8 report, not resolved here.
+test('rc=125 + wedged during the exempted "sentiment" step DOES abort', async () => {
+  const { makeStepNode, logCalls } = makeStubbedFactory({
+    rc: 125, wedged: true, stderrTail: '[wedge] stdout idle 601s > 600s — SIGTERM' });
+  const node = makeStepNode('sentiment', 'run_sentiment_step');
+  await assert.rejects(
+    () => node({ ...BASE_STATE, env: {} }),
+    (err) => {
+      assert.equal(err.step, 'sentiment');
+      assert.equal(err.rc, 125);
+      assert.equal(err.wedged, true);
+      assert.match(err.stderrTail, /\[wedge\]/);
+      return true;
+    },
+  );
+  const failCall = logCalls.find(([fn]) => fn === 'notifyFailure');
+  assert.ok(failCall);
+  assert.match(failCall[1][3], /\[wedge\]/);
+  assert.ok(!logCalls.some(([fn, args]) => fn === 'feedEnd' && args[1] === 'warn'));
+});
+
+test('rc=125 + wedged during the exempted "activation" step DOES abort', async () => {
+  const { makeStepNode, logCalls } = makeStubbedFactory({
+    rc: 125, wedged: true, stderrTail: '[wedge] stdout idle 601s > 600s — SIGTERM' });
+  const node = makeStepNode('activation', 'activation_apply');
+  await assert.rejects(
+    () => node({ ...BASE_STATE, env: { OPENCLAW_STRICT_EXIT_CODES: '1' } }),
+    (err) => {
+      assert.equal(err.step, 'activation');
+      assert.equal(err.rc, 125);
+      assert.equal(err.wedged, true);
+      return true;
+    },
+  );
+  assert.ok(logCalls.some(([fn]) => fn === 'notifyFailure'));
+  assert.ok(!logCalls.some(([fn, args]) => fn === 'feedEnd' && args[1] === 'warn'));
+});
+
+test('wedged on "signals" aborts after EXACTLY one attempt (no bounded retry)', async () => {
+  const { makeStepNode, attempts, logCalls } = makeStubbedFactory({
+    rc: 125, wedged: true, stderrTail: '[wedge] stdout idle 601s > 600s — SIGTERM' });
+  const node = makeStepNode('signals', 'engine');
+  await assert.rejects(
+    () => node({ ...BASE_STATE, env: {} }),
+    (err) => { assert.equal(err.rc, 125); assert.equal(err.wedged, true); return true; },
+  );
+  assert.equal(attempts.length, 1);
+  assert.ok(!logCalls.some(([fn, args]) => fn === 'notifyFailure' && /attempt 1\/2/.test(args[0])));
 });
