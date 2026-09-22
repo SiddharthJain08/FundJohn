@@ -95,15 +95,14 @@ function makeStepNode(STEP, scriptName) {
     // carried on into signals/trade/alpaca under someone else's lock.
     //
     // `wedged` (QD E3b, 2026-09-22) is set by runSubprocess when the
-    // stdout-idle watchdog SIGTERMed a silent-but-alive child (rc=125). Same
-    // carve-out as `lockLost`, for a different reason: a wedge means the
-    // step's own liveness contract was violated (no output for the full
-    // idle budget) — that is exactly the failure mode the watchdog exists to
-    // surface loudly, so it must never be swallowed into a bounded retry or
-    // a gap-filler warn. Controller note: this DOES make a wedged
-    // sentiment/activation run cost the day's COMPUTED set, which is in
-    // tension with that exemption's original purpose (see the exemption's
-    // own comment below) — flagged as a concern in the task-8 report.
+    // stdout-idle watchdog SIGTERMed a silent-but-alive child (rc=125).
+    // Controller ruling (2026-09-22, superseding the task-8 brief's original
+    // hard constraint): a wedge is a failed gap-filler exactly like a
+    // timed-out one (rc=124) — it must WARN THROUGH under the sentiment/
+    // activation exemption below, same as any other non-lockLost failure.
+    // It DOES still carve the signals retry out (below): a hung step will
+    // hang again, and retrying just doubles the wall time for nothing. Only
+    // `lockLost` overrides the exemption (wave-1 ruling, unchanged).
     let { rc, stdout, stderrTail, durationMs, timedOut, lockLost, wedged } = await runOnce(1);
 
     // §5 (2026-08-06 remediation spec): ONE bounded retry for the signals
@@ -198,15 +197,13 @@ function makeStepNode(STEP, scriptName) {
     // shape). Falling through to the throw below hands the abort path the
     // `[lock] lost before <step>` stderrTail already posted by notifyFailure.
     //
-    // `!wedged` (QD E3b, 2026-09-22): a second carve-out, mandated
-    // out-of-brief by the task-8 controller constraint ("rc 125 like other
-    // hard failures — no retry, no sentiment/activation exemption"). Note
-    // this one IS in tension with the exemption's stated rationale above —
-    // the 2026-07-22 sentiment timeout (rc=124) that motivated the exemption
-    // in the first place is the same failure class a wedge (rc=125) now
-    // aborts on instead of warning through. Flagged as a concern in the
-    // task-8 report for the controller to rule on.
-    if ((STEP === 'sentiment' || STEP === 'activation') && !lockLost && !wedged) {
+    // `wedged` is deliberately NOT carved out here (controller ruling,
+    // 2026-09-22, superseding the task-8 brief's original constraint that
+    // this file treat rc=125 like every other hard failure): a wedge is a
+    // failed gap-filler exactly like the 2026-07-22 rc=124 timeout that
+    // motivated this exemption in the first place, so it warns through the
+    // same way. Only `lockLost` overrides the exemption.
+    if ((STEP === 'sentiment' || STEP === 'activation') && !lockLost) {
       completion.status = 'warn';
       await pipelineLog.feedEnd(STEP, 'warn', state.runDate, durationMs);
       return { completedSteps: [...(state.completedSteps || []), completion] };
