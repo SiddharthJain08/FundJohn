@@ -89,7 +89,13 @@ async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, s
     const wrapped = wrapCapped(argv[0], argv.slice(1), { memoryMax: cap, fallback: DEFAULT_STEP_MEMORY_MAX });
     const cmd  = wrapped.cmd;
     const args = wrapped.args;
-    const idleMax = (idleOverride === undefined) ? stdoutIdleMaxSec() : Number(idleOverride);
+    // A malformed override (non-numeric, zero, negative) must fall back to
+    // the validated default rather than silently disarming the watchdog —
+    // idleSec <= NaN is always false, so an unvalidated NaN budget would
+    // never wedge. Same discipline as stepMemoryMax()'s own validation.
+    const idleN   = Number(idleOverride);
+    const idleMax = (idleOverride !== undefined && Number.isFinite(idleN) && idleN > 0)
+      ? idleN : stdoutIdleMaxSec();
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -130,6 +136,13 @@ async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, s
       const idleSec = (Date.now() - lastOutputAt) / 1000;
       if (idleSec <= idleMax) return;
       wedged = true;
+      // A wedge is terminal, exactly like the Python twin's `return (False,
+      // -2)` exits its poll loop — clear the wall-clock timer so it can
+      // never also fire and set timedOut=true for a child already killed
+      // for wedging. Without this, a wedge that outlives its remaining wall
+      // budget would reach daily_cycle_node.js with both wedged:true AND
+      // timedOut:true, muddying the rc=125 signal it exists to keep clean.
+      clearTimeout(timer);
       stderr += `\n[wedge] stdout idle ${Math.round(idleSec)}s > ${idleMax}s — SIGTERM\n`;
       try { proc.kill('SIGTERM'); } catch {}
       hardKill();
