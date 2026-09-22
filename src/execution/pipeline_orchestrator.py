@@ -29,6 +29,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
+# 2026-09-22: `from lib import run_lock` (wave 1, E1) needs <ROOT>/src on the
+# path. The JS cycle graph and pytest set PYTHONPATH; the pre-market scan unit
+# (openclaw-premarket-scan@.service, imports this module via premarket_helpers)
+# does not — both scans died with ModuleNotFoundError every day from 09-16.
+sys.path.insert(0, str(ROOT / 'src'))
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
