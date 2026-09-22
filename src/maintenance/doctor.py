@@ -820,78 +820,180 @@ def check_data_coverage():
 
 @_check('orchestrator_lock')
 def check_orchestrator_lock():
-    """Stale lock from > 1h ago indicates a previous run died with the
-    lock still held. Surface so operator knows to clear it."""
+    """Report on the shared daily-cycle run lock (QD E1/E3; ruled semantics,
+    fix round 1).
+
+    Diagnostic, not a gate: a lock held by a LIVE process — same host or
+    another host — is normal mid-cycle state, not a fault, so it PASSes.
+    WARN is reserved for a lock that's actually wrong: a same-host holder
+    whose pid is dead (a previous run died without releasing), or a value/
+    TTL doctor.py can't even parse. `ttl == -2` (the key vanished between
+    the scan and this read — its TTL lapsed or its owner released it) is
+    ignored outright, not reported as anything.
+
+    `KEY_PREFIX`/`parse_value`/`pid_alive` are imported ABOVE the try: an
+    ImportError here is a real bug in this check, not a Redis problem, and
+    must never be mislabeled "redis unreachable". The one try below wraps
+    the WHOLE read (connect, scan, AND every per-key ttl/get) — a
+    connection that drops mid-loop must WARN (unknown lock state is exactly
+    what this check exists to surface), never silently `continue` past the
+    keys it didn't get to and report a false "no locks held"."""
+    import socket
+    from lib.run_lock import KEY_PREFIX as _LOCK_PREFIX, parse_value, pid_alive
     url = os.environ.get('REDIS_URL', 'redis://localhost:6379')
     try:
         import redis
-        from lib.run_lock import KEY_PREFIX as _LOCK_PREFIX
-        r = redis.from_url(url, socket_connect_timeout=2)
+        r = redis.from_url(url, socket_connect_timeout=2, decode_responses=True)
         # QD E1: the shared key is `pipeline:run_lock:<run_date>`
         # (src/lib/run_lock_key.json — single source of truth for both the
         # Python and JS twins; imported here rather than hardcoded so this
         # check can never drift from it again). This scan used to look for
         # `pipeline:lock:*`, which matched NEITHER the old Python key
-        # (`pipeline:running:*`) nor the new one — so the check has been
+        # (`pipeline:running:*`) nor the new one — so the check had been
         # reporting "no locks held" unconditionally since it was written.
         keys = list(r.scan_iter(f'{_LOCK_PREFIX}:*', count=20))
+        if not keys:
+            return _ok('orchestrator_lock', 'no locks held')
+        me = socket.gethostname()
+        parts = []
+        any_warn = False
+        for k in keys:
+            k_str = k.decode() if isinstance(k, bytes) else k
+            ttl = r.ttl(k)
+            if ttl == -2:
+                # Vanished between the scan and this read — not a lock.
+                continue
+            val = r.get(k)
+            parsed = parse_value(val)
+            if ttl == -1 or parsed is None:
+                any_warn = True
+                val_str = val.decode('utf-8', 'replace') if isinstance(val, bytes) else val
+                parts.append(f'{k_str}: unparseable value or no-expiry '
+                             f'(ttl={ttl}, value={val_str!r})')
+                continue
+            host, pid, started = parsed
+            if host == me and not pid_alive(pid):
+                any_warn = True
+                parts.append(f'stale lock, holder pid {pid} dead ({k_str})')
+            else:
+                parts.append(f'held by {host}:{pid} since {started}, ttl={ttl}s')
+        if not parts:
+            return _ok('orchestrator_lock', 'no locks held')
+        detail = '; '.join(parts)
+        return _warn('orchestrator_lock', detail) if any_warn else _ok('orchestrator_lock', detail)
+    except Exception as exc:
+        return _warn('orchestrator_lock', f'redis error — {type(exc).__name__}: {exc}')
+
+
+CO_TENANT_ROSTER_SIZE = 5
+CO_TENANT_MEM_AVAILABLE_WARN_MB = 1536
+
+# Test seam (QD E3 fix round 1, ruled item 4): every /proc read below goes
+# through this constant so tests can point it at a fake tree under tmp_path
+# instead of the real /proc.
+_PROC = '/proc'
+
+
+def _co_tenant_mem_available_mb():
+    """/proc/meminfo's MemAvailable in MB, or None if unreadable."""
+    try:
+        with open(os.path.join(_PROC, 'meminfo')) as fh:
+            for line in fh:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1]) / 1024.0
     except Exception:
-        return _warn('orchestrator_lock', 'redis unreachable — skipped')
-    if not keys:
-        return _ok('orchestrator_lock', 'no locks held')
-    stale = []
-    for k in keys:
-        ttl = r.ttl(k)
-        # Lock TTL is set to LOCK_TTL (likely 6h). If TTL still high, lock is
-        # active. If TTL < 0 or TTL near LOCK_TTL — but still around > 1h — we
-        # treat as stale.  Conservative heuristic: report all locks; operator
-        # decides. Value is `host:pid:start_iso` (run_lock.py) — surface the
-        # owner so the operator doesn't have to GET the key by hand.
-        val = r.get(k)
-        if isinstance(val, bytes):
-            val = val.decode('utf-8', 'replace')
-        stale.append(f'{k.decode() if isinstance(k, bytes) else k} (ttl={ttl}s, owner={val})')
-    return _warn('orchestrator_lock', '; '.join(stale))
+        return None
+    return None
 
 
-CO_TENANT_RSS_MB = 1024
+def _co_tenant_ppid(pid):
+    """Parent pid from /proc/<pid>/stat, or None. `comm` (2nd field) can
+    itself contain spaces or parens, so split after the LAST ')' rather
+    than on whitespace from the start of the line."""
+    try:
+        with open(os.path.join(_PROC, str(pid), 'stat')) as fh:
+            content = fh.read()
+        after = content.rsplit(')', 1)[-1].split()
+        return int(after[1])   # after[0] = state, after[1] = ppid
+    except Exception:
+        return None
+
+
+def _co_tenant_own_process_tree(limit=32):
+    """This check's own pid + every ancestor, walked via /proc/<pid>/stat,
+    so the roster can mark rows that are "us" (doctor.py + whatever spawned
+    it — johnbot's ExecStartPre, or pipeline_orchestrator's pre-flight
+    subprocess) rather than a genuine co-tenant. `limit` bounds the walk so
+    a broken /proc (a cycle, or a ppid chain that never terminates) can
+    never loop forever."""
+    pids = set()
+    pid = os.getpid()
+    for _ in range(limit):
+        if pid is None or pid <= 0 or pid in pids:
+            break
+        pids.add(pid)
+        pid = _co_tenant_ppid(pid)
+    return pids
 
 
 @_check('co_tenant_memory')
 def check_co_tenant_memory():
-    """Name every python/node co-tenant over 1 GB RSS, by argv (QD E3).
+    """Roster the top co-tenant processes by RSS + flag genuine memory
+    pressure (QD E3; ruled semantics, fix round 1).
 
-    Pure /proc read — no DB, no Redis, no `ps` shell-out. On an 8 GB no-swap
-    box the question at 3am is always "who else is resident right now"; this
-    answers it in one line of the digest. Context: 2026-09-16's 15:00 ET
-    cycle was OOM-killed with a 2.2 GB intraday-HMM process beside a 4.3 GB
-    signals step; 2026-09-19 ran two concurrent fleet backtests (3.8 GB +
-    2.8 GB). This check makes that situation legible before the kernel OOM
-    killer has to pick a victim. Diagnostic only — always WARN, never FAIL,
-    so it can never abort the `--required-only` pre-flight."""
+    ALWAYS PASSes with the roster (top CO_TENANT_ROSTER_SIZE by RSS, argv
+    TAIL — the trailing flags like `--strategy-id <sid>` are the
+    informative part of a long argv, not the leading interpreter path —
+    with the caller's own process tree marked `(self)`): "who else is on
+    this box" is routine, point-in-time information on a shared box, not a
+    threshold alarm. A big fleet-backtest child or a collector cycle is
+    EXPECTED, not a fault, so a large process by itself never warrants a
+    WARN. The ONLY WARN condition is /proc/meminfo's MemAvailable dropping
+    below CO_TENANT_MEM_AVAILABLE_WARN_MB — genuine memory pressure. Never
+    FAILs, so it can never abort the `--required-only` pre-flight. Never
+    sums RSS (a roster is not a budget: double-counting shared pages across
+    processes would misrepresent real pressure anyway). No wall-clock
+    window — this is a single point-in-time /proc read, not a rate.
+
+    Context: 2026-09-16's 15:00 ET cycle was OOM-killed with a 2.2 GB
+    intraday-HMM process beside a 4.3 GB signals step; 2026-09-19 ran two
+    concurrent fleet backtests (3.8 GB + 2.8 GB) — both routine, neither
+    should have WARNed on size alone. Pure /proc read — no DB, no Redis, no
+    `ps` shell-out."""
     import glob
     page = os.sysconf('SC_PAGE_SIZE')
-    big = []
-    for statm in glob.glob('/proc/[0-9]*/statm'):
-        pid = statm.split('/')[2]
+    own_pids = _co_tenant_own_process_tree()
+    procs = []
+    for statm in glob.glob(os.path.join(_PROC, '[0-9]*', 'statm')):
+        pid_s = statm.split(os.sep)[-2]
         try:
             with open(statm) as fh:
                 rss = int(fh.read().split()[1]) * page / (1024 * 1024)
-            if rss < CO_TENANT_RSS_MB:
-                continue
-            with open(f'/proc/{pid}/cmdline', 'rb') as fh:
+            with open(os.path.join(_PROC, pid_s, 'cmdline'), 'rb') as fh:
                 argv = fh.read().replace(b'\x00', b' ').decode('utf-8', 'replace').strip()
         except Exception:
+            # Process vanished between the glob listing and these reads
+            # (exited mid-scan) — skip it, never let one vanished pid
+            # abort the whole roster.
             continue
         if not argv:
             continue
-        big.append((round(rss), pid, argv[:90]))
-    if not big:
-        return _ok('co_tenant_memory', f'no process over {CO_TENANT_RSS_MB} MB RSS')
-    big.sort(reverse=True)
-    detail = '; '.join(f'{mb}MB pid={pid} {argv}' for mb, pid, argv in big[:5])
-    total = sum(mb for mb, _p, _a in big)
-    return _warn('co_tenant_memory', f'{len(big)} co-tenant(s), {total}MB total — {detail}'[:400])
+        procs.append((round(rss), pid_s, argv, int(pid_s) in own_pids))
+    procs.sort(key=lambda t: t[0], reverse=True)
+    top = procs[:CO_TENANT_ROSTER_SIZE]
+    if top:
+        detail = '; '.join(
+            f'{mb}MB pid={pid}{" (self)" if is_self else ""} {argv[-90:]}'
+            for mb, pid, argv, is_self in top
+        )
+    else:
+        detail = 'no processes found'
+    mem_avail = _co_tenant_mem_available_mb()
+    if mem_avail is not None:
+        detail = f'{detail} | MemAvailable={mem_avail:.0f}MB'
+        if mem_avail < CO_TENANT_MEM_AVAILABLE_WARN_MB:
+            return _warn('co_tenant_memory', detail[:400])
+    return _ok('co_tenant_memory', detail[:400])
 
 
 REGIME_BLENDED_GATE_STALE_DAYS = 14

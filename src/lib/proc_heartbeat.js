@@ -31,23 +31,39 @@ function rssMb(pid) {
   }
 }
 
-async function writeHeartbeat(r, { step, argv, pid, host, startedAt, ttlSec } = {}) {
+async function writeHeartbeat(r, { step, argv, pid, host, startedAt, ttlSec, rssMbOverride } = {}) {
   if (!r) return null;
   const key = heartbeatKey({ host, pid });
   const now = new Date().toISOString();
-  const resident = rssMb(pid);
+  // rssMbOverride (fix round 1, minor item 5): a caller writing a heartbeat
+  // for a CHILD THAT DOESN'T EXIST YET (e.g. the fleet driver, which writes
+  // before spawnSync) has no real pid to sample — rssMb(pid) would silently
+  // fall back to THIS process's own RSS, which is not the child's. Passing
+  // rssMbOverride (e.g. '') writes the field as-is, in the SAME multi/EXEC
+  // as everything else, rather than a second round-trip that would leave a
+  // window where the key holds a misleading rss_mb.
+  let rssMbField;
+  if (rssMbOverride !== undefined) {
+    rssMbField = String(rssMbOverride);
+  } else {
+    const resident = rssMb(pid);
+    rssMbField = resident === null ? '' : String(resident);
+  }
   const fields = {
     host:       String(host || os.hostname()),
     pid:        String(pid == null ? process.pid : Number(pid)),
     step:       String(step || ''),
     argv:       (argv || []).map(String).join(' ').slice(0, 500),
-    rss_mb:     resident == null ? '' : String(resident),
+    rss_mb:     rssMbField,
     started_at: String(startedAt || now),
     updated_at: now,
   };
   try {
-    await r.hset(key, fields);
-    await r.expire(key, Math.trunc(Number(ttlSec) || DEFAULT_TTL_SEC));
+    // hset + expire run inside ONE multi/EXEC (fix round 1, minor item 1) —
+    // two separate top-level calls could leave a half-written key (fields
+    // present with no TTL) immortal if the connection drops between them.
+    const ttl = Math.trunc(Number(ttlSec) || DEFAULT_TTL_SEC);
+    await r.multi().hset(key, fields).expire(key, ttl).exec();
     return key;
   } catch (_) {
     return null;

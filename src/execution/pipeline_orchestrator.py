@@ -29,6 +29,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
+# 2026-09-22: `from lib import run_lock` (wave 1, E1) needs <ROOT>/src on the
+# path. The JS cycle graph and pytest set PYTHONPATH; the pre-market scan unit
+# (openclaw-premarket-scan@.service, imports this module via premarket_helpers)
+# does not — both scans died with ModuleNotFoundError every day from 09-16.
+sys.path.insert(0, str(ROOT / 'src'))
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -161,6 +166,24 @@ def get_redis():
     import redis as _redis
     url = os.environ.get('REDIS_URL', 'redis://localhost:6379')
     return _redis.from_url(url, decode_responses=True)
+
+
+def get_heartbeat_redis():
+    """A DEDICATED Redis client for `proc_heartbeat` writes (QD E3 fix round
+    1, IMPORTANT item 2). NEVER reuse `get_redis()` here: its config is the
+    lock/renew contract (SET NX / EXPIRE under `acquire_lock`/`renew_lock`),
+    which must not gain a socket timeout that could change that behavior
+    under load. Heartbeats are best-effort diagnostics fired from the
+    step-deadline poll loop every 30s — bound their socket waits tightly (2s)
+    so a wedged Redis can never stall that loop.
+
+    Module-level (like `get_redis`) so tests can monkeypatch it the same way
+    `_hermetic_main` patches `get_redis` — a test-time substitute here must
+    NEVER let `main()` open a real socket to a production Redis."""
+    import redis as _redis
+    url = os.environ.get('REDIS_URL', 'redis://localhost:6379')
+    return _redis.from_url(url, decode_responses=True,
+                           socket_timeout=2, socket_connect_timeout=2)
 
 
 def acquire_lock(r, run_date, ttl_s=None):
@@ -670,7 +693,7 @@ def _renew_or_lose(r, run_date, step_timeout_s):
         raise LockLost(f'renew failed for {run_date} — lock lapsed or taken over')
 
 
-def run_step(script, run_date, env, renew=None, heartbeat=None):
+def run_step(script, run_date, env, renew=None, heartbeat=None, heartbeat_clear=None):
     """
     Spawn a pipeline script. Returns (ok, rc) so callers can route on
     exit-code discipline (Tier 3): 0=success, 1=transient/data error
@@ -684,6 +707,14 @@ def run_step(script, run_date, env, renew=None, heartbeat=None):
     `heartbeat`, if given, is Callable[[int, str], None] taking
     (child_pid, started_at_iso) — called from the existing 30s poll loop
     (QD E3). No new thread (spec §0).
+
+    `heartbeat_clear`, if given, is Callable[[int], None] taking the child's
+    pid — called exactly once, from a `finally` covering the whole child
+    lifecycle (QD E3 fix round 1, IMPORTANT item 2), so a step's heartbeat
+    entry is cleared on EVERY exit path: normal completion, non-zero rc,
+    timeout/wedge SIGTERM, or an unexpected exception. Swallows its own
+    exceptions — diagnostics can never mask or replace the step's real
+    outcome.
     """
     import threading
     cmd, timeout = _resolve_script(script, run_date)
@@ -746,14 +777,15 @@ def run_step(script, run_date, env, renew=None, heartbeat=None):
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
         )
+    except Exception as e:
+        # Popen itself never produced a child — there is no pid for
+        # heartbeat_clear to clear, so this path stays OUTSIDE the
+        # try/finally below (a pre-existing return, unchanged in shape).
+        log(f'{script} error: {e}')
+        return (False, -1)
+
+    try:
         last_output_ts = [time.time()]
-        # QD E3: declare who we are, right after spawn and again every 30s
-        # tick below — from the poll loop that already exists, no timer
-        # thread (spec §0). Diagnostics only: never let a heartbeat failure
-        # take down the step.
-        if heartbeat is not None:
-            try: heartbeat(proc.pid, _hb_started)
-            except Exception: pass
         def _pump():
             for line in proc.stdout:
                 last_output_ts[0] = time.time()
@@ -762,6 +794,14 @@ def run_step(script, run_date, env, renew=None, heartbeat=None):
                     print(f'  [{script}] {line}', flush=True)
         t = threading.Thread(target=_pump, daemon=True)
         t.start()
+        # QD E3 fix round 1 (IMPORTANT item 2): the heartbeat write moves
+        # BELOW t.start() (the stdout pump) — starting the pump thread is a
+        # pure in-process operation that cannot block, so this ordering
+        # costs nothing, and it means a heartbeat write (which does I/O)
+        # can never delay the pump from picking up the child's first output.
+        if heartbeat is not None:
+            try: heartbeat(proc.pid, _hb_started)
+            except Exception: pass
         deadline = time.time() + timeout
         wedged = False
         try:
@@ -809,6 +849,15 @@ def run_step(script, run_date, env, renew=None, heartbeat=None):
     except Exception as e:
         log(f'{script} error: {e}')
         return (False, -1)
+    finally:
+        # QD E3 fix round 1 (IMPORTANT item 2): clear this child's heartbeat
+        # on EVERY exit from here down — normal completion, non-zero rc,
+        # timeout/wedge SIGTERM, or an exception — `proc` is guaranteed to
+        # exist at this point (the Popen-failure path above already
+        # returned before this try/finally began).
+        if heartbeat_clear is not None:
+            try: heartbeat_clear(proc.pid)
+            except Exception: pass
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -895,6 +944,14 @@ def main(argv=None):
     env = {**os.environ, 'PYTHONPATH': os.pathsep.join(_pp_parts)}
 
     r = get_redis()
+
+    # QD E3 fix round 1 (IMPORTANT item 2): a DEDICATED client for heartbeat
+    # writes/clears — never `r` (the lock/renew client). `_ph` is imported
+    # once here rather than inside each per-step closure below, since both
+    # `_hb` (per-step) and `_hb_clear` (once, for the whole run) need it.
+    r_hb = get_heartbeat_redis()
+    from lib import proc_heartbeat as _ph
+    _hb_clear = lambda p: _ph.clear(r_hb, pid=p)
 
     # ── Idempotency: skip if pipeline already finished today ──────────────────
     # Set by mark_completed() at the end of a successful run. Covers both the
@@ -1036,16 +1093,17 @@ def main(argv=None):
             # QD E3: declare this step's child in Redis from the same poll
             # loop that already renews the lock — no new thread (spec §0).
             # Bound as defaults (_k, _s) because the closure outlives this
-            # loop iteration (it's handed to run_step, called below).
+            # loop iteration (it's handed to run_step, called below). Fix
+            # round 1 (IMPORTANT item 2): writes through the DEDICATED
+            # `r_hb` client, never the lock/renew client `r`.
             def _hb(child_pid, started_at, _k=step_key, _s=script):
-                from lib import proc_heartbeat as _ph
-                _ph.write(r, step=_k, argv=[_s], pid=child_pid,
+                _ph.write(r_hb, step=_k, argv=[_s], pid=child_pid,
                           started_at=started_at, ttl_s=_ph.DEFAULT_TTL_S)
 
             # Run the step
             ok, rc = run_step(script, run_date, step_env,
                               renew=lambda t: _renew_or_lose(r, run_date, t),
-                              heartbeat=_hb)
+                              heartbeat=_hb, heartbeat_clear=_hb_clear)
 
             # §5 (2026-08-06 remediation spec): ONE bounded retry for the
             # signals step — twin of daily_cycle_node.js. A failed signals
@@ -1067,7 +1125,7 @@ def main(argv=None):
                 )
                 ok, rc = run_step(script, run_date, step_env,
                                   renew=lambda t: _renew_or_lose(r, run_date, t),
-                                  heartbeat=_hb)
+                                  heartbeat=_hb, heartbeat_clear=_hb_clear)
 
             # Tier 3 exit-code discipline (gated): rc == 2 means auth/config
             # error — abort the cycle without retrying. Behind the

@@ -190,10 +190,27 @@ function allStrategies() {
     // QD E3: one heartbeat per child, written BEFORE the blocking spawnSync.
     // The driver blocks for up to PER_TIMEOUT_S, so a 60s cadence is
     // impossible here — the TTL covers the whole child instead.
+    //
+    // NOTE (fix round 1, minor item 5): a firewalled/wedged Redis costs up
+    // to ioredis's connect timeout PER SPAWN here — this call blocks the
+    // driver before every single strategy in the fleet, serially, because
+    // writeHeartbeat is awaited ahead of spawnSync rather than fired-and-
+    // forgotten. lazyConnect + the swallowed 'error' handler above bound
+    // that cost to one timeout, not a hang, but it is still paid once per
+    // strategy, not once per run.
+    //
+    // rssMbOverride: '' — the child doesn't exist yet (this write happens
+    // BEFORE spawnSync), so rssMb(pid) would silently sample the DRIVER's
+    // own few-MB footprint, not the multi-GB strategy about to spawn. The
+    // override writes rss_mb as '' in the SAME multi/EXEC as the rest of
+    // the fields, rather than a second round-trip that would leave a
+    // window with a misleading value on the key. co_tenant_memory's own
+    // /proc scan is what actually answers "how much RAM is this child using".
     await writeHeartbeat(_hbRedis, {
       step: `fleet:${sid}`,
       argv: ['python3', '-m', 'backtest.unified_backtest', '--strategy-id', sid],
       ttlSec: PER_TIMEOUT_S + 300,
+      rssMbOverride: '',
     });
     const r = spawnSync('bash', [path.join(ROOT, 'scripts/fleet_oom_victim_exec.sh'),
       'python3', '-m', 'backtest.unified_backtest', '--strategy-id', sid],

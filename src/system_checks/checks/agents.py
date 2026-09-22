@@ -73,39 +73,67 @@ def _discord_bot_token_valid():
 
 @check(name='proc_registry', tags=['agents'], requires=['fs'])
 def _proc_registry():
-    """List the live `proc:<host>:<pid>` heartbeats (QD E3).
+    """List the live `proc:<host>:<pid>` heartbeats (QD E3; ruled semantics,
+    fix round 1).
 
-    Diagnostic, not a gate: PASS with the roster, WARN only when an entry
-    names a process that is no longer alive on this host (a writer that
-    died between refreshes leaves a ghost until its TTL expires — worth
-    seeing, never worth failing a maintenance run over). `requires=['fs']`
-    because the runner has no 'redis' dep key (see registry.py's docstring);
-    Redis reachability is handled here instead, via SKIP.
+    SKIPs on ANY Redis error — connection refused up front, or a connection
+    that dies mid-read (a firewalled/restarting Redis can drop on the Nth
+    key just as easily as the first: the try wraps the WHOLE read loop, not
+    just the connect+scan). A heartbeat registry being briefly unreachable
+    is diagnostics-unavailable, not a system_checks-worthy ERROR. WARN only
+    when a same-host entry names a PID that's no longer alive (a writer
+    that died between refreshes leaves a ghost until its TTL expires —
+    worth seeing, never worth failing a maintenance run over; a MISSING pid
+    field is treated the same way — `run_lock.pid_alive` returns False for
+    an unparseable/absent pid, so it's "not live" too, not a crash).
+    `requires=['fs']` because the runner has no 'redis' dep key (see
+    registry.py's docstring); Redis reachability is handled here instead,
+    via SKIP.
     """
+    import itertools
     import socket
+    import time as _time
+    from datetime import datetime
+
+    # Imported ABOVE the try (same rule doctor.py's check_orchestrator_lock
+    # follows for KEY_PREFIX): an ImportError here is a real bug in this
+    # check, not a Redis problem, and must not be mislabeled SKIP.
+    from lib.run_lock import pid_alive
+
+    MAX_ENTRIES = 20
+    me = socket.gethostname()
+    now = _time.time()
     try:
         import redis as _redis
         r = _redis.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379'),
-                            socket_connect_timeout=2, decode_responses=True)
-        keys = sorted(r.scan_iter('proc:*', count=100))
+                            socket_connect_timeout=2, socket_timeout=2,
+                            decode_responses=True)
+        lines, ghosts, n_seen = [], [], 0
+        # Cap WHILE iterating — scan_iter is a cursor-based generator;
+        # islice never pulls more than MAX_ENTRIES even against a registry
+        # with thousands of live keys (no `sorted(list(...))` materialising
+        # the whole scan first).
+        for k in itertools.islice(r.scan_iter('proc:*', count=100), MAX_ENTRIES):
+            n_seen += 1
+            h = r.hgetall(k) or {}
+            pid_raw = h.get('pid')
+            age_s = '?'
+            updated_at = h.get('updated_at')
+            if updated_at:
+                try:
+                    age_s = int(now - datetime.fromisoformat(
+                        updated_at.replace('Z', '+00:00')).timestamp())
+                except Exception:
+                    age_s = '?'
+            lines.append(f"{h.get('step') or '?'}@{pid_raw or '?'}"
+                         f"({h.get('rss_mb') or '?'}MB,age={age_s}s)")
+            if h.get('host') == me and not pid_alive(pid_raw):
+                ghosts.append(str(k))
     except Exception as e:
-        return Status.SKIP, f'redis unreachable ({type(e).__name__}) — no proc registry'
-    if not keys:
+        return Status.SKIP, f'redis error ({type(e).__name__}) — no proc registry'
+    if not lines:
         return Status.PASS, 'no live process heartbeats'
-    me = socket.gethostname()
-    lines, ghosts = [], []
-    for k in keys[:20]:
-        h = r.hgetall(k) or {}
-        lines.append(f"{h.get('step') or '?'}@{h.get('pid') or '?'}"
-                     f"({h.get('rss_mb') or '?'}MB)")
-        if h.get('host') == me:
-            try:
-                os.kill(int(h.get('pid', 0)), 0)
-            except PermissionError:
-                pass
-            except Exception:
-                ghosts.append(k)
-    detail = f'{len(keys)} live: ' + ', '.join(lines)
+    detail = f'{n_seen} shown (cap {MAX_ENTRIES}): ' + ', '.join(lines)
     if ghosts:
         return Status.WARN, (detail + f' | {len(ghosts)} ghost entr'
                              f'{"y" if len(ghosts) == 1 else "ies"}: {", ".join(ghosts[:3])}')[:200]

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -128,11 +129,19 @@ def _hermetic_main(r):
     alert_msgs: list[str] = []
     dashboard_calls: list[str] = []
 
-    orig = (po.get_redis, po.notify, po.pipeline_feed, po.data_alerts,
-            po.set_agent_status, po.broadcast_dashboard_refresh,
+    orig = (po.get_redis, po.get_heartbeat_redis, po.notify, po.pipeline_feed,
+            po.data_alerts, po.set_agent_status, po.broadcast_dashboard_refresh,
             po.is_completed_today, po.read_checkpoint,
             po.run_step, po._resolve_script)
     po.get_redis = lambda: r
+    # QD E3 fix round 1: main() also opens a DEDICATED heartbeat client via
+    # get_heartbeat_redis() — that seam must be patched here too, or a
+    # main()-driving test would open a REAL socket to redis://localhost:6379
+    # the instant it runs an unstubbed run_step. Reusing the same fake `r`
+    # is enough: proc_heartbeat.write()/clear() swallow whatever this fake
+    # doesn't support (no .hset here) and never raise, so heartbeats are a
+    # silent no-op in these tests — never a real connection.
+    po.get_heartbeat_redis = lambda: r
     po.notify = lambda msg, channel='pipeline-feed': posts.append((channel, msg))
     po.pipeline_feed = lambda msg: feed_msgs.append(msg)
     po.data_alerts = lambda msg: alert_msgs.append(msg)
@@ -145,8 +154,8 @@ def _hermetic_main(r):
              mock.patch('http.client.HTTPConnection', side_effect=_raise_if_touched):
             yield posts, feed_msgs, alert_msgs, dashboard_calls
     finally:
-        (po.get_redis, po.notify, po.pipeline_feed, po.data_alerts,
-         po.set_agent_status, po.broadcast_dashboard_refresh,
+        (po.get_redis, po.get_heartbeat_redis, po.notify, po.pipeline_feed,
+         po.data_alerts, po.set_agent_status, po.broadcast_dashboard_refresh,
          po.is_completed_today, po.read_checkpoint,
          po.run_step, po._resolve_script) = orig
 
@@ -306,6 +315,132 @@ class TestRunStepHeartbeat(unittest.TestCase):
         ok, rc = po.run_step('engine', DATE, dict(os.environ))
         self.assertTrue(ok)
         self.assertEqual(rc, 0)
+
+
+class _FakePopen:
+    """Stands in for subprocess.Popen so `proc.wait()` can be scripted
+    precisely — real `true`/`false` binaries give no control over WHEN
+    `.wait()` raises TimeoutExpired vs. returns, which is exactly what the
+    poll-loop heartbeat tick and heartbeat_clear tests below need."""
+    def __init__(self, pid=42424, wait_effects=(0,)):
+        self.pid = pid
+        self.stdout = iter(())          # _pump's `for line in proc.stdout` finishes at once
+        self._effects = list(wait_effects)
+
+    def wait(self, timeout=None):
+        eff = self._effects.pop(0)
+        if isinstance(eff, BaseException):
+            raise eff
+        return eff
+
+    def terminate(self):
+        pass
+
+    def kill(self):
+        pass
+
+
+class TestRunStepHeartbeatPollLoopAndClear(unittest.TestCase):
+    """QD E3 fix round 1 (IMPORTANT item 2): the heartbeat fires again from
+    a 30s poll-loop tick (not just once at spawn), and `heartbeat_clear` is
+    called with the child's pid from a `finally` that covers both the
+    normal-exit and the step-raises paths."""
+
+    def setUp(self):
+        self._orig_resolve = po._resolve_script
+        self._orig_popen = po.subprocess.Popen
+        # A generous timeout so the real wall-clock deadline check in
+        # run_step's poll loop is never hit by these near-instant fakes.
+        po._resolve_script = lambda script, run_date: (['true'], 90)
+
+    def tearDown(self):
+        po._resolve_script = self._orig_resolve
+        po.subprocess.Popen = self._orig_popen
+
+    def test_heartbeat_fires_again_from_a_30s_poll_loop_tick(self):
+        """A fake Popen whose `wait` raises TimeoutExpired once, then
+        returns 0, must produce TWO heartbeat calls: one post-spawn (moved
+        below t.start()), one from the TimeoutExpired branch of the poll
+        loop — not just the post-spawn call alone."""
+        fake = _FakePopen(wait_effects=[subprocess.TimeoutExpired(cmd=['true'], timeout=30), 0])
+        po.subprocess.Popen = lambda *a, **kw: fake
+        calls = []
+        ok, rc = po.run_step('engine', DATE, dict(os.environ),
+                             heartbeat=lambda pid, started_at: calls.append(pid))
+        self.assertTrue(ok)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(pid == fake.pid for pid in calls))
+
+    def test_heartbeat_clear_called_with_the_child_pid_on_normal_exit(self):
+        fake = _FakePopen(wait_effects=[0])
+        po.subprocess.Popen = lambda *a, **kw: fake
+        cleared = []
+        ok, rc = po.run_step('engine', DATE, dict(os.environ),
+                             heartbeat_clear=lambda pid: cleared.append(pid))
+        self.assertTrue(ok)
+        self.assertEqual(rc, 0)
+        self.assertEqual(cleared, [fake.pid])
+
+    def test_heartbeat_clear_called_when_the_step_raises(self):
+        """`proc.wait()` raising something OTHER than TimeoutExpired isn't
+        caught by either poll-loop except clause — it propagates to
+        run_step's outermost `except Exception`, which returns (False, -1).
+        heartbeat_clear's `finally` must still fire on this path."""
+        fake = _FakePopen(wait_effects=[OSError('boom')])
+        po.subprocess.Popen = lambda *a, **kw: fake
+        cleared = []
+        ok, rc = po.run_step('engine', DATE, dict(os.environ),
+                             heartbeat_clear=lambda pid: cleared.append(pid))
+        self.assertFalse(ok)
+        self.assertEqual(rc, -1)
+        self.assertEqual(cleared, [fake.pid])
+
+    def test_a_raising_heartbeat_clear_never_propagates(self):
+        fake = _FakePopen(wait_effects=[0])
+        po.subprocess.Popen = lambda *a, **kw: fake
+        ok, rc = po.run_step(
+            'engine', DATE, dict(os.environ),
+            heartbeat_clear=lambda pid: (_ for _ in ()).throw(RuntimeError('redis down')))
+        self.assertTrue(ok)
+        self.assertEqual(rc, 0)
+
+    def test_heartbeat_clear_called_on_the_stdout_idle_wedge_path(self):
+        """The wedge branch (`return (False, -2)`, triggered when stdout has
+        been idle past STEP_STDOUT_IDLE_MAX_S) lives inside the SAME try as
+        every other exit — this is a THIRD distinct return site, beyond the
+        normal-exit and step-raises paths already covered above, proving
+        heartbeat_clear's finally covers it too."""
+        fake = _FakePopen(wait_effects=[
+            subprocess.TimeoutExpired(cmd=['true'], timeout=30),  # first 30s poll tick
+            -15,                                                   # reaped after terminate()
+        ])
+        po.subprocess.Popen = lambda *a, **kw: fake
+        cleared = []
+        with mock.patch.dict(os.environ, {'STEP_STDOUT_IDLE_MAX_S': '0'}):
+            ok, rc = po.run_step('engine', DATE, dict(os.environ),
+                                 heartbeat_clear=lambda pid: cleared.append(pid))
+        self.assertFalse(ok)
+        self.assertEqual(rc, -2)
+        self.assertEqual(cleared, [fake.pid])
+
+    def test_heartbeat_clear_called_on_the_hard_timeout_path(self):
+        """A step timeout (`now >= deadline`) raises TimeoutExpired from
+        INSIDE the poll loop's outer try, caught by run_step's own
+        `except subprocess.TimeoutExpired` (return (False, -1)) — a FOURTH
+        distinct return site inside the same try/finally."""
+        po._resolve_script = lambda script, run_date: (['true'], -5)  # deadline already past
+        fake = _FakePopen(wait_effects=[
+            subprocess.TimeoutExpired(cmd=['true'], timeout=30),
+            -15,
+        ])
+        po.subprocess.Popen = lambda *a, **kw: fake
+        cleared = []
+        ok, rc = po.run_step('engine', DATE, dict(os.environ),
+                             heartbeat_clear=lambda pid: cleared.append(pid))
+        self.assertFalse(ok)
+        self.assertEqual(rc, -1)
+        self.assertEqual(cleared, [fake.pid])
 
 
 class TestMainBusyLock(unittest.TestCase):

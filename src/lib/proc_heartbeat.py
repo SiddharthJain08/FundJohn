@@ -41,7 +41,12 @@ def rss_mb(pid=None):
 
 def write(r, *, step, argv=None, pid=None, host=None, started_at=None,
           ttl_s=DEFAULT_TTL_S):
-    """Upsert this process's heartbeat hash. Returns the key, or None."""
+    """Upsert this process's heartbeat hash. Returns the key, or None.
+
+    hset + expire run inside ONE pipeline/MULTI (fix round 1, minor item 1):
+    two separate top-level calls could leave a half-written key — fields
+    present with no TTL — immortal if the connection drops between them.
+    """
     if r is None:
         return None
     key = heartbeat_key(host=host, pid=pid)
@@ -57,8 +62,10 @@ def write(r, *, step, argv=None, pid=None, host=None, started_at=None,
         'updated_at': now,
     }
     try:
-        r.hset(key, mapping=fields)
-        r.expire(key, int(ttl_s))
+        pipe = r.pipeline()
+        pipe.hset(key, mapping=fields)
+        pipe.expire(key, int(ttl_s))
+        pipe.execute()
         return key
     except Exception:
         return None
