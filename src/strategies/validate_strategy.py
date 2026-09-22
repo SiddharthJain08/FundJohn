@@ -68,6 +68,18 @@ def validate(filepath: str) -> dict:
     # Derive module path from file path so relative imports work correctly.
     # e.g. .../src/strategies/implementations/foo.py → strategies.implementations.foo
     abs_path = os.path.abspath(filepath)
+
+    # ── 2a. Import allowlist (QD spec §5 E4) ──────────────────────────────────
+    # Runs BEFORE the first import, so a candidate that reaches for subprocess
+    # / requests / open() never gets executed. unified_backtest.load_strategy_class
+    # calls validate() first, so this covers that path too.
+    from strategies.strategy_lint import lint_file, format_violations
+    lint_violations = lint_file(abs_path)
+    if lint_violations:
+        return {'ok': False,
+                'errors': format_violations(lint_violations),
+                'signal_count': 0}
+
     module_name = None
     if SRC_DIR in abs_path:
         rel = os.path.relpath(abs_path, SRC_DIR).replace(os.sep, '.')

@@ -53,6 +53,7 @@ const MAX_TOURNAMENT_VARIANTS = 8;
 const QUEUE_STATUS_FOR_REASON = {
   coding_failed:      'failed',
   contract_violation: 'validation_failed',
+  import_violation:   'validation_failed',
   redteam_blocked:    'redteam_blocked',
   prescreen_failed:   'prescreen_failed',
   backtest_error:     'backtest_failed',
@@ -1296,6 +1297,42 @@ class ResearchOrchestrator {
 
     // ── Phase 1: Contract validation ─────────────────────────────────────────
     onPhase('validate', 40);
+
+    // QD E4: AST import lint BEFORE the 60s validate_strategy spawn. A file
+    // that reaches for subprocess/requests/open() is rejected here, attributed
+    // as import_violation rather than the generic contract_violation, and never
+    // gets imported by anything.
+    const lint = await _spawnPython(['src/strategies/strategy_lint.py', implPath],
+                                    { cwd: OPENCLAW_DIR, timeoutMs: 20_000, onChild: opts.onChild });
+    let lintOut = null;
+    try { lintOut = JSON.parse(lint.stdout); } catch (_) { lintOut = null; }
+    if (lintOut && lintOut.ok === false) {
+      const lintLog = (lintOut.violations || [])
+        .map(v => `line ${v.line}: ${v.kind}: ${v.detail}`).join('\n');
+      const lPaperId = await paperIdForCandidate(candidate_id);
+      if (!suppressQueueWrite) {
+        await this._query(
+          `UPDATE implementation_queue SET status = 'validation_failed', error_log = $1 WHERE candidate_id = $2`,
+          [lintLog, candidate_id]
+        );
+      }
+      await this._emitDecisionFn({
+        paperId:      lPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'validate',
+        outcome:      'reject',
+        reasonCode:   'import_violation',
+        reasonDetail: lintLog,
+        metadata:     { violations: lintOut.violations || [] },
+      });
+      notify?.(`  ❌ ${stratId} import lint failed: ${lintLog.slice(0, 200)}`);
+      channelNotify?.(`❌ **${stratId}** rejected — disallowed imports/calls (see implementation_queue).`);
+      return { ok: false, result: { promoted: false, reasonCode: 'import_violation', error: lintLog } };
+    }
+    // lintOut === null means the lint itself failed to run (infra) — fail OPEN
+    // and let validate_strategy.py's own in-process lint be the authority.
+
     const validResult = await this._validateFn(implPath, opts);
 
     const vPaperId = await paperIdForCandidate(candidate_id);

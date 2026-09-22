@@ -107,6 +107,8 @@ Rules:
 - Handle empty/None DataFrame (return `[]`)
 - Maximum 200 lines
 - No naked class-body imports
+- **Imports are enforced by an AST allowlist** (`src/strategies/strategy_lint.py`), run before the file is ever imported. Permitted roots: `strategies`, `src`, `backtest`, `lib`, `base`, `_extra_panels`, `pandas`, `numpy`, `scipy`, `sklearn`, `statsmodels`, `pyarrow`, `__future__`, `typing`, `sys`, `os`, `json`, `pathlib`, `traceback`, `math`, `datetime`, `itertools`, `functools`, `logging`, `dataclasses`, `enum`, `statistics`, `collections`, `re`, plus relative imports. `os` is limited to `os.environ` / `os.path` / `os.getenv`; `sys` to `sys.stderr` / `sys.stdout` / `sys.path` / `sys.exit` / `sys.argv`.
+- **Never** `subprocess`, `socket`, `requests`, `urllib`, `http`, `shutil`, `importlib`, `pickle`, `ctypes`, `multiprocessing` — and never `open()`, `eval()`, `exec()`, `compile()`, `__import__()`, `.to_csv()`, `.to_parquet()`, `.write_text()`. A strategy reads the panels it is handed and returns `Signal`s; it never touches the network or the filesystem. Violations reject the candidate before validation runs.
 - All Signal fields must be correct Python types (float not numpy.float64, str dates not datetime)
 - `confidence` must be str `'HIGH'`, `'MED'`, or `'LOW'` — never a float, never None
 - **Never use covariance-based optimization (scipy.optimize, mean-variance, tangency portfolio) unless you can guarantee at least 3× more observations than assets.** Underdetermined covariance matrices silently fail, producing 0 signals in backtesting. Use rank-based or momentum-based scoring instead.
