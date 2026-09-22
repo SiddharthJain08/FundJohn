@@ -19,11 +19,18 @@ files import sys and 30 import os (2026-09-22 census), and the strategycoder
 prompt itself mandates `print(..., file=sys.stderr)` on every strategy.
 Rejecting the module would reject the fleet; rejecting `os.system` /
 `os.remove` / `sys.modules` is the part that actually matters.
+
+This is a PROMOTION-TIME gate: it runs inside `validate_strategy.validate()`
+and the research-orchestrator pre-flight, both on the path a candidate file
+takes on its way to being promoted — `strategies.registry.load_strategy_class`
+(used to instantiate an already-promoted strategy at runtime) never calls
+this lint and is unlinted by design.
 """
 from __future__ import annotations
 
 import ast
 import json
+import re
 import sys
 from collections import namedtuple
 from pathlib import Path
@@ -78,9 +85,23 @@ BANNED_METHODS = frozenset({
     'urlopen', 'check_output', 'Popen',
 })
 
+# A string literal passed straight to a call that looks like a URL — the
+# fleet has zero legitimate uses of this (docstrings/comments never match:
+# they aren't Call arguments).
+_URL_RE = re.compile(r'^(https?|ftp)://')
+
 
 def _root(dotted: str) -> str:
     return (dotted or '').split('.')[0]
+
+
+def _call_repr(fn) -> str:
+    """Best-effort human name for a Call's func, for the violation detail."""
+    if isinstance(fn, ast.Name):
+        return fn.id
+    if isinstance(fn, ast.Attribute):
+        return f'{_call_repr(fn.value)}.{fn.attr}'
+    return '<call>'
 
 
 def lint_source(source: str, filename: str = '<candidate>') -> list:
@@ -89,6 +110,20 @@ def lint_source(source: str, filename: str = '<candidate>') -> list:
         tree = ast.parse(source, filename=filename)
     except SyntaxError as e:
         return [Violation(getattr(e, 'lineno', 0) or 0, 'syntax', f'syntax error: {e.msg}')]
+
+    # First pass: resolve every `import x as y` binding (y -> x) so the
+    # os/sys attribute policy also applies through an alias — `import os as
+    # _o; _o.execv(...)` binds a name that is never spelled `os` in the
+    # source, so the second pass has to look it up. Applies to the FULL
+    # dotted import name: `import os.path as osp` binds `osp` to the
+    # `os.path` submodule, not to `os` itself, so `osp.join(...)` stays
+    # clean — only an exact `import os`/`import sys` (with or without
+    # `as ...`) resolves to a key in ALLOWED_ATTRS.
+    alias_to_name = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                alias_to_name[alias.asname or alias.name] = alias.name
 
     out = []
     for node in ast.walk(tree):
@@ -116,9 +151,12 @@ def lint_source(source: str, filename: str = '<candidate>') -> list:
                         out.append(Violation(node.lineno, 'import',
                                              f'from {root} import {alias.name} — only '
                                              f'{sorted(ALLOWED_ATTRS[root])} are permitted'))
-        # os.<attr> / sys.<attr>
+        # os.<attr> / sys.<attr> — resolved through any `import ... as`
+        # alias recorded in the first pass above (falls back to the literal
+        # name when it wasn't bound by an `ast.Import`, e.g. a function
+        # parameter or an unrelated local named `os`).
         elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            mod = node.value.id
+            mod = alias_to_name.get(node.value.id, node.value.id)
             if mod in ALLOWED_ATTRS and node.attr not in ALLOWED_ATTRS[mod]:
                 out.append(Violation(node.lineno, 'attribute',
                                      f'{mod}.{node.attr} — only '
@@ -134,6 +172,15 @@ def lint_source(source: str, filename: str = '<candidate>') -> list:
                     out.append(Violation(node.lineno, 'method',
                                          f'.{fn.attr}(…) writes or reaches out — not permitted '
                                          f'in a strategy file'))
+            # kind='network': a URL string literal passed straight to any
+            # call, positional or keyword. Docstrings/bare comments never
+            # trigger this — they aren't ast.Call arguments.
+            for arg in list(node.args) + [kw.value for kw in node.keywords]:
+                if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                        and _URL_RE.match(arg.value)):
+                    out.append(Violation(node.lineno, 'network',
+                                         f'{_call_repr(fn)}(…) called with a network literal '
+                                         f'{arg.value!r}'))
 
     out.sort(key=lambda v: (v.line, v.kind, v.detail))
     return out

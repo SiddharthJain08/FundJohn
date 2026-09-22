@@ -8,8 +8,12 @@ hardcodes it) and asserts zero violations.
 """
 from __future__ import annotations
 
+import contextlib
 import glob
+import io
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -69,6 +73,12 @@ class TestAllowed(unittest.TestCase):
         self.assertEqual(sl.lint_source('from src.strategies.universe_default import sp500\n'), [])
         self.assertEqual(sl.lint_source('from backtest.quick_backtest import run\n'), [])
 
+    def test_import_of_a_submodule_with_an_alias_stays_clean(self):
+        # `import os.path as osp` binds osp to the os.path SUBMODULE, not to
+        # `os` itself — the attribute policy must not treat it as os.
+        self.assertEqual(
+            sl.lint_source("import os.path as osp\nosp.join('a')\n"), [])
+
 
 class TestRejected(unittest.TestCase):
     def _kinds(self, src):
@@ -127,6 +137,34 @@ class TestRejected(unittest.TestCase):
     def test_dataframe_rename_is_NOT_a_violation(self):
         self.assertEqual(sl.lint_source('df = df.rename(columns={"a": "b"})\n'), [])
 
+    def test_aliased_os_and_sys_imports_do_not_bypass_the_attribute_policy(self):
+        vs = sl.lint_source('import os as _o\n_o.execv("/bin/sh", [])\n')
+        self.assertIn('attribute', [v.kind for v in vs])
+        self.assertTrue(any('_o.execv' in v.detail or 'os.execv' in v.detail for v in vs))
+
+        vs = sl.lint_source('import sys as _s\n_s.modules\n')
+        self.assertEqual([v.kind for v in vs], ['attribute'])
+
+    def test_network_literal_passed_to_a_call_is_rejected(self):
+        vs = sl.lint_source("pd.read_csv('https://example.com/data.csv')\n")
+        self.assertTrue(any(v.kind == 'network' for v in vs))
+
+        vs = sl.lint_source("requests_get(url='ftp://example.com/x')\n")
+        self.assertTrue(any(v.kind == 'network' for v in vs))
+
+    def test_a_url_in_a_docstring_is_not_a_violation(self):
+        # A bare docstring alone would pass trivially even if the network
+        # check scanned every ast.Constant in the tree — pair it with a real
+        # Call so the test actually proves the URL isn't a Call argument.
+        src = ('"""See https://example.com/paper.pdf for the reference."""\n'
+               "df = df.rename(columns={'a': 'b'})\n")
+        self.assertEqual(sl.lint_source(src), [])
+
+    def test_a_url_in_a_comment_is_not_a_violation(self):
+        src = ("x = 1  # see https://example.com/paper.pdf\n"
+               "df = df.rename(columns={'a': 'b'})\n")
+        self.assertEqual(sl.lint_source(src), [])
+
     def test_a_syntax_error_is_reported_as_one_violation(self):
         vs = sl.lint_source('def f(:\n')
         self.assertEqual(len(vs), 1)
@@ -137,6 +175,56 @@ class TestRejected(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn('line 1', lines[0])
         self.assertIn('socket', lines[0])
+
+
+class TestCLIContract(unittest.TestCase):
+    """Hermetic: `main()` called in-process (no subprocess) against a real
+    temp file, with stdout captured. Exercises exactly what
+    research-orchestrator.js's pre-flight parses: `JSON.parse(stdout)` then
+    reads `.ok` and `.violations[].{file,line,kind,detail}`.
+    """
+
+    def _run_main(self, *paths):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = sl.main([str(p) for p in paths])
+        return rc, json.loads(buf.getvalue())
+
+    def test_cli_json_contract_on_a_clean_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'clean.py'
+            f.write_text(OK_HEAD)
+            rc, payload = self._run_main(f)
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload, {'ok': True, 'violations': []})
+
+    def test_cli_json_contract_on_a_violating_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'bad.py'
+            f.write_text('import socket\n')
+            rc, payload = self._run_main(f)
+        self.assertEqual(rc, 1)
+        self.assertIs(payload['ok'], False)
+        self.assertEqual(len(payload['violations']), 1)
+        for v in payload['violations']:
+            self.assertEqual(set(v.keys()), {'file', 'line', 'kind', 'detail'})
+        self.assertEqual(payload['violations'][0]['kind'], 'import')
+
+    def test_lint_file_on_an_unreadable_path_reports_io(self):
+        vs = sl.lint_file('/nonexistent/path/does-not-exist-strategy_lint.py')
+        self.assertEqual(len(vs), 1)
+        self.assertEqual(vs[0].kind, 'io')
+
+    def test_a_syntax_broken_file_reports_syntax_and_the_json_still_parses(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'broken.py'
+            f.write_text('def f(:\n')
+            rc, payload = self._run_main(f)
+        self.assertEqual(rc, 1)
+        self.assertIs(payload['ok'], False)
+        self.assertEqual(len(payload['violations']), 1)
+        self.assertEqual(payload['violations'][0]['kind'], 'syntax')
+        self.assertEqual(set(payload['violations'][0].keys()), {'file', 'line', 'kind', 'detail'})
 
 
 class TestFleetIsClean(unittest.TestCase):

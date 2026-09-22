@@ -1307,8 +1307,17 @@ class ResearchOrchestrator {
     let lintOut = null;
     try { lintOut = JSON.parse(lint.stdout); } catch (_) { lintOut = null; }
     if (lintOut && lintOut.ok === false) {
-      const lintLog = (lintOut.violations || [])
+      const violations = lintOut.violations || [];
+      const lintLog = violations
         .map(v => `line ${v.line}: ${v.kind}: ${v.detail}`).join('\n');
+      // reasonCode reflects WHAT was found, not just that the lint rejected
+      // the file: import/attribute/call/method/network are disallowed-import
+      // findings; syntax/io-only output is the pre-existing "broken Python"
+      // case (previously only caught downstream by validate_strategy.py) and
+      // stays contract_violation so it isn't mislabeled as an import problem.
+      const importKinds = new Set(['import', 'attribute', 'call', 'method', 'network']);
+      const reasonCode = violations.some(v => importKinds.has(v.kind))
+        ? 'import_violation' : 'contract_violation';
       const lPaperId = await paperIdForCandidate(candidate_id);
       if (!suppressQueueWrite) {
         await this._query(
@@ -1322,13 +1331,15 @@ class ResearchOrchestrator {
         strategyId:   stratId,
         gateName:     'validate',
         outcome:      'reject',
-        reasonCode:   'import_violation',
+        reasonCode,
         reasonDetail: lintLog,
-        metadata:     { violations: lintOut.violations || [] },
+        metadata:     { violations },
       });
+      const humanReason = reasonCode === 'import_violation'
+        ? 'disallowed imports/calls' : 'a syntax/read error';
       notify?.(`  ❌ ${stratId} import lint failed: ${lintLog.slice(0, 200)}`);
-      channelNotify?.(`❌ **${stratId}** rejected — disallowed imports/calls (see implementation_queue).`);
-      return { ok: false, result: { promoted: false, reasonCode: 'import_violation', error: lintLog } };
+      channelNotify?.(`❌ **${stratId}** rejected — ${humanReason} (see implementation_queue).`);
+      return { ok: false, result: { promoted: false, reasonCode, error: lintLog } };
     }
     // lintOut === null means the lint itself failed to run (infra) — fail OPEN
     // and let validate_strategy.py's own in-process lint be the authority.
