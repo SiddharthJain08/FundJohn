@@ -3,13 +3,16 @@
  *
  *   skipForSubset(step, state) → true if state.requestedSteps excludes this step
  *   strictMode(env)            → boolean from OPENCLAW_STRICT_EXIT_CODES
- *   runSubprocess(argv, opts)  → Promise<{rc, stdout, stderrTail, durationMs, timedOut, lockLost?, memoryMax}>
+ *   runSubprocess(argv, opts)  → Promise<{rc, stdout, stderrTail, durationMs, timedOut, wedged, lockLost?, memoryMax}>
  *     opts.step names the caller's step for the `[lock] lost before <step>`
  *     message if the shared run lock (src/lib/run_lock.js) is lost before
  *     spawning — see runSubprocess's own comment (QD E1, 2026-09-14).
  *     opts.memoryMax overrides the MemoryMax cap wrapCapped applies around
  *     the spawn (undefined → stepMemoryMax(), '0' → uncapped); see
  *     stepMemoryMax()'s own comment (QD E2b, 2026-09-12).
+ *     opts.stdoutIdleMaxSec overrides the stdout/stderr idle budget (undefined
+ *     → stdoutIdleMaxSec()); a child silent past the budget is SIGTERMed and
+ *     the result carries wedged:true + rc:125 (QD E3b, 2026-09-12).
  */
 'use strict';
 
@@ -35,6 +38,19 @@ function strictMode(env) {
   return (env && env.OPENCLAW_STRICT_EXIT_CODES) === '1';
 }
 
+// QD E3b (2026-09-12): the stdout-idle wedge detector, ported from
+// pipeline_orchestrator.run_step (:592-633). The 2026-04-29 cycle sat in
+// collector Phase 3 for 30+ minutes with zero output on a half-open TCP
+// stream. The Python runner has caught that class since; the JS runner only
+// had a wall-clock timeout, so the same wedge would burn the full 9000s
+// collect budget. Same env var, same default, so the twins agree.
+const DEFAULT_STDOUT_IDLE_MAX_SEC = 600;
+
+function stdoutIdleMaxSec() {
+  const v = parseInt(process.env.STEP_STDOUT_IDLE_MAX_S, 10);
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_STDOUT_IDLE_MAX_SEC;
+}
+
 // QD E1 controller ruling (2026-09-14): this graph IS the production cycle
 // whenever OPENCLAW_LANGGRAPH_ORCHESTRATOR=1 (the prod default — see
 // cron-schedule.js), so every step spawned here must renew the shared run
@@ -42,7 +58,8 @@ function strictMode(env) {
 // each script. `renewCurrent` is a no-op (returns true) when no lock is
 // currently held — via `runLock.setCurrent` in daily-cycle.js — so tests
 // and one-off runs that never acquire a lock behave exactly as before.
-async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, step, memoryMax } = {}) {
+async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, step, memoryMax,
+                                     stdoutIdleMaxSec: idleOverride } = {}) {
   // QD wave-1 fix item 1 (2026-09-14): pass a logger. Without one,
   // `renewCurrent`'s default no-op `log` discarded the only diagnostic that
   // names WHY the renew failed — run_lock.renew's "[lock] renew skipped —
@@ -57,6 +74,7 @@ async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, s
       stderrTail:  `[lock] lost before ${step || 'step'}`,
       durationMs:  0,
       timedOut:    false,
+      wedged:      false,
       lockLost:    true,
       memoryMax:   null,
     };
@@ -71,9 +89,12 @@ async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, s
     const wrapped = wrapCapped(argv[0], argv.slice(1), { memoryMax: cap, fallback: DEFAULT_STEP_MEMORY_MAX });
     const cmd  = wrapped.cmd;
     const args = wrapped.args;
+    const idleMax = (idleOverride === undefined) ? stdoutIdleMaxSec() : Number(idleOverride);
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let wedged = false;
+    let lastOutputAt = Date.now();
 
     const proc = spawn(cmd, args, {
       env,
@@ -81,38 +102,70 @@ async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, s
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    proc.stdout.on('data', (b) => { stdout += b.toString(); });
-    proc.stderr.on('data', (b) => { stderr += b.toString(); });
+    // ANY output — stdout or stderr — counts as liveness. The Python twin
+    // merges stderr into stdout (stderr=subprocess.STDOUT), so this matches.
+    proc.stdout.on('data', (b) => { lastOutputAt = Date.now(); stdout += b.toString(); });
+    proc.stderr.on('data', (b) => { lastOutputAt = Date.now(); stderr += b.toString(); });
+
+    // Belt-and-suspenders SIGKILL if SIGTERM doesn't land within 5s. unref'd
+    // and cleared on every exit path so a dead-but-still-armed hard-kill
+    // timer never keeps the event loop (or a `node --test` process) alive
+    // past the child's actual exit.
+    let hardKillTimer = null;
+    const hardKill = () => {
+      hardKillTimer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 5000);
+      if (typeof hardKillTimer.unref === 'function') hardKillTimer.unref();
+    };
 
     const timer = setTimeout(() => {
       timedOut = true;
       try { proc.kill('SIGTERM'); } catch {}
-      // Hard-kill after 5s if it doesn't exit
-      setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 5000);
+      hardKill();
     }, timeoutSec * 1000);
+
+    // Poll on a 5s grain: fine enough to honour a short idle budget in tests,
+    // negligible on a 9000s collect. Cleared in the same place as `timer`.
+    const idleTimer = setInterval(() => {
+      if (timedOut || wedged) return;
+      const idleSec = (Date.now() - lastOutputAt) / 1000;
+      if (idleSec <= idleMax) return;
+      wedged = true;
+      stderr += `\n[wedge] stdout idle ${Math.round(idleSec)}s > ${idleMax}s — SIGTERM\n`;
+      try { proc.kill('SIGTERM'); } catch {}
+      hardKill();
+    }, 5000);
+    if (typeof idleTimer.unref === 'function') idleTimer.unref();
 
     proc.on('close', (code, signal) => {
       clearTimeout(timer);
+      clearInterval(idleTimer);
+      if (hardKillTimer) clearTimeout(hardKillTimer);
       const durationMs = Date.now() - startedAt;
-      const rc = timedOut ? 124 : (code === null ? (signal ? 137 : 1) : code);
+      const rc = wedged   ? 125
+               : timedOut ? 124
+               : (code === null ? (signal ? 137 : 1) : code);
       resolve({
         rc,
         stdout,
         stderrTail: stderr.slice(-4000),
         durationMs,
         timedOut,
+        wedged,
         memoryMax: wrapped.memoryMax,
       });
     });
 
     proc.on('error', (e) => {
       clearTimeout(timer);
+      clearInterval(idleTimer);
+      if (hardKillTimer) clearTimeout(hardKillTimer);
       resolve({
         rc: 127,
         stdout: '',
         stderrTail: `spawn failed: ${e.message}`,
         durationMs: Date.now() - startedAt,
         timedOut: false,
+        wedged: false,
         memoryMax: wrapped.memoryMax,
       });
     });
@@ -128,6 +181,7 @@ async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, s
 const _RC_HINTS = {
   137: 'SIGKILL — almost always OOM (rc=137)',
   139: 'SIGSEGV (rc=139)',
+  125: 'stdout idle — wedge detected and SIGTERMed (rc=125)',
   124: 'timed out (rc=124)',
 };
 
@@ -228,6 +282,6 @@ async function postAbortAlert(payload, deps = {}) {
 }
 
 module.exports = {
-  skipForSubset, strictMode, runSubprocess, stepMemoryMax,
+  skipForSubset, strictMode, runSubprocess, stepMemoryMax, stdoutIdleMaxSec,
   formatAbortAlert, postAbortAlert,
 };
