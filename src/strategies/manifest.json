@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-09-12T19:22:15.544970+00:00",
+  "updated_at": "2026-09-19T19:24:09.650Z",
   "strategies": {
     "S_leadlag_cluster_minirocket": {
       "state": "candidate",
@@ -2568,8 +2568,8 @@
       "instrument_class": "equity"
     },
     "S_visibility_graph_rsi": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:03:59.316973+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T19:02:24.569Z",
       "metadata": {
         "canonical_file": "S_visibility_graph_rsi.py",
         "class": "VisibilityGraphRSI",
@@ -2628,6 +2628,22 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T19:02:24.569Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "equity"
@@ -3780,14 +3796,14 @@
       "instrument_class": "etp"
     },
     "oxf_orbp_momentum": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:03:59.576727+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T19:06:03.430Z",
       "metadata": {
         "canonical_file": "oxf_orbp_momentum.py",
         "class": "OxfOrbpMomentum",
         "description": "ORBP opening-range-breakout-preference with momentum trend filter on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat orbp-trend). Buy stop at Open+Stretch confirmed on signal-day OHLC; close[t+1] fill.",
         "eligible_regimes": [
-          "CRISIS"
+          "HIGH_VOL"
         ],
         "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
@@ -3813,6 +3829,22 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T19:06:03.430Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "HIGH_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "etp"
@@ -3912,8 +3944,8 @@
       "instrument_class": "etp"
     },
     "oxf_td_sequential": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:03:59.646702+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T19:07:59.294Z",
       "metadata": {
         "canonical_file": "oxf_td_sequential.py",
         "class": "OxfTdSequential",
@@ -3945,6 +3977,22 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T19:07:59.294Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "etp"
@@ -4113,8 +4161,8 @@
       "instrument_class": "equity"
     },
     "S_schur_damped_minvar_shrinkage": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:03:59.706741+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T19:01:40.014Z",
       "metadata": {
         "canonical_file": "S_schur_damped_minvar_shrinkage.py",
         "class": "SchurDampedMinVarShrinkage",
@@ -4147,6 +4195,22 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T19:01:40.014Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "equity"
@@ -4564,8 +4628,8 @@
       "instrument_class": "etp"
     },
     "S_ast_earnings_announcements_combined_with_stock_repurchases": {
-      "state": "candidate",
-      "state_since": "2026-09-07T04:00:18.927316+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T18:58:45.133Z",
       "metadata": {
         "canonical_file": "S_ast_earnings_announcements_combined_with_stock_repurchases.py",
         "class": "AstEarningsAnnouncementsCombinedWithStockRepurchases",
@@ -4661,6 +4725,22 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_weekly_cron",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T18:58:45.133Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "equity"
@@ -4850,8 +4930,8 @@
       "instrument_class": "equity"
     },
     "S_volume_shock_overnight_drift": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:03:59.779286+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T19:03:00.352Z",
       "metadata": {
         "canonical_file": "S_volume_shock_overnight_drift.py",
         "class": "VolumeShockOvernightDrift",
@@ -4887,6 +4967,22 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T19:03:00.352Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "equity"
@@ -4928,8 +5024,8 @@
       "instrument_class": "equity"
     },
     "S_downside_beta_premium": {
-      "state": "candidate",
-      "state_since": "2026-09-07T04:00:19.039810+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T18:59:39.513Z",
       "metadata": {
         "canonical_file": "S_downside_beta_premium.py",
         "class": "DownsideBetaPremium",
@@ -4937,7 +5033,7 @@
         "origin": "manual_research_2026_07_12",
         "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
         "eligible_regimes": [
-          "HIGH_VOL"
+          "TRANSITIONING"
         ],
         "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
@@ -4965,6 +5061,22 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_weekly_cron",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T18:59:39.513Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "HIGH_VOL"
+            ],
+            "eligible_regimes_after": [
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "equity"
@@ -5029,8 +5141,8 @@
       "instrument_class": "equity"
     },
     "S_same_month_seasonality": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:03:59.850845+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T19:01:02.333Z",
       "metadata": {
         "canonical_file": "S_same_month_seasonality.py",
         "class": "SameMonthSeasonality",
@@ -5038,7 +5150,7 @@
         "origin": "manual_research_2026_07_12",
         "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
         "eligible_regimes": [
-          "HIGH_VOL"
+          "LOW_VOL"
         ],
         "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
@@ -5066,6 +5178,22 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T19:01:02.333Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "HIGH_VOL"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "equity"
@@ -5149,7 +5277,7 @@
     },
     "S_regime_age_momentum": {
       "state": "live",
-      "state_since": "2026-07-13T12:52:57.908Z",
+      "state_since": "2026-09-19T19:00:40.920Z",
       "metadata": {
         "canonical_file": "S_regime_age_momentum.py",
         "class": "RegimeAgeMomentum",
@@ -5157,7 +5285,6 @@
         "origin": "manual_research_2026_07_12",
         "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
         "eligible_regimes": [
-          "LOW_VOL",
           "CRISIS"
         ],
         "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
@@ -5176,6 +5303,31 @@
             ],
             "eligible_regimes_after": [
               "LOW_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-09-14T04:00:34.312930+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_weekly_cron",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T19:00:40.920Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
               "CRISIS"
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
@@ -5238,16 +5390,15 @@
       "instrument_class": "equity"
     },
     "oxf_bollinger_momentum": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:04:00.007624+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T19:03:42.037Z",
       "metadata": {
         "canonical_file": "oxf_bollinger_momentum.py",
         "class": "OxfBollingerMomentum",
         "description": "Bollinger-band momentum breakout on liquid ETFs (oxfordstrat bollinger-bands). Daily-bar, close[t+1] fill.",
         "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
         "eligible_regimes": [
-          "LOW_VOL",
-          "CRISIS"
+          "LOW_VOL"
         ]
       },
       "history": [
@@ -5281,6 +5432,23 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T19:03:42.037Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "etp"
@@ -5332,16 +5500,15 @@
       "instrument_class": "etp"
     },
     "oxf_donchian_breakout": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:04:00.075258+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T19:03:59.565Z",
       "metadata": {
         "canonical_file": "oxf_donchian_breakout.py",
         "class": "OxfDonchianBreakout",
         "description": "Donchian N-day channel breakout on liquid ETFs (oxfordstrat donchian-channel-2). Daily-bar, close[t+1] fill.",
         "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
         "eligible_regimes": [
-          "HIGH_VOL",
-          "CRISIS"
+          "LOW_VOL"
         ]
       },
       "history": [
@@ -5375,20 +5542,37 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T19:03:59.565Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "HIGH_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "etp"
     },
     "oxf_dow_theory": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:04:00.160233+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T19:04:20.171Z",
       "metadata": {
         "canonical_file": "oxf_dow_theory.py",
         "class": "OxfDowTheory",
         "description": "Dow-theory swing-pivot breakout on liquid ETFs (oxfordstrat dow-theory-trend). Close breaks the most-recent pivot. Daily-bar, close[t+1] fill.",
         "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
         "eligible_regimes": [
-          "CRISIS"
+          "LOW_VOL"
         ]
       },
       "history": [
@@ -5421,6 +5605,22 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T19:04:20.171Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "etp"
@@ -5510,15 +5710,16 @@
       "instrument_class": "etp"
     },
     "oxf_livermore": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:04:00.316806+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T19:04:40.280Z",
       "metadata": {
         "canonical_file": "oxf_livermore.py",
         "class": "OxfLivermore",
         "description": "Livermore pivotal-point breakout on liquid ETFs (oxfordstrat livermore-system-1). Penetrates 2 most-recent swing pivots by >= noise. Daily-bar, close[t+1] fill.",
         "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
         "eligible_regimes": [
-          "CRISIS"
+          "LOW_VOL",
+          "HIGH_VOL"
         ]
       },
       "history": [
@@ -5551,13 +5752,30 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T19:04:40.280Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "HIGH_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "etp"
     },
     "oxf_nr7": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:04:00.406175+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T19:05:25.638Z",
       "metadata": {
         "canonical_file": "oxf_nr7.py",
         "class": "OxfNR7",
@@ -5597,6 +5815,22 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T19:05:25.638Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "etp"
@@ -5640,14 +5874,15 @@
       "instrument_class": "etp"
     },
     "oxf_ross_hook": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:04:00.478316+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T19:06:58.007Z",
       "metadata": {
         "canonical_file": "oxf_ross_hook.py",
         "class": "OxfRossHook",
         "description": "Ross hook 1-2-3 trend-break breakout on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat ross-hook-filter-2). Hook high pierced on signal-day OHLC after a 1-2-3 swing structure; close[t+1] fill.",
         "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
         "eligible_regimes": [
+          "LOW_VOL",
           "HIGH_VOL",
           "CRISIS"
         ]
@@ -5683,19 +5918,39 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T19:06:58.007Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "HIGH_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "HIGH_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "etp"
     },
     "oxf_welles_wilder_breakout": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:04:00.560280+00:00",
+      "state": "live",
+      "state_since": "2026-09-19T19:09:22.672Z",
       "metadata": {
         "canonical_file": "oxf_welles_wilder_breakout.py",
         "class": "OxfWellesWilderBreakout",
         "description": "Welles Wilder volatility breakout on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat welles-wilder-1). Close move over the lookback exceeds ARC = ATR*const (stateless SIC proxy); close[t+1] fill.",
         "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
         "eligible_regimes": [
+          "LOW_VOL",
           "CRISIS"
         ]
       },
@@ -5729,6 +5984,23 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-19T19:09:22.672Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "etp"
@@ -6151,59 +6423,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_lstm_sector_embedding_reversal_momentum": {
-      "state": "candidate",
-      "state_since": "2026-08-22T22:46:18.278284+00:00",
-      "metadata": {
-        "canonical_file": "S_lstm_sector_embedding_reversal_momentum.py",
-        "class": "LSTMSectorEmbeddingReversalMomentum",
-        "description": "Sector-aware LSTM with learnable embeddings and macro-financial covariates exploits cross-sectional heterogeneity — combining short-term reversal (60-day lagged returns) with industry momentum (sector embedding Δc correlated with realized median sector return) — to predict daily ",
-        "universe_filter_ref": "src.strategies.universe_default:sp500",
-        "universe_filter_source": "paperhunter_inferred"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-08-09T00:08:47.073Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-01-04→2026-08-06, providers polygon/yahoo/alpha_vantage)",
-                "log_returns: backfilled (2016-01-04→2026-08-06, providers polygon/yahoo/alpha_vantage/computed)",
-                "macro: reachable but not backfilled (providers yfinance)",
-                "financials: backfilled (2009-09-01→2026-07-15, providers fmp/yahoo)"
-              ],
-              "missing_columns": [
-                "macro"
-              ],
-              "provider_route": [
-                {
-                  "provider": "yfinance",
-                  "column": "macro",
-                  "data_type": "macro",
-                  "gap_from": "2024-07-14",
-                  "gap_to": "2026-08-09"
-                }
-              ]
-            },
-            "candidate_id": "eac8eb40-34c8-4db0-94f3-f9d79b6fee30"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-08-22T22:46:18.278284+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe -3.54, DD 98.6%, trades 83943",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S_vol_indicators_sp500_drawdown_timing": {
       "state": "live",
       "state_since": "2026-08-15T18:59:38.275Z",
@@ -6461,52 +6680,39 @@
       ],
       "instrument_class": "etp"
     },
-    "S_lead_lag_granger_causality_v2": {
+    "S_commodity_seasonal_ssa_dvr": {
       "state": "candidate",
-      "state_since": "2026-08-29T18:26:11.514Z",
+      "state_since": "2026-09-19T18:20:10.146357+00:00",
       "metadata": {
-        "canonical_file": "S_lead_lag_granger_causality_v2.py",
-        "class": "LeadLagGrangerCausalityV2",
-        "description": "Directional alpha from Granger-causal lead-lag return relationships among low-volatility (index-leader-proxy) names, weekly refresh, full 2yr estimation window (variant 2 of source paper's ambiguous parameters)."
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
-    "S_holiday_seasonality_energy_etf": {
-      "state": "candidate",
-      "state_since": "2026-08-29T00:00:00.000Z",
-      "metadata": {
-        "canonical_file": "S_holiday_seasonality_energy_etf.py",
-        "class": "HolidaySeasonalityEnergyEtf",
-        "description": "LONG energy ETF basket (USO/UGA/XLE/XOP) in the 8-trading-day window before each US federal holiday; exits at the close before the holiday, avoiding the post-holiday reversal (variant 1 of source paper's ambiguous exit timing/basket weighting).",
+        "canonical_file": "S_commodity_seasonal_ssa_dvr.py",
+        "class": "CommoditySeasonalSsaDvr",
+        "description": "Monthly LONG/SHORT rotation across a 15-name commodity ETP basket, ranked by OLS dummy-variable-regression t-stat of the current calendar month seasonal coefficient over a rolling 5y window (variant 1: DVR-only, not SSA; 5y rolling window not the paper's literal 10y, given ~10.5y total history available).",
         "backtest_results": {
-          "trade_count": 440,
+          "trade_count": 414,
           "regime_partition": {
             "LOW_VOL": {
-              "trade_count": 160,
-              "sharpe": 0.209,
-              "avg_r_multiple": 0.451
+              "trade_count": 84,
+              "sharpe": 0.146,
+              "avg_r_multiple": 0.496
             },
             "TRANSITIONING": {
-              "trade_count": 184,
-              "sharpe": 0.061,
-              "avg_r_multiple": 0.163
+              "trade_count": 240,
+              "sharpe": -0.121,
+              "avg_r_multiple": -0.502
             },
             "HIGH_VOL": {
-              "trade_count": 72,
-              "sharpe": 0.076,
-              "avg_r_multiple": 0.26
+              "trade_count": 60,
+              "sharpe": -0.175,
+              "avg_r_multiple": -0.851
             },
             "CRISIS": {
-              "trade_count": 24,
-              "sharpe": 0.871,
-              "avg_r_multiple": 3.94
+              "trade_count": 30,
+              "sharpe": -0.279,
+              "avg_r_multiple": -1.343
             }
           }
         },
-        "eligible_regimes": [
-          "CRISIS"
-        ]
+        "eligible_regimes": []
       },
       "history": [],
       "instrument_class": "etp"

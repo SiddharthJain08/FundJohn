@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_short_term_dip_reversion",
+  "required": ["prices"],
+  "optional": []
+}

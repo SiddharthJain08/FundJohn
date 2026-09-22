@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_btc_supertrend_naive_flip",
+  "required": ["prices"],
+  "optional": []
+}

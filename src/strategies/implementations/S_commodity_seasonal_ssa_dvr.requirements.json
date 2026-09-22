@@ -1,5 +1,5 @@
 {
-  "strategy_id": "S_holiday_seasonality_energy_etf",
+  "strategy_id": "S_commodity_seasonal_ssa_dvr",
   "required": [
     "prices"
   ],

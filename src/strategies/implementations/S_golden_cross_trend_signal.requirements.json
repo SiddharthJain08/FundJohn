@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_golden_cross_trend_signal",
+  "required": ["prices"],
+  "optional": []
+}
