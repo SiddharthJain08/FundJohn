@@ -3,14 +3,21 @@
 /**
  * D3 — the orchestrator's zero-signal branch (spec 2026-09-12 §4 D3).
  *
- * When validate_strategy reports warnings ['zero_signals_synthetic'], the gate
- * chain must (a) NOT call the Opus red-team reviewer, (b) emit a redteam
- * decision with reasonCode 'needs_signal_check', and (c) keep going — the
- * prescreen and the backtest still run. It must never return ok:false.
+ * When validate_strategy reports warnings ['zero_signals_synthetic'], the
+ * skip-the-red-team behaviour is gated behind OPENCLAW_ZERO_SIGNAL_SKIP_REDTEAM
+ * (fix round 1, spec §0 CRITICAL item):
+ *
+ *   - flag UNSET (default): the red-team LLM runs exactly as it did before
+ *     this task ever landed. The validate-pass decision still records
+ *     metadata.warnings + signal_count either way.
+ *   - flag SET ('1'): the landed skip-and-continue behaviour — the Opus
+ *     reviewer is never called, a `redteam`/`pass`/`needs_signal_check` row
+ *     is emitted instead, and the chain keeps going (prescreen + backtest
+ *     still run). It must never return ok:false.
  *
  * Run:
  *   cd /root/openclaw/.claude/worktrees/qd-adoptions && \
- *     node --test tests/agent/test_zero_signal_gate.test.js
+ *     nice -n 19 node --test tests/agent/test_zero_signal_gate.test.js
  */
 
 // paperIdForCandidate() and emitGateDecision() both short-circuit to null when
@@ -39,6 +46,25 @@ const FIXTURE_PATH = path.join(FIXTURE_DIR, 'S_zero.py');
 fs.writeFileSync(FIXTURE_PATH, '"""stub strategy file for gate-chain test isolation (D3 T2)."""\n');
 after(() => { fs.rmSync(FIXTURE_DIR, { recursive: true, force: true }); });
 
+// Fix round 1: the skip is gated behind this flag. Read at call time by the
+// orchestrator's `_zeroSignalSkipEnabled()`, so tests can flip it per-test —
+// save/restore around each test rather than leaking state to the next one.
+const FLAG_KEY = 'OPENCLAW_ZERO_SIGNAL_SKIP_REDTEAM';
+
+function withFlag(value, fn) {
+  return async () => {
+    const prev = process.env[FLAG_KEY];
+    if (value === undefined) delete process.env[FLAG_KEY];
+    else process.env[FLAG_KEY] = value;
+    try {
+      await fn();
+    } finally {
+      if (prev === undefined) delete process.env[FLAG_KEY];
+      else process.env[FLAG_KEY] = prev;
+    }
+  };
+}
+
 function makeOrch({ warnings = [], redteamVerdict = 'pass' } = {}) {
   const orch = new ResearchOrchestrator();
   const calls = { redteam: 0, prescreen: 0, backtest: 0 };
@@ -62,9 +88,34 @@ const ARGS = {
   runEligibility: false,
 };
 
-test('zero_signals_synthetic: red-team LLM is skipped and the chain continues', async () => {
+test('flag unset (default): zero_signals_synthetic warning does NOT skip the red-team LLM', withFlag(undefined, async () => {
   const { orch, calls, decisions } = makeOrch({ warnings: ['zero_signals_synthetic'] });
-  const out = await orch._runGateChain({ ...ARGS });
+  const notified = [];
+  const out = await orch._runGateChain({ ...ARGS, notify: (m) => notified.push(m) });
+
+  assert.equal(calls.redteam, 1, 'flag unset (default) — the red-team LLM must still run, byte-identical to pre-D3 behaviour');
+  assert.equal(calls.prescreen, 1, 'the prescreen still runs');
+  assert.equal(calls.backtest, 1, 'the backtest still runs');
+  assert.equal(out.ok, true);
+
+  const rt = decisions.filter(d => d.gateName === 'redteam');
+  assert.equal(rt.length, 1, 'exactly one plain redteam pass row');
+  assert.equal(rt[0].outcome, 'pass');
+  assert.equal(rt[0].reasonCode, undefined, 'no needs_signal_check row when the flag is unset');
+
+  assert.ok(!notified.some(m => m.includes('needs_signal_check')), 'no ⚠️ needs_signal_check line when the flag is unset');
+  assert.equal(notified.filter(m => m.includes('red-team review passed')).length, 1,
+    'the "passed" line still posts exactly once — flag unset is byte-identical to pre-D3 behaviour');
+
+  const v = decisions.find(d => d.gateName === 'validate');
+  assert.deepEqual(v.metadata.warnings, ['zero_signals_synthetic'], 'the validate decision still records the warning even with the flag unset');
+  assert.equal(v.metadata.signal_count, 0);
+}));
+
+test('flag set: zero_signals_synthetic warning skips the red-team LLM and marks needs_signal_check', withFlag('1', async () => {
+  const { orch, calls, decisions } = makeOrch({ warnings: ['zero_signals_synthetic'] });
+  const notified = [];
+  const out = await orch._runGateChain({ ...ARGS, notify: (m) => notified.push(m) });
 
   assert.equal(calls.redteam, 0, 'the Opus red-team turn must be skipped');
   assert.equal(calls.prescreen, 1, 'the prescreen still runs');
@@ -75,15 +126,16 @@ test('zero_signals_synthetic: red-team LLM is skipped and the chain continues', 
   assert.equal(rt.length, 1, 'exactly one redteam decision, not two');
   assert.equal(rt[0].outcome, 'pass');
   assert.equal(rt[0].reasonCode, 'needs_signal_check');
-});
 
-test('zero_signals_synthetic: the validate decision carries the warnings list', async () => {
-  const { orch, decisions } = makeOrch({ warnings: ['zero_signals_synthetic'] });
-  await orch._runGateChain({ ...ARGS });
+  const warnLines   = notified.filter(m => m.includes('needs_signal_check'));
+  const passedLines = notified.filter(m => m.includes('red-team review passed'));
+  assert.equal(warnLines.length, 1, 'the ⚠️ needs_signal_check line is posted exactly once');
+  assert.equal(passedLines.length, 0, 'the "red-team review passed" line must NOT be posted when the red-team was skipped');
+
   const v = decisions.find(d => d.gateName === 'validate');
-  assert.deepEqual(v.metadata.warnings, ['zero_signals_synthetic']);
+  assert.deepEqual(v.metadata.warnings, ['zero_signals_synthetic'], 'the validate decision records the warning with the flag set too');
   assert.equal(v.metadata.signal_count, 0);
-});
+}));
 
 test('no warnings: the red-team reviewer runs exactly as before', async () => {
   const { orch, calls, decisions } = makeOrch({ warnings: [] });
@@ -108,4 +160,30 @@ test('a validate result with no warnings key is treated as no warnings', async (
   const out = await orch._runGateChain({ ...ARGS });
   assert.equal(redteamCalls, 1);
   assert.equal(out.ok, true);
+});
+
+test('ok:false with warnings: zero_signals_synthetic never reaches the red-team branch', async () => {
+  const orch = new ResearchOrchestrator();
+  const calls = { redteam: 0 };
+  const decisions = [];
+  orch._query = async () => ({ rows: [] });
+  // Defensive case: even if a future validate_strategy.py shape carries
+  // both ok:false and a warnings array, the pre-existing failure path
+  // (":1380-ish", before the zero-signal branch is ever read) must return
+  // first — the red-team is never called and no needs_signal_check row is
+  // ever emitted for a candidate that already failed contract validation.
+  orch._validateFn = async () => ({ ok: false, errors: ['boom'], signal_count: 0, warnings: ['zero_signals_synthetic'] });
+  orch._redteamFn = async () => { calls.redteam += 1; return { verdict: 'pass', findings: [], infra_fail: false }; };
+  orch._prescreenFn = async () => ({ psResult: { pass: true }, psInfraFail: false, psInfraReason: null });
+  orch._backtestFn = async () => ({ run_id: 'r1' });
+  orch._emitDecisionFn = async (d) => { decisions.push(d); };
+
+  const out = await orch._runGateChain({ ...ARGS });
+
+  assert.equal(calls.redteam, 0, 'ok:false must short-circuit before the red-team branch is ever reached');
+  assert.equal(out.ok, false);
+  assert.equal(out.result.reasonCode, 'contract_violation');
+
+  const rt = decisions.filter(d => d.gateName === 'redteam');
+  assert.equal(rt.length, 0, 'no redteam decision at all — and definitely no needs_signal_check row');
 });

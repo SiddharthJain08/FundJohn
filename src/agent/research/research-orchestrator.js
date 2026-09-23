@@ -167,6 +167,32 @@ function _optionUnderlyingSupported(underlying) {
 }
 
 /**
+ * D3 fix round 1 (spec §0, 2026-09-12): gates the zero-signal red-team skip
+ * branch in `_runGateChain`. Read at call time, not cached — same pattern as
+ * `_validateInferredFilter` / `_validateInferredClass` above.
+ *
+ * UNSET (default): the red-team LLM runs exactly as it did before this task
+ * ever landed, even when validate_strategy reports `zero_signals_synthetic`;
+ * the validate-pass decision still records `metadata.warnings` +
+ * `signal_count` either way (see the emit right before this gate is read).
+ * SET ('1'): the landed skip-and-continue behaviour (skip the Opus call,
+ * emit a `redteam`/`pass`/`needs_signal_check` row, keep going — never
+ * BLOCK).
+ *
+ * Rationale for defaulting OFF: the red-team reviewer's look-ahead /
+ * off-by-one / full-sample-fit / survivorship checks are exactly what a
+ * strategy that emits zero signals on the synthetic panel but is actually
+ * driven by real (non-synthetic) data needs reviewed — those defects don't
+ * announce themselves as "zero signals on LOW_VOL". The skip is only safe
+ * to flip on once the synthetic panel can exercise aux-data-driven
+ * strategies too (follow-up; spec §4 D3 amendment, Task 10).
+ * Gate: OPENCLAW_ZERO_SIGNAL_SKIP_REDTEAM=1
+ */
+function _zeroSignalSkipEnabled() {
+  return process.env.OPENCLAW_ZERO_SIGNAL_SKIP_REDTEAM === '1';
+}
+
+/**
  * Task R2 review fix (Minor): shape-validate factor_prescreen.py's parsed
  * stdout before trusting it as a verdict. JSON.parse happily succeeds on
  * `5`, `"ok"`, `null`, `[]`, or `{}` — none of which carry the boolean
@@ -1387,21 +1413,28 @@ class ResearchOrchestrator {
       outcome:     'pass',
       metadata:    { signal_count: validResult.signal_count ?? null, warnings: vWarnings },
     });
-    const zeroSignals = vWarnings.includes('zero_signals_synthetic');
+    const zeroSignals = vWarnings.includes('zero_signals_synthetic') && _zeroSignalSkipEnabled();
     notify?.(`  ✅ ${stratId} validation passed — running red-team review...`);
     onPhase('redteam', 50);
 
     // ── Phase 1.5: Mandatory LLM red-team gate (Task S1) ──────────────────────
     let rtResult;
     if (zeroSignals) {
+      // Reached only when OPENCLAW_ZERO_SIGNAL_SKIP_REDTEAM=1 (default OFF —
+      // see _zeroSignalSkipEnabled() above for why: a zero-synthetic-signal
+      // strategy may still be real-data-active, and that's exactly the case
+      // the red-team's look-ahead / off-by-one / full-sample-fit /
+      // survivorship checks exist to catch).
+      //
       // Spec D3 (2026-09-12): validate_strategy emitted zero signals on the
       // synthetic LOW_VOL panel and the strategy is neither calendar_edge, nor
-      // gated away from LOW_VOL, nor longer-lookback than the panel. The
-      // red-team reviewer's job is to find backtest-integrity defects in code
-      // that PRODUCES signals; on a silently inert strategy it burns an Opus
-      // turn to restate what the harness already proved. Skip the call, mark
-      // the candidate needs_signal_check, and continue — the prescreen and the
-      // backtest are the gates that decide. This branch NEVER blocks.
+      // gated away from LOW_VOL, nor longer-lookback than the panel. With the
+      // flag on, the operator has decided that for the current synthetic
+      // panel a strategy in this shape is more often inert than aux-data-
+      // driven, so the red-team turn is skipped rather than spent restating
+      // what the harness observed. Skip the call, mark the candidate
+      // needs_signal_check, and continue — the prescreen and the backtest
+      // are the gates that decide. This branch NEVER blocks.
       rtResult = { verdict: 'pass', findings: [], infra_fail: false, skipped_zero_signals: true };
       await this._emitDecisionFn({
         paperId:      vPaperId,
@@ -1462,7 +1495,11 @@ class ResearchOrchestrator {
     } else if (!rtResult.skipped_zero_signals) {
       // The zero-signal branch above already emitted this gate's decision —
       // emitting again would double-count the redteam gate in
-      // paper_gate_decisions and skew curator_gate_calibration.
+      // paper_gate_decisions (e.g. the per-candidate gate-decision timeline
+      // served by GET /api/research/papers/:candidateId, which reads that
+      // table ordered by occurred_at). NOT curator_gate_calibration — that
+      // view (migration 037) only ever aggregates paperhunter / researchjohn
+      // / convergence; it has no 'redteam' gate_name to skew.
       await this._emitDecisionFn({
         paperId:     vPaperId,
         candidateId: candidate_id,
@@ -1473,7 +1510,11 @@ class ResearchOrchestrator {
       });
     }
 
-    notify?.(`  ✅ ${stratId} red-team review passed — running factor prescreen...`);
+    // The zero-signal skip already posted its own ⚠️ needs_signal_check line
+    // above — don't also claim the red-team "passed" here (minor, fix round 1).
+    if (!rtResult.skipped_zero_signals) {
+      notify?.(`  ✅ ${stratId} red-team review passed — running factor prescreen...`);
+    }
     onPhase('prescreen', 55);
 
     // ── Phase 1.75: Cheap pre-backtest factor screen (Task R2) ────────────────
