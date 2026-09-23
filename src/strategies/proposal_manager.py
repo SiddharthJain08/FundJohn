@@ -4,8 +4,10 @@ parameter changes.
 
 Lifecycle:
   Mastermind comprehensive-review -> insert_proposal() with status='pending'
-  Saturday auto-apply (2026-07-14)-> auto_apply_batch(): confidence > 0.8 is
-                                     auto-approved (source='auto-approval');
+  Saturday auto-apply (2026-07-14)-> auto_apply_batch(): confidence >
+                                     the floor (autoapprove_min_confidence(),
+                                     default 0.85) is auto-approved
+                                     (source='auto-approval');
                                      everything else -> status='noted' (kept
                                      visible on the dashboard; superseded by
                                      next Saturday's fresh proposal = the
@@ -37,6 +39,32 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
+
+# ── Auto-approve confidence floor — ONE source of truth (spec D2, 2026-09-12) ─
+# Was split three ways before this: auto_approve read a '0.85' default,
+# auto_apply_batch a '0.8' default, and the CLI help said 0.8. Production
+# overrides all of them via .env (OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE
+# = 0.9 since 2026-09-06), so unifying the fallback changes no live behaviour —
+# it removes a trap where an env-less run silently used a looser bar in the
+# Saturday batch path than in the single-proposal path.
+DEFAULT_AUTOAPPROVE_MIN_CONFIDENCE = 0.85
+
+
+def autoapprove_min_confidence() -> float:
+    """The confidence floor auto-approval compares against. Read at CALL time
+    so an .env change is picked up by the next timer-spawned run without a
+    restart (the same contract backtest.factor_prescreen._default_lookback
+    documents). Precedence is byte-identical to the pre-unification reads:
+    unset env -> the constant; env set to anything (including an empty or
+    unparseable string) -> float(raw), which raises ValueError exactly as
+    the old `float(os.environ.get(KEY, default))` call sites did. This is
+    deliberately fail-closed: a mangled floor must crash the caller, not
+    silently fall back to a looser bar than the operator set in .env."""
+    raw = os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE')
+    if raw is None:
+        return DEFAULT_AUTOAPPROVE_MIN_CONFIDENCE
+    return float(raw)
+
 
 _THIS = Path(__file__).resolve()
 _SRC = _THIS.parents[1]
@@ -308,7 +336,7 @@ def auto_approve(*, proposal_id: int) -> dict:
         return {'id': proposal_id, 'status': 'skipped',
                 'reason': 'auto-approval feature disabled (OPENCLAW_PROPOSAL_AUTOAPPROVE != 1)'}
 
-    min_conf  = float(os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE', '0.85'))
+    min_conf  = autoapprove_min_confidence()
     max_size  = float(os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE_MAX_SIZE_DELTA', '0.20'))
     max_stop  = float(os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE_MAX_STOP_DELTA', '0.01'))
 
@@ -387,7 +415,8 @@ def _mark_noted(proposal_id: int, reason: str) -> None:
 def auto_apply_batch(*, threshold: Optional[float] = None, limit: int = 500,
                      log=logger.info) -> dict:
     """Saturday full-auto pass over ALL pending proposals (2026-07-14 operator
-    directive): confidence strictly > threshold (default 0.8, env
+    directive): confidence strictly > threshold (default
+    autoapprove_min_confidence(), env
     OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE) routes through auto_approve()
     (same set_params path as a dashboard click, source='auto-approval');
     everything else — low/missing confidence or a rail skip inside
@@ -399,8 +428,7 @@ def auto_apply_batch(*, threshold: Optional[float] = None, limit: int = 500,
     if os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE') != '1':
         log('[auto-apply] OPENCLAW_PROPOSAL_AUTOAPPROVE != 1 — skipping (no-op).')
         return {'skipped': True, 'approved': 0, 'noted': 0, 'errors': 0}
-    thr = threshold if threshold is not None else float(
-        os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE', '0.8'))
+    thr = threshold if threshold is not None else autoapprove_min_confidence()
     approved = noted = errors = 0
     for prop in list_proposals(status='pending', limit=limit):
         pid = prop['id']
@@ -469,8 +497,9 @@ def main():
                      help='Saturday full-auto: approve pending proposals with '
                           'confidence strictly > threshold; note the rest.')
     p.add_argument('--threshold', type=float, default=None,
-                   help='confidence threshold for --auto-apply-batch '
-                        '(default env OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE or 0.8)')
+                   help='confidence threshold for --auto-apply-batch (default env '
+                        'OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE, else '
+                        f'{DEFAULT_AUTOAPPROVE_MIN_CONFIDENCE})')
     p.add_argument('--status', default='pending')
     p.add_argument('--actor', default='cli')
     p.add_argument('--reason', default='')
