@@ -135,6 +135,162 @@ def _bucket_aggregates(observations: list[dict]) -> list[dict]:
     return out
 
 
+# ── D2: outcome-calibrated confidence + evidence cap (spec 2026-09-12 §4) ─────
+# Evidence for these numbers: the 2026-09-06 recompute found the mastermind
+# over-confident — Brier 0.254 on 41 resolved outcomes, hit rate 0.66 against a
+# mean stated confidence of 0.75, and 0.56 (10/18) inside the >=0.8 bucket that
+# auto-approval actually reads. calibrated_confidence turns that observation
+# into the number the floor is compared against instead of the stated one.
+
+MIN_BUCKET_N         = 8      # below this a bucket's rate is noise — pass raw through
+EVIDENCE_WINDOW_DAYS = 30     # matches DEFAULT_WINDOW_DAYS, the outcome window
+EVIDENCE_STALE_DAYS  = 45     # no closed trade in this long => one level down
+EVIDENCE_LEVELS      = ('none', 'low', 'medium', 'high')
+EVIDENCE_CAPS        = {'none': 0.35, 'low': 0.55, 'medium': 0.75, 'high': 1.0}
+
+
+def bucket_midpoint(lo: float, hi: float) -> float:
+    """Midpoint of a BUCKETS range. The top bucket's `hi` is 1.001 (an
+    exclusive-upper trick so confidence == 1.0 lands somewhere), so clamp it
+    back to 1.0 before averaging — otherwise the [0.8, 1.0] midpoint would be
+    0.9005 and every top-bucket remap would carry a spurious deflation."""
+    return (float(lo) + min(float(hi), 1.0)) / 2.0
+
+
+def bucket_for(conf):
+    """The (lo, hi, label) BUCKETS triple containing `conf`; None when conf is
+    None or outside [0, 1]."""
+    if conf is None:
+        return None
+    try:
+        c = float(conf)
+    except (TypeError, ValueError):
+        return None
+    if c < 0.0 or c > 1.0:
+        return None
+    for lo, hi, label in BUCKETS:
+        if lo <= c < hi:
+            return (lo, hi, label)
+    return None
+
+
+def calibrated_confidence(raw, bucket_table, *, min_n: int = MIN_BUCKET_N):
+    """raw x clip(match_rate(bucket) / bucket_midpoint, 0.5, 1.0), or raw when
+    the bucket has fewer than `min_n` resolved observations.
+
+    `bucket_table` is the list _bucket_aggregates / calibration_report()['buckets']
+    returns: rows of {'range', 'count', 'matched', 'match_rate'}. NOTE the key is
+    `match_rate` (per-bucket); `hit_rate` on the report is the GLOBAL figure.
+
+    The ratio's upper clip is 1.0 by design: this may only deflate an
+    over-confident stated number, never inflate an under-confident one — an
+    auto-approval floor must not be crossed by a bonus.
+    """
+    if raw is None:
+        return None
+    try:
+        raw_f = float(raw)
+    except (TypeError, ValueError):
+        return None
+    b = bucket_for(raw_f)
+    if b is None or not bucket_table:
+        return raw_f
+    _lo, _hi, label = b
+    row = next((r for r in bucket_table if r.get('range') == label), None)
+    if row is None:
+        return raw_f
+    try:
+        n = int(row.get('count') or 0)
+    except (TypeError, ValueError):
+        return raw_f
+    rate = row.get('match_rate')
+    if n < min_n or rate is None:
+        return raw_f
+    mid = bucket_midpoint(_lo, _hi)
+    if mid <= 0:
+        return raw_f
+    ratio = float(rate) / mid
+    ratio = max(0.5, min(1.0, ratio))
+    return raw_f * ratio
+
+
+def evidence_level(n_closed: int, staleness_days,
+                   *, stale_days: int = EVIDENCE_STALE_DAYS) -> str:
+    """Evidence tier for a proposal's decisive window.
+
+    Count tiers: <10 none, <30 low, <100 medium, else high. A sleeve whose most
+    recent closed trade is older than `stale_days` drops exactly one tier
+    (floored at 'none'); a sleeve with no closed trade at all is 'none'
+    regardless of count (staleness_days is None only in that case).
+    """
+    if staleness_days is None:
+        return 'none'
+    try:
+        n = int(n_closed or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n < 10:
+        level = 'none'
+    elif n < 30:
+        level = 'low'
+    elif n < 100:
+        level = 'medium'
+    else:
+        level = 'high'
+    if float(staleness_days) > float(stale_days):
+        idx = max(0, EVIDENCE_LEVELS.index(level) - 1)
+        level = EVIDENCE_LEVELS[idx]
+    return level
+
+
+def evidence_cap(n_closed: int, staleness_days) -> tuple:
+    """(level, cap) for a proposal's decisive window — see EVIDENCE_CAPS."""
+    level = evidence_level(n_closed, staleness_days)
+    return level, EVIDENCE_CAPS[level]
+
+
+def evidence_counts(strategy_id: str, regime_state: str, *,
+                    window_days: int = EVIDENCE_WINDOW_DAYS, now=None) -> dict:
+    """Closed-trade evidence behind a PENDING proposal for (strategy, regime).
+
+    _direction_match's "decisive window" is defined relative to `decided_at`,
+    which a pending proposal does not have yet. The honest analogue at
+    auto-approval time is the TRAILING `window_days` of closed trades — the same
+    evidence the memo that produced the proposal was written from. Staleness is
+    measured against the most recent closed trade with NO lookback bound, so a
+    sleeve dark for two months reads as stale even though its trailing-window
+    count is 0.
+
+    Returns {'n_closed': int, 'staleness_days': float | None}; staleness is None
+    when the sleeve has no closed trade at all.
+    """
+    from datetime import datetime, timezone
+    ref = now or datetime.now(timezone.utc)
+    sql = """
+        SELECT COUNT(*) FILTER (WHERE sp.closed_at >= %s) AS n_closed,
+               MAX(sp.closed_at)                          AS last_closed_at
+          FROM signal_pnl sp
+          JOIN execution_signals es ON es.id = sp.signal_id
+         WHERE es.strategy_id = %s
+           AND es.regime_state = %s
+           AND sp.realized_pnl_pct IS NOT NULL
+    """
+    from datetime import timedelta
+    window_start = ref - timedelta(days=int(window_days))
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (window_start, strategy_id, regime_state))
+            row = cur.fetchone()
+    n_closed = int(row[0] or 0) if row else 0
+    last = row[1] if row else None
+    staleness = None
+    if last is not None:
+        if getattr(last, 'tzinfo', None) is None:
+            last = last.replace(tzinfo=timezone.utc)
+        staleness = (ref - last).total_seconds() / 86400.0
+    return {'n_closed': n_closed, 'staleness_days': staleness}
+
+
 def compute_outcome(proposal_id: int, window_days: int = DEFAULT_WINDOW_DAYS) -> Optional[dict]:
     """Compute one proposal's outcome. Persists; returns the row dict."""
     from datetime import timedelta
