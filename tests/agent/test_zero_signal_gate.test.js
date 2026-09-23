@@ -20,8 +20,8 @@ delete process.env.POSTGRES_URI;
 const os   = require('os');
 const fs   = require('fs');
 const path = require('path');
-const { test } = require('node:test');
-const assert    = require('node:assert/strict');
+const { test, after } = require('node:test');
+const assert           = require('node:assert/strict');
 
 const ResearchOrchestrator = require('../../src/agent/research/research-orchestrator');
 
@@ -37,6 +37,7 @@ const ResearchOrchestrator = require('../../src/agent/research/research-orchestr
 const FIXTURE_DIR  = fs.mkdtempSync(path.join(os.tmpdir(), 'zsig-'));
 const FIXTURE_PATH = path.join(FIXTURE_DIR, 'S_zero.py');
 fs.writeFileSync(FIXTURE_PATH, '"""stub strategy file for gate-chain test isolation (D3 T2)."""\n');
+after(() => { fs.rmSync(FIXTURE_DIR, { recursive: true, force: true }); });
 
 function makeOrch({ warnings = [], redteamVerdict = 'pass' } = {}) {
   const orch = new ResearchOrchestrator();
