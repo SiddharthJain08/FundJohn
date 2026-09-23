@@ -1310,7 +1310,9 @@ app.get('/api/portfolio/summary', async (req, res) => {
       avg_loss_pct:     tradeKpis.avg_loss_pct,
       // Close-to-close MAE: worst daily mark per signal, floored at 0.
       // No intraday store exists on the live side.
-      mae_median_pct:   mae.mae_median_pct ?? null,
+      // pg returns NUMERIC as a string; coerce so the field matches its sibling
+      // KPI numbers in the JSON contract (review, 2026-09-23).
+      mae_median_pct:   mae.mae_median_pct != null ? Number(mae.mae_median_pct) : null,
       mae_n:            mae.mae_n ?? 0,
       win_days:         dayCounts.win_days,
       lose_days:        dayCounts.lose_days,

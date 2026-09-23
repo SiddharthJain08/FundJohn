@@ -54,6 +54,11 @@ const MAE_SQL = `
       FROM signal_pnl sp
       JOIN closed c ON c.signal_id = sp.signal_id
      WHERE sp.unrealized_pnl_pct IS NOT NULL
+       -- Direct bound on the marks side (review, 2026-09-23): a signal's mark
+       -- history postdates its signal_date, so this changes nothing semantically
+       -- but stops a cost-based plan from ever seq-scanning the whole
+       -- append-only signal_pnl history (idx_signal_pnl_date covers it).
+       AND sp.pnl_date >= $1::date
      GROUP BY sp.signal_id
   )
   SELECT ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY mae_pct)::numeric, 4) AS mae_median_pct,
