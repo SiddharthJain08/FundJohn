@@ -51,12 +51,21 @@ const MAX_TOURNAMENT_VARIANTS = 8;
 // _runTournament — so the queue row is left in a real, single-shot-shaped
 // terminal state rather than an invented one.
 const QUEUE_STATUS_FOR_REASON = {
-  coding_failed:      'failed',
-  contract_violation: 'validation_failed',
-  import_violation:   'validation_failed',
-  redteam_blocked:    'redteam_blocked',
-  prescreen_failed:   'prescreen_failed',
-  backtest_error:     'backtest_failed',
+  coding_failed:       'failed',
+  contract_violation:  'validation_failed',
+  import_violation:    'validation_failed',
+  redteam_blocked:     'redteam_blocked',
+  prescreen_failed:    'prescreen_failed',
+  backtest_error:      'backtest_failed',
+  // needs_signal_check (D3, 2026-09-12): NOT a gate-chain failure — the
+  // zero-signal branch in _runGateChain always returns ok:true and never
+  // writes implementation_queue.status (spec §4 D3 "never BLOCK"; see the
+  // comment at the zero-signal branch). This entry is unreachable today —
+  // attempts[].reasonCode is only ever populated on ok:false (see the
+  // zero-survivors branch below) — but is listed here so a future change
+  // that DOES let this reasonCode reach a failed attempt degrades to a
+  // real status instead of silently falling through to 'failed'.
+  needs_signal_check:  'needs_signal_check',
 };
 
 // Task S2: insert `_tv<k>` before the file extension, e.g.
@@ -1369,27 +1378,52 @@ class ResearchOrchestrator {
       channelNotify?.(`❌ **${stratId}** failed contract validation — see implementation_queue for errors.`);
       return { ok: false, result: { promoted: false, reasonCode: 'contract_violation', error: errLog } };
     }
+    const vWarnings = Array.isArray(validResult.warnings) ? validResult.warnings : [];
     await this._emitDecisionFn({
       paperId:     vPaperId,
       candidateId: candidate_id,
       strategyId:  stratId,
       gateName:    'validate',
       outcome:     'pass',
-      metadata:    { signal_count: validResult.signal_count ?? null },
+      metadata:    { signal_count: validResult.signal_count ?? null, warnings: vWarnings },
     });
+    const zeroSignals = vWarnings.includes('zero_signals_synthetic');
     notify?.(`  ✅ ${stratId} validation passed — running red-team review...`);
     onPhase('redteam', 50);
 
     // ── Phase 1.5: Mandatory LLM red-team gate (Task S1) ──────────────────────
     let rtResult;
-    try {
-      rtResult = await this._redteamFn({
-        implPath,
-        paperContext: strategy_spec?.hypothesis_one_liner || strategy_spec?.signal_logic || null,
+    if (zeroSignals) {
+      // Spec D3 (2026-09-12): validate_strategy emitted zero signals on the
+      // synthetic LOW_VOL panel and the strategy is neither calendar_edge, nor
+      // gated away from LOW_VOL, nor longer-lookback than the panel. The
+      // red-team reviewer's job is to find backtest-integrity defects in code
+      // that PRODUCES signals; on a silently inert strategy it burns an Opus
+      // turn to restate what the harness already proved. Skip the call, mark
+      // the candidate needs_signal_check, and continue — the prescreen and the
+      // backtest are the gates that decide. This branch NEVER blocks.
+      rtResult = { verdict: 'pass', findings: [], infra_fail: false, skipped_zero_signals: true };
+      await this._emitDecisionFn({
+        paperId:      vPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'redteam',
+        outcome:      'pass',
+        reasonCode:   'needs_signal_check',
+        reasonDetail: 'validate_strategy reported zero_signals_synthetic — red-team LLM skipped (warn only, never blocks)',
+        metadata:     { warnings: vWarnings, signal_count: validResult.signal_count ?? null },
       });
-    } catch (e) {
-      console.error(`[redteam] unexpected exception auditing ${stratId}: ${e.message}`);
-      rtResult = { verdict: 'pass', findings: [], infra_fail: true };
+      notify?.(`  ⚠️ ${stratId} emitted 0 signals on the synthetic panel — needs_signal_check; red-team LLM skipped (not a block).`);
+    } else {
+      try {
+        rtResult = await this._redteamFn({
+          implPath,
+          paperContext: strategy_spec?.hypothesis_one_liner || strategy_spec?.signal_logic || null,
+        });
+      } catch (e) {
+        console.error(`[redteam] unexpected exception auditing ${stratId}: ${e.message}`);
+        rtResult = { verdict: 'pass', findings: [], infra_fail: true };
+      }
     }
 
     if (rtResult.infra_fail) {
@@ -1425,7 +1459,10 @@ class ResearchOrchestrator {
       notify?.(`  ❌ ${stratId} blocked by red-team gate: ${reason.slice(0, 200)}`);
       channelNotify?.(`❌ **${stratId}** blocked by red-team review — ${reason.slice(0, 200)}`);
       return { ok: false, result: { promoted: false, reasonCode: 'redteam_blocked', error: reason } };
-    } else {
+    } else if (!rtResult.skipped_zero_signals) {
+      // The zero-signal branch above already emitted this gate's decision —
+      // emitting again would double-count the redteam gate in
+      // paper_gate_decisions and skew curator_gate_calibration.
       await this._emitDecisionFn({
         paperId:     vPaperId,
         candidateId: candidate_id,
