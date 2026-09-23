@@ -185,6 +185,27 @@ def calibrated_confidence(raw, bucket_table, *, min_n: int = MIN_BUCKET_N):
     The ratio's upper clip is 1.0 by design: this may only deflate an
     over-confident stated number, never inflate an under-confident one — an
     auto-approval floor must not be crossed by a bonus.
+
+    `raw` is clamped to [0.0, 1.0] before it is bucketed AND before the ratio
+    is applied to it — a stray value outside that range (e.g. float drift
+    upstream) must not pick a bucket outside BUCKETS' domain, nor let the
+    returned value exceed the clamped raw. NaN fails the `x == x`
+    self-equality check and maps to None rather than silently sorting into
+    a bucket.
+
+    This map is NOT monotone across a bucket boundary. Worked counter-example:
+    suppose the [0.6, 0.8] bucket's clipped ratio is 1.0 (well- or
+    under-calibrated) and the [0.8, 1.0] bucket's clipped ratio is 0.5 (badly
+    over-confident). Then raw=0.79 (falls in [0.6, 0.8]) calibrates to
+    0.79 * 1.0 = 0.79, but raw=0.80 (falls in [0.8, 1.0]) calibrates to
+    0.80 * 0.5 = 0.40 — a one-cent rise in the stated confidence produces a
+    0.39 DROP in the calibrated one. This is acceptable for the auto-approve
+    gate: calibrated <= the clamped raw always holds (deflation only ever tightens the
+    gate), only the top bucket's calibrated value can ever reach the 0.85
+    floor at all, and within a single bucket (a fixed table) the map is
+    monotone non-decreasing — a decision made by comparing calibrated values
+    against a fixed floor for proposals in the SAME bucket stays ordered
+    consistently; it is only a comparison across buckets that can invert.
     """
     if raw is None:
         return None
@@ -192,6 +213,9 @@ def calibrated_confidence(raw, bucket_table, *, min_n: int = MIN_BUCKET_N):
         raw_f = float(raw)
     except (TypeError, ValueError):
         return None
+    if raw_f != raw_f:  # NaN != NaN
+        return None
+    raw_f = max(0.0, min(1.0, raw_f))
     b = bucket_for(raw_f)
     if b is None or not bucket_table:
         return raw_f
@@ -261,11 +285,41 @@ def evidence_counts(strategy_id: str, regime_state: str, *,
     sleeve dark for two months reads as stale even though its trailing-window
     count is 0.
 
-    Returns {'n_closed': int, 'staleness_days': float | None}; staleness is None
-    when the sleeve has no closed trade at all.
+    `signal_pnl.closed_at` is a DATE column (migration
+    `012_execution_engine.sql:62`, never altered since), so psycopg2 hands
+    back a plain `datetime.date`, not a `datetime.datetime` — a bare
+    `.replace(tzinfo=...)` on a `date` raises `TypeError`. Both `closed_at`
+    (`last`) and `now` are normalised the same way before any arithmetic: a
+    `date` becomes midnight UTC on that date; a naive `datetime` is assumed
+    already UTC (the pipeline writes and reads UTC throughout); an aware
+    `datetime` is kept as-is. `now=None` defaults to the current UTC instant.
+
+    FAILS CLOSED: any exception raised while talking to the database (bad
+    connection, missing table, timeout, ...) is caught, logged at WARNING,
+    and this returns `{'n_closed': 0, 'staleness_days': None}` — the 'none'
+    evidence level, cap 0.35 — rather than raising or fabricating a
+    permissive count. Task 5's auto-approve path depends on this: an unknown
+    evidence state must never read as strong evidence, and a DB blip must
+    never crash the proposal pipeline.
+
+    Returns {'n_closed': int, 'staleness_days': float | None}; staleness is
+    None when the sleeve has no closed trade at all (or on DB failure).
     """
-    from datetime import datetime, timezone
-    ref = now or datetime.now(timezone.utc)
+    import logging
+    from datetime import date, datetime, time as _time, timedelta, timezone
+
+    def _aware_utc(value):
+        """Normalise a DB DATE/TIMESTAMP value (or `now`) to an aware UTC
+        datetime; None stays None."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        if isinstance(value, date):
+            return datetime.combine(value, _time.min, tzinfo=timezone.utc)
+        return value
+
+    ref = _aware_utc(now) or datetime.now(timezone.utc)
     sql = """
         SELECT COUNT(*) FILTER (WHERE sp.closed_at >= %s) AS n_closed,
                MAX(sp.closed_at)                          AS last_closed_at
@@ -275,19 +329,22 @@ def evidence_counts(strategy_id: str, regime_state: str, *,
            AND es.regime_state = %s
            AND sp.realized_pnl_pct IS NOT NULL
     """
-    from datetime import timedelta
     window_start = ref - timedelta(days=int(window_days))
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (window_start, strategy_id, regime_state))
-            row = cur.fetchone()
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (window_start, strategy_id, regime_state))
+                row = cur.fetchone()
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "evidence_counts: DB error for strategy_id=%s regime_state=%s — "
+            "failing closed (n_closed=0, staleness_days=None, evidence level "
+            "'none', cap 0.35)", strategy_id, regime_state, exc_info=True)
+        return {'n_closed': 0, 'staleness_days': None}
+
     n_closed = int(row[0] or 0) if row else 0
-    last = row[1] if row else None
-    staleness = None
-    if last is not None:
-        if getattr(last, 'tzinfo', None) is None:
-            last = last.replace(tzinfo=timezone.utc)
-        staleness = (ref - last).total_seconds() / 86400.0
+    last = _aware_utc(row[1] if row else None)
+    staleness = (ref - last).total_seconds() / 86400.0 if last is not None else None
     return {'n_closed': n_closed, 'staleness_days': staleness}
 
 
