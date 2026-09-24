@@ -315,6 +315,76 @@ def _current_size_scalar(strategy_id: str, regime_state: str):
     return row[0] if row else None
 
 
+def _calibration_report() -> dict:
+    """Indirection seam over metrics.mastermind_calibration.calibration_report
+    so tests can inject a bucket table without a DB."""
+    from metrics.mastermind_calibration import calibration_report
+    return calibration_report()
+
+
+def _evidence_counts(strategy_id: str, regime_state: str) -> dict:
+    """Indirection seam over metrics.mastermind_calibration.evidence_counts."""
+    from metrics.mastermind_calibration import evidence_counts
+    return evidence_counts(strategy_id, regime_state)
+
+
+def _calibration_inputs(strategy_id: str, regime_state: str, raw) -> dict:
+    """Everything auto_approve needs to decide and to record (spec D2).
+
+    Fail-OPEN on any calibration error: `calibrated` falls back to raw and
+    `cap` to 1.0, with the exception text kept under 'error'. A broken
+    calibration table must never turn into a silent tightening the operator
+    cannot see.
+    """
+    raw_f = float(raw) if raw is not None else None
+    out = {'raw': raw_f, 'calibrated': raw_f, 'cap': 1.0, 'evidence_level': None,
+           'n_closed': None, 'staleness_days': None, 'binding_bound': 'calibrated',
+           'error': None}
+    try:
+        # Imported inside the try (not at module/function top) so a broken
+        # metrics.mastermind_calibration import also fails OPEN rather than
+        # raising out of auto_approve — same contract as a bad DB call.
+        from metrics.mastermind_calibration import calibrated_confidence, evidence_cap
+        buckets = (_calibration_report() or {}).get('buckets') or []
+        out['calibrated'] = calibrated_confidence(raw_f, buckets)
+        ev = _evidence_counts(strategy_id, regime_state) or {}
+        out['n_closed'] = ev.get('n_closed')
+        out['staleness_days'] = ev.get('staleness_days')
+        level, cap = evidence_cap(ev.get('n_closed') or 0, ev.get('staleness_days'))
+        out['evidence_level'] = level
+        out['cap'] = cap
+    except Exception as e:  # noqa: BLE001 — fail-open, see docstring
+        out['error'] = f'{type(e).__name__}: {e}'
+        out['calibrated'] = raw_f
+        out['cap'] = 1.0
+        out['evidence_level'] = None
+    cal = out['calibrated'] if out['calibrated'] is not None else float('inf')
+    out['binding_bound'] = 'cap' if out['cap'] < cal else 'calibrated'
+    out['effective'] = None if out['calibrated'] is None else min(out['calibrated'], out['cap'])
+    return out
+
+
+def _record_calibration(proposal_id: int, calib: dict) -> None:
+    """Persist the shadow/enforced numbers on the proposal row (migration 159).
+    Best-effort: a recording failure must never block a decision."""
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE strategy_regime_param_proposals
+                       SET confidence_raw        = %s,
+                           confidence_calibrated = %s,
+                           evidence_cap          = %s,
+                           evidence_level        = %s,
+                           binding_bound         = %s
+                     WHERE id = %s
+                """, (calib.get('raw'), calib.get('calibrated'), calib.get('cap'),
+                      calib.get('evidence_level'), calib.get('binding_bound'), proposal_id))
+            conn.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f'[auto-approve] calibration recording failed for #{proposal_id}: {e}')
+
+
 def auto_approve(*, proposal_id: int) -> dict:
     """Auto-approve a pending proposal if it meets all rails. No-op otherwise.
 
@@ -323,6 +393,34 @@ def auto_approve(*, proposal_id: int) -> dict:
       OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE (default 0.85)
       OPENCLAW_PROPOSAL_AUTOAPPROVE_MAX_SIZE_DELTA (default 0.20)
       OPENCLAW_PROPOSAL_AUTOAPPROVE_MAX_STOP_DELTA (default 0.01)
+
+    Rail 1 (confidence) is outcome-calibrated + evidence-capped (spec D2,
+    migration 159). The calibrated number and the evidence cap are ALWAYS
+    computed and recorded on the proposal row (confidence_raw,
+    confidence_calibrated, evidence_cap, evidence_level, binding_bound),
+    before every other rail, in BOTH modes below:
+      OPENCLAW_PROPOSAL_CALIBRATED unset (default) — the floor compare uses
+        the RAW confidence exactly as before this change (byte-identical
+        decisions); the calibrated number and the would-be decision are
+        logged as SHADOW only.
+      OPENCLAW_PROPOSAL_CALIBRATED=1 — the floor compare uses
+        min(calibrated, evidence_cap) instead of raw.
+    FLIP NOTE: as of this change, flipping the flag on today would leave
+    auto-approval effectively OFF. The live top-[0.8, 1.0]-bucket match rate
+    is 0.56 (n=18), so even a raw confidence of 1.0 calibrates to
+    1.0 x clip(0.56/0.9, 0.5, 1.0) ~= 0.62, below both the production floor
+    of 0.9 (.env, 2026-09-06) and the code default of 0.85.
+    Recovery condition: for the top bucket (midpoint 0.9) a raw=1.0 proposal
+    clears floor F only once match_rate >= 0.9*F, i.e. >=0.765 to clear the
+    0.85 default and >=0.81 to clear the live 0.9 floor -- AND the sleeve's
+    evidence must independently reach 'high' (>=100 closed trades in the
+    trailing 30 d, most recent close within 45 d -> cap 1.0), since
+    'none'/'low'/'medium' cap at 0.35/0.55/0.75 and the compare is
+    min(calibrated, cap). Both conditions must hold at once; the cap alone
+    or the calibrated bound alone is not enough.
+    Watch the SHADOW log lines / recorded columns (confidence_raw,
+    confidence_calibrated, evidence_cap, evidence_level, binding_bound) over
+    several Saturdays before flipping this flag in production.
 
     Returns one of:
       {'status': 'approved', ...}        — auto-approved
@@ -359,11 +457,40 @@ def auto_approve(*, proposal_id: int) -> dict:
     if prop['status'] != 'pending':
         raise ValueError(f'proposal {proposal_id} is not pending (status={prop["status"]!r})')
 
-    # Rail 1: confidence
+    # ── Rail 1: confidence, outcome-calibrated + evidence-capped (spec D2) ────
+    # Computed and RECORDED unconditionally and BEFORE every other rail, so the
+    # shadow ledger covers proposals that later die on size/stop too. Only the
+    # COMPARISON is flag-gated: unset OPENCLAW_PROPOSAL_CALIBRATED keeps the raw
+    # compare byte-identical to today and logs the would-be decision.
     conf = prop['confidence']
-    if conf is None or float(conf) < min_conf:
+    calib = _calibration_inputs(prop['strategy_id'], prop['regime_state'], conf)
+    calibrated_enabled = os.environ.get('OPENCLAW_PROPOSAL_CALIBRATED') == '1'
+    effective = calib['effective']
+    would_skip = effective is None or effective < min_conf
+    calib_out = dict(calib, enforced=calibrated_enabled, would_skip=would_skip,
+                     floor=min_conf)
+    _record_calibration(proposal_id, calib)
+    if not calibrated_enabled:
+        logger.info(
+            f'[auto-approve] #{proposal_id} {prop["strategy_id"]}/{prop["regime_state"]} '
+            f'calibration SHADOW: raw={conf} calibrated={calib["calibrated"]} '
+            f'cap={calib["cap"]} ({calib["evidence_level"]}, n={calib["n_closed"]}, '
+            f'stale={calib["staleness_days"]}) bound={calib["binding_bound"]} '
+            f'floor={min_conf} would_skip={would_skip}'
+        )
+
+    if calibrated_enabled:
+        if would_skip:
+            return {'id': proposal_id, 'status': 'skipped',
+                    'reason': (f'calibrated confidence {effective} below threshold {min_conf} '
+                               f'(raw {conf}, calibrated {calib["calibrated"]}, '
+                               f'cap {calib["cap"]} [{calib["evidence_level"]}], '
+                               f'bound {calib["binding_bound"]})'),
+                    'calibration': calib_out}
+    elif conf is None or float(conf) < min_conf:
         return {'id': proposal_id, 'status': 'skipped',
-                'reason': f'confidence {conf} below threshold {min_conf}'}
+                'reason': f'confidence {conf} below threshold {min_conf}',
+                'calibration': calib_out}
 
     # Rail 2: size_scalar delta (only checked if proposing a size change)
     if prop['proposed_size_scalar'] is not None:
@@ -372,7 +499,8 @@ def auto_approve(*, proposal_id: int) -> dict:
         proposed_size_f = float(prop['proposed_size_scalar'])
         if abs(proposed_size_f - current_size_f) > max_size:
             return {'id': proposal_id, 'status': 'skipped',
-                    'reason': f'size delta |{proposed_size_f}-{current_size_f}| > {max_size}'}
+                    'reason': f'size delta |{proposed_size_f}-{current_size_f}| > {max_size}',
+                    'calibration': calib_out}
 
     # Rail 3: stop_pct delta (only checked if proposing a stop change)
     if prop['proposed_stop_pct'] is not None:
@@ -381,18 +509,22 @@ def auto_approve(*, proposal_id: int) -> dict:
         proposed_stop_f = abs(float(prop['proposed_stop_pct']))
         if proposed_stop_f > max_stop:
             return {'id': proposal_id, 'status': 'skipped',
-                    'reason': f'stop_pct |{proposed_stop_f}| > {max_stop}'}
+                    'reason': f'stop_pct |{proposed_stop_f}| > {max_stop}',
+                    'calibration': calib_out}
 
     # All rails passed → route through the normal approve path. Use an
     # actor tag that clearly identifies this as auto-approval for audit.
     auto_actor = 'auto-approval'
     auto_reason = (
-        f'auto-approved: confidence={conf:.2f} >= {min_conf}, '
+        f'auto-approved: confidence={conf:.2f} (calibrated={calib["calibrated"]}, '
+        f'cap={calib["cap"]} [{calib["evidence_level"]}]) >= {min_conf}, '
         f'rails (size_delta<={max_size}, stop<={max_stop}) all passed'
     )
-    return _decide(proposal_id=proposal_id, actor=auto_actor,
-                    reason=auto_reason, source='auto-approval',
-                    overrides=None, terminal_status='approved')
+    result = _decide(proposal_id=proposal_id, actor=auto_actor,
+                     reason=auto_reason, source='auto-approval',
+                     overrides=None, terminal_status='approved')
+    result['calibration'] = calib_out
+    return result
 
 
 def _mark_noted(proposal_id: int, reason: str) -> None:
