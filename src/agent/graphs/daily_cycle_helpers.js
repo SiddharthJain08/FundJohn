@@ -102,8 +102,17 @@ async function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd, s
     let wedged = false;
     let lastOutputAt = Date.now();
 
+    // F4 / review I-2: the stdout-idle wedge kill is default-ON (600s), and
+    // a Python child's stdout is block-buffered (not line-buffered) once
+    // it's a pipe rather than a TTY — alpaca_executor.py's own print()
+    // output can sit in that buffer past the idle deadline even while the
+    // process is alive and working, tripping a false wedge (rc 125).
+    // PYTHONUNBUFFERED=1 forces Python's stdout/stderr unbuffered
+    // regardless of whether the destination is a TTY. Merged onto a copy of
+    // the caller's env (never replaces it) — a no-op for non-Python steps.
+    const spawnEnv = { ...env, PYTHONUNBUFFERED: '1' };
     const proc = spawn(cmd, args, {
-      env,
+      env: spawnEnv,
       cwd: cwd || process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
     });

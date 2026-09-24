@@ -37,6 +37,18 @@ test('runSubprocess returns rc=0 + stdout + stderr for successful command', asyn
   assert.ok(typeof out.durationMs === 'number' && out.durationMs >= 0);
 });
 
+test('runSubprocess merges PYTHONUNBUFFERED=1 into the spawned child env (F4 / review I-2)', async () => {
+  // Confirms the flag reaches the child process AND that the rest of the
+  // caller-supplied env (a marker var here) survives — i.e. it's a merge,
+  // not a replacement.
+  const out = await helpers.runSubprocess(
+    ['node', '-e', 'console.log(process.env.PYTHONUNBUFFERED + "|" + process.env.QD_F4_MARKER)'],
+    { timeoutSec: 5, env: { ...process.env, QD_F4_MARKER: 'kept' } },
+  );
+  assert.equal(out.rc, 0);
+  assert.match(out.stdout || '', /^1\|kept/m);
+});
+
 test('runSubprocess returns rc=1 for failed command and captures stderr tail', async () => {
   // /bin/false exits 1 with no output; use 'sh -c' to print to stderr
   const out = await helpers.runSubprocess(['sh', '-c', 'echo nope >&2; exit 1'], { timeoutSec: 5, env: process.env });
