@@ -82,6 +82,13 @@ VALID_TRANSITIONS: Dict[Tuple[StrategyState, StrategyState], str] = {
     (StrategyState.MONITORING, StrategyState.DEPRECATED):  "demote from monitoring",
     (StrategyState.MONITORING, StrategyState.CANDIDATE):   "auto-demote: negative Sharpe across all eligible regimes",
     (StrategyState.DEPRECATED, StrategyState.ARCHIVED):    "archive after review period",
+    # Revival (2026-09-12, spec docs/specs/2026-09-12-quantdinger-adoptions-spec.md
+    # §A4 hygiene). ARCHIVED is normally terminal, but a strategy shelved
+    # because a data source was believed dead has to be able to come back when
+    # the source is alive again — otherwise the only route is a hand-edited
+    # manifest that bypasses this state machine entirely. It lands at CANDIDATE
+    # (never LIVE): every promotion guard downstream is unchanged.
+    (StrategyState.ARCHIVED,   StrategyState.CANDIDATE):   "revive: the data gap that caused archival is closed",
 }
 
 # Backtest thresholds required for candidate → live promotion (formerly paper → live).
@@ -222,6 +229,17 @@ class StrategyRecord:
     eligible_regimes: Optional[List[str]] = None
     universe_filter_ref: Optional[str] = None   # SP-2 Phase A — predicate import path "mod.path:attr"
     instrument_class: str = "equity"   # SP-3 — equity|option|etp (crypto|futures reserved)
+    # Stream A Task 6 fix round 1 (2026-09-17): `backtest_quarantine` is a
+    # top-level manifest flag read by scripts/refresh_backtests_resumable.js
+    # (`allStrategies()` excludes entries with a truthy `backtest_quarantine`
+    # from the nightly fleet work queue) without changing lifecycle state.
+    # Before this field existed, `to_dict()`'s fixed key set silently
+    # dropped any such flag on every `save_manifest()` call — including one
+    # triggered by an unrelated strategy's `auto_demote_negative_sharpe()`.
+    # None (the default) means "no flag" and `to_dict()` omits the key
+    # entirely, so a manifest entry that never carried it round-trips
+    # byte-for-byte unaffected.
+    backtest_quarantine: Optional[dict] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -414,6 +432,7 @@ class LifecycleStateMachine:
                 eligible_regimes=rec.get("eligible_regimes"),
                 universe_filter_ref=rec.get("metadata", {}).get("universe_filter_ref"),
                 instrument_class=_ic,
+                backtest_quarantine=rec.get("backtest_quarantine"),
             )
         decom_raw = data.get("decommissioned", {}) or {}
         decom_clean: Dict = {}
@@ -433,6 +452,7 @@ class LifecycleStateMachine:
                         eligible_regimes=rec.get("eligible_regimes"),
                         universe_filter_ref=rec.get("metadata", {}).get("universe_filter_ref"),
                         instrument_class=rec.get("instrument_class", "equity"),
+                        backtest_quarantine=rec.get("backtest_quarantine"),
                     )
                     logger.warning(
                         "lifecycle: rescued misrouted active strategy %s "
@@ -848,6 +868,15 @@ class LifecycleStateMachine:
             # SP-3: always-emit (default 'equity') so legacy records backfill
             # on first write. Unlike eligible_regimes, this field is never omitted.
             entry["instrument_class"] = rec.instrument_class
+            # Stream A Task 6 fix round 1: preserve `backtest_quarantine`
+            # through the round-trip. Emitted ONLY when set (mirrors
+            # eligible_regimes' None-omits-the-key convention) so an entry
+            # that never carried the flag stays byte-identical on save —
+            # this is what previously made ANY unrelated save_manifest()
+            # (e.g. auto_demote_negative_sharpe demoting some other
+            # strategy) silently strip the flag off every entry that had it.
+            if rec.backtest_quarantine is not None:
+                entry["backtest_quarantine"] = rec.backtest_quarantine
             strategies[sid] = entry
         return {
             "schema_version":  "1.0",

@@ -379,6 +379,24 @@ def run_scan(scan_label: str, ticker_override: list[str] | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # QD E3: this unit is spawned per instance (openclaw-premarket-scan@%i)
+    # and is a routine co-tenant of the 8 GB box — declare it. One write at
+    # start (no loop to tick from here); diagnostics only, never raises.
+    try:
+        from lib import proc_heartbeat as _ph
+        # F2 / review I-3: this is a oneshot unit with no TimeoutStartSec —
+        # an untimed redis.from_url() can hang the whole scan silently on a
+        # half-open Redis. Reuse pipeline_orchestrator's dedicated, timed
+        # client seam (socket_timeout=2, socket_connect_timeout=2) instead
+        # of opening a second, untimed connection here. It is already
+        # importable in this bare env: premarket_helpers (imported above)
+        # transitively imports pipeline_orchestrator, which is what applies
+        # the <ROOT>/src sys.path fix this entry point depends on.
+        from src.execution.pipeline_orchestrator import get_heartbeat_redis
+        _ph.write(get_heartbeat_redis(),
+                  step='premarket_scan', argv=sys.argv, ttl_s=900)
+    except Exception:
+        pass
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser()
     parser.add_argument('--scan-label', required=True, choices=['07:30', '09:00'])

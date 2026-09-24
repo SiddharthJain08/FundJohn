@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_low_volatility_us_gk63",
+  "required": ["prices"],
+  "optional": []
+}

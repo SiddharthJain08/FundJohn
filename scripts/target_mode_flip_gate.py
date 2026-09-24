@@ -40,19 +40,29 @@ def main() -> int:
     live = sorted(k for k, v in man.items() if v.get('state') == 'live')
     out, ok = [], True
     latest_atr, latest_flat = {}, {}
+    # 2026-09-17: the fleet refresh DEMOTES a strategy's previous row to
+    # primary_window=false when a new run lands, so every pre-epoch flat
+    # baseline is non-primary and a `WHERE primary_window = true` filter left
+    # G2 with 0 pairs forever (verified 09-17: 86 atr_r primary rows, 636 flat
+    # rows all primary_window=false, same window_kind). The atr_r side is still
+    # the PRIMARY row; the flat baseline is the latest non-atr_r row of the
+    # SAME window_kind, primary or not.
     with psycopg2.connect(uri) as c, c.cursor() as cur:
         cur.execute("""SELECT strategy_id, COALESCE(config_json->>'target_mode', 'flat') AS mode,
-                              total_sharpe, run_at
+                              total_sharpe, run_at, window_kind, primary_window
                          FROM strategy_backtest_runs
-                        WHERE primary_window = true
                         ORDER BY strategy_id, run_at DESC""")
-        for sid, mode, sharpe, run_at in cur.fetchall():
-            if sid not in live:
-                continue
-            if mode == 'atr_r':
-                latest_atr.setdefault(sid, (sharpe, run_at))
-            else:
-                latest_flat.setdefault(sid, (sharpe, run_at))
+        rows = [r for r in cur.fetchall() if r[0] in live]
+    for sid, mode, sharpe, run_at, wk, primary in rows:
+        if mode == 'atr_r' and primary:
+            latest_atr.setdefault(sid, (sharpe, run_at, wk))
+    for sid, mode, sharpe, run_at, wk, primary in rows:
+        if mode == 'atr_r':
+            continue
+        atr = latest_atr.get(sid)
+        if atr is not None and atr[2] != wk:
+            continue  # a different window is not a comparable baseline
+        latest_flat.setdefault(sid, (sharpe, run_at))
     # G1 — the LATEST row per live strategy must be atr_r
     lagging = [s for s in live
                if s not in latest_atr

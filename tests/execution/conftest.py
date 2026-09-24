@@ -24,6 +24,50 @@ def _deterministic_sizer_gates(request, monkeypatch):
     monkeypatch.setattr(rbs, '_load_asset_eligibility', lambda symbols: None)
     monkeypatch.setenv('OPENCLAW_NET_EXPOSURE_CAP', '0')
     monkeypatch.setenv('OPENCLAW_ENTRY_HYGIENE', '0')
+    # Ownership block (Stream B item 15, task 8): _load_ownership_blocklist()
+    # now runs unconditionally at the _emit_orders_from_targets call site (so
+    # the `[ownership]` line prints even when OPENCLAW_ENTRY_HYGIENE=0 short-
+    # circuits the gate above), which means it opens a REAL
+    # psycopg2.connect(POSTGRES_URI) on every e2e test that reaches the
+    # emission tail. Stub it the same way as _load_asset_eligibility above.
+    # SKIPPED for its own test file, same reasoning as the benchmark stubs
+    # below: stubbing the subject-under-test out from under its own unit
+    # tests would make them vacuously pass.
+    # Fix round 1 item 2: _load_ownership_blocklist() now returns
+    # (blocklist, cycle_date) instead of a bare set — the call site unpacks
+    # it, so a stub returning a bare set() would raise ValueError (0 elements
+    # to unpack into 2 names) in every e2e test that reaches the emission
+    # tail. Extended minimally to match.
+    # Fix round 2: _load_ownership_blocklist() now returns a third value —
+    # the effective enforcing bool — extended again minimally to
+    # (set(), None, False), consistent with the flag being unset/empty here.
+    if request.path.name != 'test_ownership_sizer_block.py':
+        monkeypatch.setattr(rbs, '_load_ownership_blocklist', lambda: (set(), None, False))
+    # C1 (Task 6 fix round 1): _apply_account_breaker_gate calls
+    # _load_account_breaker_halted() whenever halted is left None (the
+    # production path, reached by every e2e test whose target_usd is
+    # non-empty at the emission tail) — which, with OPENCLAW_ACCOUNT_BREAKER
+    # armed in the environment, opens a REAL psycopg2.connect(POSTGRES_URI).
+    # Stub it the same way as the ownership loader above. SKIPPED for its own
+    # test file: stubbing the subject-under-test out from under its own unit
+    # tests would make the fail-open/flag-gate tests there pass vacuously.
+    if request.path.name != 'test_account_breaker_sizer_gate.py':
+        monkeypatch.setattr(rbs, '_load_account_breaker_halted', lambda: False)
+    # C3 (Task 10): _apply_macro_event_gate calls _load_macro_event_gating()
+    # whenever `events` is left None (the production path, reached by every
+    # e2e test whose target_usd is non-empty at the emission tail) — which
+    # reads the real data/master/macro_events.parquet off disk. Stub it the
+    # same way as the two loaders above. SKIPPED for its own test file:
+    # stubbing the subject-under-test out from under its own unit tests would
+    # make the calendar-failure / non-event-session tests there vacuous.
+    # Fix round 1 item 2: _load_macro_event_gating() now returns
+    # (events, status) instead of a bare `events` value — the call site
+    # unpacks it, so a stub returning a bare None would raise (not iterable)
+    # in every e2e test that reaches the emission tail. Extended minimally
+    # to (None, 'ok'), consistent with "no event on this session, healthy
+    # read".
+    if request.path.name != 'test_macro_event_gate.py':
+        monkeypatch.setattr(rbs, '_load_macro_event_gating', lambda session: (None, 'ok'))
     # §8 (2026-08-06): production .env carries OPENCLAW_SAMEDAY_SIGNAL_TARGET=1
     # and some test module's import-time load_dotenv pulls it into os.environ
     # during collection. The resolver lets the new flag WIN over the legacy

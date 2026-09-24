@@ -87,6 +87,7 @@ _IMPL_MAP = {
     'S_TR04_zarattini_intraday_spy':          ('strategies.implementations.str04_zarattini_intraday_spy',          'ZarattiniIntradaySPY'),
     'S_TR06_baltussen_eod_reversal':          ('strategies.implementations.str06_baltussen_eod_reversal',          'BaltussenEODReversal'),
     'low_volatility_us':                      ('strategies.implementations.low_volatility_us',                      'LowVolatilityUS'),
+    'S_low_volatility_us_gk63':               ('strategies.implementations.S_low_volatility_us_gk63',               'LowVolatilityUSGK63'),
     'S_cross_sectional_price_momentum':       ('strategies.implementations.S_cross_sectional_price_momentum',       'CrossSectionalPriceMomentum'),
     'S_pairs_trading_jump_diffusion_intraday': ('strategies.implementations.S_pairs_trading_jump_diffusion_intraday', 'PairsTradingJumpDiffusionIntraday'),
     # Task D3: sector cointegration pairs — offline EG/FDR-gated pair ledger, live z-score edge-trigger entries
@@ -145,7 +146,6 @@ _IMPL_MAP = {
     'S_earnings_news_specific_momentum': ('strategies.implementations.s_earnings_news_specific_momentum', 'S_earnings_news_specific_momentum'),
     'S_price_filter_rule_trend': ('strategies.implementations.S_price_filter_rule_trend', 'PriceFilterRuleTrend'),
     'S_ivol_cross_section_quintile': ('strategies.implementations.S_ivol_cross_section_quintile', 'IvolCrossSectionQuintile'),
-    'S_fomc_presell_spy_long': ('strategies.implementations.S_fomc_presell_spy_long', 'FomcPresellSpyLong'),
     'S_labor_day_week_momentum_reversal': ('strategies.implementations.S_labor_day_week_momentum_reversal', 'LaborDayWeekMomentumReversal'),
     'S_financial_constraint_kz_factor': ('strategies.implementations.S_financial_constraint_kz_factor', 'FinancialConstraintKZFactor'),
     'S_january_btm_size_seasonal': ('strategies.implementations.S_january_btm_size_seasonal', 'JanuaryBTMSizeSeasonal'),

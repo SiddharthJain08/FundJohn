@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Intraday 5-min circuit breaker for consolidate-mode positions.
+"""Intraday 5-min per-position circuit breaker.
 
-In Phase 2 (default): logging-only — does NOT submit close orders.
-Phase 3 flips OPENCLAW_REGIME_BLENDED_LIVE=1 and breaker fires real
-closes via _close_symbol().
+Fires in ALL FOUR REGIMES (operator ruling R2, spec 2026-09-12 §3 C2). The old
+HIGH_VOL/CRISIS carve-out — those regimes ran in independent mode with only a
+strategy-level bracket as the loss cutoff, so this breaker never touched them —
+was removed from the code on 2026-05-16 (see the comment above the threshold
+lookup in main()) and is removed from this docstring on 2026-09-12: with
+sharpe_cadence-LIVE running in every regime there is no independent-mode
+bracket backstop left, so losses compound in HIGH_VOL and CRISIS too. Each
+regime contributes only its own threshold
+(regime_sizer_params.position_circuit_breaker_pct — 2.0 / 1.5 / 1.0 / 0.5 % of
+NAV), never an exemption.
 
-Independent-mode positions (HIGH_VOL/CRISIS) are skipped — strategy-level
-brackets are their cutoff.
+Live closes require OPENCLAW_REGIME_BLENDED_LIVE=1; otherwise every fire is
+logged to circuit_breaker_fires with close_result_json.dry_run=true and no
+order is submitted.
 
 Spec: docs/archive/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md §"position_circuit_breaker"
+      docs/specs/2026-09-12-quantdinger-adoptions-spec.md §3 C2 (ruling R2)
 """
 from __future__ import annotations
 
@@ -48,7 +57,8 @@ def format_breaker_message(ticker: str, ratio: float, threshold_pct: float, qty:
 
 
 def main():
-    """Scan broker positions; fire breaker on losses exceeding threshold for consolidate-mode regimes."""
+    """Scan broker positions; fire the breaker on any position whose unrealized
+    loss exceeds the live regime's threshold. Runs in all four regimes."""
     import psycopg2
     import psycopg2.extras
 
@@ -60,7 +70,7 @@ def main():
     conn = psycopg2.connect(uri)
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-    # Current regime (consolidate-mode only).
+    # Live regime — threshold lookup key only; not a gate.
     cur.execute("SELECT state FROM market_regime ORDER BY updated_at DESC LIMIT 1")
     row = cur.fetchone()
     if not row:

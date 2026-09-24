@@ -15,6 +15,7 @@ const { parseActivationDryRun } = require('./activation_preview');
 const { isRegimeEligibleNow, regimeForStrategy } = require('./regime_active');
 const { regimeFreshness } = require('./regime_freshness');
 const { realizedLeverage } = require('./leverage');
+const _kpis = require('./nav_kpis');
 const REGIME_FILE        = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
 const CRYPTO_REGIME_FILE = require('path').join(__dirname, '../../../.agents/crypto-market-state/crypto_regime_latest.json');
 
@@ -1215,7 +1216,7 @@ app.get('/api/portfolio/summary', async (req, res) => {
         openCountAlpaca = apos.payload.length;
       }
     } catch (_) { /* fall back to DB below */ }
-    const [openRes, statsRes, winLifeRes, win30dRes] = await Promise.all([
+    const [openRes, statsRes, winLifeRes, win30dRes, kpiRes, maeRes] = await Promise.all([
       openCountAlpaca != null
         ? Promise.resolve({ rows: [{ open_count: openCountAlpaca }] })
         : dbQuery(`SELECT COUNT(DISTINCT ticker) AS open_count FROM execution_signals WHERE status = 'open' AND signal_date >= CURRENT_DATE - INTERVAL '90 days'`),
@@ -1244,6 +1245,8 @@ app.get('/api/portfolio/summary', async (req, res) => {
            AND es.signal_date >= $1::date
       `, [epoch]),
       dbQuery(win30dSql, win30dArgs),
+      dbQuery(_kpis.TRADE_KPI_SQL, [epoch]).catch(() => ({ rows: [{}] })),
+      dbQuery(_kpis.MAE_SQL,       [epoch]).catch(() => ({ rows: [{}] })),
     ]);
     const open       = openRes.rows[0];
     const stats      = statsRes.rows[0];
@@ -1253,6 +1256,26 @@ app.get('/api/portfolio/summary', async (req, res) => {
     const winsLife   = parseInt(life.wins) || 0;
     const closed30   = parseInt(w30.closed_count) || 0;
     const wins30     = parseInt(w30.wins) || 0;
+
+    // QD E5: profit factor / expectancy / payoff / MAE / NAV calendar.
+    // Same closed + non-rolled + epoch scoping as the aggregates above —
+    // see the comment block in nav_kpis.js.
+    const tradeKpis = _kpis.deriveTradeKpis(kpiRes.rows[0]);
+    const mae       = maeRes.rows[0] || {};
+    // Epoch-filter the NAV store the same way _buildCandles does (server.js:2821,
+    // :2892). Read the memoized in-memory _ohlcStore, NOT a fresh
+    // _loadOhlcStore() disk read: the running sampler's in-memory copy is the
+    // real store per the comment at :2918 (the 60s save can lag or fail), and
+    // a divergent read here would make this strip disagree with the pnl-candles
+    // chart beside it — the exact failure mode E5's scoping guards against
+    // elsewhere. Also avoids a sync fs read on every summary poll.
+    let navDays = {};
+    try {
+      const _navAll = (_ohlcStore || (_ohlcStore = _loadOhlcStore())).days || {};
+      navDays = Object.fromEntries(Object.entries(_navAll).filter(([d]) => d >= epoch));
+    } catch (_) { navDays = {}; }
+    const dayCounts = _kpis.navDayCounts(navDays);
+    const monthly   = _kpis.navMonthlyReturns(navDays, { limit: 12 });
 
     res.json({
       open_count:           parseInt(open.open_count) || 0,
@@ -1277,6 +1300,23 @@ app.get('/api/portfolio/summary', async (req, res) => {
       best_trade:           stats.best,
       worst_trade:          stats.worst,
       avg_days_held:        stats.avg_days_held,
+      // ── Live KPIs (QD E5) ───────────────────────────────────────────────
+      profit_factor:    tradeKpis.profit_factor,
+      // Identical to avg_realized by construction (same rows, same AVG);
+      // surfaced under the name operators look for.
+      expectancy_pct:   tradeKpis.expectancy_pct,
+      payoff_ratio:     tradeKpis.payoff_ratio,
+      avg_win_pct:      tradeKpis.avg_win_pct,
+      avg_loss_pct:     tradeKpis.avg_loss_pct,
+      // Close-to-close MAE: worst daily mark per signal, floored at 0.
+      // No intraday store exists on the live side.
+      // pg returns NUMERIC as a string; coerce so the field matches its sibling
+      // KPI numbers in the JSON contract (review, 2026-09-23).
+      mae_median_pct:   mae.mae_median_pct != null ? Number(mae.mae_median_pct) : null,
+      mae_n:            mae.mae_n ?? 0,
+      win_days:         dayCounts.win_days,
+      lose_days:        dayCounts.lose_days,
+      monthly_returns:  monthly,
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -4766,6 +4806,18 @@ body.rs-chat-locked{overflow:hidden}
     <div class="pf-stat-card" title="Per-position win rate at close = positions with realized P&L > 0 / total positions closed. 30d on the left, lifetime on the right."><div class="pf-stat-label">Win Rate<br><span style="font-size:9px;color:var(--dim);font-weight:400">30d&nbsp;|&nbsp;Lifetime</span></div><div class="pf-stat-value" id="pf-winrate">—&nbsp;|&nbsp;—</div><div class="pf-stat-sub" id="pf-winrate-sub"></div></div>
     <div class="pf-stat-card"><div class="pf-stat-label" title="Annualized equity-curve return: (1 + period_return)^(252 / trading_days) - 1. Predicted = last 30 trading days only. Lifetime = since account inception. Identical until 30 trading days of equity history have accumulated.">Annualized Equity Realization %<br><span style="font-size:9px;color:var(--dim);font-weight:400">Predicted&nbsp;|&nbsp;Lifetime</span></div><div class="pf-stat-value" id="pf-avgpnl">—</div><div class="pf-stat-sub" id="pf-pnl-sub"></div></div>
   </div>
+  <div class="pf-summary-row" id="pf-kpi-row" style="margin-top:12px;grid-template-columns:repeat(6,1fr)">
+    <div class="pf-stat-card" title="Sum of winning trade returns / sum of losing trade returns, over closed positions since the account epoch. Above 1.0 means the winners outweigh the losers."><div class="pf-stat-label">Profit Factor</div><div class="pf-stat-value" id="pf-pf">—</div></div>
+    <div class="pf-stat-card" title="Mean realized return per closed position. Arithmetically identical to the Avg Realized figure — shown under its trading name."><div class="pf-stat-label">Expectancy</div><div class="pf-stat-value" id="pf-expectancy">—</div><div class="pf-stat-sub" id="pf-expectancy-sub"></div></div>
+    <div class="pf-stat-card" title="Average winning trade / average losing trade."><div class="pf-stat-label">Payoff Ratio</div><div class="pf-stat-value" id="pf-payoff">—</div><div class="pf-stat-sub" id="pf-payoff-sub"></div></div>
+    <div class="pf-stat-card" title="Median maximum adverse excursion, measured CLOSE-TO-CLOSE: the worst daily mark each closed position ever printed, floored at 0. There is no intraday high/low store on the live side."><div class="pf-stat-label">Median MAE<br><span style="font-size:9px;color:var(--dim);font-weight:400">close-to-close</span></div><div class="pf-stat-value" id="pf-mae">—</div><div class="pf-stat-sub" id="pf-mae-sub"></div></div>
+    <div class="pf-stat-card" title="NAV sessions closing up vs down, from the equity OHLC store."><div class="pf-stat-label">Win / Lose Days</div><div class="pf-stat-value" id="pf-daycounts">—</div><div class="pf-stat-sub" id="pf-daycounts-sub"></div></div>
+    <div class="pf-stat-card" title="Average winning and losing trade return."><div class="pf-stat-label">Avg Win / Loss</div><div class="pf-stat-value" id="pf-avgwl">—</div></div>
+  </div>
+  <div class="pf-chart-wrap" id="pf-monthly-wrap" style="margin-top:12px">
+    <div class="pf-chart-label" style="margin-bottom:8px">Monthly NAV Return (last 12 months)</div>
+    <div id="pf-monthly-strip" style="display:flex;gap:4px;flex-wrap:wrap"></div>
+  </div>
   <div class="pf-chart-wrap">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
       <div class="pf-chart-label" style="margin-bottom:0" id="pf-chart-title">Portfolio P&amp;L Curve (90d)</div>
@@ -7482,6 +7534,48 @@ function renderPortfolioSummary(s, valCurve) {
     el.textContent = '—';
     subEl.textContent = rows.length ? 'Insufficient equity history' : 'No portfolio history yet';
   }
+
+  // ── QD E5 live KPIs ────────────────────────────────────────────────────
+  const num = (v, dp, suffix) => (v == null ? '—' : Number(v).toFixed(dp) + (suffix || ''));
+  const pct = (v) => (v == null ? '—' : ((v >= 0 ? '+' : '') + (Number(v) * 100).toFixed(2) + '%'));
+
+  document.getElementById('pf-pf').textContent         = num(s.profit_factor, 2);
+  document.getElementById('pf-expectancy').textContent = pct(s.expectancy_pct);
+  document.getElementById('pf-expectancy-sub').textContent = 'per closed position';
+  document.getElementById('pf-payoff').textContent     = num(s.payoff_ratio, 2);
+  document.getElementById('pf-payoff-sub').textContent =
+    (s.avg_win_pct != null && s.avg_loss_pct != null)
+      ? pct(s.avg_win_pct) + ' vs ' + pct(-s.avg_loss_pct) : '';
+  document.getElementById('pf-mae').textContent        = pct(s.mae_median_pct);
+  document.getElementById('pf-mae-sub').textContent    =
+    s.mae_n ? s.mae_n + ' closed positions' : 'no marks yet';
+  document.getElementById('pf-daycounts').innerHTML =
+    '<span class="positive">' + (s.win_days ?? 0) + '</span>'
+    + '<span style="color:var(--dim);font-weight:400">&nbsp;|&nbsp;</span>'
+    + '<span class="negative">' + (s.lose_days ?? 0) + '</span>';
+  const totDays = (s.win_days ?? 0) + (s.lose_days ?? 0);
+  document.getElementById('pf-daycounts-sub').textContent =
+    totDays ? Math.round((s.win_days / totDays) * 100) + '% up sessions' : 'no NAV history';
+  document.getElementById('pf-avgwl').textContent =
+    (s.avg_win_pct != null || s.avg_loss_pct != null)
+      ? pct(s.avg_win_pct) + ' / ' + pct(s.avg_loss_pct == null ? null : -s.avg_loss_pct)
+      : '—';
+
+  // 12-month strip. A month with no prior-month anchor renders as an em dash
+  // rather than a fake 0% — the live NAV store began 2026-09-05.
+  const strip = document.getElementById('pf-monthly-strip');
+  const months = Array.isArray(s.monthly_returns) ? s.monthly_returns : [];
+  strip.innerHTML = months.length === 0
+    ? '<span style="color:var(--dim)">No NAV history yet</span>'
+    : months.map(m => {
+        const cls = m.return_pct == null ? 'neutral' : (m.return_pct >= 0 ? 'positive' : 'negative');
+        const val = m.return_pct == null ? '—'
+                  : ((m.return_pct >= 0 ? '+' : '') + m.return_pct.toFixed(2) + '%');
+        return '<div style="flex:1 1 70px;min-width:70px;padding:6px;border:1px solid var(--border2);'
+             + 'border-radius:4px;text-align:center" title="' + m.days + ' sessions">'
+             + '<div style="font-size:10px;color:var(--muted)">' + m.month + '</div>'
+             + '<div class="' + cls + '" style="font-size:12px">' + val + '</div></div>';
+      }).join('');
 }
 
 // ── Positions / History — grouped by ticker ────────────────────────────────

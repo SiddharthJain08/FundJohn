@@ -18,7 +18,7 @@ const TRACEBUS_PATH = require.resolve(path.join(ROOT, 'src/agent/traceBus.js'));
 
 // Build a stubbed makeNode by injecting fake helpers + logger + traceBus
 function makeStubbedFactory({ rc, stderrTail = '', durationMs = 100, throwSpawn = false,
-                              timedOut = false, lockLost = false } = {}) {
+                              timedOut = false, lockLost = false, wedged = false } = {}) {
   const traceEvents = [];
   const logCalls    = [];
   // `attempts` counts runSubprocess invocations — the signals step's bounded
@@ -39,7 +39,7 @@ function makeStubbedFactory({ rc, stderrTail = '', durationMs = 100, throwSpawn 
       runSubprocess: async (argv, opts) => {
         attempts.push(opts && opts.step);
         if (throwSpawn) throw new Error('spawn explode');
-        return { rc, stderrTail, durationMs, stdout: '', timedOut, lockLost };
+        return { rc, stderrTail, durationMs, stdout: '', timedOut, lockLost, wedged };
       },
     },
   };
@@ -260,4 +260,54 @@ test('a bare rc=75 (no lockLost flag) on a non-exempt step still aborts', async 
     () => node({ ...BASE_STATE, env: {} }),
     (err) => { assert.equal(err.step, 'signals'); assert.equal(err.rc, 75); return true; },
   );
+});
+
+// QD E3b (2026-09-22): runSubprocess returns rc=125 + wedged:true when the
+// stdout-idle watchdog SIGTERMed a silent-but-alive child. Controller ruling
+// (2026-09-22, superseding the task-8 brief's original "treat rc=125 like
+// every other hard failure" constraint): a wedge is a failed gap-filler
+// exactly like a timed-out one (rc=124) — it WARNS THROUGH under the
+// sentiment/activation exemption, same as any other non-lockLost failure.
+// Only `lockLost` overrides the exemption (wave-1 ruling, unchanged). The
+// signals bounded-retry carve-out stays: a hung step will hang again, so one
+// attempt only.
+test('rc=125 + wedged during the exempted "sentiment" step WARNS through (like rc=124)', async () => {
+  const { makeStepNode, logCalls } = makeStubbedFactory({
+    rc: 125, wedged: true, stderrTail: '[wedge] stdout idle 601s > 600s — SIGTERM' });
+  const node = makeStepNode('sentiment', 'run_sentiment_step');
+  const out = await node({ ...BASE_STATE, env: {} });
+  assert.equal(out.completedSteps.length, 1);
+  assert.equal(out.completedSteps[0].status, 'warn');
+  assert.equal(out.completedSteps[0].rc, 125);
+  // The Discord alert still fires and still carries the [wedge] line, even
+  // though the cycle continues — a warn must not be a silent warn.
+  const failCall = logCalls.find(([fn]) => fn === 'notifyFailure');
+  assert.ok(failCall);
+  assert.match(failCall[1][3], /\[wedge\]/);
+  assert.ok(logCalls.some(([fn, args]) => fn === 'feedEnd' && args[1] === 'warn'));
+});
+
+test('rc=125 + wedged during the exempted "activation" step WARNS through (like rc=124)', async () => {
+  const { makeStepNode, logCalls } = makeStubbedFactory({
+    rc: 125, wedged: true, stderrTail: '[wedge] stdout idle 601s > 600s — SIGTERM' });
+  const node = makeStepNode('activation', 'activation_apply');
+  const out = await node({ ...BASE_STATE, env: { OPENCLAW_STRICT_EXIT_CODES: '1' } });
+  assert.equal(out.completedSteps[0].status, 'warn');
+  assert.equal(out.completedSteps[0].rc, 125);
+  const failCall = logCalls.find(([fn]) => fn === 'notifyFailure');
+  assert.ok(failCall);
+  assert.match(failCall[1][3], /\[wedge\]/);
+  assert.ok(logCalls.some(([fn, args]) => fn === 'feedEnd' && args[1] === 'warn'));
+});
+
+test('wedged on "signals" (non-exempt step) aborts after EXACTLY one attempt (no bounded retry)', async () => {
+  const { makeStepNode, attempts, logCalls } = makeStubbedFactory({
+    rc: 125, wedged: true, stderrTail: '[wedge] stdout idle 601s > 600s — SIGTERM' });
+  const node = makeStepNode('signals', 'engine');
+  await assert.rejects(
+    () => node({ ...BASE_STATE, env: {} }),
+    (err) => { assert.equal(err.rc, 125); assert.equal(err.wedged, true); return true; },
+  );
+  assert.equal(attempts.length, 1);
+  assert.ok(!logCalls.some(([fn, args]) => fn === 'notifyFailure' && /attempt 1\/2/.test(args[0])));
 });

@@ -216,3 +216,47 @@ def _alpaca_clock_reachable():
         return Status.FAIL, f'/v2/clock → {r.status_code}'
     is_open = r.json().get('is_open')
     return Status.PASS, f'is_open={is_open}'
+
+
+_OWNERSHIP_STALE_DAYS = 3
+
+
+@check(name='position_ownership_clean', tags=['broker', 'pipeline'], requires=['db'])
+def _position_ownership_clean():
+    """Every ticker's latest position_ownership row is 'ok' — the broker's share
+    count and the open signals' claim agree (Stream B item 15).
+
+    A SHORTFALL means signals are marking a position the broker does not hold
+    (phantom P&L in every rollup); an UNALLOCATED means shares no strategy owns
+    are sitting in the book. SKIPs quietly until migration 156 has been applied
+    and the reconcile step has written a cycle."""
+    try:
+        with psycopg2.connect(os.environ['POSTGRES_URI'], connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('public.position_ownership')")
+                if (cur.fetchone() or [None])[0] is None:
+                    return Status.SKIP, 'position_ownership not migrated yet'
+                cur.execute('SELECT MAX(cycle_date) FROM position_ownership')
+                latest = (cur.fetchone() or [None])[0]
+                if latest is None:
+                    return Status.SKIP, 'no position_ownership rows yet'
+                cur.execute('SELECT CURRENT_DATE - %s', (latest,))
+                age_days = int((cur.fetchone() or [0])[0] or 0)
+                cur.execute('SELECT status, COUNT(*) FROM position_ownership '
+                            'WHERE cycle_date = %s GROUP BY status', (latest,))
+                counts = {r[0]: int(r[1]) for r in (cur.fetchall() or [])}
+    except Exception as exc:  # noqa: BLE001
+        return Status.FAIL, f'ownership query failed: {type(exc).__name__}: {exc}'[:200]
+
+    if age_days > _OWNERSHIP_STALE_DAYS:
+        return Status.WARN, (f'latest ownership ledger is {age_days}d old ({latest}) — '
+                             f'is the reconcile step running?')
+    shortfall = counts.get('shortfall', 0)
+    unallocated = counts.get('unallocated', 0)
+    total = sum(counts.values())
+    if shortfall:
+        return Status.FAIL, (f'{shortfall} ticker(s) SHORTFALL, {unallocated} unallocated '
+                             f'of {total} on {latest}')
+    if unallocated:
+        return Status.WARN, f'{unallocated} unallocated ticker(s) of {total} on {latest}'
+    return Status.PASS, f'{total} ticker(s) ok on {latest}'

@@ -4,8 +4,10 @@ parameter changes.
 
 Lifecycle:
   Mastermind comprehensive-review -> insert_proposal() with status='pending'
-  Saturday auto-apply (2026-07-14)-> auto_apply_batch(): confidence > 0.8 is
-                                     auto-approved (source='auto-approval');
+  Saturday auto-apply (2026-07-14)-> auto_apply_batch(): confidence >
+                                     the floor (autoapprove_min_confidence(),
+                                     default 0.85) is auto-approved
+                                     (source='auto-approval');
                                      everything else -> status='noted' (kept
                                      visible on the dashboard; superseded by
                                      next Saturday's fresh proposal = the
@@ -37,6 +39,32 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
+
+# ── Auto-approve confidence floor — ONE source of truth (spec D2, 2026-09-12) ─
+# Was split three ways before this: auto_approve read a '0.85' default,
+# auto_apply_batch a '0.8' default, and the CLI help said 0.8. Production
+# overrides all of them via .env (OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE
+# = 0.9 since 2026-09-06), so unifying the fallback changes no live behaviour —
+# it removes a trap where an env-less run silently used a looser bar in the
+# Saturday batch path than in the single-proposal path.
+DEFAULT_AUTOAPPROVE_MIN_CONFIDENCE = 0.85
+
+
+def autoapprove_min_confidence() -> float:
+    """The confidence floor auto-approval compares against. Read at CALL time
+    so an .env change is picked up by the next timer-spawned run without a
+    restart (the same contract backtest.factor_prescreen._default_lookback
+    documents). Precedence is byte-identical to the pre-unification reads:
+    unset env -> the constant; env set to anything (including an empty or
+    unparseable string) -> float(raw), which raises ValueError exactly as
+    the old `float(os.environ.get(KEY, default))` call sites did. This is
+    deliberately fail-closed: a mangled floor must crash the caller, not
+    silently fall back to a looser bar than the operator set in .env."""
+    raw = os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE')
+    if raw is None:
+        return DEFAULT_AUTOAPPROVE_MIN_CONFIDENCE
+    return float(raw)
+
 
 _THIS = Path(__file__).resolve()
 _SRC = _THIS.parents[1]
@@ -287,6 +315,121 @@ def _current_size_scalar(strategy_id: str, regime_state: str):
     return row[0] if row else None
 
 
+def _calibration_report() -> dict:
+    """Indirection seam over metrics.mastermind_calibration.calibration_report
+    so tests can inject a bucket table without a DB."""
+    from metrics.mastermind_calibration import calibration_report
+    return calibration_report()
+
+
+def _evidence_counts(strategy_id: str, regime_state: str) -> dict:
+    """Indirection seam over metrics.mastermind_calibration.evidence_counts."""
+    from metrics.mastermind_calibration import evidence_counts
+    return evidence_counts(strategy_id, regime_state)
+
+
+def _fmt4(x) -> str:
+    """Render a possibly-None float with 4 decimals, for calibration reason
+    strings. Used for raw/calibrated/effective only — evidence_cap is one of
+    four fixed constants (0.35/0.55/0.75/1.0) and is left unformatted so
+    audit text stays greppable verbatim, e.g. 'cap 0.35 [none]'."""
+    return 'None' if x is None else f'{float(x):.4f}'
+
+
+def _calibration_inputs(strategy_id: str, regime_state: str, raw) -> dict:
+    """Everything auto_approve needs to decide and to record (spec D2).
+
+    Two INDEPENDENT failure domains, each with its own contract — a broken
+    calibration table and a broken evidence table fail in opposite
+    directions on purpose:
+
+    - The calibration-report step (bucket table -> calibrated_confidence)
+      fails OPEN: any exception falls back to `calibrated = raw`, clamped
+      into [0, 1] with NaN -> None (mirroring calibrated_confidence's own
+      raw handling), so a NaN/out-of-range raw can never reach a bogus
+      `min(nan, cap)` downstream. A broken calibration table must never
+      turn into a silent tightening the operator cannot see.
+
+    - The evidence step (evidence_counts -> evidence_cap) fails CLOSED: ANY
+      exception — a DB error escaping the seam, a bad row, a raise inside
+      evidence_cap's own parsing — drops straight to evidence_level='none',
+      cap=0.35 (the same cap a sleeve with zero closed trades gets), and
+      sets evidence_error=True. An unreadable evidence table must never
+      read as strong evidence; unlike the calibration step, it is itself a
+      reason to tighten the gate, not loosen it.
+
+    The two steps are independent: a report failure does not force the
+    evidence cap down, and an evidence failure does not force calibrated
+    back to raw.
+    """
+    raw_f = float(raw) if raw is not None else None
+    if raw_f is not None and raw_f == raw_f:  # not NaN
+        raw_clamped = max(0.0, min(1.0, raw_f))
+    else:
+        raw_clamped = None
+
+    out = {'raw': raw_f, 'calibrated': raw_clamped, 'cap': 1.0, 'evidence_level': None,
+           'n_closed': None, 'staleness_days': None, 'binding_bound': 'calibrated',
+           'error': None, 'evidence_error': False}
+
+    # Step 1 — calibration report: fail OPEN (see docstring).
+    try:
+        # Imported inside the try (not at module/function top) so a broken
+        # metrics.mastermind_calibration import also fails OPEN rather than
+        # raising out of auto_approve — same contract as a bad DB call.
+        from metrics.mastermind_calibration import calibrated_confidence
+        buckets = (_calibration_report() or {}).get('buckets') or []
+        out['calibrated'] = calibrated_confidence(raw_f, buckets)
+    except Exception as e:  # noqa: BLE001 — fail-open, see docstring
+        out['error'] = f'{type(e).__name__}: {e}'
+        out['calibrated'] = raw_clamped
+
+    # Step 2 — evidence: fail CLOSED (see docstring). Independent try block:
+    # this must never inherit or be masked by a Step 1 failure/success.
+    try:
+        from metrics.mastermind_calibration import evidence_cap
+        ev = _evidence_counts(strategy_id, regime_state) or {}
+        n_closed = ev.get('n_closed')
+        staleness_days = ev.get('staleness_days')
+        level, cap = evidence_cap(n_closed or 0, staleness_days)
+        out['n_closed'] = n_closed
+        out['staleness_days'] = staleness_days
+        out['evidence_level'] = level
+        out['cap'] = cap
+    except Exception as e:  # noqa: BLE001 — fail CLOSED, see docstring
+        out['evidence_error'] = True
+        out['evidence_level'] = 'none'
+        out['cap'] = 0.35
+        if out['error'] is None:
+            out['error'] = f'{type(e).__name__}: {e}'
+
+    cal = out['calibrated'] if out['calibrated'] is not None else float('inf')
+    out['binding_bound'] = 'cap' if out['cap'] < cal else 'calibrated'
+    out['effective'] = None if out['calibrated'] is None else min(out['calibrated'], out['cap'])
+    return out
+
+
+def _record_calibration(proposal_id: int, calib: dict) -> None:
+    """Persist the shadow/enforced numbers on the proposal row (migration 159).
+    Best-effort: a recording failure must never block a decision."""
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE strategy_regime_param_proposals
+                       SET confidence_raw        = %s,
+                           confidence_calibrated = %s,
+                           evidence_cap          = %s,
+                           evidence_level        = %s,
+                           binding_bound         = %s
+                     WHERE id = %s
+                """, (calib.get('raw'), calib.get('calibrated'), calib.get('cap'),
+                      calib.get('evidence_level'), calib.get('binding_bound'), proposal_id))
+            conn.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f'[auto-approve] calibration recording failed for #{proposal_id}: {e}')
+
+
 def auto_approve(*, proposal_id: int) -> dict:
     """Auto-approve a pending proposal if it meets all rails. No-op otherwise.
 
@@ -295,6 +438,34 @@ def auto_approve(*, proposal_id: int) -> dict:
       OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE (default 0.85)
       OPENCLAW_PROPOSAL_AUTOAPPROVE_MAX_SIZE_DELTA (default 0.20)
       OPENCLAW_PROPOSAL_AUTOAPPROVE_MAX_STOP_DELTA (default 0.01)
+
+    Rail 1 (confidence) is outcome-calibrated + evidence-capped (spec D2,
+    migration 159). The calibrated number and the evidence cap are ALWAYS
+    computed and recorded on the proposal row (confidence_raw,
+    confidence_calibrated, evidence_cap, evidence_level, binding_bound),
+    before every other rail, in BOTH modes below:
+      OPENCLAW_PROPOSAL_CALIBRATED unset (default) — the floor compare uses
+        the RAW confidence exactly as before this change (byte-identical
+        decisions); the calibrated number and the would-be decision are
+        logged as SHADOW only.
+      OPENCLAW_PROPOSAL_CALIBRATED=1 — the floor compare uses
+        min(calibrated, evidence_cap) instead of raw.
+    FLIP NOTE: as of this change, flipping the flag on today would leave
+    auto-approval effectively OFF. The live top-[0.8, 1.0]-bucket match rate
+    is 0.56 (n=18), so even a raw confidence of 1.0 calibrates to
+    1.0 x clip(0.56/0.9, 0.5, 1.0) ~= 0.62, below both the production floor
+    of 0.9 (.env, 2026-09-06) and the code default of 0.85.
+    Recovery condition: for the top bucket (midpoint 0.9) a raw=1.0 proposal
+    clears floor F only once match_rate >= 0.9*F, i.e. >=0.765 to clear the
+    0.85 default and >=0.81 to clear the live 0.9 floor -- AND the sleeve's
+    evidence must independently reach 'high' (>=100 closed trades in the
+    trailing 30 d, most recent close within 45 d -> cap 1.0), since
+    'none'/'low'/'medium' cap at 0.35/0.55/0.75 and the compare is
+    min(calibrated, cap). Both conditions must hold at once; the cap alone
+    or the calibrated bound alone is not enough.
+    Watch the SHADOW log lines / recorded columns (confidence_raw,
+    confidence_calibrated, evidence_cap, evidence_level, binding_bound) over
+    several Saturdays before flipping this flag in production.
 
     Returns one of:
       {'status': 'approved', ...}        — auto-approved
@@ -308,7 +479,7 @@ def auto_approve(*, proposal_id: int) -> dict:
         return {'id': proposal_id, 'status': 'skipped',
                 'reason': 'auto-approval feature disabled (OPENCLAW_PROPOSAL_AUTOAPPROVE != 1)'}
 
-    min_conf  = float(os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE', '0.85'))
+    min_conf  = autoapprove_min_confidence()
     max_size  = float(os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE_MAX_SIZE_DELTA', '0.20'))
     max_stop  = float(os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE_MAX_STOP_DELTA', '0.01'))
 
@@ -331,11 +502,41 @@ def auto_approve(*, proposal_id: int) -> dict:
     if prop['status'] != 'pending':
         raise ValueError(f'proposal {proposal_id} is not pending (status={prop["status"]!r})')
 
-    # Rail 1: confidence
+    # ── Rail 1: confidence, outcome-calibrated + evidence-capped (spec D2) ────
+    # Computed and RECORDED unconditionally and BEFORE every other rail, so the
+    # shadow ledger covers proposals that later die on size/stop too. Only the
+    # COMPARISON is flag-gated: unset OPENCLAW_PROPOSAL_CALIBRATED keeps the raw
+    # compare byte-identical to today and logs the would-be decision.
     conf = prop['confidence']
-    if conf is None or float(conf) < min_conf:
+    calib = _calibration_inputs(prop['strategy_id'], prop['regime_state'], conf)
+    calibrated_enabled = os.environ.get('OPENCLAW_PROPOSAL_CALIBRATED') == '1'
+    effective = calib['effective']
+    would_skip = effective is None or effective < min_conf
+    calib_out = dict(calib, enforced=calibrated_enabled, would_skip=would_skip,
+                     floor=min_conf)
+    _record_calibration(proposal_id, calib)
+    if not calibrated_enabled:
+        logger.info(
+            f'[auto-approve] #{proposal_id} {prop["strategy_id"]}/{prop["regime_state"]} '
+            f'calibration SHADOW: raw={conf} calibrated={calib["calibrated"]} '
+            f'cap={calib["cap"]} ({calib["evidence_level"]}, n={calib["n_closed"]}, '
+            f'stale={calib["staleness_days"]}) bound={calib["binding_bound"]} '
+            f'floor={min_conf} would_skip={would_skip}'
+        )
+
+    if calibrated_enabled:
+        if would_skip:
+            return {'id': proposal_id, 'status': 'skipped',
+                    'reason': (f'calibrated confidence {_fmt4(effective)} below threshold {min_conf} '
+                               f'(raw {_fmt4(conf)}, calibrated {_fmt4(calib["calibrated"])}, '
+                               f'cap {calib["cap"]} [{calib["evidence_level"]}], '
+                               f'bound {calib["binding_bound"]}'
+                               f'{", evidence_error" if calib["evidence_error"] else ""})'),
+                    'calibration': calib_out}
+    elif conf is None or float(conf) < min_conf:
         return {'id': proposal_id, 'status': 'skipped',
-                'reason': f'confidence {conf} below threshold {min_conf}'}
+                'reason': f'confidence {conf} below threshold {min_conf}',
+                'calibration': calib_out}
 
     # Rail 2: size_scalar delta (only checked if proposing a size change)
     if prop['proposed_size_scalar'] is not None:
@@ -344,7 +545,8 @@ def auto_approve(*, proposal_id: int) -> dict:
         proposed_size_f = float(prop['proposed_size_scalar'])
         if abs(proposed_size_f - current_size_f) > max_size:
             return {'id': proposal_id, 'status': 'skipped',
-                    'reason': f'size delta |{proposed_size_f}-{current_size_f}| > {max_size}'}
+                    'reason': f'size delta |{proposed_size_f}-{current_size_f}| > {max_size}',
+                    'calibration': calib_out}
 
     # Rail 3: stop_pct delta (only checked if proposing a stop change)
     if prop['proposed_stop_pct'] is not None:
@@ -353,18 +555,32 @@ def auto_approve(*, proposal_id: int) -> dict:
         proposed_stop_f = abs(float(prop['proposed_stop_pct']))
         if proposed_stop_f > max_stop:
             return {'id': proposal_id, 'status': 'skipped',
-                    'reason': f'stop_pct |{proposed_stop_f}| > {max_stop}'}
+                    'reason': f'stop_pct |{proposed_stop_f}| > {max_stop}',
+                    'calibration': calib_out}
 
     # All rails passed → route through the normal approve path. Use an
     # actor tag that clearly identifies this as auto-approval for audit.
     auto_actor = 'auto-approval'
-    auto_reason = (
-        f'auto-approved: confidence={conf:.2f} >= {min_conf}, '
-        f'rails (size_delta<={max_size}, stop<={max_stop}) all passed'
-    )
-    return _decide(proposal_id=proposal_id, actor=auto_actor,
-                    reason=auto_reason, source='auto-approval',
-                    overrides=None, terminal_status='approved')
+    if calibrated_enabled:
+        auto_reason = (
+            f'auto-approved: confidence={_fmt4(conf)} '
+            f'(calibrated={_fmt4(calib["calibrated"])}, '
+            f'cap={calib["cap"]} [{calib["evidence_level"]}]) >= {min_conf}, '
+            f'rails (size_delta<={max_size}, stop<={max_stop}) all passed'
+        )
+    else:
+        # §0 / spec D2: the unset path must be byte-identical to base — no
+        # calibrated=/cap= fragments. Those facts live only in the five
+        # recorded columns (migration 159) + the SHADOW log line above.
+        auto_reason = (
+            f'auto-approved: confidence={conf:.2f} >= {min_conf}, '
+            f'rails (size_delta<={max_size}, stop<={max_stop}) all passed'
+        )
+    result = _decide(proposal_id=proposal_id, actor=auto_actor,
+                     reason=auto_reason, source='auto-approval',
+                     overrides=None, terminal_status='approved')
+    result['calibration'] = calib_out
+    return result
 
 
 def _mark_noted(proposal_id: int, reason: str) -> None:
@@ -387,7 +603,8 @@ def _mark_noted(proposal_id: int, reason: str) -> None:
 def auto_apply_batch(*, threshold: Optional[float] = None, limit: int = 500,
                      log=logger.info) -> dict:
     """Saturday full-auto pass over ALL pending proposals (2026-07-14 operator
-    directive): confidence strictly > threshold (default 0.8, env
+    directive): confidence strictly > threshold (default
+    autoapprove_min_confidence(), env
     OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE) routes through auto_approve()
     (same set_params path as a dashboard click, source='auto-approval');
     everything else — low/missing confidence or a rail skip inside
@@ -399,8 +616,7 @@ def auto_apply_batch(*, threshold: Optional[float] = None, limit: int = 500,
     if os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE') != '1':
         log('[auto-apply] OPENCLAW_PROPOSAL_AUTOAPPROVE != 1 — skipping (no-op).')
         return {'skipped': True, 'approved': 0, 'noted': 0, 'errors': 0}
-    thr = threshold if threshold is not None else float(
-        os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE', '0.8'))
+    thr = threshold if threshold is not None else autoapprove_min_confidence()
     approved = noted = errors = 0
     for prop in list_proposals(status='pending', limit=limit):
         pid = prop['id']
@@ -469,8 +685,9 @@ def main():
                      help='Saturday full-auto: approve pending proposals with '
                           'confidence strictly > threshold; note the rest.')
     p.add_argument('--threshold', type=float, default=None,
-                   help='confidence threshold for --auto-apply-batch '
-                        '(default env OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE or 0.8)')
+                   help='confidence threshold for --auto-apply-batch (default env '
+                        'OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE, else '
+                        f'{DEFAULT_AUTOAPPROVE_MIN_CONFIDENCE})')
     p.add_argument('--status', default='pending')
     p.add_argument('--actor', default='cli')
     p.add_argument('--reason', default='')

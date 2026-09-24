@@ -75,7 +75,13 @@ _CADENCES: dict[str, tuple[str | None, int]] = {
 }
 
 # Covered by a dedicated, stricter check — do not double-report here.
-_COVERED_ELSEWHERE = {'options_aggregates_enriched.parquet'}  # options_aux_freshness
+_COVERED_ELSEWHERE = {
+    'options_aggregates_enriched.parquet',   # options_aux_freshness
+    # macro_events: a calendar master's failure mode is losing FORWARD
+    # coverage, not going stale backwards — macro_events_freshness asserts
+    # a high-importance release >= 30 d ahead instead (spec 2026-09-12 C3).
+    'macro_events.parquet',                  # macro_events_freshness
+}
 
 _SMALL_ENOUGH_FOR_COLUMN_READ = 100 * 1024 * 1024  # bytes
 

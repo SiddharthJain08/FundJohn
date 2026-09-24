@@ -51,11 +51,22 @@ const MAX_TOURNAMENT_VARIANTS = 8;
 // _runTournament — so the queue row is left in a real, single-shot-shaped
 // terminal state rather than an invented one.
 const QUEUE_STATUS_FOR_REASON = {
-  coding_failed:      'failed',
-  contract_violation: 'validation_failed',
-  redteam_blocked:    'redteam_blocked',
-  prescreen_failed:   'prescreen_failed',
-  backtest_error:     'backtest_failed',
+  coding_failed:       'failed',
+  contract_violation:  'validation_failed',
+  import_violation:    'validation_failed',
+  redteam_blocked:     'redteam_blocked',
+  prescreen_failed:    'prescreen_failed',
+  ic_screen_flat:      'ic_screen_flat',
+  backtest_error:      'backtest_failed',
+  // needs_signal_check (D3, 2026-09-12): NOT a gate-chain failure — the
+  // zero-signal branch in _runGateChain always returns ok:true and never
+  // writes implementation_queue.status (spec §4 D3 "never BLOCK"; see the
+  // comment at the zero-signal branch). This entry is unreachable today —
+  // attempts[].reasonCode is only ever populated on ok:false (see the
+  // zero-survivors branch below) — but is listed here so a future change
+  // that DOES let this reasonCode reach a failed attempt degrades to a
+  // real status instead of silently falling through to 'failed'.
+  needs_signal_check:  'needs_signal_check',
 };
 
 // Task S2: insert `_tv<k>` before the file extension, e.g.
@@ -157,6 +168,32 @@ function _optionUnderlyingSupported(underlying) {
 }
 
 /**
+ * D3 fix round 1 (spec §0, 2026-09-12): gates the zero-signal red-team skip
+ * branch in `_runGateChain`. Read at call time, not cached — same pattern as
+ * `_validateInferredFilter` / `_validateInferredClass` above.
+ *
+ * UNSET (default): the red-team LLM runs exactly as it did before this task
+ * ever landed, even when validate_strategy reports `zero_signals_synthetic`;
+ * the validate-pass decision still records `metadata.warnings` +
+ * `signal_count` either way (see the emit right before this gate is read).
+ * SET ('1'): the landed skip-and-continue behaviour (skip the Opus call,
+ * emit a `redteam`/`pass`/`needs_signal_check` row, keep going — never
+ * BLOCK).
+ *
+ * Rationale for defaulting OFF: the red-team reviewer's look-ahead /
+ * off-by-one / full-sample-fit / survivorship checks are exactly what a
+ * strategy that emits zero signals on the synthetic panel but is actually
+ * driven by real (non-synthetic) data needs reviewed — those defects don't
+ * announce themselves as "zero signals on LOW_VOL". The skip is only safe
+ * to flip on once the synthetic panel can exercise aux-data-driven
+ * strategies too (follow-up; spec §4 D3 amendment, Task 10).
+ * Gate: OPENCLAW_ZERO_SIGNAL_SKIP_REDTEAM=1
+ */
+function _zeroSignalSkipEnabled() {
+  return process.env.OPENCLAW_ZERO_SIGNAL_SKIP_REDTEAM === '1';
+}
+
+/**
  * Task R2 review fix (Minor): shape-validate factor_prescreen.py's parsed
  * stdout before trusting it as a verdict. JSON.parse happily succeeds on
  * `5`, `"ok"`, `null`, `[]`, or `{}` — none of which carry the boolean
@@ -171,6 +208,27 @@ function _isPrescreenShape(obj) {
     && typeof obj === 'object'
     && !Array.isArray(obj)
     && typeof obj.pass === 'boolean';
+}
+
+/**
+ * Shape-validate research.factor_ic_screen's parsed stdout before trusting
+ * it (Task 8, spec D1). Same hole `_isPrescreenShape` closes: JSON.parse
+ * succeeds on `5`, `"flat"`, `null`, `[]` and `{}`, none of which carry the
+ * `verdict` this gate branches on. Only an object whose `verdict` is one of
+ * the four known strings counts; everything else — including the module's
+ * own infra-failure line `{"verdict": null, "reason": "ic_screen_infra_fail",
+ * "error": "…"}` (landed 10f20c73) — is routed to the infra-fail
+ * warn-and-pass path. Does NOT require `coverage`/`one_sided` (Task 7 fix
+ * round additions) so older/partial output stays parseable.
+ */
+const IC_SCREEN_VERDICTS = new Set(['pass', 'weak', 'flat', 'skipped']);
+
+function _isIcScreenShape(obj) {
+  return obj !== null
+    && typeof obj === 'object'
+    && !Array.isArray(obj)
+    && typeof obj.verdict === 'string'
+    && IC_SCREEN_VERDICTS.has(obj.verdict);
 }
 
 // Pure builder for the strategycoder subagent context. Extracted from
@@ -316,6 +374,7 @@ class ResearchOrchestrator {
     this._validateFn  = this._runValidateStrategy.bind(this);
     this._redteamFn   = redteamStrategy;
     this._prescreenFn = this._runFactorPrescreen.bind(this);
+    this._icScreenFn  = this._runIcScreen.bind(this);
     this._backtestFn  = this._runUnifiedBacktest.bind(this);
     // _emitDecisionFn: every emitGateDecision() call reachable from
     // _runGateChain / _runTournament goes through this seam (defaults to the
@@ -1080,6 +1139,56 @@ class ResearchOrchestrator {
     return { psResult, psInfraFail, psInfraReason };
   }
 
+  /**
+   * Default `_icScreenFn` — spec D1, Task 8 (research.factor_ic_screen,
+   * Task 7). Its own 300 s budget: the screen drives ~100 generate_signals
+   * calls over a 504-bar panel, well past the prescreen's 120 s. Any
+   * non-zero exit / unparseable line / bad shape — including the module's
+   * own `{"verdict": null, "reason": "ic_screen_infra_fail", ...}` line on
+   * exit 1 (landed 10f20c73) — is an infra failure that WARNS and passes
+   * the candidate through, exactly as the prescreen does.
+   *
+   * `spawnFn` defaults to the module's real `_spawnPython` but is an
+   * explicit parameter (mirrors `_generateTearsheet`'s `spawnFn` — see
+   * tests/agent/test_tearsheet_hook.test.js) so
+   * tests/agent/test_ic_screen_gate.test.js can exercise this parsing logic
+   * directly, without going through `_runGateChain`'s lint pre-flight and
+   * without spawning a real python3 process. Never overridden in
+   * production — `this._icScreenFn` (bound above) is the only seam
+   * `_runGateChain` calls through.
+   */
+  async _runIcScreen(implPath, opts = {}, spawnFn = _spawnPython) {
+    let icResult = null, icInfraFail = false, icInfraReason = null;
+    try {
+      const { stdout, code } = await spawnFn(
+        ['-m', 'research.factor_ic_screen', '--strategy-file', implPath],
+        { cwd: OPENCLAW_DIR, timeoutMs: 300_000, onChild: opts.onChild,
+          env: { ...process.env, PYTHONPATH: 'src' } });
+      if (code !== 0) {
+        icInfraFail = true;
+        icInfraReason = `factor_ic_screen.py exit=${code}; stdout: ${(stdout || '').slice(-300)}`;
+      } else {
+        try {
+          const lastLine = stdout.trim().split('\n').pop();
+          const parsed = JSON.parse(lastLine);
+          if (_isIcScreenShape(parsed)) {
+            icResult = parsed;
+          } else {
+            icInfraFail = true;
+            icInfraReason = `factor_ic_screen.py stdout parsed but is not a valid screen result shape: ${lastLine.slice(0, 300)}`;
+          }
+        } catch (e) {
+          icInfraFail = true;
+          icInfraReason = `factor_ic_screen.py unparseable stdout: ${stdout.slice(0, 300)}`;
+        }
+      }
+    } catch (e) {
+      icInfraFail = true;
+      icInfraReason = `factor_ic_screen.py threw: ${e.message}`;
+    }
+    return { icResult, icInfraFail, icInfraReason };
+  }
+
   /** Default `_backtestFn` — extracted verbatim from the original inline Phase 2. */
   async _runUnifiedBacktest(implPath, opts = {}) {
     const onPhase = typeof opts.onPhase === 'function' ? opts.onPhase : () => {};
@@ -1296,6 +1405,53 @@ class ResearchOrchestrator {
 
     // ── Phase 1: Contract validation ─────────────────────────────────────────
     onPhase('validate', 40);
+
+    // QD E4: AST import lint BEFORE the 60s validate_strategy spawn. A file
+    // that reaches for subprocess/requests/open() is rejected here, attributed
+    // as import_violation rather than the generic contract_violation, and never
+    // gets imported by anything.
+    const lint = await _spawnPython(['src/strategies/strategy_lint.py', implPath],
+                                    { cwd: OPENCLAW_DIR, timeoutMs: 20_000, onChild: opts.onChild });
+    let lintOut = null;
+    try { lintOut = JSON.parse(lint.stdout); } catch (_) { lintOut = null; }
+    if (lintOut && lintOut.ok === false) {
+      const violations = lintOut.violations || [];
+      const lintLog = violations
+        .map(v => `line ${v.line}: ${v.kind}: ${v.detail}`).join('\n');
+      // reasonCode reflects WHAT was found, not just that the lint rejected
+      // the file: import/attribute/call/method/network are disallowed-import
+      // findings; syntax/io-only output is the pre-existing "broken Python"
+      // case (previously only caught downstream by validate_strategy.py) and
+      // stays contract_violation so it isn't mislabeled as an import problem.
+      const importKinds = new Set(['import', 'attribute', 'call', 'method', 'network']);
+      const reasonCode = violations.some(v => importKinds.has(v.kind))
+        ? 'import_violation' : 'contract_violation';
+      const lPaperId = await paperIdForCandidate(candidate_id);
+      if (!suppressQueueWrite) {
+        await this._query(
+          `UPDATE implementation_queue SET status = 'validation_failed', error_log = $1 WHERE candidate_id = $2`,
+          [lintLog, candidate_id]
+        );
+      }
+      await this._emitDecisionFn({
+        paperId:      lPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'validate',
+        outcome:      'reject',
+        reasonCode,
+        reasonDetail: lintLog,
+        metadata:     { violations },
+      });
+      const humanReason = reasonCode === 'import_violation'
+        ? 'disallowed imports/calls' : 'a syntax/read error';
+      notify?.(`  ❌ ${stratId} import lint failed: ${lintLog.slice(0, 200)}`);
+      channelNotify?.(`❌ **${stratId}** rejected — ${humanReason} (see implementation_queue).`);
+      return { ok: false, result: { promoted: false, reasonCode, error: lintLog } };
+    }
+    // lintOut === null means the lint itself failed to run (infra) — fail OPEN
+    // and let validate_strategy.py's own in-process lint be the authority.
+
     const validResult = await this._validateFn(implPath, opts);
 
     const vPaperId = await paperIdForCandidate(candidate_id);
@@ -1321,27 +1477,59 @@ class ResearchOrchestrator {
       channelNotify?.(`❌ **${stratId}** failed contract validation — see implementation_queue for errors.`);
       return { ok: false, result: { promoted: false, reasonCode: 'contract_violation', error: errLog } };
     }
+    const vWarnings = Array.isArray(validResult.warnings) ? validResult.warnings : [];
     await this._emitDecisionFn({
       paperId:     vPaperId,
       candidateId: candidate_id,
       strategyId:  stratId,
       gateName:    'validate',
       outcome:     'pass',
-      metadata:    { signal_count: validResult.signal_count ?? null },
+      metadata:    { signal_count: validResult.signal_count ?? null, warnings: vWarnings },
     });
+    const zeroSignals = vWarnings.includes('zero_signals_synthetic') && _zeroSignalSkipEnabled();
     notify?.(`  ✅ ${stratId} validation passed — running red-team review...`);
     onPhase('redteam', 50);
 
     // ── Phase 1.5: Mandatory LLM red-team gate (Task S1) ──────────────────────
     let rtResult;
-    try {
-      rtResult = await this._redteamFn({
-        implPath,
-        paperContext: strategy_spec?.hypothesis_one_liner || strategy_spec?.signal_logic || null,
+    if (zeroSignals) {
+      // Reached only when OPENCLAW_ZERO_SIGNAL_SKIP_REDTEAM=1 (default OFF —
+      // see _zeroSignalSkipEnabled() above for why: a zero-synthetic-signal
+      // strategy may still be real-data-active, and that's exactly the case
+      // the red-team's look-ahead / off-by-one / full-sample-fit /
+      // survivorship checks exist to catch).
+      //
+      // Spec D3 (2026-09-12): validate_strategy emitted zero signals on the
+      // synthetic LOW_VOL panel and the strategy is neither calendar_edge, nor
+      // gated away from LOW_VOL, nor longer-lookback than the panel. With the
+      // flag on, the operator has decided that for the current synthetic
+      // panel a strategy in this shape is more often inert than aux-data-
+      // driven, so the red-team turn is skipped rather than spent restating
+      // what the harness observed. Skip the call, mark the candidate
+      // needs_signal_check, and continue — the prescreen and the backtest
+      // are the gates that decide. This branch NEVER blocks.
+      rtResult = { verdict: 'pass', findings: [], infra_fail: false, skipped_zero_signals: true };
+      await this._emitDecisionFn({
+        paperId:      vPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'redteam',
+        outcome:      'pass',
+        reasonCode:   'needs_signal_check',
+        reasonDetail: 'validate_strategy reported zero_signals_synthetic — red-team LLM skipped (warn only, never blocks)',
+        metadata:     { warnings: vWarnings, signal_count: validResult.signal_count ?? null },
       });
-    } catch (e) {
-      console.error(`[redteam] unexpected exception auditing ${stratId}: ${e.message}`);
-      rtResult = { verdict: 'pass', findings: [], infra_fail: true };
+      notify?.(`  ⚠️ ${stratId} emitted 0 signals on the synthetic panel — needs_signal_check; red-team LLM skipped (not a block).`);
+    } else {
+      try {
+        rtResult = await this._redteamFn({
+          implPath,
+          paperContext: strategy_spec?.hypothesis_one_liner || strategy_spec?.signal_logic || null,
+        });
+      } catch (e) {
+        console.error(`[redteam] unexpected exception auditing ${stratId}: ${e.message}`);
+        rtResult = { verdict: 'pass', findings: [], infra_fail: true };
+      }
     }
 
     if (rtResult.infra_fail) {
@@ -1377,7 +1565,14 @@ class ResearchOrchestrator {
       notify?.(`  ❌ ${stratId} blocked by red-team gate: ${reason.slice(0, 200)}`);
       channelNotify?.(`❌ **${stratId}** blocked by red-team review — ${reason.slice(0, 200)}`);
       return { ok: false, result: { promoted: false, reasonCode: 'redteam_blocked', error: reason } };
-    } else {
+    } else if (!rtResult.skipped_zero_signals) {
+      // The zero-signal branch above already emitted this gate's decision —
+      // emitting again would double-count the redteam gate in
+      // paper_gate_decisions (e.g. the per-candidate gate-decision timeline
+      // served by GET /api/research/papers/:candidateId, which reads that
+      // table ordered by occurred_at). NOT curator_gate_calibration — that
+      // view (migration 037) only ever aggregates paperhunter / researchjohn
+      // / convergence; it has no 'redteam' gate_name to skew.
       await this._emitDecisionFn({
         paperId:     vPaperId,
         candidateId: candidate_id,
@@ -1388,7 +1583,11 @@ class ResearchOrchestrator {
       });
     }
 
-    notify?.(`  ✅ ${stratId} red-team review passed — running factor prescreen...`);
+    // The zero-signal skip already posted its own ⚠️ needs_signal_check line
+    // above — don't also claim the red-team "passed" here (minor, fix round 1).
+    if (!rtResult.skipped_zero_signals) {
+      notify?.(`  ✅ ${stratId} red-team review passed — running factor prescreen...`);
+    }
     onPhase('prescreen', 55);
 
     // ── Phase 1.75: Cheap pre-backtest factor screen (Task R2) ────────────────
@@ -1436,7 +1635,96 @@ class ResearchOrchestrator {
       });
     }
 
-    notify?.(`  ✅ ${stratId} factor prescreen passed — running backtest (may take 2–5 min)...`);
+    notify?.(`  ✅ ${stratId} factor prescreen did not block — running IC screen...`);
+    onPhase('ic_screen', 57);
+
+    // ── Phase 1.9: rank-IC / quantile / turnover screen (spec D1, Task 8) ────
+    // Placed after the prescreen rather than immediately after red-team: the
+    // prescreen is the cheaper of the two screens (120 s vs 300 s) and its
+    // block conditions are a strict subset of the states that make an IC
+    // number meaningless, so screening cheap-first avoids a 300 s IC run on
+    // a candidate the prescreen already killed. Still strictly after
+    // red-team and strictly before the backtest slot.
+    //
+    // OPENCLAW_IC_SCREEN unset/not '1' (default) = shadow: compute + record
+    // + log only, no candidate's fate changes, the backtest always runs. Set
+    // to exactly '1', a 'flat' verdict — and ONLY 'flat' — skips the ~900 s
+    // backtest. 'weak' and 'skipped' annotate and continue in BOTH modes;
+    // 'skipped' is the thin-cross-section / one-sided-partial-coverage guard
+    // that keeps long-only decile strategies (and one-sided
+    // minority-coverage strategies) out of 'flat' entirely (Task 7 fix
+    // round, rulings R1-R8). A negative ic/icir is not a defect and is never
+    // flagged as a warning here.
+    const icEnforced = process.env.OPENCLAW_IC_SCREEN === '1';
+    const { icResult, icInfraFail, icInfraReason } = await this._icScreenFn(implPath, opts);
+
+    if (icInfraFail) {
+      await this._emitDecisionFn({
+        paperId:      vPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'ic_screen',
+        outcome:      'pass',
+        reasonCode:   'ic_screen_infra_fail',
+        reasonDetail: icInfraReason,
+        metadata:     { enforced: icEnforced },
+      });
+      notify?.(`  ⚠️ [ic_screen] ${stratId} infra failure (${icInfraReason}) — WARN-and-pass, continuing to backtest.`);
+    } else {
+      const v = icResult?.verdict || null;
+      const n3 = (x) => (x === null || x === undefined ? 'n/a' : Number(x).toFixed(4));
+      // Amendment from the Task 7 review (2026-09-24): the log line + gate
+      // decision must carry verdict, reason, ic (H=5), icir (H=5,
+      // annualized), ls_q5q1, turnover, coverage, one_sided, n_rebalances
+      // (when present) — NOT n_qualifying_rebalances, which the original
+      // plan text used before `coverage`/`one_sided` existed.
+      const line = `verdict=${v ?? 'n/a'} reason=${icResult?.reason ?? 'n/a'} `
+                 + `ic5=${n3(icResult?.ic?.['5'])} icir5=${n3(icResult?.icir?.['5'])} `
+                 + `ls_q5q1=${n3(icResult?.ls_q5q1)} turnover=${n3(icResult?.turnover)} `
+                 + `coverage=${n3(icResult?.coverage)} `
+                 + `one_sided=${icResult?.one_sided ?? 'n/a'} `
+                 + `n_rebalances=${icResult?.n_rebalances ?? 'n/a'}`;
+
+      if (v === 'flat' && icEnforced) {
+        const detail = `ic_screen flat (${icResult.reason || 'no reason'}): ${line}`;
+        if (!suppressQueueWrite) {
+          await this._query(
+            `UPDATE implementation_queue SET status = 'ic_screen_flat', error_log = $1 WHERE candidate_id = $2`,
+            [detail, candidate_id]
+          );
+        }
+        await this._emitDecisionFn({
+          paperId:      vPaperId,
+          candidateId:  candidate_id,
+          strategyId:   stratId,
+          gateName:     'ic_screen',
+          outcome:      'reject',
+          reasonCode:   'ic_screen_flat',
+          reasonDetail: detail,
+          metadata:     { ic_screen: icResult, enforced: true },
+        });
+        notify?.(`  ❌ [ic_screen] ${stratId} blocked (flat, enforced) — ${detail}`);
+        channelNotify?.(`❌ **${stratId}** skipped backtest — IC screen flat (${line})`);
+        return { ok: false, result: { promoted: false, reasonCode: 'ic_screen_flat', error: detail } };
+      }
+
+      const shadowNote = (v === 'flat' && !icEnforced)
+        ? ' (shadow: OPENCLAW_IC_SCREEN unset — would have skipped the backtest)'
+        : '';
+      await this._emitDecisionFn({
+        paperId:      vPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'ic_screen',
+        outcome:      'pass',
+        reasonCode:   v ? `ic_screen_${v}` : null,
+        reasonDetail: icResult?.reason || null,
+        metadata:     { ic_screen: icResult || null, enforced: icEnforced },
+      });
+      notify?.(`  [ic_screen] ${stratId} ${line}${shadowNote}`);
+    }
+
+    notify?.(`  ✅ ${stratId} IC screen complete — running backtest (may take 2–5 min)...`);
     onPhase('backtest', 60);
 
     // ── Phase 2: Unified backtest convergence gate ────────────────────────────
@@ -2228,6 +2516,7 @@ module.exports._validateInferredFilter = _validateInferredFilter;
 module.exports._validateInferredClass = _validateInferredClass;
 module.exports._optionUnderlyingSupported = _optionUnderlyingSupported;
 module.exports._isPrescreenShape = _isPrescreenShape;
+module.exports._isIcScreenShape = _isIcScreenShape;
 module.exports.buildCoderContext = buildCoderContext;
 module.exports._variantPath = _variantPath;
 module.exports.QUEUE_STATUS_FOR_REASON = QUEUE_STATUS_FOR_REASON;

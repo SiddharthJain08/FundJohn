@@ -272,12 +272,221 @@ Memo content must:
 No hedge language. Every claim must cite a number from the data.
 `;
 
-// 2026-05-19: Phase 2F calibration-addenda prepend logic removed.
-// Operators no longer interact with MastermindJohn's weekly review prompt —
-// the research-page dashboard is the only operator entry into the research
-// pipeline (add papers / sources / hand-developed strategies). The
-// mastermind_prompt_addenda table stays as a historical record but is
-// neither read nor written by this codebase.
+// 2026-05-19: the Phase 2F OPERATOR addenda prepend was removed (operators no
+// longer interact with this prompt — the research-page dashboard is the only
+// operator entry into the research pipeline). The mastermind_prompt_addenda
+// table stays a historical record and is still neither read nor written here.
+//
+// 2026-09-12 (spec §4 D2): the CALIBRATION addendum is restored — a different
+// thing from the operator addenda. It is the model's own empirical track
+// record, the same bucket table doctor.py's mastermind_calibration_brier check
+// reports, in the same shape the corpus curator already receives from
+// mastermind.js:_renderCalibration (:747-850). The memo writer is being asked
+// for a `confidence` it has been measurably bad at (2026-09-06: Brier 0.254 on
+// 41 resolved outcomes, hit rate 0.66 vs mean stated 0.75, and 0.56 inside the
+// >=0.8 bucket that auto-approval reads); withholding that from the prompt is
+// what let it drift. Fail-soft everywhere: no data => no block => the prompt is
+// byte-identical to before this change.
+
+// Mirror of doctor.py CALIBRATION_BRIER_WARN / _FAIL
+// (src/maintenance/doctor.py:1197-1199). Keep in sync.
+const CALIBRATION_BRIER_WARN  = 0.10;
+const CALIBRATION_BRIER_FAIL  = 0.20;
+
+// D6 fix1 item 4: doctor.py's CALIBRATION_MIN_SAMPLES (10) is a GLOBAL floor
+// on total resolved observations across the whole report — reusing it as a
+// per-bucket gate overstated how much a thin bucket could be trusted.
+// mastermind_calibration.py already has the correct PER-BUCKET floor for
+// exactly this purpose, used by calibrated_confidence() (:177-238):
+// MIN_BUCKET_N (src/metrics/mastermind_calibration.py:145), "below this a
+// bucket's rate is noise — pass raw through". Mirror that constant instead.
+// Keep in sync.
+const MIN_BUCKET_N = 8;
+
+// Mirror of mastermind_calibration.py EVIDENCE_CAPS / count tiers / staleness
+// (src/metrics/mastermind_calibration.py:145-149, evidence_level():241-267).
+// This is STATIC guidance text — the cap TIERS are not computed per
+// (strategy, regime) here (that would cost 4 extra DB round trips per
+// strategy per review, one per canonical regime); it tells the model the
+// RULE proposal_manager.py's auto_approve applies downstream, and is
+// careful not to overstate it: with OPENCLAW_PROPOSAL_CALIBRATED unset
+// (today's default), the floor compare still uses the RAW stated confidence
+// only — the cap is computed and logged, not yet enforced.
+//
+// D6 fix1 item 1: unlike the cap TIERS above, the FLOOR itself is not
+// static — it is read live from
+// process.env.OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE at render time,
+// the same source proposal_manager.py's autoapprove_min_confidence() reads
+// (src/strategies/proposal_manager.py:50 the default constant, :53-66 the
+// live reader). Unlike that Python reader — which deliberately raises on a
+// mangled value, "fail-closed: a mangled floor must crash the caller" — a
+// parse failure here falls back to the code default rather than throwing:
+// this text is a prompt, not a gate, and "never a throw that kills the
+// Saturday review" wins for this file.
+const DEFAULT_AUTOAPPROVE_MIN_CONFIDENCE = 0.85; // mirror of proposal_manager.py:50
+
+function _autoApproveFloor() {
+  const raw = process.env.OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE;
+  if (raw === undefined || String(raw).trim() === '') return DEFAULT_AUTOAPPROVE_MIN_CONFIDENCE;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : DEFAULT_AUTOAPPROVE_MIN_CONFIDENCE;
+}
+
+function _autoApproveFloorText() {
+  const floor = _autoApproveFloor();
+  return `the auto-approve floor (${floor}, from `
+       + `OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE; code default `
+       + `${DEFAULT_AUTOAPPROVE_MIN_CONFIDENCE})`;
+}
+
+function _renderEvidenceCapText() {
+  return [
+    '  auto_approve can ALSO cap your confidence by how much LIVE evidence',
+    '  backs the specific (strategy, regime) decision at approval time — a',
+    '  trailing 30-day closed-trade count, staleness-adjusted:',
+    '    <10 closed trades  -> "none"   cap 0.35',
+    '    <30 closed trades  -> "low"    cap 0.55',
+    '    <100 closed trades -> "medium" cap 0.75',
+    '    >=100 closed trades -> "high"  cap 1.0',
+    '  (drop one tier if the most recent closed trade is >45 days old).',
+    '  When OPENCLAW_PROPOSAL_CALIBRATED=1, auto_approve compares',
+    `  min(calibrated_confidence, cap) against ${_autoApproveFloorText()}, so a thin-evidence`,
+    '  regime cannot earn approval on confidence alone. While the flag is',
+    '  unset (today\'s default), the floor compare uses your raw stated',
+    '  confidence only — the cap is computed and logged, not enforced.',
+    '  A bucket\'s match rate can only LOWER your stated confidence toward that rate — it never raises it.',
+  ].join('\n');
+}
+
+/**
+ * Render the confidence-calibration block. '' when there is nothing to say.
+ * Defensive against a malformed bucket entry (e.g. `null`, from a corrupt
+ * report) — a single bad row is skipped rather than thrown, per the "never a
+ * throw that kills the Saturday review" fail-soft requirement.
+ */
+function _renderProposalCalibration(cal) {
+  if (!cal || !Array.isArray(cal.buckets) || cal.buckets.length === 0) return '';
+  const buckets = cal.buckets.filter(b => b && typeof b === 'object');
+  const withData = buckets.filter(b => (b.count ?? 0) > 0);
+  if (!withData.length) return '';
+
+  const num = (v, d = 3) => (v === null || v === undefined ? 'n/a' : Number(v).toFixed(d));
+  const parts = [];
+  parts.push('--- CONFIDENCE CALIBRATION (your own track record) ---');
+  parts.push('');
+  parts.push('The `confidence` field of each entry in `regime_recommendations` (schema');
+  parts.push('above) is scored 30 days later against the live Sharpe direction for that');
+  parts.push('(strategy, regime). This is how those scores came out:');
+  parts.push('');
+  parts.push('  bucket        n    matched  match_rate');
+  for (const b of buckets) {
+    const n = b.count ?? 0;
+    const rate = n < MIN_BUCKET_N ? 'n/a (thin sample)' : num(b.match_rate);
+    parts.push(`  ${String(b.range).padEnd(12)} ${String(n).padStart(4)}  `
+             + `${String(b.matched ?? 0).padStart(7)}  ${rate}`);
+  }
+  parts.push('');
+  parts.push(`  Brier score: ${num(cal.brier_score)} `
+           + `(warn >= ${CALIBRATION_BRIER_WARN.toFixed(2)}, fail >= ${CALIBRATION_BRIER_FAIL.toFixed(2)})`);
+  parts.push(`  Overall hit rate: ${num(cal.hit_rate, 2)} against mean stated confidence `
+           + `${num(cal.mean_confidence, 2)} `
+           + `(${cal.resolved_observations ?? 0} resolved of ${cal.total_observations ?? 0})`);
+  parts.push('');
+  parts.push(_renderEvidenceCapText());
+  parts.push('');
+  if (cal.hit_rate != null && cal.mean_confidence != null
+      && Number(cal.hit_rate) < Number(cal.mean_confidence) - 0.05) {
+    parts.push('You are OVER-CONFIDENT: your stated confidence exceeds your realised hit rate.');
+    parts.push('A bucket whose match_rate sits well below its own midpoint is one you should stop');
+    parts.push('using — move those calls down a bucket. Reserve >= 0.8 for recommendations you');
+    parts.push('would defend on the trade-level numbers alone, not on the shape of the story.');
+  } else {
+    parts.push('Use these rates as a prior on your own confidence. Reserve >= 0.8 for');
+    parts.push('recommendations you would defend on the trade-level numbers alone.');
+  }
+  parts.push('Ignore "thin sample" buckets until they accumulate enough observations.');
+  parts.push('');
+  return parts.join('\n');
+}
+
+function _stderrTail(res) {
+  const raw = res && res.stderr != null ? String(res.stderr) : '';
+  return raw.length > 200 ? raw.slice(-200) : raw;
+}
+
+// D6 fix1 item 2: loader failures were silent (a caught error only ever
+// logged from the outermost catch, and only for the "spawn threw" case —
+// a non-zero status, an empty stdout, or a shape-invalid report all
+// returned null with NO log line at all). Every non-success branch below
+// now logs exactly one console.warn naming what happened, the exit
+// status/signal, and a 200-char stderr tail, before returning null.
+function _warnCalibrationUnavailable(reason, res) {
+  const status = res && 'status' in res ? res.status : null;
+  const signal = res && 'signal' in res ? res.signal : null;
+  console.warn(
+    `[review] calibration addendum unavailable: ${reason} `
+    + `(status=${status}, signal=${signal}) stderr="${_stderrTail(res)}"`
+  );
+}
+
+/**
+ * Best-effort read of the calibration report. Uses the file's existing
+ * spawnSync/PYTHON convention. Every non-success branch (spawn threw, spawn
+ * returned a `res.error` — e.g. ENOENT or a timeout, a non-zero or null
+ * exit status, empty stdout, unparseable stdout, or JSON missing a
+ * `buckets` array) logs exactly one
+ * `console.warn('[review] calibration addendum unavailable: …')` and then
+ * returns null so the prompt simply omits the block. Never throws.
+ *
+ * `spawn` is injectable (defaults to the real `spawnSync`) so tests can
+ * exercise every fail-open path — a thrown spawn call, a real
+ * `spawnSync`-style `res.error` (ENOENT/timeout), a non-zero or null exit
+ * status, empty stdout, unparseable stdout, or a report missing `buckets`
+ * — without a real Python/Postgres round trip. The production call site is
+ * `run()` (hoisted once per Saturday review, not once per strategy — see
+ * D6 fix1 item 4); `_reviewOne` receives the already-loaded `calibration`
+ * via its options object and no longer calls this function itself.
+ */
+function _loadProposalCalibration({ spawn = spawnSync } = {}) {
+  let res;
+  try {
+    res = spawn(PYTHON, ['-m', 'metrics.mastermind_calibration', '--report'], {
+      encoding: 'utf-8',
+      cwd: OPENCLAW_DIR,
+      timeout: 60_000,
+      env: { ...process.env, PYTHONPATH: 'src' },
+    });
+  } catch (e) {
+    _warnCalibrationUnavailable(`spawn threw: ${e.message}`, null);
+    return null;
+  }
+
+  if (res && res.error) {
+    _warnCalibrationUnavailable(`spawn error: ${res.error.message}`, res);
+    return null;
+  }
+  if (!res || res.status !== 0) {
+    _warnCalibrationUnavailable('non-zero or missing exit status', res);
+    return null;
+  }
+  if (!res.stdout) {
+    _warnCalibrationUnavailable('empty stdout', res);
+    return null;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(res.stdout);
+  } catch (e) {
+    _warnCalibrationUnavailable(`stdout is not valid JSON: ${e.message}`, res);
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.buckets)) {
+    _warnCalibrationUnavailable('parsed JSON has no buckets array', res);
+    return null;
+  }
+  return parsed;
+}
 
 // SP-4: mirror of lifecycle.py PROMOTION_THRESHOLDS (keep in sync). Used to
 // tell the reviewer the correct per-class promotion floor for this strategy.
@@ -290,12 +499,21 @@ const PROMOTION_THRESHOLDS = {
   crypto: { min_sharpe: 0, max_drawdown: 0.70, min_trades: 100 },
 };
 
-function buildStrategyPrompt(strategy, tradePack, counterfactuals) {
+function buildStrategyPrompt(strategy, tradePack, counterfactuals, calibration = null) {
   const ic = strategy.instrument_class || 'equity';
   const thr = PROMOTION_THRESHOLDS[ic] || PROMOTION_THRESHOLDS.equity;
   const classLine = `Instrument class: ${ic} (promotion floor per regime sleeve: Sharpe > ${thr.min_sharpe.toFixed(2)}, MaxDD ≤ ${(thr.max_drawdown * 100).toFixed(0)}%, trades ≥ ${thr.min_trades})`;
+  // Defense-in-depth on top of _renderProposalCalibration's own guards: this
+  // block must never be the reason the Saturday review throws.
+  let calBlock = '';
+  try {
+    calBlock = _renderProposalCalibration(calibration);
+  } catch (e) {
+    console.error(`[review] calibration block render failed: ${e.message}`);
+    calBlock = '';
+  }
   return `${MEMO_SYSTEM_PREAMBLE}
-
+${calBlock ? '\n' + calBlock : ''}
 Strategy: ${strategy.id} (${strategy.name})
 Status: ${strategy.status}
 Tier: ${strategy.tier}
@@ -351,7 +569,7 @@ async function _postToDiscord(channelName, text) {
   return false;
 }
 
-async function _reviewOne(strategy, { dryRun, notify }) {
+async function _reviewOne(strategy, { dryRun, notify, calibration = null }) {
   const log = (m) => { notify?.(`${strategy.id}: ${m}`); };
   const tradePack = await _buildTradePack(strategy.id);
 
@@ -368,7 +586,10 @@ async function _reviewOne(strategy, { dryRun, notify }) {
   }
 
   const counterfactuals = _counterfactuals(tradePack.pnl);
-  const prompt = buildStrategyPrompt(strategy, tradePack, counterfactuals);
+  // D6 fix1 item 4: calibration is loaded ONCE per run() (hoisted above the
+  // strategy loop) and threaded through via this options object — no
+  // per-strategy spawnSync/Python/Postgres round trip here any more.
+  const prompt = buildStrategyPrompt(strategy, tradePack, counterfactuals, calibration);
   log(`prompting Opus (signals=${tradePack.signals.length} pnl=${tradePack.pnl.length})`);
 
   const memoModel = resolveModel('mastermind', 'comprehensive-review', 'memo_writer');
@@ -578,13 +799,27 @@ print(pid)`,
   return { strategy_id: strategy.id, memo_id: memoId, cost_usd: out.costUsd, posted };
 }
 
-async function run({ dryRun = false, strategyIds = null, notify = () => {} } = {}) {
-  const strategies = await _fetchStrategies(strategyIds);
+// D6 fix1 item 4: `fetchStrategies` / `reviewOne` / `loadCalibration` are
+// injectable (defaulting to the real, DB/Python-backed production
+// functions) purely so a test can drive this loop — 3 fake strategies, a
+// counting fake loader, a recording fake reviewOne — without touching
+// Postgres, spawning Python, or calling the LLM. Production call sites
+// (run_mastermind.js) pass none of these and are unaffected.
+async function run({ dryRun = false, strategyIds = null, notify = () => {},
+                      fetchStrategies = _fetchStrategies,
+                      reviewOne = _reviewOne,
+                      loadCalibration = _loadProposalCalibration } = {}) {
+  const strategies = await fetchStrategies(strategyIds);
   notify(`${strategies.length} strategies to review`);
+  // Loaded ONCE for the whole Saturday review, not once per strategy — the
+  // report doesn't change strategy-to-strategy, so re-spawning Python once
+  // per strategy (previously inside _reviewOne) was a wasted round trip per
+  // strategy for identical data.
+  const calibration = loadCalibration();
   const results = [];
   let totalCost = 0;
   for (const s of strategies) {
-    const r = await _reviewOne(s, { dryRun, notify });
+    const r = await reviewOne(s, { dryRun, notify, calibration });
     results.push(r);
     if (r.cost_usd) totalCost += Number(r.cost_usd);
   }
@@ -597,4 +832,5 @@ async function run({ dryRun = false, strategyIds = null, notify = () => {} } = {
   };
 }
 
-module.exports = { run, buildStrategyPrompt, _counterfactuals };
+module.exports = { run, buildStrategyPrompt, _counterfactuals,
+                   _renderProposalCalibration, _loadProposalCalibration };

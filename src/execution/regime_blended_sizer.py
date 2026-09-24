@@ -16,7 +16,10 @@ import logging
 import math
 import os
 import re
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+import psycopg2
 
 from execution.signal_cadence_gate import filter_by_cadence, advance_last_fire
 from execution.alpaca_executor import _spot_price
@@ -2318,6 +2321,102 @@ def _load_recent_stopouts(days: float) -> dict:
         return {}
 
 
+def _ownership_block_on() -> bool:
+    """Stream B item 15 enforcement flag. Unset (or anything other than '1')
+    means report-only: the ledger is written and logged, sizing is untouched."""
+    return os.environ.get('OPENCLAW_OWNERSHIP_BLOCK') == '1'
+
+
+def _ownership_blocklist_from(status_map, *, enforcing=None, cycle_date=None) -> set:
+    """Pure: {ticker: ownership status} -> the set the hygiene gate sheds.
+
+    ALWAYS logs the `[ownership]` line so the trade step shows the finding even
+    in report-only mode, and returns an EMPTY set unless enforcing — so an unset
+    OPENCLAW_OWNERSHIP_BLOCK leaves today's sizing byte-identical.
+
+    Fix round 1 item 1: this line reports the RESOLVER's candidates, labeled
+    `candidates=` (was unlabeled `not ok=`) precisely because `enforcing=True`
+    here does NOT mean anything was actually shed — this fires before the
+    hygiene gate's own early return (OPENCLAW_ENTRY_HYGIENE=0 short-circuits
+    the gate with nothing shed) and before the call site's benchmark-sleeve
+    subtraction. `_apply_entry_hygiene_gate`'s own `applied=`/`n_applied=` line
+    is the one that reports EFFECT."""
+    from execution.position_ownership import STATUS_OK
+    if enforcing is None:
+        enforcing = _ownership_block_on()
+    bad = {t for t, s in (status_map or {}).items() if s and s != STATUS_OK}
+    logger.info('[ownership] candidates=%s n_candidates=%d enforcing=%s cycle_date=%s',
+                sorted(bad)[:20], len(bad), bool(enforcing), cycle_date)
+    return bad if enforcing else set()
+
+
+_OWNERSHIP_MAX_AGE_DAYS_DEFAULT = 3
+
+
+def _load_ownership_blocklist() -> tuple:
+    """Read the newest position_ownership cycle and resolve the blocklist.
+    Returns (blocklist, cycle_date, enforcing).
+
+    `enforcing` (fix round 2) is the EFFECTIVE state, not the raw env flag:
+    flag on AND the ledger is fresh (not stale) AND the load path raised no
+    exception. No rows at all is still "enforcing" when the flag is on —
+    there's nothing to block, which is not the same failure as staleness.
+    This is what `_apply_entry_hygiene_gate`'s `applied=` line prints; the
+    resolver's own `candidates=` line (`_ownership_blocklist_from`) keeps
+    reporting the raw flag, except on the stale branch, where this loader
+    forces `enforcing=False` into it (see below) — the two lines are
+    intentionally different views (intent vs. effect), see both docstrings.
+
+    Fail-open (empty set, None, False) on ANY error — including one raised by
+    the resolve step itself (fix round 1 item 3: the prior code called
+    `_ownership_blocklist_from(status_map)` AFTER the try/except, so a bug in
+    the resolver would propagate uncaught instead of failing open; the resolve
+    now happens inside the try). A ledger read must never stop the book from
+    trading.
+
+    Fix round 1 item 2 — staleness bound: an unbounded MAX(cycle_date) lets a
+    reconcile hook that silently stops running freeze a stale blocklist in
+    place while it keeps gating order flow. age_days is computed by Postgres
+    (`CURRENT_DATE - cycle_date`, same construction as broker.py's
+    `_position_ownership_clean` system check) — deliberately the DB's clock,
+    not this process's `date.today()`, to avoid the exact host/DB timezone
+    drift class `_load_premarket_vetoes` (above) documents for the same
+    reason. Past OPENCLAW_OWNERSHIP_MAX_AGE_DAYS (default 3, matching
+    `_position_ownership_clean`) the ledger counts as stale: log a WARNING and
+    still run the resolver — with `enforcing=False` forced regardless of the
+    flag, so the candidates= line keeps showing what the stale ledger claims
+    without the enforcing=True/nothing-applied lie item 1 exists to kill —
+    then return its (empty, by construction) result — `enforcing=False`,
+    fix round 2. No rows at all (cycle_date is None) skips the age check
+    entirely: `set()` as today, `enforcing=` still the raw flag."""
+    try:
+        import psycopg2
+        from execution.position_ownership import latest_status_map_with_date
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            status_map, cycle_date = latest_status_map_with_date(cur)
+            age_days = None
+            if cycle_date is not None:
+                cur.execute('SELECT CURRENT_DATE - %s', (cycle_date,))
+                age_days = int((cur.fetchone() or [0])[0] or 0)
+        if age_days is not None:
+            try:
+                max_age = int(os.environ.get('OPENCLAW_OWNERSHIP_MAX_AGE_DAYS',
+                                             _OWNERSHIP_MAX_AGE_DAYS_DEFAULT))
+            except (TypeError, ValueError):
+                max_age = _OWNERSHIP_MAX_AGE_DAYS_DEFAULT
+            if age_days > max_age:
+                logger.warning('[ownership] ledger stale age_days=%d (> %d) — not enforcing',
+                               age_days, max_age)
+                return (_ownership_blocklist_from(status_map, enforcing=False,
+                                                  cycle_date=cycle_date),
+                        cycle_date, False)
+        return (_ownership_blocklist_from(status_map, cycle_date=cycle_date),
+                cycle_date, _ownership_block_on())
+    except Exception as e:  # noqa: BLE001
+        logger.warning('[ownership] latest-status lookup failed (%s) — no block applied', e)
+        return set(), None, False
+
+
 def _load_liquidity_stats():
     """(adv_usd, med_close) dicts from the derived cost artifact, or None."""
     try:
@@ -2360,17 +2459,42 @@ def _load_premarket_vetoes():
 
 
 def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, params=None,
-                              premarket_vetoes=None, risk_exits=None):
+                              premarket_vetoes=None, risk_exits=None,
+                              ownership_blocked=None, ownership_cycle_date=None,
+                              ownership_enforcing=None):
     """Apply premarket veto + cooldowns + liquidity floor + participation cap to
     targets. Only-shed semantics per blocked ticker: not held → target dropped;
     flip → close-only; same-sign increase → capped at held size. The
     participation cap reduces target magnitude to max(cap, |held|). Inputs
     injectable for tests.
 
-    Three cooldown classes, all same-direction-only except the news veto:
+    Four cooldown classes, all same-direction-only except the news veto and
+    ownership:
       premarket veto  — this name is dangerous TODAY (direction-agnostic)
       stop-out        — this side of this name just hit its stop
       risk exit       — the circuit breaker fired on it, or it was liquidated
+      ownership       — the broker's share count and the open signals' claim
+                       disagree on this name (Stream B item 15). Direction-
+                       agnostic like the news veto: the finding says "we do not
+                       know who owns these shares", not "this side lost". Opt-in
+                       via OPENCLAW_OWNERSHIP_BLOCK=1; the default resolves to an
+                       empty set, so unset == today's behaviour.
+
+    `ownership_cycle_date` (fix round 1) is a separate, logging-only param —
+    the ledger's own cycle_date, carried through so the `[ownership]
+    applied=...` line can report which day's ledger produced the (possibly
+    empty) block.
+
+    `ownership_enforcing` (fix round 2) is a separate, logging-only param —
+    the EFFECTIVE enforcing state (see the ownership loader's docstring):
+    the raw flag AND ledger-fresh AND no load exception. Omitted
+    callers (the direct-call tests in test_entry_hygiene_gate.py and
+    test_sameday_premarket_protection.py) fall back to `_ownership_block_on()`
+    — the raw flag — which keeps those tests valid since they never exercise
+    staleness. The printed `enforcing=` on the `applied=` line is this value
+    AND-ed with "the hygiene gate is actually active": always `False` on the
+    OPENCLAW_ENTRY_HYGIENE=0 / empty-target early return below, since nothing
+    CAN be applied on that path regardless of the flag.
 
     The premarket veto is what makes pre-market protection actually protective.
     Without it the 09:25 reconcile closes a news-vetoed position at the open and
@@ -2379,6 +2503,23 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
     Direction-agnostic on purpose, unlike the stop-out cooldown: the veto says
     "this name is dangerous today", not "this side of it lost"."""
     if os.environ.get('OPENCLAW_ENTRY_HYGIENE', '1') == '0' or not target_usd:
+        # Fix round 1 item 1: nothing is shed on this early-return path, so the
+        # effect line must say so — n_applied=0 — even though the resolver's
+        # own candidates= line (logged before this gate ever runs) may say
+        # enforcing=True. Always fires exactly once here.
+        #
+        # Fix round 2: enforcing= is hardcoded False here, NOT the raw flag
+        # and NOT ownership_enforcing — the hygiene gate itself is not active
+        # on this path, so nothing can be applied regardless of flag/ledger
+        # state. This is deliberate, not a placeholder: do not "fix" it back
+        # to _ownership_block_on() or ownership_enforcing. One consequence:
+        # the zero-conviction flatten path (_emit_orders_from_targets calling
+        # this gate with target_usd={}) always hits this branch, so it always
+        # prints enforcing=False here even on a cycle where enforcement is
+        # genuinely armed — that is correct (nothing is ever shed on an
+        # empty-target call), not a bug.
+        logger.info('[ownership] applied=[] n_applied=0 enforcing=False cycle_date=%s',
+                    ownership_cycle_date)
         return target_usd
     params = params or _load_entry_hygiene_params()
     if stopouts is None:
@@ -2391,9 +2532,16 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
                        _ENTRY_HYGIENE_DEFAULTS['risk_exit_cooldown_days']))
     if liq is None:
         liq = _load_liquidity_stats()
+    ownership_blocked = ownership_blocked or frozenset()
+    # Fix round 2: `is None`, never `or` — a caller (the production call
+    # site) legitimately passes False (a stale or failed ledger with the flag
+    # on), and `ownership_enforcing or _ownership_block_on()` would silently
+    # restore True for that exact case, which is the bug this round fixes.
+    if ownership_enforcing is None:
+        ownership_enforcing = _ownership_block_on()
     adv, px = liq if liq else ({}, {})
     out = dict(target_usd)
-    cooled, illiquid, part_capped, vetoed, risk_cooled = [], [], [], [], []
+    cooled, illiquid, part_capped, vetoed, risk_cooled, own_blocked = [], [], [], [], [], []
 
     def _shed(tkr):
         target, current = out[tkr], broker.get(tkr, 0.0)
@@ -2411,6 +2559,10 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
         if tkr in premarket_vetoes and target != 0.0:
             _shed(tkr)
             vetoed.append(tkr)
+            continue
+        if tkr in ownership_blocked and target != 0.0:
+            _shed(tkr)
+            own_blocked.append(tkr)
             continue
         stop_dir = stopouts.get(tkr)
         if stop_dir and (target > 0) == (stop_dir > 0) and target != 0.0:
@@ -2435,14 +2587,261 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
             if abs(target) > limit + 0.01:
                 out[tkr] = (1.0 if target > 0 else -1.0) * limit
                 part_capped.append(tkr)
-    if cooled or illiquid or part_capped or vetoed or risk_cooled:
+    if cooled or illiquid or part_capped or vetoed or risk_cooled or own_blocked:
         logger.warning(
             'regime_blended_sizer.entry_hygiene: premarket-veto blocked=%s, '
             'stop-out cooldown blocked=%s, risk-exit cooldown blocked=%s, '
-            'liquidity floor blocked=%s, participation-capped=%s',
-            sorted(vetoed), sorted(cooled), sorted(risk_cooled),
+            'ownership blocked=%s, liquidity floor blocked=%s, '
+            'participation-capped=%s',
+            sorted(vetoed), sorted(cooled), sorted(risk_cooled), sorted(own_blocked),
             sorted(illiquid), sorted(part_capped))
+    # Fix round 1 item 1: report EFFECT, not intent. own_blocked is exactly the
+    # set of tickers the ownership branch above actually _shed() — a ticker
+    # shed by an earlier branch (premarket veto, cooldown) `continue`s before
+    # ever reaching the ownership check, so it correctly never lands here; a
+    # bench-exempt ticker never reaches here either, since the call site
+    # subtracts bench_tkrs from ownership_blocked before calling this gate.
+    # Always logs once, even when own_blocked is empty, so this line can never
+    # be conflated with the resolver's candidates=/enforcing=True intent line.
+    #
+    # Fix round 2: enforcing= is the resolved ownership_enforcing (EFFECTIVE
+    # state — see the docstring), not a fresh _ownership_block_on() read. The
+    # gate reaches this line only when it is actually active, so this is the
+    # "AND the hygiene gate is active" half of the AND already satisfied —
+    # ownership_enforcing alone is the correct value to print.
+    logger.info('[ownership] applied=%s n_applied=%d enforcing=%s cycle_date=%s',
+                sorted(own_blocked), len(own_blocked), bool(ownership_enforcing),
+                ownership_cycle_date)
     return out
+
+
+# ── Only-shed clamp, shared by the C1 breaker gate and the C3 event gate ────
+# Same semantics as _apply_entry_hygiene_gate's inner _shed (above), lifted
+# to module scope so the two new gates cannot drift from it: not held -> drop the
+# target (an open is refused); opposite sign -> zero it (the close leg survives,
+# the re-open leg dies); same-sign larger -> cap at the held size (no growth);
+# same-sign smaller -> untouched (a reduction is an exit and is never blocked).
+def _clamp_to_held(out: dict, tkr: str, broker: dict) -> str:
+    """Mutates `out[tkr]` in place. Returns 'blocked' | 'unflipped' | 'capped'
+    | 'none' so callers can report exactly what they did."""
+    target = out.get(tkr)
+    if target is None:
+        return 'none'
+    current = (broker or {}).get(tkr, 0.0)
+    if current == 0.0:
+        del out[tkr]
+        return 'blocked'
+    if (target > 0 > current) or (target < 0 < current):
+        out[tkr] = 0.0
+        return 'unflipped'
+    if abs(target) > abs(current):
+        out[tkr] = (1.0 if current > 0 else -1.0) * abs(current)
+        return 'capped'
+    return 'none'
+
+
+def _load_account_breaker_halted() -> bool:
+    """account_breaker_state.halted (spec 2026-09-12 C1).
+
+    Fix round 1 item 3, belt-and-braces: short-circuits to False, with no DB
+    read at all, unless OPENCLAW_ACCOUNT_BREAKER=1 is armed. halted can only
+    ever be SET by the breaker's own save_state, whose caller gates on
+    account_breaker.armed() — so this is a redundant guard against a stray or
+    stale row, not a new way to reach True.
+
+    FAIL-OPEN (False) on any error, matching _load_recent_risk_exits: the hard
+    stop is the breaker's own flatten, which runs in its own 5-minute process.
+    A Postgres hiccup must not silently freeze the whole fleet's entries."""
+    if os.environ.get('OPENCLAW_ACCOUNT_BREAKER') != '1':
+        return False
+    try:
+        with psycopg2.connect(os.environ['POSTGRES_URI'], connect_timeout=5) as c, \
+                c.cursor() as cur:
+            cur.execute('SELECT halted FROM account_breaker_state WHERE id = 1')
+            row = cur.fetchone()
+            return bool(row and row[0])
+    except Exception as e:  # noqa: BLE001
+        logger.warning('[account_breaker] halted lookup failed (%s: %s); '
+                       'treating as NOT halted', type(e).__name__, e)
+        return False
+
+
+def _apply_account_breaker_gate(target_usd, broker, *, halted=None,
+                                bench_tkrs=None):
+    """While the account breaker is halted, alpha OPENS and ADDS are refused.
+
+    Exits, reductions and orphan closes are structurally unblockable (orphan
+    closes never enter target_usd). Benchmark-sleeve tickers are exempt: ruling
+    R2 halts the ALPHA book, and S_beta_spy positions and entries stay
+    untouched. Option legs and crypto pairs are out of scope. `halted` and
+    `bench_tkrs` are injectable for tests."""
+    if not target_usd:
+        return target_usd
+    if halted is None:
+        halted = _load_account_breaker_halted()
+    if not halted:
+        return target_usd
+
+    bench_tkrs = set(bench_tkrs or ())
+    out = dict(target_usd)
+    blocked, unflipped, capped = [], [], []
+    for tkr in [t for t in target_usd
+                if t not in bench_tkrs and not _is_occ_symbol(t) and '/' not in t]:
+        action = _clamp_to_held(out, tkr, broker)
+        if action == 'blocked':
+            blocked.append(tkr)
+        elif action == 'unflipped':
+            unflipped.append(tkr)
+        elif action == 'capped':
+            capped.append(tkr)
+    if blocked or unflipped or capped:
+        logger.warning(
+            '[account_breaker] HALTED — alpha opens blocked=%s, flips converted '
+            'to close-only=%s, adds capped at held size=%s (benchmark exempt=%s)',
+            sorted(blocked), sorted(unflipped), sorted(capped), sorted(bench_tkrs))
+    return out
+
+
+# ── C3 (spec 2026-09-12 §3, ruling R3): T-1..T macro-event entry block ─────
+EVENT_GATE_ENV = 'OPENCLAW_EVENT_GATE'
+EVENT_GATE_EXEMPT_BENCH_ENV = 'OPENCLAW_EVENT_GATE_EXEMPT_BENCH'
+
+
+def _event_gate_enabled() -> bool:
+    return os.environ.get(EVENT_GATE_ENV) == '1'
+
+
+def _event_gate_exempt_bench() -> bool:
+    """Operator switch, ruling R3: the benchmark sleeve is NOT exempt by
+    default (consistent with the 09-04 premarket-veto ruling)."""
+    return os.environ.get(EVENT_GATE_EXEMPT_BENCH_ENV) == '1'
+
+
+def _load_macro_event_gating(session):
+    """lib.macro_events.gating_event(session), isolated to a single call site
+    so conftest can stub it the same way as _load_account_breaker_halted /
+    _load_ownership_blocklist above (Task 6 / Task 8's idiom) — without this
+    indirection, every sizer e2e test that reaches the emission tail would
+    read the real data/master/macro_events.parquet off disk on every run.
+    The import stays INSIDE this function rather than hoisted to module
+    scope: test_macro_event_gate.py's calendar-failure test patches
+    lib.macro_events.gating_event directly, which only takes effect if the
+    name is looked up fresh on every call.
+
+    Returns (events, status) — fix round 1 item 2. status is one of:
+      'ok'      — gating_event(session) completed without raising AND the
+                  master exists. `events` may still be None (no listed
+                  release gates this session — the normal, common case).
+      'missing' — the master parquet is absent on disk. `events` is always
+                  None here: lib.macro_events.load_events() already
+                  degrades a missing file to [] internally, so
+                  gating_event() itself never raises for this — presence is
+                  checked separately, AFTER the read call below, precisely
+                  so a raising gating_event() (mocked or real) is still
+                  caught as 'failed' first, even on a box where the master
+                  is absent (checking existence FIRST would swallow that
+                  case as 'missing' and make 'failed' unreachable here).
+      'failed'  — gating_event(session) itself raised: import failure, a
+                  bug, or any error lib.macro_events did not already
+                  swallow internally.
+    status exists ONLY to change what the shadow line PRINTS
+    (`events=unavailable:<status>` vs `events=<value|none>`). The caller
+    must never branch on status as a truthy sentinel — only the `events`
+    value (always None on 'missing'/'failed') gates anything, so a
+    calendar/master outage fails OPEN, never closed.
+
+    Logged at ERROR, not WARNING, on 'failed' — mirrors the T8/T10 ERROR
+    bump on lib.macro_events._t_minus_one: a calendar failure here must be
+    loud, not papered over. Prefixed `[event_gate]` (fix round 1 item 4) for
+    grep parity with the shadow/armed summary line below."""
+    try:
+        from lib.macro_events import gating_event, master_path
+        events = gating_event(session)
+    except Exception as e:  # noqa: BLE001
+        logger.error('[event_gate] calendar/master unreadable (%s: %s); inert',
+                     type(e).__name__, e)
+        return None, 'failed'
+    try:
+        exists = master_path().exists()
+    except Exception as e:  # noqa: BLE001
+        logger.error('[event_gate] calendar/master unreadable (%s: %s); inert',
+                     type(e).__name__, e)
+        return None, 'failed'
+    return (events, 'ok') if exists else (None, 'missing')
+
+
+def _apply_macro_event_gate(target_usd, broker, *, session=None, events=None,
+                            bench_tkrs=None):
+    """Ruling R3: drop every NEW open/add from T-1 through the release session
+    of a high-importance macro event (FOMC_DECISION, CPI, NFP).
+
+    Exits, reductions and orphan closes are untouched (orphan closes never
+    enter target_usd). ALWAYS ACTIVE, independent of any market-condition
+    classification — this function takes no branch on it. Benchmark tickers
+    are included unless OPENCLAW_EVENT_GATE_EXEMPT_BENCH=1. The bench_exempt=
+    token on the line below reports this SWITCH, not the outcome (fix round
+    1 item 4): if bench_tkrs arrives here empty — e.g. a benchmark-registry
+    lookup failure upstream — the switch can read 1 while every ticker,
+    including the sleeve, is gated anyway; fail-closed for the sleeve, the
+    same class as the other gates.
+
+    SHADOW unless OPENCLAW_EVENT_GATE=1: the ORIGINAL dict is returned and
+    only the `[event_gate] shadow ...` line is emitted, so routing is
+    byte-identical. The line is emitted on EVERY cycle, including non-event
+    sessions (events=none) — its absence must mean "the sizer did not run",
+    never "nothing was gated".
+
+    Blocked conviction is SHAVED, not redistributed (same philosophy as the
+    per-ticker and cluster caps). `session`, `events` and `bench_tkrs` are
+    injectable for tests; a calendar/master outage is inert (see
+    _load_macro_event_gating) and renders on the line as
+    events=unavailable:<missing|failed> rather than silently reading as
+    events=none (fix round 1 item 2) — `if events:` below still branches on
+    the events VALUE only, never on status, so an outage cannot fail
+    closed."""
+    if session is None:
+        # Fix round 1 item 1: this host's clock is UTC. date.today() rolls
+        # to the next calendar day at 00:00 UTC — hours before an Eastern
+        # midnight — so a cycle run after 19:00 local Eastern time would key
+        # on TOMORROW's date instead of today's. Use the Eastern calendar
+        # date directly, exactly as account_breaker.py:902 does.
+        session = datetime.now(ZoneInfo('America/New_York')).date()
+    if events is None:
+        events, status = _load_macro_event_gating(session)
+    else:
+        status = 'ok'
+
+    applying = _event_gate_enabled()
+    exempt_bench = _event_gate_exempt_bench()
+    exempt = set(bench_tkrs or ()) if exempt_bench else set()
+
+    work = dict(target_usd or {})
+    blocked, capped = [], []
+    if events:
+        for tkr in [t for t in (target_usd or {})
+                    if t not in exempt and not _is_occ_symbol(t) and '/' not in t]:
+            action = _clamp_to_held(work, tkr, broker)
+            if action in ('blocked', 'unflipped'):
+                # both are "this entry is refused"; the shadow line reports
+                # them together under blocked= (byte-exact contract, plan
+                # lines 141-168). Divergence from _apply_account_breaker_gate's
+                # three-bucket line is intentional here — flagged for review.
+                blocked.append(tkr)
+            elif action == 'capped':
+                capped.append(tkr)
+
+    affected = sorted(set(blocked) | set(capped))
+    # Fix round 1 item 2: status ('missing'/'failed') renders as
+    # unavailable:<status> instead of the misleading events=none a bare
+    # falsy `events` would otherwise print — 'ok' keeps the byte-exact
+    # events=<value|none> token healthy cycles print today.
+    events_token = (events or 'none') if status == 'ok' else f'unavailable:{status}'
+    logger.info('[event_gate] %s session=%s events=%s blocked=%d capped=%d '
+                'tickers=%s bench_exempt=%d',
+                'armed' if applying else 'shadow', session, events_token,
+                len(blocked), len(capped), ','.join(affected[:20]),
+                int(exempt_bench))
+    return work if applying else target_usd
 
 
 def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_groups,
@@ -2466,7 +2865,38 @@ def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_gr
     if broker is None:
         broker = _load_broker_positions_usd()
     target_usd = _apply_asset_eligibility_gate(target_usd, broker)
-    target_usd = _apply_entry_hygiene_gate(target_usd, broker)
+    # Stream B item 15: the `[ownership]` line is emitted every cycle (report-only
+    # by default) because the loader runs HERE, not inside the gate — the gate
+    # short-circuits on OPENCLAW_ENTRY_HYGIENE=0 and would swallow the line. The
+    # returned set is empty unless OPENCLAW_OWNERSHIP_BLOCK=1. Benchmark-sleeve
+    # tickers (bench_tkrs) are exempted here, not inside the gate: this task's
+    # constraints forbid ever blocking the benchmark sleeve, and the sleeve is a
+    # deliberate S_m-vs-book proxy the ownership ledger has no opinion on.
+    # Fix round 1 item 5: a registry lookup failure (load_benchmark_sleeve_ids /
+    # benchmark_tickers, above) yields an EMPTY _bench_tkrs, so this subtraction
+    # removes nothing that cycle — the sleeve then fails CLOSED here (treated
+    # like any other ticker, exemption lost), the same fail-direction class as
+    # the sleeve bracket and the cap/similarity exemptions. Intentional, no
+    # code change.
+    # Fix round 2: _load_ownership_blocklist() now returns a third value —
+    # the EFFECTIVE enforcing state (flag on AND ledger fresh AND no load
+    # exception) — threaded straight through so the gate's applied= line
+    # never claims enforcing=True on a stale or failed ledger.
+    _ownership_raw, _ownership_cycle_date, _ownership_enforcing = _load_ownership_blocklist()
+    target_usd = _apply_entry_hygiene_gate(
+        target_usd, broker,
+        ownership_blocked=_ownership_raw - set(bench_tkrs or ()),
+        ownership_cycle_date=_ownership_cycle_date,
+        ownership_enforcing=_ownership_enforcing)
+    # C1 (spec 2026-09-12): while the account breaker is halted, alpha opens and
+    # adds are refused. Benchmark tickers are exempt (ruling R2 halts the ALPHA
+    # book). Inert when not halted — byte-identical routing.
+    target_usd = _apply_account_breaker_gate(target_usd, broker,
+                                             bench_tkrs=bench_tkrs)
+    # C3 (spec 2026-09-12, ruling R3): T-1..T macro-event entry block. All
+    # regimes; benchmark included unless OPENCLAW_EVENT_GATE_EXEMPT_BENCH=1.
+    # SHADOW (line only) unless OPENCLAW_EVENT_GATE=1.
+    target_usd = _apply_macro_event_gate(target_usd, broker, bench_tkrs=bench_tkrs)
     # Net cap runs LAST: the per-name gates above can re-skew net (dropping an
     # unshortable short leg raises net-long) — the emitted book must respect it.
     target_usd = _apply_net_exposure_cap(target_usd)

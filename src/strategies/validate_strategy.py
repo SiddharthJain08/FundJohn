@@ -5,7 +5,7 @@ Usage:
     python3 src/strategies/validate_strategy.py src/strategies/implementations/S_xx_foo.py
 
 Exit code 0 = valid. Exit code 1 = invalid.
-Prints JSON: {"ok": bool, "errors": [...], "signal_count": int}
+Prints JSON: {"ok": bool, "errors": [...], "signal_count": int, "warnings": [...]}
 """
 
 import sys
@@ -56,6 +56,68 @@ def _make_synthetic_regime() -> dict:
     }
 
 
+# Number of synthetic bars _make_synthetic_prices builds (its n_days default).
+# A strategy whose declared min_lookback exceeds this cannot possibly emit on
+# the synthetic panel, so zero signals there proves nothing about it.
+SYNTHETIC_DAYS = 60
+
+MANIFEST_PATH = os.path.join(SRC_DIR, 'strategies', 'manifest.json')
+
+
+def _manifest_regime_gated(strategy_id) -> bool:
+    """True when the manifest pins this strategy's eligible_regimes to a set
+    that EXCLUDES LOW_VOL — the operator has already gated it away from the
+    only regime _make_synthetic_regime drives, so zero signals here is the
+    expected outcome, not a defect. Any read/shape failure returns False: an
+    unreadable manifest must never grant an exemption."""
+    if not strategy_id:
+        return False
+    # Everything past the load — including the dict/key navigation — is
+    # inside this try: a malformed manifest (list instead of dict, an entry
+    # or metadata that isn't a dict, etc.) must degrade to "not exempt", not
+    # raise. Letting a shape error escape here would turn a WARNING into a
+    # crashed validate() call, which spec §0 forbids.
+    try:
+        with open(MANIFEST_PATH) as fh:
+            manifest = json.load(fh)
+        entry = (manifest.get('strategies') or {}).get(str(strategy_id)) or {}
+        eligible = (entry.get('metadata') or {}).get('eligible_regimes')
+        if not isinstance(eligible, list) or not eligible:
+            return False
+        return 'LOW_VOL' not in eligible
+    except Exception:
+        return False
+
+
+def _zero_signal_exempt(cls) -> bool:
+    """True when zero signals on the synthetic panel is EXPECTED (spec D3).
+
+    Three class-level exemptions plus one manifest one:
+      - calendar_edge (base.py:149): the calendar window IS the signal, and the
+        synthetic bdate_range ending 2026-01-01 will usually miss it.
+      - LOW_VOL not in active_in_regimes: should_run() returns False by design,
+        because _make_synthetic_regime only ever emits state='LOW_VOL'.
+      - min_lookback > SYNTHETIC_DAYS: the panel is shorter than the strategy's
+        own declared history requirement.
+      - manifest metadata.eligible_regimes excludes LOW_VOL (see above).
+    """
+    if bool(getattr(cls, 'calendar_edge', False)):
+        return True
+    regimes = getattr(cls, 'active_in_regimes', None) or []
+    try:
+        if 'LOW_VOL' not in set(regimes):
+            return True
+    except TypeError:
+        pass
+    try:
+        declared = getattr(cls, 'min_lookback', None)
+        if declared is not None and int(declared) > SYNTHETIC_DAYS:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return _manifest_regime_gated(getattr(cls, 'id', None))
+
+
 def validate(filepath: str) -> dict:
     errors = []
     signal_count = 0
@@ -68,6 +130,18 @@ def validate(filepath: str) -> dict:
     # Derive module path from file path so relative imports work correctly.
     # e.g. .../src/strategies/implementations/foo.py → strategies.implementations.foo
     abs_path = os.path.abspath(filepath)
+
+    # ── 2a. Import allowlist (QD spec §5 E4) ──────────────────────────────────
+    # Runs BEFORE the first import, so a candidate that reaches for subprocess
+    # / requests / open() never gets executed. unified_backtest.load_strategy_class
+    # calls validate() first, so this covers that path too.
+    from strategies.strategy_lint import lint_file, format_violations
+    lint_violations = lint_file(abs_path)
+    if lint_violations:
+        return {'ok': False,
+                'errors': format_violations(lint_violations),
+                'signal_count': 0}
+
     module_name = None
     if SRC_DIR in abs_path:
         rel = os.path.relpath(abs_path, SRC_DIR).replace(os.sep, '.')
@@ -190,6 +264,17 @@ def validate(filepath: str) -> dict:
 
     signal_count = len(signals)
 
+    # ── 6b. Zero-signal WARN (spec D3, 2026-09-12) ────────────────────────────
+    # A strategy that emits nothing on the synthetic LOW_VOL panel is usually
+    # silently inert — the defect class the red-team gate calls "(e) SIGNAL-CAN-
+    # NEVER-FIRE". Surfacing it here lets the orchestrator skip the Opus turn
+    # instead of paying for one to restate what this harness already knows.
+    # WARNING ONLY: `ok` below stays `len(errors) == 0`, so this can never fail
+    # a candidate — the prescreen and the backtest remain the gates that block.
+    warnings_out: list = []
+    if signal_count == 0 and not _zero_signal_exempt(cls):
+        warnings_out.append('zero_signals_synthetic')
+
     # ── 7. Signal field type checks ───────────────────────────────────────────
     VALID_DIRECTIONS  = {'LONG', 'SHORT', 'SELL_VOL', 'BUY_VOL', 'FLAT'}
     VALID_CONFIDENCES = {'HIGH', 'MED', 'LOW'}
@@ -214,7 +299,8 @@ def validate(filepath: str) -> dict:
                 errors.append(f'signals[{i}].{field} is NaN')
 
     ok = len(errors) == 0
-    return {'ok': ok, 'errors': errors, 'signal_count': signal_count}
+    return {'ok': ok, 'errors': errors, 'signal_count': signal_count,
+            'warnings': warnings_out}
 
 
 if __name__ == '__main__':

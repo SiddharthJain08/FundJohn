@@ -55,6 +55,9 @@ def test_auto_approve_below_confidence_threshold(monkeypatch):
                         lambda: FakeConn(rows=[_proposal_row(conf=0.7)]))
     monkeypatch.setattr(pm, '_set_params_via_manager',
                         lambda **kw: {'after': {}})
+    monkeypatch.setattr(pm, '_calibration_report', lambda: {'buckets': []})
+    monkeypatch.setattr(pm, '_evidence_counts',
+                        lambda s, r: {'n_closed': 0, 'staleness_days': None})
     result = pm.auto_approve(proposal_id=10)
     assert result['status'] == 'skipped'
     assert 'confidence' in result['reason'].lower()
@@ -71,6 +74,9 @@ def test_auto_approve_size_delta_too_large(monkeypatch):
     monkeypatch.setattr(pm, '_current_size_scalar', lambda sid, r: None)
     monkeypatch.setattr(pm, '_set_params_via_manager',
                         lambda **kw: {'after': {}})
+    monkeypatch.setattr(pm, '_calibration_report', lambda: {'buckets': []})
+    monkeypatch.setattr(pm, '_evidence_counts',
+                        lambda s, r: {'n_closed': 0, 'staleness_days': None})
     result = pm.auto_approve(proposal_id=10)
     assert result['status'] == 'skipped'
     assert 'size' in result['reason'].lower()
@@ -83,6 +89,9 @@ def test_auto_approve_happy_path(monkeypatch):
     monkeypatch.setattr(pm, '_connect',
                         lambda: FakeConn(rows=[_proposal_row(conf=0.95, size=0.55)]))
     monkeypatch.setattr(pm, '_current_size_scalar', lambda sid, r: 0.5)
+    monkeypatch.setattr(pm, '_calibration_report', lambda: {'buckets': []})
+    monkeypatch.setattr(pm, '_evidence_counts',
+                        lambda s, r: {'n_closed': 0, 'staleness_days': None})
     set_params_calls: list = []
     monkeypatch.setattr(pm, '_set_params_via_manager',
                         lambda **kw: set_params_calls.append(kw) or {'after': {'eligible': True, 'size_scalar': 0.55}})
@@ -103,6 +112,9 @@ def test_auto_approve_eligibility_only_passes(monkeypatch):
     monkeypatch.setattr(pm, '_current_size_scalar', lambda sid, r: None)
     monkeypatch.setattr(pm, '_set_params_via_manager',
                         lambda **kw: {'after': {'eligible': True}})
+    monkeypatch.setattr(pm, '_calibration_report', lambda: {'buckets': []})
+    monkeypatch.setattr(pm, '_evidence_counts',
+                        lambda s, r: {'n_closed': 0, 'staleness_days': None})
     result = pm.auto_approve(proposal_id=10)
     assert result['status'] == 'approved'
 

@@ -838,6 +838,19 @@ function start(swarm, generateId, notifyDiscord) {
                 stdio: ['ignore', logFd, logFd],
             });
             child.unref();
+
+            // C1 (spec 2026-09-12): the account-level breaker rides the SAME
+            // 5-minute RTH cron — no new schedule, no new thread. A separate
+            // process so a crash in one breaker cannot take the other down.
+            const abLogPath = path.join(logDir, `account_breaker_${today}.log`);
+            const abLogFd = fs.openSync(abLogPath, 'a');
+            const abChild = spawn(PYTHON, ['src/execution/account_breaker.py'], {
+                cwd: ROOT,
+                env: { ...process.env },
+                detached: true,
+                stdio: ['ignore', abLogFd, abLogFd],
+            });
+            abChild.unref();
         } catch (e) {
             log(`circuit-breaker spawn error: ${e.message}`);
         }

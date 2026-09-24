@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -128,11 +129,19 @@ def _hermetic_main(r):
     alert_msgs: list[str] = []
     dashboard_calls: list[str] = []
 
-    orig = (po.get_redis, po.notify, po.pipeline_feed, po.data_alerts,
-            po.set_agent_status, po.broadcast_dashboard_refresh,
+    orig = (po.get_redis, po.get_heartbeat_redis, po.notify, po.pipeline_feed,
+            po.data_alerts, po.set_agent_status, po.broadcast_dashboard_refresh,
             po.is_completed_today, po.read_checkpoint,
             po.run_step, po._resolve_script)
     po.get_redis = lambda: r
+    # QD E3 fix round 1: main() also opens a DEDICATED heartbeat client via
+    # get_heartbeat_redis() — that seam must be patched here too, or a
+    # main()-driving test would open a REAL socket to redis://localhost:6379
+    # the instant it runs an unstubbed run_step. Reusing the same fake `r`
+    # is enough: proc_heartbeat.write()/clear() swallow whatever this fake
+    # doesn't support (no .hset here) and never raise, so heartbeats are a
+    # silent no-op in these tests — never a real connection.
+    po.get_heartbeat_redis = lambda: r
     po.notify = lambda msg, channel='pipeline-feed': posts.append((channel, msg))
     po.pipeline_feed = lambda msg: feed_msgs.append(msg)
     po.data_alerts = lambda msg: alert_msgs.append(msg)
@@ -145,8 +154,8 @@ def _hermetic_main(r):
              mock.patch('http.client.HTTPConnection', side_effect=_raise_if_touched):
             yield posts, feed_msgs, alert_msgs, dashboard_calls
     finally:
-        (po.get_redis, po.notify, po.pipeline_feed, po.data_alerts,
-         po.set_agent_status, po.broadcast_dashboard_refresh,
+        (po.get_redis, po.get_heartbeat_redis, po.notify, po.pipeline_feed,
+         po.data_alerts, po.set_agent_status, po.broadcast_dashboard_refresh,
          po.is_completed_today, po.read_checkpoint,
          po.run_step, po._resolve_script) = orig
 
@@ -268,6 +277,242 @@ class TestRunStepRenewRetry(unittest.TestCase):
         self.assertEqual(len(calls), 2)   # exactly one retry, no more
 
 
+class TestRunStepHeartbeat(unittest.TestCase):
+    """QD E3: run_step calls the optional `heartbeat` callback with the
+    spawned child's pid and the captured start stamp, and swallows a
+    raising heartbeat rather than letting it break the step — a heartbeat
+    is diagnostics, never load-bearing for step success/failure."""
+
+    def setUp(self):
+        self._orig_resolve = po._resolve_script
+        po._resolve_script = lambda script, run_date: (['true'], 5)
+
+    def tearDown(self):
+        po._resolve_script = self._orig_resolve
+
+    def test_heartbeat_fires_with_the_child_pid_and_a_start_stamp(self):
+        calls = []
+        ok, rc = po.run_step('engine', DATE, dict(os.environ),
+                             heartbeat=lambda pid, started_at: calls.append((pid, started_at)))
+        self.assertTrue(ok)
+        self.assertEqual(rc, 0)
+        self.assertGreaterEqual(len(calls), 1)
+        pid, started_at = calls[0]
+        self.assertIsInstance(pid, int)
+        self.assertGreater(pid, 0)
+        self.assertIsInstance(started_at, str)
+        self.assertTrue(started_at)   # a real (non-empty) ISO stamp
+
+    def test_a_raising_heartbeat_never_breaks_the_step(self):
+        def _boom(pid, started_at):
+            raise RuntimeError('redis down')
+
+        ok, rc = po.run_step('engine', DATE, dict(os.environ), heartbeat=_boom)
+        self.assertTrue(ok)
+        self.assertEqual(rc, 0)
+
+    def test_run_step_without_heartbeat_is_unchanged(self):
+        ok, rc = po.run_step('engine', DATE, dict(os.environ))
+        self.assertTrue(ok)
+        self.assertEqual(rc, 0)
+
+
+class _FakePopen:
+    """Stands in for subprocess.Popen so `proc.wait()` can be scripted
+    precisely — real `true`/`false` binaries give no control over WHEN
+    `.wait()` raises TimeoutExpired vs. returns, which is exactly what the
+    poll-loop heartbeat tick and heartbeat_clear tests below need."""
+    def __init__(self, pid=42424, wait_effects=(0,)):
+        self.pid = pid
+        self.stdout = iter(())          # _pump's `for line in proc.stdout` finishes at once
+        self._effects = list(wait_effects)
+
+    def wait(self, timeout=None):
+        eff = self._effects.pop(0)
+        if isinstance(eff, BaseException):
+            raise eff
+        return eff
+
+    def terminate(self):
+        pass
+
+    def kill(self):
+        pass
+
+
+class TestRunStepHeartbeatPollLoopAndClear(unittest.TestCase):
+    """QD E3 fix round 1 (IMPORTANT item 2): the heartbeat fires again from
+    a 30s poll-loop tick (not just once at spawn), and `heartbeat_clear` is
+    called with the child's pid from a `finally` that covers both the
+    normal-exit and the step-raises paths."""
+
+    def setUp(self):
+        self._orig_resolve = po._resolve_script
+        self._orig_popen = po.subprocess.Popen
+        # A generous timeout so the real wall-clock deadline check in
+        # run_step's poll loop is never hit by these near-instant fakes.
+        po._resolve_script = lambda script, run_date: (['true'], 90)
+
+    def tearDown(self):
+        po._resolve_script = self._orig_resolve
+        po.subprocess.Popen = self._orig_popen
+
+    def test_heartbeat_fires_again_from_a_30s_poll_loop_tick(self):
+        """A fake Popen whose `wait` raises TimeoutExpired once, then
+        returns 0, must produce TWO heartbeat calls: one post-spawn (moved
+        below t.start()), one from the TimeoutExpired branch of the poll
+        loop — not just the post-spawn call alone."""
+        fake = _FakePopen(wait_effects=[subprocess.TimeoutExpired(cmd=['true'], timeout=30), 0])
+        po.subprocess.Popen = lambda *a, **kw: fake
+        calls = []
+        ok, rc = po.run_step('engine', DATE, dict(os.environ),
+                             heartbeat=lambda pid, started_at: calls.append(pid))
+        self.assertTrue(ok)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(pid == fake.pid for pid in calls))
+
+    def test_heartbeat_clear_called_with_the_child_pid_on_normal_exit(self):
+        fake = _FakePopen(wait_effects=[0])
+        po.subprocess.Popen = lambda *a, **kw: fake
+        cleared = []
+        ok, rc = po.run_step('engine', DATE, dict(os.environ),
+                             heartbeat_clear=lambda pid: cleared.append(pid))
+        self.assertTrue(ok)
+        self.assertEqual(rc, 0)
+        self.assertEqual(cleared, [fake.pid])
+
+    def test_heartbeat_clear_called_when_the_step_raises(self):
+        """`proc.wait()` raising something OTHER than TimeoutExpired isn't
+        caught by either poll-loop except clause — it propagates to
+        run_step's outermost `except Exception`, which returns (False, -1).
+        heartbeat_clear's `finally` must still fire on this path."""
+        fake = _FakePopen(wait_effects=[OSError('boom')])
+        po.subprocess.Popen = lambda *a, **kw: fake
+        cleared = []
+        ok, rc = po.run_step('engine', DATE, dict(os.environ),
+                             heartbeat_clear=lambda pid: cleared.append(pid))
+        self.assertFalse(ok)
+        self.assertEqual(rc, -1)
+        self.assertEqual(cleared, [fake.pid])
+
+    def test_a_raising_heartbeat_clear_never_propagates(self):
+        fake = _FakePopen(wait_effects=[0])
+        po.subprocess.Popen = lambda *a, **kw: fake
+        ok, rc = po.run_step(
+            'engine', DATE, dict(os.environ),
+            heartbeat_clear=lambda pid: (_ for _ in ()).throw(RuntimeError('redis down')))
+        self.assertTrue(ok)
+        self.assertEqual(rc, 0)
+
+    def test_heartbeat_clear_called_on_the_stdout_idle_wedge_path(self):
+        """The wedge branch (`return (False, -2)`, triggered when stdout has
+        been idle past STEP_STDOUT_IDLE_MAX_S) lives inside the SAME try as
+        every other exit — this is a THIRD distinct return site, beyond the
+        normal-exit and step-raises paths already covered above, proving
+        heartbeat_clear's finally covers it too."""
+        fake = _FakePopen(wait_effects=[
+            subprocess.TimeoutExpired(cmd=['true'], timeout=30),  # first 30s poll tick
+            -15,                                                   # reaped after terminate()
+        ])
+        po.subprocess.Popen = lambda *a, **kw: fake
+        cleared = []
+        with mock.patch.dict(os.environ, {'STEP_STDOUT_IDLE_MAX_S': '0'}):
+            ok, rc = po.run_step('engine', DATE, dict(os.environ),
+                                 heartbeat_clear=lambda pid: cleared.append(pid))
+        self.assertFalse(ok)
+        self.assertEqual(rc, -2)
+        self.assertEqual(cleared, [fake.pid])
+
+    def test_heartbeat_clear_called_on_the_hard_timeout_path(self):
+        """A step timeout (`now >= deadline`) raises TimeoutExpired from
+        INSIDE the poll loop's outer try, caught by run_step's own
+        `except subprocess.TimeoutExpired` (return (False, -1)) — a FOURTH
+        distinct return site inside the same try/finally."""
+        po._resolve_script = lambda script, run_date: (['true'], -5)  # deadline already past
+        fake = _FakePopen(wait_effects=[
+            subprocess.TimeoutExpired(cmd=['true'], timeout=30),
+            -15,
+        ])
+        po.subprocess.Popen = lambda *a, **kw: fake
+        cleared = []
+        ok, rc = po.run_step('engine', DATE, dict(os.environ),
+                             heartbeat_clear=lambda pid: cleared.append(pid))
+        self.assertFalse(ok)
+        self.assertEqual(rc, -1)
+        self.assertEqual(cleared, [fake.pid])
+
+
+@contextlib.contextmanager
+def _proc_heartbeat_import_broken():
+    """Force `from lib import proc_heartbeat` to raise ImportError for the
+    duration of the with-block (F6 / review M-2).
+
+    Merely patching `sys.modules['lib.proc_heartbeat']` to None is not
+    enough by itself: once any earlier import in this test session has
+    executed `import lib.proc_heartbeat`, Python caches it as an attribute
+    of the `lib` package object, and `from lib import proc_heartbeat`
+    resolves it via a plain `getattr(lib, 'proc_heartbeat')` without ever
+    consulting `sys.modules` again. Both the cached attribute AND the
+    sys.modules entry have to be cleared to actually force the import
+    machinery to run (and fail).
+    """
+    import lib as _lib_pkg
+    had_attr = hasattr(_lib_pkg, 'proc_heartbeat')
+    orig_attr = getattr(_lib_pkg, 'proc_heartbeat', None)
+    orig_mod = sys.modules.get('lib.proc_heartbeat')
+    if had_attr:
+        delattr(_lib_pkg, 'proc_heartbeat')
+    sys.modules['lib.proc_heartbeat'] = None
+    try:
+        yield
+    finally:
+        if orig_mod is not None:
+            sys.modules['lib.proc_heartbeat'] = orig_mod
+        else:
+            sys.modules.pop('lib.proc_heartbeat', None)
+        if had_attr:
+            setattr(_lib_pkg, 'proc_heartbeat', orig_attr)
+
+
+class TestMainHeartbeatImportGuard(unittest.TestCase):
+    """F6 / review M-2: `main()` guards `from lib import proc_heartbeat`
+    with try/except ImportError → a no-op shim exposing write()/clear()/
+    DEFAULT_TTL_S. If `lib.proc_heartbeat` itself isn't importable, the
+    whole daily cycle must not crash over a diagnostics import — main()
+    must run to completion and every heartbeat call site must be a no-op
+    (no raise)."""
+
+    def setUp(self):
+        po.LOCK_VALUE = None
+
+    def tearDown(self):
+        po.LOCK_VALUE = None
+
+    def test_main_completes_and_heartbeats_are_silent_noops_when_proc_heartbeat_unimportable(self):
+        r = FakeRedis()
+        captured = {}
+
+        def _run_step(script, run_date, env, renew=None, heartbeat=None,
+                      heartbeat_clear=None, **_kwargs):
+            captured['heartbeat'] = heartbeat
+            captured['heartbeat_clear'] = heartbeat_clear
+            return (True, 0)
+
+        with _proc_heartbeat_import_broken(), \
+             _hermetic_main(r) as (posts, feed_msgs, alert_msgs, dashboard_calls):
+            po.run_step = _run_step
+            rc = po.main(['--date', DATE, '--force-resume', '--steps', 'report'])
+
+        self.assertEqual(rc, 0)  # the ImportError never propagated out of main()
+        self.assertEqual(dashboard_calls, [DATE])  # cycle ran to completion
+        # The heartbeat/heartbeat_clear callables main() built on top of the
+        # no-op shim must themselves be callable with no exception — this is
+        # what actually exercises `_ph.write`/`_ph.clear` on the shim.
+        captured['heartbeat'](42424, '2026-09-24T00:00:00+00:00')
+        captured['heartbeat_clear'](42424)
+
+
 class TestMainBusyLock(unittest.TestCase):
     def test_main_returns_75_and_posts_when_another_run_owns_today(self):
         r = FakeRedis({KEY: f'{po._HOST}:{os.getpid()}:T0'})
@@ -320,7 +565,7 @@ class TestForceResume(unittest.TestCase):
         acquired", since both end with the key absent.
         """
         with _hermetic_main(r) as (posts, feed_msgs, alert_msgs, dashboard_calls):
-            def _run_step(script, run_date, env, renew=None):
+            def _run_step(script, run_date, env, renew=None, **_kwargs):
                 if snap is not None and 'key' not in snap:
                     snap['key'] = r.store.get(KEY)
                     snap['lock_value'] = po.LOCK_VALUE
@@ -379,7 +624,7 @@ class TestForceResume(unittest.TestCase):
             po._resolve_script = lambda script, run_date: (['true'], 5)
             orig_run_step = po.run_step
 
-            def _tracking_run_step(script, run_date, env, renew=None):
+            def _tracking_run_step(script, run_date, env, renew=None, **_kwargs):
                 ran_scripts.append(script)
                 return orig_run_step(script, run_date, env, renew=renew)
 
@@ -397,7 +642,7 @@ class TestForceResume(unittest.TestCase):
         r = FakeRedis()
         snap = {}
         with _hermetic_main(r) as (posts, feed_msgs, alert_msgs, dashboard_calls):
-            def _run_step(script, run_date, env, renew=None):
+            def _run_step(script, run_date, env, renew=None, **_kwargs):
                 snap.setdefault('key', r.store.get(KEY))
                 return (True, 0)
             po.run_step = _run_step
@@ -441,7 +686,7 @@ class TestRenewLostIsFatal(unittest.TestCase):
                 po._resolve_script = lambda script, run_date: (['true'], 5)
                 orig_run_step = po.run_step
 
-                def _tracking_run_step(script, run_date, env, renew=None):
+                def _tracking_run_step(script, run_date, env, renew=None, **_kwargs):
                     ran_scripts.append(script)
                     return orig_run_step(script, run_date, env, renew=renew)
 
@@ -490,7 +735,7 @@ class TestMainStopsWhenRenewRaisesTwice(unittest.TestCase):
                 po._resolve_script = lambda script, run_date: (['true'], 5)
                 orig_run_step = po.run_step
 
-                def _tracking_run_step(script, run_date, env, renew=None):
+                def _tracking_run_step(script, run_date, env, renew=None, **_kwargs):
                     ran_scripts.append(script)
                     return orig_run_step(script, run_date, env, renew=renew)
 

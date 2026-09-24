@@ -1,0 +1,15 @@
+[Unit]
+Description=Refresh the macro-event calendar master monthly (2nd, 07:00 UTC)
+
+[Timer]
+# The Fed publishes next year's schedule ~12 months ahead and BLS/BEA a year
+# ahead, so monthly is ample. The 2nd (not the 1st) keeps it clear of the
+# 06:00 UTC trading-calendar refresh on the 1st, which this ingest depends on
+# for session_date. Persistent=true so the first enable populates immediately
+# and a missed month catches up on boot.
+OnCalendar=*-*-02 07:00:00 UTC
+Persistent=true
+Unit=openclaw-macro-events.service
+
+[Install]
+WantedBy=timers.target

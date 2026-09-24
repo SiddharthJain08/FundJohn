@@ -182,6 +182,27 @@ def test_autoclose_skipped_on_llm_error_even_when_gate_on(
     mock_close.assert_not_called()
 
 
+def test_heartbeat_uses_timed_client_seam(monkeypatch):
+    """F2 / review I-3: the startup heartbeat write must go through
+    pipeline_orchestrator's dedicated, timed get_heartbeat_redis() seam
+    (socket_timeout=2, socket_connect_timeout=2) instead of an untimed
+    redis.from_url() — this is a oneshot unit with no TimeoutStartSec, so a
+    half-open Redis must not be able to hang the scan silently."""
+    monkeypatch.delenv('OPENCLAW_PREMARKET_SCAN', raising=False)
+    calls = []
+
+    def _spy_from_url(*args, **kwargs):
+        calls.append(kwargs)
+        raise RuntimeError('no real redis in tests')
+
+    monkeypatch.setattr('redis.from_url', _spy_from_url)
+    rc = main(['--scan-label', '07:30'])
+    assert rc == 0  # heartbeat failure must stay non-fatal
+    assert calls, 'expected get_heartbeat_redis() to construct a client via redis.from_url'
+    assert calls[0].get('socket_timeout') == 2
+    assert calls[0].get('socket_connect_timeout') == 2
+
+
 def test_persisted_uuids_filter_out_non_uuid_strings():
     """market_news.uuid is text; not all values are valid UUIDs."""
     from src.pipeline.run_premarket_scan import _filter_uuid_strs

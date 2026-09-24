@@ -39,6 +39,7 @@ import inspect as _inspect
 import json
 import math
 import os
+import statistics
 import subprocess
 import sys
 import uuid
@@ -389,11 +390,35 @@ def _signal_to_long_short(direction: str) -> int:
 
 
 def _bar_exit(direction: int, high: float, low: float,
-              stop_loss: float, target_1: float, dt_priority: str):
+              stop_loss: float, target_1: float, dt_priority: str,
+              *, open_: Optional[float] = None):
     """Intra-bar bracket decision shared by simulate_trade and the exit-hook
     open-book stepper. Returns (exit_level, reason) or (None, None).
     Long: target when high >= target_1, stop when low <= stop_loss; short
-    mirrored. Double-touch resolves by dt_priority ('stop' default)."""
+    mirrored. Double-touch resolves by dt_priority ('stop' default).
+
+    Gap fill (spec 2026-09-12 §A2): a stop does NOT protect against an
+    overnight gap — if the bar already OPENS beyond a level, that is the fill.
+    Under OPENCLAW_BT_GAP_FILL='open': long `open_ <= stop_loss` fills 'stop'
+    at open_ and `open_ >= target_1` fills 'target' at open_; short mirrored.
+    This is checked BEFORE the touch/double-touch logic because the open is the
+    bar's first price. Unset / 'level' (the default) ignores open_ entirely, as
+    does any call passing open_=None (a bars frame with no 'open' column) —
+    both are byte-identical to the pre-2026-09-12 engine. The env read is
+    guarded behind `open_ is not None` so legacy callers pay nothing.
+    """
+    if open_ is not None and os.environ.get('OPENCLAW_BT_GAP_FILL', 'level') == 'open':
+        o = float(open_)
+        if direction > 0:
+            if o <= stop_loss:
+                return o, 'stop'
+            if o >= target_1:
+                return o, 'target'
+        else:
+            if o >= stop_loss:
+                return o, 'stop'
+            if o <= target_1:
+                return o, 'target'
     if direction > 0:
         t_hit = high >= target_1
         s_hit = low <= stop_loss
@@ -409,6 +434,98 @@ def _bar_exit(direction: int, high: float, low: float,
     if s_hit:
         return float(stop_loss), 'stop'
     return None, None
+
+
+def exit_reason_census(trades) -> dict:
+    """{exit_reason: {n, mean_pnl_pct, median_hold_days}} over `trades`
+    (spec 2026-09-12 §A3). Never changes a Sharpe — provenance only.
+
+    Hook exits keep their 'strategy_exit:<reason>' prefix on purpose: the
+    prefix is exactly how "65 % of exits were pair_decohered" becomes readable
+    from a stored run instead of a rolled journal.
+
+    Non-finite pnl_pct / holding_days are dropped from the aggregates the same
+    way aggregate_metrics and tail_stats drop them (2026-06-15 BRK-B: one
+    corrupt price bar must not NaN a whole stat) — the trade still counts in n.
+    A reason with no finite observation reports None, never a fabricated 0.0.
+    """
+    buckets: dict = {}
+    for t in trades or []:
+        reason = str(t.get('exit_reason') or 'unknown')
+        slot = buckets.setdefault(reason, {'n': 0, 'pnl': [], 'hold': []})
+        slot['n'] += 1
+        p = t.get('pnl_pct')
+        try:
+            if p is not None and math.isfinite(float(p)):
+                slot['pnl'].append(float(p))
+        except (TypeError, ValueError):
+            pass
+        h = t.get('holding_days')
+        try:
+            if h is not None and math.isfinite(float(h)):
+                slot['hold'].append(float(h))
+        except (TypeError, ValueError):
+            pass
+    out: dict = {}
+    for reason, slot in buckets.items():
+        out[reason] = {
+            'n': slot['n'],
+            'mean_pnl_pct': (sum(slot['pnl']) / len(slot['pnl'])) if slot['pnl'] else None,
+            'median_hold_days': statistics.median(slot['hold']) if slot['hold'] else None,
+        }
+    return out
+
+
+def cost_drag_bps(trades, *, cost_bps_by_ticker: Optional[dict] = None,
+                  flat_bps: float = 0.0) -> Optional[float]:
+    """Modelled round-trip cost as basis points of gross P&L (spec §A3):
+
+        1e4 * Σ cost_i / Σ |gross_i|
+
+    cost_i = 2 * bps_i / 1e4 — one adverse entry fill plus one adverse exit
+    fill, with bps_i resolved exactly as _per_bar_simulate resolves it
+    (cost_bps_by_ticker.get(ticker, flat_bps)). gross_i = pnl_pct_i + cost_i,
+    a first-order un-netting: pnl_pct compounds and the two cost legs do not
+    net out exactly, which is immaterial at ≤ 30 bps and is why this is
+    provenance and never a gate input.
+
+    A trade with holding_days == 0 AND pnl_pct == 0.0 never had a real fill
+    by construction (simulate_trade's bars_future.empty early return, or the
+    open-book flush's "closing flat at entry") — it is skipped entirely, not
+    charged 2*bps of phantom round-trip cost the P&L never actually
+    absorbed (Stream A T5 review, deferred to the wave-2 fix wave).
+
+    Returns None (never 0.0, never ZeroDivisionError) when no trade carries a
+    finite pnl_pct or when Σ|gross| is 0.
+    """
+    num = 0.0
+    den = 0.0
+    seen = False
+    for t in trades or []:
+        p = t.get('pnl_pct')
+        try:
+            p = float(p)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(p):
+            continue
+        h = t.get('holding_days')
+        try:
+            zero_fill = p == 0.0 and h is not None and float(h) == 0.0
+        except (TypeError, ValueError):
+            zero_fill = False
+        if zero_fill:
+            continue
+        bps = float(flat_bps)
+        if cost_bps_by_ticker:
+            bps = float(cost_bps_by_ticker.get(t.get('ticker'), flat_bps))
+        cost = 2.0 * bps / 1e4
+        num += cost
+        den += abs(p + cost)
+        seen = True
+    if not seen or den <= 0.0:
+        return None
+    return 1e4 * num / den
 
 
 def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
@@ -469,7 +586,12 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
     _dt_priority = os.environ.get('OPENCLAW_BT_DOUBLE_TOUCH', 'stop')
     for i, (dt, bar) in enumerate(bars_window.iterrows(), start=1):
         high, low, close = float(bar['high']), float(bar['low']), float(bar['close'])
-        exit_level, reason = _bar_exit(direction, high, low, stop_loss, target_1, _dt_priority)
+        # `open` is absent from some synthetic/legacy bars frames; None there
+        # means _bar_exit ignores the gap rule (spec §A2 fallback).
+        _o = bar.get('open')
+        _open = float(_o) if _o is not None and pd.notna(_o) else None
+        exit_level, reason = _bar_exit(direction, high, low, stop_loss, target_1, _dt_priority,
+                                       open_=_open)
         if exit_level is None and i == n:  # last bar, no bracket -> exit at close
             exit_level = close
             reason = 'max_hold' if n == max_hold_days else 'end_of_data'
@@ -781,6 +903,12 @@ def _per_bar_simulate(
     walk (H/L of the fill bar are eligible for bracket exits, since they
     occur after the open fill). Raises ValueError on any other value.
 
+    The macro-event entry gate (OPENCLAW_BT_EVENT_GATE) keys on the SIGNAL
+    bar (cur_d), so it lines up exactly with the T-1/T sessions it gates
+    under the default 'same_close' fill model but is effectively shifted one
+    session relative to the fill date under the legacy
+    OPENCLAW_BT_FILL_MODEL=close|open.
+
     Returns a dict with keys:
       - trades: list[dict]
       - universe_sizes: list[int]  (non-empty only when resolver is not None)
@@ -825,6 +953,7 @@ def _per_bar_simulate(
     days_processed = 0
     days_with_signals = 0
     entries_asset_gated = 0
+    entries_event_gated = 0
     bars_raised = 0
     first_raise: str | None = None
     # Track per-bar universe sizes when resolver is active.
@@ -842,6 +971,22 @@ def _per_bar_simulate(
         raise ValueError('exit_hook strategies support fill_model close/same_close only '
                          '(the open-fill bar-inclusion rule is not modelled in the open book)')
     _dt_priority = os.environ.get('OPENCLAW_BT_DOUBLE_TOUCH', 'stop')
+    # C3 (spec 2026-09-12): the live T-1..T macro-event entry block must have a
+    # backtest twin — the backtest side is authoritative, so a live gate with no
+    # backtest counterpart is forbidden. DELIBERATELY a separate flag from the
+    # live OPENCLAW_EVENT_GATE and with NO fallback to it: spec §0 forbids
+    # stacking epochs, and a shared flag would let a live .env edit silently
+    # re-epoch all 156 strategies mid-fleet. The backtest half enters via the
+    # post-atr_r drop-in, on operator confirmation. Empty dict = inert.
+    _event_gate_sessions: dict = {}
+    if os.environ.get('OPENCLAW_BT_EVENT_GATE') == '1':
+        try:
+            from lib.macro_events import gated_sessions
+            _event_gate_sessions = gated_sessions(start_dt.date(), end_dt.date())
+        except Exception as _e:  # noqa: BLE001
+            print(f'[WARN] event gate calendar unreadable ({type(_e).__name__}: '
+                  f'{_e}) — entries NOT gated', file=sys.stderr)
+            _event_gate_sessions = {}
     open_book: list = []
     hook_counters: dict = {}
     if _use_open_book:
@@ -956,6 +1101,15 @@ def _per_bar_simulate(
                 continue
             ticker = sig.ticker
             if ticker not in bars_by_ticker:
+                continue
+            if _event_gate_sessions and _is_equity_ticker(ticker) and cur_d in _event_gate_sessions:
+                # ENTRIES only, equity only (fix round 1, C3 T11): mirrors the
+                # live per-ticker gate exactly — crypto (BTC-USD, dash form)
+                # and OCC option symbols are never blocked, and a mixed
+                # equity+crypto bar loses only the equity signal. The
+                # open-book exit walk above and every simulate_trade already
+                # in flight are untouched; this only ever skips a NEW entry.
+                entries_event_gated += 1
                 continue
             if asset_gate is not None:
                 _long_ok, _short_ok = asset_gate.get(ticker, (True, True))
@@ -1108,6 +1262,10 @@ def _per_bar_simulate(
     if entries_asset_gated:
         _log(f'asset gate: skipped {entries_asset_gated} entries on execution-ineligible '
              f'symbols (non-ETB/non-shortable/non-fractionable per today\'s Alpaca universe)')
+    if entries_event_gated:
+        _log(f'event gate: skipped {entries_event_gated} equity entries on '
+             f'{len(_event_gate_sessions)} macro-event sessions (T-1..T of '
+             f'FOMC_DECISION/CPI/NFP)')
 
     return {
         'trades':           trades,
@@ -1115,6 +1273,7 @@ def _per_bar_simulate(
         'days_processed':   days_processed,
         'days_with_signals': days_with_signals,
         'entries_asset_gated': entries_asset_gated,
+        'entries_event_gated': entries_event_gated,
         'bars_raised':      bars_raised,
         'static_universe':  static_universe,
         'min_lookback':     min_lookback,
@@ -1457,6 +1616,34 @@ def run_backtest(strategy_id: str, *,
                 'asset_gate': (os.environ.get('OPENCLAW_BT_ASSET_GATE', 'parity')
                                if _sim_kwargs.get('asset_gate') else 'off'),
                 'double_touch': os.environ.get('OPENCLAW_BT_DOUBLE_TOUCH', 'stop'),
+                # C3 (spec 2026-09-12): T-1..T macro-event entry block. 'off'
+                # unless OPENCLAW_BT_EVENT_GATE=1 — a SEPARATE flag from the
+                # live OPENCLAW_EVENT_GATE so arming the live gate can never
+                # silently re-epoch the fleet. Also 'off' whenever _sim_fn is
+                # not _per_bar_simulate (fix round 1, T11 item 2): an options
+                # run never calls _per_bar_simulate at all, so it must never
+                # be misreported as gated even with the flag set.
+                'event_gate': ('on' if (os.environ.get('OPENCLAW_BT_EVENT_GATE') == '1'
+                                        and _sim_fn is _per_bar_simulate)
+                               else 'off'),
+                'entries_event_gated': int(sim.get('entries_event_gated', 0)),
+                # Gap-fill provenance (2026-09-12 §A2): 'level' = a bracket
+                # touch returns the LEVEL (legacy); 'open' = a bar that opens
+                # beyond the level fills at that open. Read by
+                # scripts/pit_gap_flip_gate.py gate G1.
+                'gap_fill': os.environ.get('OPENCLAW_BT_GAP_FILL', 'level'),
+                # Fundamentals point-in-time provenance (2026-09-12 §A1). Read
+                # straight from the env at persist time rather than importing
+                # aux_data_loader — no new cross-module dependency here.
+                'financials_pit': os.environ.get('OPENCLAW_FINANCIALS_PIT', '0') == '1',
+                # Exit-reason census + modelled cost drag (2026-09-12 §A3).
+                # Provenance only — never a Sharpe, never a gate input. Hook
+                # exits appear as 'strategy_exit:<reason>'.
+                'exit_reasons': exit_reason_census(trades),
+                'cost_drag_bps': cost_drag_bps(
+                    trades,
+                    cost_bps_by_ticker=_sim_kwargs.get('cost_bps_by_ticker'),
+                    flat_bps=_slippage_bps),
                 'exit_hook':   bool(getattr(instance, 'exit_hook', False)),
                 'hook_exits':  int(sim.get('hook_exits', 0)),
                 # Persisted, not just logged: a run whose hook raised on every

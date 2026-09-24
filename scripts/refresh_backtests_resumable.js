@@ -49,6 +49,18 @@ const { spawnSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 
+// QD E3: declare each child in Redis before the blocking spawnSync below.
+// The driver blocks for up to PER_TIMEOUT_S per strategy, so a 60s-cadence
+// heartbeat is impossible here — one write per spawn, TTL sized to cover
+// the whole child, is the honest cadence for this call site (spec §0: no
+// new timer/thread). lazyConnect + a swallowed 'error' handler mean a dead
+// Redis degrades this to a no-op, never to a failed fleet run.
+const { writeHeartbeat, clearHeartbeat } = require(path.join(__dirname, '..', 'src/lib/proc_heartbeat.js'));
+const Redis = require('ioredis');
+const _hbRedis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379',
+                           { lazyConnect: true, maxRetriesPerRequest: 1 });
+_hbRedis.on('error', () => { /* heartbeats are diagnostics; never fail the fleet */ });
+
 const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? (process.argv[i + 1] ?? true) : d; };
 const DRY        = process.argv.includes('--dry-run');
 const RESUME     = process.argv.includes('--resume');
@@ -174,6 +186,32 @@ function allStrategies() {
     // fleet_oom_victim_exec.sh marks ONLY this child oom_score_adj=1000 (the
     // driver stays at normal priority — unit-level OOMScoreAdjust killed the
     // driver itself at the 2026-07-27 13:30Z market-open surge).
+    //
+    // QD E3: one heartbeat per child, written BEFORE the blocking spawnSync.
+    // The driver blocks for up to PER_TIMEOUT_S, so a 60s cadence is
+    // impossible here — the TTL covers the whole child instead.
+    //
+    // NOTE (fix round 1, minor item 5): a firewalled/wedged Redis costs up
+    // to ioredis's connect timeout PER SPAWN here — this call blocks the
+    // driver before every single strategy in the fleet, serially, because
+    // writeHeartbeat is awaited ahead of spawnSync rather than fired-and-
+    // forgotten. lazyConnect + the swallowed 'error' handler above bound
+    // that cost to one timeout, not a hang, but it is still paid once per
+    // strategy, not once per run.
+    //
+    // rssMbOverride: '' — the child doesn't exist yet (this write happens
+    // BEFORE spawnSync), so rssMb(pid) would silently sample the DRIVER's
+    // own few-MB footprint, not the multi-GB strategy about to spawn. The
+    // override writes rss_mb as '' in the SAME multi/EXEC as the rest of
+    // the fields, rather than a second round-trip that would leave a
+    // window with a misleading value on the key. co_tenant_memory's own
+    // /proc scan is what actually answers "how much RAM is this child using".
+    await writeHeartbeat(_hbRedis, {
+      step: `fleet:${sid}`,
+      argv: ['python3', '-m', 'backtest.unified_backtest', '--strategy-id', sid],
+      ttlSec: PER_TIMEOUT_S + 300,
+      rssMbOverride: '',
+    });
     const r = spawnSync('bash', [path.join(ROOT, 'scripts/fleet_oom_victim_exec.sh'),
       'python3', '-m', 'backtest.unified_backtest', '--strategy-id', sid],
       // maxBuffer (2026-09-06): spawnSync's DEFAULT is 1 MiB of captured
@@ -211,6 +249,8 @@ function allStrategies() {
       console.log(`[rebt] FAIL ${sid} (${mins}m) ${why} :: ${tail.slice(0, 110)}`);
     }
   }
+  await clearHeartbeat(_hbRedis);
+  _hbRedis.disconnect();
   const total = ((Date.now() - t0) / 60000).toFixed(1);
   const doneSet = new Set(fs.existsSync(CKPT)
     ? fs.readFileSync(CKPT, 'utf8').split('\n').filter(Boolean) : []);
