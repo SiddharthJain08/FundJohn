@@ -950,7 +950,26 @@ def main(argv=None):
     # once here rather than inside each per-step closure below, since both
     # `_hb` (per-step) and `_hb_clear` (once, for the whole run) need it.
     r_hb = get_heartbeat_redis()
-    from lib import proc_heartbeat as _ph
+    try:
+        from lib import proc_heartbeat as _ph
+    except ImportError:
+        # F6 / review M-2: heartbeats are best-effort diagnostics (see
+        # proc_heartbeat.py's own module docstring — "NEVER raises and
+        # NEVER blocks a caller"). If `lib.proc_heartbeat` itself isn't
+        # importable in this process's env, main() must degrade to the same
+        # silent no-op contract rather than crash the whole daily cycle over
+        # a diagnostics import. Shim exposes exactly the surface used below:
+        # write(), clear(), DEFAULT_TTL_S.
+        class _ph:  # noqa: N801 — module-shaped shim, not a class API
+            DEFAULT_TTL_S = 180
+
+            @staticmethod
+            def write(*args, **kwargs):
+                return None
+
+            @staticmethod
+            def clear(*args, **kwargs):
+                return None
     _hb_clear = lambda p: _ph.clear(r_hb, pid=p)
 
     # ── Idempotency: skip if pipeline already finished today ──────────────────

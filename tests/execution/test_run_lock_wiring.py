@@ -443,6 +443,76 @@ class TestRunStepHeartbeatPollLoopAndClear(unittest.TestCase):
         self.assertEqual(cleared, [fake.pid])
 
 
+@contextlib.contextmanager
+def _proc_heartbeat_import_broken():
+    """Force `from lib import proc_heartbeat` to raise ImportError for the
+    duration of the with-block (F6 / review M-2).
+
+    Merely patching `sys.modules['lib.proc_heartbeat']` to None is not
+    enough by itself: once any earlier import in this test session has
+    executed `import lib.proc_heartbeat`, Python caches it as an attribute
+    of the `lib` package object, and `from lib import proc_heartbeat`
+    resolves it via a plain `getattr(lib, 'proc_heartbeat')` without ever
+    consulting `sys.modules` again. Both the cached attribute AND the
+    sys.modules entry have to be cleared to actually force the import
+    machinery to run (and fail).
+    """
+    import lib as _lib_pkg
+    had_attr = hasattr(_lib_pkg, 'proc_heartbeat')
+    orig_attr = getattr(_lib_pkg, 'proc_heartbeat', None)
+    orig_mod = sys.modules.get('lib.proc_heartbeat')
+    if had_attr:
+        delattr(_lib_pkg, 'proc_heartbeat')
+    sys.modules['lib.proc_heartbeat'] = None
+    try:
+        yield
+    finally:
+        if orig_mod is not None:
+            sys.modules['lib.proc_heartbeat'] = orig_mod
+        else:
+            sys.modules.pop('lib.proc_heartbeat', None)
+        if had_attr:
+            setattr(_lib_pkg, 'proc_heartbeat', orig_attr)
+
+
+class TestMainHeartbeatImportGuard(unittest.TestCase):
+    """F6 / review M-2: `main()` guards `from lib import proc_heartbeat`
+    with try/except ImportError → a no-op shim exposing write()/clear()/
+    DEFAULT_TTL_S. If `lib.proc_heartbeat` itself isn't importable, the
+    whole daily cycle must not crash over a diagnostics import — main()
+    must run to completion and every heartbeat call site must be a no-op
+    (no raise)."""
+
+    def setUp(self):
+        po.LOCK_VALUE = None
+
+    def tearDown(self):
+        po.LOCK_VALUE = None
+
+    def test_main_completes_and_heartbeats_are_silent_noops_when_proc_heartbeat_unimportable(self):
+        r = FakeRedis()
+        captured = {}
+
+        def _run_step(script, run_date, env, renew=None, heartbeat=None,
+                      heartbeat_clear=None, **_kwargs):
+            captured['heartbeat'] = heartbeat
+            captured['heartbeat_clear'] = heartbeat_clear
+            return (True, 0)
+
+        with _proc_heartbeat_import_broken(), \
+             _hermetic_main(r) as (posts, feed_msgs, alert_msgs, dashboard_calls):
+            po.run_step = _run_step
+            rc = po.main(['--date', DATE, '--force-resume', '--steps', 'report'])
+
+        self.assertEqual(rc, 0)  # the ImportError never propagated out of main()
+        self.assertEqual(dashboard_calls, [DATE])  # cycle ran to completion
+        # The heartbeat/heartbeat_clear callables main() built on top of the
+        # no-op shim must themselves be callable with no exception — this is
+        # what actually exercises `_ph.write`/`_ph.clear` on the shim.
+        captured['heartbeat'](42424, '2026-09-24T00:00:00+00:00')
+        captured['heartbeat_clear'](42424)
+
+
 class TestMainBusyLock(unittest.TestCase):
     def test_main_returns_75_and_posts_when_another_run_owns_today(self):
         r = FakeRedis({KEY: f'{po._HOST}:{os.getpid()}:T0'})
