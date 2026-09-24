@@ -294,6 +294,27 @@ const CALIBRATION_BRIER_WARN  = 0.10;
 const CALIBRATION_BRIER_FAIL  = 0.20;
 const CALIBRATION_MIN_SAMPLES = 10;
 
+// Mirror of mastermind_calibration.py EVIDENCE_CAPS / count tiers / staleness
+// (src/metrics/mastermind_calibration.py:145-149, evidence_level():241-267).
+// Keep in sync. This is STATIC guidance text — it is not computed per
+// (strategy, regime) here (that would cost 4 extra DB round trips per
+// strategy per review, one per canonical regime); it tells the model the
+// RULE proposal_manager.py's auto_approve applies downstream.
+const EVIDENCE_CAP_TEXT = [
+  '  Your confidence is also capped by how much LIVE evidence backs the',
+  '  specific (strategy, regime) decision at approval time — a trailing',
+  '  30-day closed-trade count, staleness-adjusted:',
+  '    <10 closed trades  -> "none"   cap 0.35',
+  '    <30 closed trades  -> "low"    cap 0.55',
+  '    <100 closed trades -> "medium" cap 0.75',
+  '    >=100 closed trades -> "high"  cap 1.0',
+  '  (drop one tier if the most recent closed trade is >45 days old).',
+  '  auto_approve compares min(calibrated_confidence, cap) against the 0.85',
+  '  floor when OPENCLAW_PROPOSAL_CALIBRATED=1; while unset it computes and',
+  '  logs this without changing the decision. A thin-evidence regime cannot',
+  '  earn auto-approval on confidence alone regardless of what you state.',
+].join('\n');
+
 /**
  * Render the confidence-calibration block. '' when there is nothing to say.
  * Defensive against a malformed bucket entry (e.g. `null`, from a corrupt
@@ -310,8 +331,9 @@ function _renderProposalCalibration(cal) {
   const parts = [];
   parts.push('--- CONFIDENCE CALIBRATION (your own track record) ---');
   parts.push('');
-  parts.push('Every `confidence` you emit below is scored 30 days later against the live');
-  parts.push('Sharpe direction for that (strategy, regime). This is how those scores came out:');
+  parts.push('The `confidence` field of each entry in `regime_recommendations` (schema');
+  parts.push('above) is scored 30 days later against the live Sharpe direction for that');
+  parts.push('(strategy, regime). This is how those scores came out:');
   parts.push('');
   parts.push('  bucket        n    matched  match_rate');
   for (const b of buckets) {
@@ -326,6 +348,8 @@ function _renderProposalCalibration(cal) {
   parts.push(`  Overall hit rate: ${num(cal.hit_rate, 2)} against mean stated confidence `
            + `${num(cal.mean_confidence, 2)} `
            + `(${cal.resolved_observations ?? 0} resolved of ${cal.total_observations ?? 0})`);
+  parts.push('');
+  parts.push(EVIDENCE_CAP_TEXT);
   parts.push('');
   if (cal.hit_rate != null && cal.mean_confidence != null
       && Number(cal.hit_rate) < Number(cal.mean_confidence) - 0.05) {

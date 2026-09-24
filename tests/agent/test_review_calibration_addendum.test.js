@@ -68,6 +68,61 @@ test('_renderProposalCalibration tells the model what to do about it', () => {
   assert.ok(out.includes('confidence'));
 });
 
+test('_renderProposalCalibration names the exact scored field and evidence-cap rule', () => {
+  const out = _renderProposalCalibration(CAL);
+  // T6 ledger row: "per-bucket match rates, evidence level/cap". Only
+  // regime_recommendations[].confidence is ever written to
+  // strategy_regime_param_proposals (see :637-650) and scored into
+  // mastermind_proposal_outcomes — the top-level recommendations.confidence
+  // is never persisted there, so the block must name the field precisely
+  // rather than a generic "confidence you emit".
+  assert.ok(out.includes('regime_recommendations'), 'must name the exact scored field');
+  // Evidence cap tiers/thresholds mirrored from mastermind_calibration.py
+  // EVIDENCE_CAPS / evidence_level().
+  assert.ok(out.includes('0.35'), 'the "none" tier cap must appear');
+  assert.ok(out.includes('45 days'), 'the staleness drop-one-tier rule must appear');
+  assert.ok(out.includes('OPENCLAW_PROPOSAL_CALIBRATED'), 'must name the flag that enforces the cap');
+});
+
+test('_renderProposalCalibration renders the exact pinned block for the CAL fixture', () => {
+  const expected =
+    '--- CONFIDENCE CALIBRATION (your own track record) ---\n' +
+    '\n' +
+    'The `confidence` field of each entry in `regime_recommendations` (schema\n' +
+    'above) is scored 30 days later against the live Sharpe direction for that\n' +
+    '(strategy, regime). This is how those scores came out:\n' +
+    '\n' +
+    '  bucket        n    matched  match_rate\n' +
+    '  [0.0, 0.2]      0        0  n/a (thin sample)\n' +
+    '  [0.2, 0.4]      2        1  n/a (thin sample)\n' +
+    '  [0.4, 0.6]      5        2  n/a (thin sample)\n' +
+    '  [0.6, 0.8]     16        9  0.563\n' +
+    '  [0.8, 1.0]     18       10  0.556\n' +
+    '\n' +
+    '  Brier score: 0.254 (warn >= 0.10, fail >= 0.20)\n' +
+    '  Overall hit rate: 0.66 against mean stated confidence 0.75 (41 resolved of 96)\n' +
+    '\n' +
+    '  Your confidence is also capped by how much LIVE evidence backs the\n' +
+    '  specific (strategy, regime) decision at approval time — a trailing\n' +
+    '  30-day closed-trade count, staleness-adjusted:\n' +
+    '    <10 closed trades  -> "none"   cap 0.35\n' +
+    '    <30 closed trades  -> "low"    cap 0.55\n' +
+    '    <100 closed trades -> "medium" cap 0.75\n' +
+    '    >=100 closed trades -> "high"  cap 1.0\n' +
+    '  (drop one tier if the most recent closed trade is >45 days old).\n' +
+    '  auto_approve compares min(calibrated_confidence, cap) against the 0.85\n' +
+    '  floor when OPENCLAW_PROPOSAL_CALIBRATED=1; while unset it computes and\n' +
+    '  logs this without changing the decision. A thin-evidence regime cannot\n' +
+    '  earn auto-approval on confidence alone regardless of what you state.\n' +
+    '\n' +
+    'You are OVER-CONFIDENT: your stated confidence exceeds your realised hit rate.\n' +
+    'A bucket whose match_rate sits well below its own midpoint is one you should stop\n' +
+    'using — move those calls down a bucket. Reserve >= 0.8 for recommendations you\n' +
+    'would defend on the trade-level numbers alone, not on the shape of the story.\n' +
+    'Ignore "thin sample" buckets until they accumulate enough observations.\n';
+  assert.equal(_renderProposalCalibration(CAL), expected);
+});
+
 test('_renderProposalCalibration is empty for null / cold start', () => {
   assert.equal(_renderProposalCalibration(null), '');
   assert.equal(_renderProposalCalibration(undefined), '');
