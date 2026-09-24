@@ -184,7 +184,10 @@ class LowVolatilityUSGK63(BaseStrategy):
             if w is None or w.empty:
                 print('[debug] signals=0', file=sys.stderr)
                 return []
-            panels[field] = w.reindex(equity_calendar).tail(self.GK_WINDOW)
+            # reindex straight onto the LAST GK_WINDOW equity dates — identical to
+            # reindex(full calendar).tail(GK_WINDOW) but never materialises a
+            # full-history copy per field (≈64 MiB transient each at 2016+).
+            panels[field] = w.reindex(equity_calendar[-self.GK_WINDOW:])
 
         cols = None
         for w in panels.values():
