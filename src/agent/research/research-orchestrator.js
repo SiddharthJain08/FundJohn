@@ -56,6 +56,7 @@ const QUEUE_STATUS_FOR_REASON = {
   import_violation:    'validation_failed',
   redteam_blocked:     'redteam_blocked',
   prescreen_failed:    'prescreen_failed',
+  ic_screen_flat:      'ic_screen_flat',
   backtest_error:      'backtest_failed',
   // needs_signal_check (D3, 2026-09-12): NOT a gate-chain failure — the
   // zero-signal branch in _runGateChain always returns ok:true and never
@@ -209,6 +210,27 @@ function _isPrescreenShape(obj) {
     && typeof obj.pass === 'boolean';
 }
 
+/**
+ * Shape-validate research.factor_ic_screen's parsed stdout before trusting
+ * it (Task 8, spec D1). Same hole `_isPrescreenShape` closes: JSON.parse
+ * succeeds on `5`, `"flat"`, `null`, `[]` and `{}`, none of which carry the
+ * `verdict` this gate branches on. Only an object whose `verdict` is one of
+ * the four known strings counts; everything else — including the module's
+ * own infra-failure line `{"verdict": null, "reason": "ic_screen_infra_fail",
+ * "error": "…"}` (landed 10f20c73) — is routed to the infra-fail
+ * warn-and-pass path. Does NOT require `coverage`/`one_sided` (Task 7 fix
+ * round additions) so older/partial output stays parseable.
+ */
+const IC_SCREEN_VERDICTS = new Set(['pass', 'weak', 'flat', 'skipped']);
+
+function _isIcScreenShape(obj) {
+  return obj !== null
+    && typeof obj === 'object'
+    && !Array.isArray(obj)
+    && typeof obj.verdict === 'string'
+    && IC_SCREEN_VERDICTS.has(obj.verdict);
+}
+
 // Pure builder for the strategycoder subagent context. Extracted from
 // _codeStrategy so the porting hook is unit-testable without spawning a
 // subagent. Returns the EXACT ctx object _codeStrategy used to build inline,
@@ -352,6 +374,7 @@ class ResearchOrchestrator {
     this._validateFn  = this._runValidateStrategy.bind(this);
     this._redteamFn   = redteamStrategy;
     this._prescreenFn = this._runFactorPrescreen.bind(this);
+    this._icScreenFn  = this._runIcScreen.bind(this);
     this._backtestFn  = this._runUnifiedBacktest.bind(this);
     // _emitDecisionFn: every emitGateDecision() call reachable from
     // _runGateChain / _runTournament goes through this seam (defaults to the
@@ -1116,6 +1139,56 @@ class ResearchOrchestrator {
     return { psResult, psInfraFail, psInfraReason };
   }
 
+  /**
+   * Default `_icScreenFn` — spec D1, Task 8 (research.factor_ic_screen,
+   * Task 7). Its own 300 s budget: the screen drives ~100 generate_signals
+   * calls over a 504-bar panel, well past the prescreen's 120 s. Any
+   * non-zero exit / unparseable line / bad shape — including the module's
+   * own `{"verdict": null, "reason": "ic_screen_infra_fail", ...}` line on
+   * exit 1 (landed 10f20c73) — is an infra failure that WARNS and passes
+   * the candidate through, exactly as the prescreen does.
+   *
+   * `spawnFn` defaults to the module's real `_spawnPython` but is an
+   * explicit parameter (mirrors `_generateTearsheet`'s `spawnFn` — see
+   * tests/agent/test_tearsheet_hook.test.js) so
+   * tests/agent/test_ic_screen_gate.test.js can exercise this parsing logic
+   * directly, without going through `_runGateChain`'s lint pre-flight and
+   * without spawning a real python3 process. Never overridden in
+   * production — `this._icScreenFn` (bound above) is the only seam
+   * `_runGateChain` calls through.
+   */
+  async _runIcScreen(implPath, opts = {}, spawnFn = _spawnPython) {
+    let icResult = null, icInfraFail = false, icInfraReason = null;
+    try {
+      const { stdout, code } = await spawnFn(
+        ['-m', 'research.factor_ic_screen', '--strategy-file', implPath],
+        { cwd: OPENCLAW_DIR, timeoutMs: 300_000, onChild: opts.onChild,
+          env: { ...process.env, PYTHONPATH: 'src' } });
+      if (code !== 0) {
+        icInfraFail = true;
+        icInfraReason = `factor_ic_screen.py exit=${code}; stdout: ${(stdout || '').slice(-300)}`;
+      } else {
+        try {
+          const lastLine = stdout.trim().split('\n').pop();
+          const parsed = JSON.parse(lastLine);
+          if (_isIcScreenShape(parsed)) {
+            icResult = parsed;
+          } else {
+            icInfraFail = true;
+            icInfraReason = `factor_ic_screen.py stdout parsed but is not a valid screen result shape: ${lastLine.slice(0, 300)}`;
+          }
+        } catch (e) {
+          icInfraFail = true;
+          icInfraReason = `factor_ic_screen.py unparseable stdout: ${stdout.slice(0, 300)}`;
+        }
+      }
+    } catch (e) {
+      icInfraFail = true;
+      icInfraReason = `factor_ic_screen.py threw: ${e.message}`;
+    }
+    return { icResult, icInfraFail, icInfraReason };
+  }
+
   /** Default `_backtestFn` — extracted verbatim from the original inline Phase 2. */
   async _runUnifiedBacktest(implPath, opts = {}) {
     const onPhase = typeof opts.onPhase === 'function' ? opts.onPhase : () => {};
@@ -1562,7 +1635,96 @@ class ResearchOrchestrator {
       });
     }
 
-    notify?.(`  ✅ ${stratId} factor prescreen passed — running backtest (may take 2–5 min)...`);
+    notify?.(`  ✅ ${stratId} factor prescreen passed — running IC screen...`);
+    onPhase('ic_screen', 57);
+
+    // ── Phase 1.9: rank-IC / quantile / turnover screen (spec D1, Task 8) ────
+    // Placed after the prescreen rather than immediately after red-team: the
+    // prescreen is the cheaper of the two screens (120 s vs 300 s) and its
+    // block conditions are a strict subset of the states that make an IC
+    // number meaningless, so screening cheap-first avoids a 300 s IC run on
+    // a candidate the prescreen already killed. Still strictly after
+    // red-team and strictly before the backtest slot.
+    //
+    // OPENCLAW_IC_SCREEN unset/not '1' (default) = shadow: compute + record
+    // + log only, no candidate's fate changes, the backtest always runs. Set
+    // to exactly '1', a 'flat' verdict — and ONLY 'flat' — skips the ~900 s
+    // backtest. 'weak' and 'skipped' annotate and continue in BOTH modes;
+    // 'skipped' is the thin-cross-section / one-sided-partial-coverage guard
+    // that keeps long-only decile strategies (and one-sided
+    // minority-coverage strategies) out of 'flat' entirely (Task 7 fix
+    // round, rulings R1-R8). A negative ic/icir is not a defect and is never
+    // flagged as a warning here.
+    const icEnforced = process.env.OPENCLAW_IC_SCREEN === '1';
+    const { icResult, icInfraFail, icInfraReason } = await this._icScreenFn(implPath, opts);
+
+    if (icInfraFail) {
+      await this._emitDecisionFn({
+        paperId:      vPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'ic_screen',
+        outcome:      'pass',
+        reasonCode:   'ic_screen_infra_fail',
+        reasonDetail: icInfraReason,
+        metadata:     { enforced: icEnforced },
+      });
+      notify?.(`  ⚠️ ${stratId} IC screen infra failure — WARN-and-pass, continuing to backtest.`);
+    } else {
+      const v = icResult?.verdict || null;
+      const n3 = (x) => (x === null || x === undefined ? 'n/a' : Number(x).toFixed(4));
+      // Amendment from the Task 7 review (2026-09-24): the log line + gate
+      // decision must carry verdict, reason, ic (H=5), icir (H=5,
+      // annualized), ls_q5q1, turnover, coverage, one_sided, n_rebalances
+      // (when present) — NOT n_qualifying_rebalances, which the original
+      // plan text used before `coverage`/`one_sided` existed.
+      const line = `verdict=${v ?? 'n/a'} reason=${icResult?.reason ?? 'n/a'} `
+                 + `ic5=${n3(icResult?.ic?.['5'])} icir5=${n3(icResult?.icir?.['5'])} `
+                 + `ls_q5q1=${n3(icResult?.ls_q5q1)} turnover=${n3(icResult?.turnover)} `
+                 + `coverage=${n3(icResult?.coverage)} `
+                 + `one_sided=${icResult?.one_sided ?? 'n/a'} `
+                 + `n_rebalances=${icResult?.n_rebalances ?? 'n/a'}`;
+
+      if (v === 'flat' && icEnforced) {
+        const detail = `ic_screen flat (${icResult.reason || 'no reason'}): ${line}`;
+        if (!suppressQueueWrite) {
+          await this._query(
+            `UPDATE implementation_queue SET status = 'ic_screen_flat', error_log = $1 WHERE candidate_id = $2`,
+            [detail, candidate_id]
+          );
+        }
+        await this._emitDecisionFn({
+          paperId:      vPaperId,
+          candidateId:  candidate_id,
+          strategyId:   stratId,
+          gateName:     'ic_screen',
+          outcome:      'reject',
+          reasonCode:   'ic_screen_flat',
+          reasonDetail: detail,
+          metadata:     { ic_screen: icResult, enforced: true },
+        });
+        notify?.(`  ❌ ${stratId} blocked by the IC screen — ${detail}`);
+        channelNotify?.(`❌ **${stratId}** skipped backtest — IC screen flat (${line})`);
+        return { ok: false, result: { promoted: false, reasonCode: 'ic_screen_flat', error: detail } };
+      }
+
+      const shadowNote = (v === 'flat' && !icEnforced)
+        ? ' (shadow: OPENCLAW_IC_SCREEN unset — would have skipped the backtest)'
+        : '';
+      await this._emitDecisionFn({
+        paperId:      vPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'ic_screen',
+        outcome:      'pass',
+        reasonCode:   v ? `ic_screen_${v}` : null,
+        reasonDetail: icResult?.reason || null,
+        metadata:     { ic_screen: icResult || null, enforced: icEnforced },
+      });
+      notify?.(`  [ic_screen] ${stratId} ${line}${shadowNote}`);
+    }
+
+    notify?.(`  ✅ ${stratId} IC screen complete — running backtest (may take 2–5 min)...`);
     onPhase('backtest', 60);
 
     // ── Phase 2: Unified backtest convergence gate ────────────────────────────
@@ -2354,6 +2516,7 @@ module.exports._validateInferredFilter = _validateInferredFilter;
 module.exports._validateInferredClass = _validateInferredClass;
 module.exports._optionUnderlyingSupported = _optionUnderlyingSupported;
 module.exports._isPrescreenShape = _isPrescreenShape;
+module.exports._isIcScreenShape = _isIcScreenShape;
 module.exports.buildCoderContext = buildCoderContext;
 module.exports._variantPath = _variantPath;
 module.exports.QUEUE_STATUS_FOR_REASON = QUEUE_STATUS_FOR_REASON;
