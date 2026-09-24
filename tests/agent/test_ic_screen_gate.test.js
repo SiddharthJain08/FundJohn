@@ -339,10 +339,25 @@ test('_runIcScreen: a throwing spawnFn is an infra failure, never throws out', a
 test('_runIcScreen: exit=0 with a valid pass verdict parses cleanly, no infra failure', async () => {
   const orch = new ResearchOrchestrator();
   const stdout = JSON.stringify(PASS.icResult) + '\n';
-  const spawnStub = async () => ({ stdout, stderr: '', code: 0 });
-  const { icResult, icInfraFail, icInfraReason } = await orch._runIcScreen(FIXTURE_PATH, {}, spawnStub);
+  let capturedArgs, capturedOpts;
+  const spawnStub = async (args, opts) => {
+    capturedArgs = args;
+    capturedOpts = opts;
+    return { stdout, stderr: '', code: 0 };
+  };
+  const onChild = () => {};
+  const { icResult, icInfraFail, icInfraReason } =
+    await orch._runIcScreen(FIXTURE_PATH, { onChild }, spawnStub);
   assert.equal(icInfraFail, false);
   assert.equal(icInfraReason, null);
   assert.equal(icResult.verdict, 'pass');
   assert.equal(icResult.n_rebalances, 42);
+
+  // Pin the real invocation shape the production seam sends to python —
+  // every other test stubs this seam away, so this is the one place that
+  // checks the argv/opts _runIcScreen actually builds.
+  assert.deepEqual(capturedArgs, ['-m', 'research.factor_ic_screen', '--strategy-file', FIXTURE_PATH]);
+  assert.equal(capturedOpts.timeoutMs, 300_000);
+  assert.equal(capturedOpts.env.PYTHONPATH, 'src');
+  assert.equal(capturedOpts.onChild, onChild, 'the Cancel button must be able to kill the 300s child');
 });
