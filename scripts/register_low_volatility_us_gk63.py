@@ -165,8 +165,13 @@ def run(manifest_path: Path, apply: bool) -> int:
         print(f"[register_low_volatility_us_gk63] byte-stable under write_atomic: {byte_stable}"
               + ('' if byte_stable else
                  " (expected if the manifest has literal non-ASCII characters written by a "
-                 "JS caller — see NON-ASCII NOTE in apply_qd_manifest_hygiene.py; this is "
-                 "exactly why --apply never rewrites the file on a no-op)"))
+                 "JS caller — see NON-ASCII NOTE in apply_qd_manifest_hygiene.py. This is "
+                 "exactly why a no-op --apply never rewrites the file — but the FIRST real "
+                 "--apply, the one that actually inserts this entry, still calls write_atomic "
+                 "once and WILL re-escape every such character elsewhere in the file into "
+                 "\\uXXXX, producing a real diff far larger than the one new strategy entry "
+                 "even though every other entry's PARSED value is unchanged — same caveat the "
+                 "hygiene script's dry-run gives for its own first apply)"))
 
         _saved_pguri = os.environ.pop('POSTGRES_URI', None)
         try:

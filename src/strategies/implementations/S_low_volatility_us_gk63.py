@@ -111,10 +111,22 @@ class LowVolatilityUSGK63(BaseStrategy):
         # ── Self-load OHLC, POINT-IN-TIME ─────────────────────────────────────
         # asof is the signal bar; .loc[:asof] before .tail() is _extra_panels'
         # documented caller contract and is what makes this look-ahead-safe.
+        #
+        # Key load_wide by the STABLE full close-panel column set
+        # (prices.columns), not by `available` (universe intersected with
+        # prices.columns) — `available` tracks the per-bar `universe` arg,
+        # which a backtest's point-in-time resolver can vary every bar
+        # (unified_backtest.py's bar_universe = resolver.resolve(...)). A
+        # bar-varying ticker tuple would defeat load_wide's cache key on
+        # every call for a DAILY-cadence strategy (4 chunked full-parquet
+        # reads/bar; _extra_panels.py:125-131 documents ~3s/bar for exactly
+        # this pattern). Mirrors liquid_pool's own precedent for the same
+        # reason. `cols` below still restricts the result to `available`, so
+        # this changes nothing about what gets ranked — only the cache key.
         asof = prices.index[-1]
         panels = {}
         for field in ('open', 'high', 'low', 'close'):
-            w = load_wide(field, available, date_floor=self.DATE_FLOOR)
+            w = load_wide(field, list(prices.columns), date_floor=self.DATE_FLOOR)
             if w is None or w.empty:
                 print('[debug] signals=0', file=sys.stderr)
                 return []

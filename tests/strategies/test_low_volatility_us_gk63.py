@@ -171,6 +171,32 @@ def test_ohlc_is_sliced_to_the_signal_date(monkeypatch, wired):
     assert len(recorded['index']) == gk.LowVolatilityUSGK63.GK_WINDOW
 
 
+def test_load_wide_key_is_stable_across_universe_subsets(monkeypatch, wired):
+    """load_wide must be keyed by the full close-panel column set
+    (prices.columns), not by the per-call `universe` argument — else a
+    backtest whose point-in-time resolver varies `bar_universe` every bar
+    would cache-miss load_wide on every single bar (4 chunked full-parquet
+    reads/bar for a daily-cadence strategy; _extra_panels.py:125-131
+    documents ~3s/bar for exactly this pattern). Mirrors the liquid_pool
+    precedent (_extra_panels.py:125-131)."""
+    _, panels = _panels()
+    seen_tickers = []
+    def _load_wide(field, tickers, date_floor='2021-01-01'):
+        seen_tickers.append(tuple(sorted(tickers)))
+        return panels[field][[t for t in tickers if t in panels[field].columns]]
+    monkeypatch.setattr(gk, 'load_wide', _load_wide)
+
+    s = gk.LowVolatilityUSGK63()
+    s.generate_signals(wired, _regime(), TICKERS)        # full universe
+    s.generate_signals(wired, _regime(), TICKERS[:20])    # narrower universe, same price panel
+
+    assert len(seen_tickers) == 8   # 4 OHLC fields x 2 generate_signals calls
+    assert len(set(seen_tickers)) == 1, (
+        'load_wide was called with a different ticker set across two calls '
+        'sharing the SAME price panel but different `universe` arguments — '
+        'the cache key must track prices.columns, not the per-bar universe list')
+
+
 def test_contract_surface_matches_the_parent():
     s = gk.LowVolatilityUSGK63()
     assert s.id == 'S_low_volatility_us_gk63'
