@@ -68,3 +68,29 @@ class TestCostDrag:
         # pnl exactly cancels the cost => gross 0 for every trade
         trades = [{'ticker': 'AAA', 'pnl_pct': -0.002, 'holding_days': 1}]
         assert ub.cost_drag_bps(trades, flat_bps=10.0) is None
+
+    def test_zero_fill_trade_never_contributes_to_the_drag(self):
+        """F8 / Stream A T5 ruling: a trade with holding_days == 0 AND
+        pnl_pct == 0.0 never had a real fill by construction
+        (simulate_trade's bars_future.empty early return, or the open-book
+        flush's 'closing flat at entry') — it must be skipped entirely, not
+        charged phantom 2*bps round-trip cost the P&L never absorbed."""
+        zero_fill = {'ticker': 'ZZZ', 'pnl_pct': 0.0, 'holding_days': 0}
+        got_without = ub.cost_drag_bps(THREE, flat_bps=10.0)
+        got_with = ub.cost_drag_bps(THREE + [zero_fill], flat_bps=10.0)
+        assert got_with == pytest.approx(got_without, rel=1e-9)
+
+    def test_a_same_day_trade_with_real_pnl_is_not_treated_as_zero_fill(self):
+        # holding_days == 0 but pnl_pct != 0 — a real same-day fill, still
+        # charged cost like any other trade (unchanged behavior).
+        real_same_day = {'ticker': 'ZZZ', 'pnl_pct': 0.01, 'holding_days': 0}
+        got = ub.cost_drag_bps([real_same_day], flat_bps=10.0)
+        assert got == pytest.approx(1e4 * 0.002 / 0.012, rel=1e-9)
+
+    def test_a_genuine_breakeven_trade_with_real_holding_days_is_not_skipped(self):
+        # pnl_pct == 0.0 but holding_days != 0 — a real trade that broke
+        # exactly even, not a zero-fill artifact; still charged cost
+        # (unchanged behavior).
+        breakeven = {'ticker': 'ZZZ', 'pnl_pct': 0.0, 'holding_days': 4}
+        got = ub.cost_drag_bps([breakeven], flat_bps=10.0)
+        assert got == pytest.approx(1e4, rel=1e-9)

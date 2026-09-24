@@ -489,6 +489,12 @@ def cost_drag_bps(trades, *, cost_bps_by_ticker: Optional[dict] = None,
     net out exactly, which is immaterial at ≤ 30 bps and is why this is
     provenance and never a gate input.
 
+    A trade with holding_days == 0 AND pnl_pct == 0.0 never had a real fill
+    by construction (simulate_trade's bars_future.empty early return, or the
+    open-book flush's "closing flat at entry") — it is skipped entirely, not
+    charged 2*bps of phantom round-trip cost the P&L never actually
+    absorbed (Stream A T5 review, deferred to the wave-2 fix wave).
+
     Returns None (never 0.0, never ZeroDivisionError) when no trade carries a
     finite pnl_pct or when Σ|gross| is 0.
     """
@@ -502,6 +508,13 @@ def cost_drag_bps(trades, *, cost_bps_by_ticker: Optional[dict] = None,
         except (TypeError, ValueError):
             continue
         if not math.isfinite(p):
+            continue
+        h = t.get('holding_days')
+        try:
+            zero_fill = p == 0.0 and h is not None and float(h) == 0.0
+        except (TypeError, ValueError):
+            zero_fill = False
+        if zero_fill:
             continue
         bps = float(flat_bps)
         if cost_bps_by_ticker:
