@@ -70,9 +70,9 @@ def test_gating_event_cheap_filters_and_memoizes_prev_session(tmp_path, monkeypa
 
     result = me.gating_event(query)
 
-    assert len(calls) <= 2, (
+    assert len(calls) == 1, (  # re-review finding 3: == 1 pins the memo (2 without it)
         f'expected the 14-day cheap filter + per-session_date memoization to '
-        f'hold prev_session calls to <= 2, got {len(calls)}')
+        f'hold prev_session calls to exactly 1, got {len(calls)}')
     assert result == f'CPI@{same_day.isoformat()},NFP@{same_day.isoformat()}'
 
 

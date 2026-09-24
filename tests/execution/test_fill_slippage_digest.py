@@ -261,3 +261,18 @@ def test_load_exit_rows_never_dedupes_unmatched_left_join_legs():
     ]
     out = fs.load_exit_rows(_FakeConn(rows), '2026-09-15')
     assert len(out) == 2
+
+
+def test_fill_slippage_line_scrub_precedes_truncation_when_dsn_straddles_the_cut(monkeypatch):
+    """Re-review finding 4: pin the ORDER (scrub, then truncate). Credentials
+    sit inside the first 60 chars and the '@' lands just past the cut, so
+    truncation alone would post 'tradejohn:' plus most of the password."""
+    pw = 'p' * 45
+    straddle_err = 'db: postgresql://tradejohn:' + pw + '@10.0.0.5/fundjohn'
+    assert straddle_err.index('@') > 60 and straddle_err.index('tradejohn') < 60
+    monkeypatch.setattr(fs, 'load_entry_rows',
+                        lambda conn, rd: (_ for _ in ()).throw(RuntimeError(straddle_err)))
+    line = fs.fill_slippage_line('2026-09-15', conn=object(), bench_ids=set())
+    assert 'tradejohn' not in line
+    assert 'ppppp' not in line
+    assert 'postgres://***@' in line

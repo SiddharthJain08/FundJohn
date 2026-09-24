@@ -952,7 +952,9 @@ def main(argv=None):
     r_hb = get_heartbeat_redis()
     try:
         from lib import proc_heartbeat as _ph
-    except ImportError:
+    except ImportError as _hb_imp_err:
+        # Re-review finding 1: never swallow this silently — one line, once per run.
+        log(f'[heartbeat] lib.proc_heartbeat unimportable ({_hb_imp_err}); heartbeats disabled this run')
         # F6 / review M-2: heartbeats are best-effort diagnostics (see
         # proc_heartbeat.py's own module docstring — "NEVER raises and
         # NEVER blocks a caller"). If `lib.proc_heartbeat` itself isn't

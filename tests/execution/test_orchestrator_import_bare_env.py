@@ -87,8 +87,19 @@ def test_account_breaker_script_mode_imports_without_running_main(tmp_path):
     happens. PYTHONPATH unset, cwd outside the repo (tmp_path),
     POSTGRES_URI empty."""
     script = str(ROOT / 'src' / 'execution' / 'account_breaker.py')
-    code = ('import runpy\n'
+    # Re-review finding 2: the script's top-level imports are stdlib-only
+    # (its execution.* imports are lazy), so a bare runpy load passes even
+    # without the script's own sys.path.insert. Pin the OUTAGE CLASS instead:
+    # after the load, `lib` and `execution` must resolve under ROOT/src
+    # (find_spec does not import them — no DB/HTTP call).
+    code = ('import runpy, importlib.util, os\n'
            f'runpy.run_path({script!r}, run_name="not_main")\n'
+           f'src = os.path.realpath({str(ROOT / "src")!r})\n'
+            'for name in ("lib", "execution"):\n'
+            '    spec = importlib.util.find_spec(name)\n'
+            '    assert spec is not None, name + " not importable"\n'
+            '    locs = [os.path.realpath(p) for p in (spec.submodule_search_locations or [])]\n'
+            '    assert any(l.startswith(src) for l in locs), (name, locs)\n'
             'print("IMPORT_OK")\n')
     r = subprocess.run(
         [sys.executable, '-c', code],
@@ -111,3 +122,27 @@ def test_ingest_macro_events_script_mode_help_bare_env(tmp_path):
     )
     assert r.returncode == 0, r.stderr[-800:]
     assert 'usage' in r.stdout.lower()
+
+
+def test_ingest_macro_events_script_mode_puts_lib_and_src_on_path(tmp_path):
+    """Re-review finding 2: `--help` exits inside argparse before anything
+    sys.path-dependent runs, so it cannot pin the 09-16..22 outage class.
+    Load the script via runpy with run_name != '__main__' (no fetch/DB/
+    parquet code runs) and assert that `lib` resolves under ROOT/src and
+    `src` under ROOT afterwards — the two import roots its lazy imports need."""
+    script = str(ROOT / 'src' / 'ingestion' / 'ingest_macro_events.py')
+    code = ('import runpy, importlib.util, os\n'
+           f'runpy.run_path({script!r}, run_name="not_main")\n'
+           f'root = os.path.realpath({str(ROOT)!r}); src = os.path.join(root, "src")\n'
+            'for name, base in (("lib", src), ("src", root)):\n'
+            '    spec = importlib.util.find_spec(name)\n'
+            '    assert spec is not None, name + " not importable"\n'
+            '    locs = [os.path.realpath(p) for p in (spec.submodule_search_locations or [])]\n'
+            '    assert any(l == base or l.startswith(base + os.sep) for l in locs), (name, locs)\n'
+            'print("IMPORT_OK")\n')
+    r = subprocess.run(
+        [sys.executable, '-c', code],
+        cwd=str(tmp_path), env=_script_mode_env(), capture_output=True, text=True, timeout=120,
+    )
+    assert r.returncode == 0, r.stderr[-800:]
+    assert 'IMPORT_OK' in r.stdout
