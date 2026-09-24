@@ -286,6 +286,47 @@ actions on 2026-09-12 16:14 UTC with these rulings:
 ## 4. Stream D — research lane (items 6, 7, 8, 9)
 
 ### D1 Rank-IC / quantile-turnover / decay screen (item 6)
+
+> **Amendment (Task 7/T7↔T8 review, 2026-09-24):** four corrections, landed
+> as-implemented:
+> 1. The verdict set gains a fourth AND fifth `skipped` reason beyond the
+>    sketch above. `insufficient_cross_section` (checked first): a
+>    rebalance only counts toward the screen's evidence when its
+>    factor∩forward-return cross-section has ≥`MIN_CROSS_SECTION=20`
+>    non-NaN names, ≥`MIN_DISTINCT_VALUES=5` distinct values, and the run
+>    has ≥`MIN_REBALANCES=12` such qualifying rebalances — without this, a
+>    long-only decile strategy (~12 non-NaN cells over 2 confidence
+>    levels) scores `flat` on thin data and false-blocks the whole decile
+>    class. `one_sided_partial_coverage` (checked second, T7 review
+>    Important finding, ruling R1): a strategy whose picks are
+>    one-directional AND whose median cross-section coverage is < 0.5
+>    ranks only its own already-selected names, which measures nothing
+>    (IC≈0 by construction, not because the factor is weak) — so it is
+>    marked `skipped` rather than risk a false `flat`. Verdict evaluation
+>    order: `insufficient_cross_section` → `one_sided_partial_coverage` →
+>    `flat` → `weak` → `pass`.
+> 2. ICIR is explicitly the ANNUALIZED per-date Spearman IC series:
+>    `mean(ic) / std(ic, ddof=1) × √(252/H)`. The `weak` threshold reads
+>    `|ICIR_5| < 0.3` — a strongly NEGATIVE ICIR is still a strong signal
+>    and is NOT `weak` (a reversed/short factor reaches `pass`).
+> 3. T7↔T8 ruling (binding): `weak` and every `skipped` reason proceed to
+>    the backtest exactly like `pass` — annotated, never gated. Only
+>    `verdict === 'flat'` skips the ~900 s backtest, and only when
+>    `OPENCLAW_IC_SCREEN=1` (unset/default = compute, record, log; the
+>    backtest always runs).
+> 4. Placement (T7↔T8 pre-flight ruling): the screen runs in the
+>    orchestrator's gate chain AFTER the factor prescreen (cheap filter
+>    first) — not immediately after red-team as this section's wording
+>    could be read to imply — but still strictly before the backtest slot.
+>    An infra failure (exit 1) emits `{verdict: null, reason:
+>    'ic_screen_infra_fail', error}`; a null verdict can never reach the
+>    `flat` short-circuit (shape-guarded), so a screen crash always falls
+>    through to the backtest, the same as `weak`/`skipped`.
+> Round-trip cost is `ONE_WAY_COST_BPS = 10.0`, a duplicated (not
+> imported) mirror of `backtest.unified_backtest.INSTRUMENT_COST_BPS['equity']`
+> (:88) — kept in sync by convention, not by import, so the screen never
+> drags `unified_backtest`'s parquet loaders into the process.
+
 - New `src/research/factor_ic_screen.py`: given a strategy's signal
   panel (or a factor column), compute per-rebalance Spearman rank IC at
   horizons 5/10/21 sessions, ICIR (√(252/H)), first-/second-half IC,
@@ -303,6 +344,58 @@ actions on 2026-09-12 16:14 UTC with these rulings:
   pure noise scores flat; a reversed factor scores negative IC.
 
 ### D2 Outcome-calibrated auto-approve floor + evidence cap (item 7)
+
+> **Amendment (Tasks 4/5, ledger rulings, 2026-09-24):** three corrections
+> and one runbook addition:
+> 1. Naming: the formula below writes `hit_rate(bucket)`. The shipped code
+>    reads the per-bucket key `match_rate` (`mastermind_calibration.py:133`,
+>    docstring `:182-183`) — `hit_rate` is reserved for the report's GLOBAL
+>    figure (`:453-458`, the 09-06 changelog entry's 0.66/0.75/[0.56 on
+>    ≥0.8] numbers). `calibrated_confidence(raw, bucket_table) = raw ×
+>    clip(match_rate(bucket) / bucket_midpoint, 0.5, 1.0)` for buckets with
+>    `n ≥ MIN_BUCKET_N = 8`.
+> 2. Runbook (binding, ledger Task 5 review Important 3): migration 159
+>    (`strategy_regime_param_proposals` gains raw/calibrated/cap/level/
+>    binding_bound columns, additive only) is applied ONLY when user-scope
+>    johnbot restarts (`postgres.js` runs migrations at process boot, not
+>    on a schedule) — the Saturday sizing-proposal sweep is timer-spawned
+>    and never restarts johnbot itself. Restart user-scope johnbot AFTER
+>    this stream merges and BEFORE the first Saturday sweep, outside
+>    11:30–13:30Z / 19:00–20:45Z, and verify with `\d
+>    strategy_regime_param_proposals`. Until that restart, every
+>    above-floor proposal logs a WARNING and no shadow-evidence
+>    accumulates on the new columns; decisions are unaffected (the flag
+>    stays OFF by default regardless).
+> 3. Flip-effect note (ledger Task 4 review, ruled INTENDED and spec-exact
+>    against the cap table above): setting `OPENCLAW_PROPOSAL_CALIBRATED=1`
+>    effectively turns auto-approval OFF, not down. At the CODE-DEFAULT
+>    floor (`DEFAULT_AUTOAPPROVE_MIN_CONFIDENCE = 0.85`), a raw confidence
+>    of 1.0 in the top `[0.8, 1.0]` bucket calibrates to `1.0 × clip(
+>    match_rate / 0.9, 0.5, 1.0)`, so the bucket's live `match_rate` must
+>    reach `0.9 × 0.85 ≈ 0.765` before anything in that bucket can clear
+>    the floor even at maximum stated confidence. Production runs at the
+>    OPERATOR-RAISED floor 0.9 (`.env`
+>    `OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE=0.9`, set 2026-09-06),
+>    where the same algebra gives `0.9 × 0.9 = 0.81` — the live threshold,
+>    not 0.765. A sleeve additionally needs ≥100 closed trades in the
+>    trailing 30 d with a close in the last 45 d to reach evidence level
+>    `high` (cap 1.0); short of that the cap itself binds below the floor
+>    regardless of the calibrated number. Watch the `calibration SHADOW:`
+>    would-be-decision log for several Saturdays before ever setting the
+>    flag. Eligibility-expansion proposals (a regime with no closed trades
+>    to evaluate) always resolve `n_closed = 0` ⇒ evidence level `none` ⇒
+>    cap `0.35`, permanently below both floors — they can never
+>    auto-approve under the flag, regardless of raw confidence.
+> Also folded in here (ledger supplement item 6, documentation-only —
+> no source edited by this stream): the 2026-09-06 changelog entry below
+> names `saturday_brain_finisher.js` as the auto-approve floor's reader;
+> the real reader is `src/maintenance/weekend_saturday.sh`
+> (`openclaw-weekend-saturday.service`, step "4b"). `.env.example:179` and
+> `weekend_saturday.sh:38`'s step label still say `0.8` against the code
+> default now unified at `0.85` (live `.env` override remains `0.9`,
+> unaffected) — left uncorrected pending a documentation-only follow-up
+> outside this stream's file scope.
+
 - `src/strategies/proposal_manager.py:311` reads a static floor; `:403`
   and `:473` default 0.8 vs 0.85 at `:311`. Unify the default at 0.85 in
   ONE constant.
@@ -325,6 +418,37 @@ actions on 2026-09-12 16:14 UTC with these rulings:
   the min; env-unset path logs and does not change the decision.
 
 ### D3 Zero-signal WARN gate (item 8)
+
+> **Amendment (Task 2 review, ruling adopted, 2026-09-24):** two
+> corrections and one flip prerequisite:
+> 1. The red-team skip is NOT unconditional as this section reads. It
+>    ships behind `OPENCLAW_ZERO_SIGNAL_SKIP_REDTEAM=1`, default OFF.
+>    Unset (today's default), the red-team LLM runs exactly as before —
+>    the `warnings` list and `signal_count` are still recorded on the
+>    validate-pass decision row regardless of the flag (compute + log,
+>    same pattern as D1/D2's flags). Reason: the synthetic validation
+>    panel (5 tickers / 60 days, no aux data) cannot exercise
+>    insider/options/earnings/news/custom-basket strategies — 3 LIVE
+>    strategies (`S12_insider`, `S_sparse_cca_mean_revert`,
+>    `S_news_sentiment_long_short`) and ~14% of the fleet-equivalent trip
+>    the warning today — and the red-team's look-ahead / off-by-one /
+>    full-sample-fit / survivorship checks are exactly what such a
+>    candidate needs before it can auto-promote through Phase 3 →
+>    `evaluatePromotionGate` on its own possibly-inflated metrics. Flip
+>    prerequisite (follow-up task, not built in this stream): `base.py`'s
+>    `_zero_signal_exempt` needs aux-data awareness, or the synthetic
+>    fixture needs a richer aux-data panel, before this flag is ever set.
+> 2. "Read the manifest flags" above overstates it: `calendar_edge` and
+>    `active_in_regimes` are CLASS attributes on `BaseStrategy`/its
+>    subclasses (`base.py:149`), not manifest fields — `calendar_edge` has
+>    zero occurrences in `manifest.json`. The manifest contributes only
+>    `metadata.eligible_regimes` as an overlay exemption. A fourth
+>    exemption not in the sketch: `min_lookback > 60` (the synthetic panel
+>    is 60 sessions; a strategy that structurally cannot warm up on it is
+>    exempted rather than false-flagged). A malformed/unreadable manifest
+>    resolves to NOT exempt — the warning still fires — the safer
+>    direction, and never a crash.
+
 - `src/strategies/validate_strategy.py:172-190` computes `signal_count` on
   synthetic bars; `:216-217` `ok = len(errors)==0`. Add
   `warnings.append('zero_signals_synthetic')` when 0 and the strategy is
@@ -333,6 +457,42 @@ actions on 2026-09-12 16:14 UTC with these rulings:
   LLM call and mark the candidate `needs_signal_check`; never BLOCK.
 
 ### D4 Garman-Klass range-vol low-vol variant (item 9)
+
+> **Amendment (Task 9 review, fix round 1, 2026-09-24):** three
+> corrections:
+> 1. `DATE_FLOOR = '2016-01-01'` (T9 review Important 1 — an earlier draft
+>    used 2021-01-01, which would have made this variant's backtest window
+>    a different, non-comparable span from every other fleet strategy;
+>    2016-01-01 matches the fleet's shared backtest window and the first
+>    rolling-63-session window lands 2016-01-14, inside the floor).
+> 2. The self-loaded panel is equity-only, three fields (Open, High, Low —
+>    NOT Close, which the strategy takes from the engine's own `prices`
+>    series like every other strategy), via
+>    `_extra_panels.load_wide(field, equity_cols, date_floor=DATE_FLOOR)`
+>    filtered through `is_equity_ticker` and REINDEXED onto the engine's
+>    own equity-calendar index (`prices.index`, ≤ asof) before taking the
+>    trailing 63 bars — self-loading the raw union calendar (which
+>    includes 7-day-a-week tickers) was found by the T9 reviewer to dilute
+>    a 63-session window to as few as 43–45 true equity bars, below the
+>    `MIN_VALID=45` floor, producing zero signals in most windows (C1,
+>    fixed). A validity mask drops non-finite, non-positive, and
+>    inconsistent OHLC bars (`H ≥ max(O,C)`, `L ≤ min(O,C)`, `H > L`) to
+>    NaN before the Garman-Klass estimator runs. Memory-bounded to
+>    ≈192 MiB steady-state per process for the 3 cached fields (T9 review
+>    Important 2; the parent's close-load leg was dropped from this
+>    variant's panel).
+> 3. "Register in `registry.py` + `manifest.json` as `candidate`" above
+>    overstates what landed on the branch. Only `registry.py::_IMPL_MAP`
+>    was edited (same ruling as Stream A Task 6): `manifest.json` and
+>    `strategy_signatures.json` are live, continuously-rewritten-by-the-
+>    fleet-refresh files that this branch does not touch. Candidate
+>    registration is an OPERATOR action after merge, via
+>    `scripts/register_low_volatility_us_gk63.py` (`--dry-run` default;
+>    review the entry; `--apply` to write, idempotent) — run AFTER the
+>    wave-2 merge and BEFORE the next Saturday sweep;
+>    `strategy_signatures.json` regenerates on the next research cron run
+>    with no hand edit needed.
+
 - New `src/strategies/implementations/S_low_volatility_us_gk63.py`
   cloned from `low_volatility_us.py` (252-d close-to-close std decile):
   rank on 63-session Garman-Klass variance
