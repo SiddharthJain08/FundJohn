@@ -107,11 +107,20 @@ def test_reversed_factor_scores_negative_ic():
     assert res['ic']['5'] < -0.25, res
     assert res['ls_q5q1'] < 0
     assert res['verdict'] != 'flat'
+    # Pin the ledger's binding T7-ICIR ruling itself (|ICIR| < 0.3, not a
+    # signed comparison): a strongly NEGATIVE ICIR must still reach `pass`,
+    # not `weak` — `verdict != 'flat'` alone would not catch a regression to
+    # a signed `icir0 < WEAK_ICIR_ABS` comparison (a large negative icir0
+    # would then wrongly satisfy that and land on `weak`).
+    assert res['icir']['5'] < -0.30, res
+    assert res['verdict'] == 'pass', res
 
 
 def test_thin_cross_section_scores_skipped_not_flat():
-    """A long-only decile strategy: 12 names, 2 distinct values. Must NOT be
-    scored flat — that would false-block the whole decile class."""
+    """A long-only decile strategy: 12 names, 2 distinct values — below even
+    the rebalance-date cross-section floor (MIN_CROSS_SECTION=20), so no
+    rebalance date is ever formed at all. Must NOT be scored flat — that
+    would false-block the whole decile class."""
     closes, _rng = _panel()
     factor = pd.DataFrame(np.nan, index=closes.index, columns=closes.columns)
     picks = list(closes.columns[:12])
@@ -120,11 +129,35 @@ def test_thin_cross_section_scores_skipped_not_flat():
     res = fis.compute_ic_screen(factor, closes)
     assert res['verdict'] == 'skipped'
     assert res['reason'] == 'insufficient_cross_section'
+    assert res['n_rebalances'] == 0
+
+
+def test_wide_but_low_distinct_cross_section_scores_skipped():
+    """The brief's actual motivating case: a decile strategy with enough
+    NAMES to clear the rebalance-date cross-section floor (40 >= 20) but
+    only 2 distinct values — ties dominate rank IC and pd.qcut cannot form 5
+    quantiles. Must be caught by MIN_DISTINCT_VALUES inside the qualifying
+    check, NOT by rebalance_dates' coarser notna-count filter (that filter
+    alone is exercised by the 12-name test above, where it gates everything
+    before this check is ever reached)."""
+    closes, _rng = _panel()
+    factor = pd.DataFrame(np.nan, index=closes.index, columns=closes.columns)
+    picks = list(closes.columns[:40])
+    factor.loc[:, picks[:20]] = 1.0
+    factor.loc[:, picks[20:]] = 0.6
+    res = fis.compute_ic_screen(factor, closes)
+    assert res['n_rebalances'] > 0, res       # cleared the notna>=20 floor
+    assert res['n_qualifying_rebalances'] == 0, res  # but nunique < 5 every time
+    assert res['verdict'] == 'skipped'
+    assert res['reason'] == 'insufficient_cross_section'
 
 
 def test_low_icir_scores_weak():
     """Enough cross-section and a non-trivial spread, but an IC series whose
-    sign flips constantly."""
+    sign flips constantly. Left as an in-('weak','flat') tolerance check —
+    on SEED=7 this symmetric flip's mean IC lands close enough to zero that
+    it actually scores `flat` (see test_weak_icir_verdict_is_reachable below
+    for a deterministic pin of the `weak` branch itself)."""
     closes, rng = _panel()
     fwd = fis.forward_returns(closes, 5)
     flip = pd.Series(np.where(np.arange(len(closes)) % 10 < 5, 1.0, -1.0), index=closes.index)
@@ -134,6 +167,25 @@ def test_low_icir_scores_weak():
     if res['verdict'] == 'weak':
         assert abs(res['icir']['5']) < 0.30
         assert res['reason'] == 'icir_below_threshold'
+
+
+def test_weak_icir_verdict_is_reachable():
+    """Deterministically pins the `weak` branch itself (not just tolerated
+    as one of two possible outcomes, as in test_low_icir_scores_weak above).
+    A slightly asymmetric sign-flip (+0.06 bias, still flipping sign every 5
+    sessions) keeps the IC real (|IC_5| clears the 0.01 flat floor with
+    margin) but unstable enough that its annualized ICIR stays under 0.30
+    with margin on both sides — empirically verified on SEED=7 at
+    ic_5≈0.0226, icir_5≈0.194."""
+    closes, rng = _panel()
+    fwd = fis.forward_returns(closes, 5)
+    flip = pd.Series(np.where(np.arange(len(closes)) % 10 < 5, 1.0, -1.0), index=closes.index)
+    factor = fwd.mul(flip + 0.06, axis=0) + rng.normal(0.0, 0.02, size=fwd.shape)
+    res = fis.compute_ic_screen(factor, closes)
+    assert abs(res['ic']['5']) >= 0.015, res
+    assert abs(res['icir']['5']) < 0.30, res
+    assert res['verdict'] == 'weak', res
+    assert res['reason'] == 'icir_below_threshold'
 
 
 def test_output_shape_carries_every_spec_field():
@@ -148,6 +200,11 @@ def test_output_shape_carries_every_spec_field():
     assert set(res['ic_half']) == {'first', 'second'}
     import json
     json.dumps(res)   # must be JSON-serialisable for the orchestrator
+    # The CLI's main() hardens this with allow_nan=False (a bare `NaN` token
+    # is invalid JSON for the orchestrator's Node-side JSON.parse) — prove
+    # the same guarantee holds on the pure core's own output, not just that
+    # the permissive default succeeds.
+    json.dumps(res, allow_nan=False)
 
 
 # ── factor_from_signals ───────────────────────────────────────────────────────
