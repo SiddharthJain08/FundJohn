@@ -158,10 +158,28 @@ def gated_sessions(start, end, events=HIGH_IMPORTANCE) -> dict:
 def gating_event(session, events=HIGH_IMPORTANCE):
     """'CPI@2026-09-16,FOMC_DECISION@2026-09-17' when `session` is T-1 or T of
     at least one listed release, else None. The string is the `events=` token
-    of the [event_gate] line, so it is sorted and comma-joined."""
+    of the [event_gate] line, so it is sorted and comma-joined.
+
+    Cheap-filters rows on the row's own session_date before ever calling
+    _t_minus_one: only a row whose session_date falls in
+    [session - 14d, session] can possibly gate `session` (the T-1..T window
+    is always inside 14 d), so every other row is skipped without touching
+    the calendar. _t_minus_one is additionally memoized per session_date for
+    the lifetime of this call — rows that share a session_date (more than
+    one high-importance release on the same day) call it once, not once per
+    row (fix wave F1 / review I-1)."""
     hits = []
+    t1_cache: dict = {}
+    window = dt.timedelta(days=14)
     for r in load_events(events=events):
         t = r['session_date']
-        if t == session or _t_minus_one(t) == session:
+        if t is None or not (t - window <= session <= t):
+            continue
+        if t == session:
+            hits.append(f"{r['event']}@{t.isoformat()}")
+            continue
+        if t not in t1_cache:
+            t1_cache[t] = _t_minus_one(t)
+        if t1_cache[t] == session:
             hits.append(f"{r['event']}@{t.isoformat()}")
     return ','.join(sorted(set(hits))) if hits else None
