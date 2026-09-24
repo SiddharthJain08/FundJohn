@@ -16,14 +16,30 @@ regime change in a name's realised risk.
 
 Same universe, same rebalance cadence (daily-driven, decile-selected), same
 decile fraction, same house ATR brackets as the parent — the ONLY change is the
-ranking statistic, so the fleet gates measure the estimator, not a new strategy.
+ranking statistic, so the fleet gates measure the estimator, not a new
+strategy. `DATE_FLOOR = '2016-01-01'` matches the fleet's shared backtest
+window: `unified_backtest.DEFAULT_START_DATE = '2016-04-11'` (the earliest
+`historical_regimes` row) is the actual start of any backtest run, and
+GK_WINDOW=63 equity bars past `2016-01-01` are already available by
+`2016-03-29` — BEFORE that start date. So this variant can produce a signal
+on the very first backtest bar, exactly like the parent: the two are compared
+over the SAME span from day one, not a shorter one, which is the whole point
+of the D4 experiment (an earlier `2021-01-01` floor would instead have cost
+~5 years of missing comparison window at the start of the backtest).
 
-Data: close panel (engine) + self-loaded OPEN/HIGH/LOW/CLOSE panels from
-prices.parquet via _extra_panels.load_wide — the established pattern for a
-strategy needing extra master-parquet columns (see S_overnight_intraday_tug_of_war
-and oxford_crabel.basket_ohlc). Point-in-time: every self-loaded panel is
-sliced .loc[:asof] with asof = prices.index[-1] before anything is computed,
-which is _extra_panels' documented caller contract.
+Data: close panel (engine) + self-loaded OPEN/HIGH/LOW panels from
+prices.parquet via _extra_panels.load_wide (CLOSE is taken from the engine's
+own `prices` panel, not re-loaded — see the loader below); the established
+pattern for a strategy needing extra master-parquet columns (see
+S_overnight_intraday_tug_of_war and oxford_crabel.basket_ohlc). Point-in-time:
+every self-loaded panel is reindexed to the engine's own calendar
+(`prices.index[prices.index <= asof]`, asof = prices.index[-1]) before the
+63-bar `.tail()` — both to stay look-ahead-safe (_extra_panels' documented
+caller contract) and to keep the window on the EQUITY calendar the backtest
+actually handed us, regardless of what calendar `load_wide` itself returns
+(it is loaded with equity-only tickers via `lib.price_panel.is_equity_ticker`,
+so a 7-day-market ticker such as BTC-USD in the universe can never dilute the
+window with weekend/holiday rows that would starve it below `MIN_VALID`).
 """
 from __future__ import annotations
 
@@ -34,6 +50,7 @@ import numpy as np
 import pandas as pd
 
 from strategies.base import BaseStrategy, Signal
+from lib.price_panel import is_equity_ticker
 
 try:
     from strategies.implementations._extra_panels import load_wide
@@ -52,10 +69,22 @@ def garman_klass_variance(open_: pd.DataFrame, high: pd.DataFrame,
                            low: pd.DataFrame, close: pd.DataFrame) -> pd.DataFrame:
     """Per-bar Garman-Klass variance: 0.5*ln(H/L)^2 - (2ln2-1)*ln(C/O)^2.
 
-    Returns a frame aligned with the inputs; NaN wherever any leg is missing or
-    non-positive (log of <= 0 is undefined — a zero/negative price is bad data,
-    not a zero-variance bar)."""
-    valid = (open_ > 0) & (high > 0) & (low > 0) & (close > 0)
+    Returns a frame aligned with the inputs; NaN wherever a bar is not a
+    usable OHLC bar (fix round 1, R4) — a bar is valid only if:
+      - all four legs are finite and strictly positive (log of <= 0 is
+        undefined — a zero/negative or missing price is bad data);
+      - H >= max(O, C) and L <= min(O, C) (the high/low must actually bound
+        the open/close, or the bar is internally inconsistent — e.g. a bad
+        print with O above H); and
+      - H > L strictly (a zero-range O=H=L=C stale/illiquid bar is NaN, not a
+        legitimate zero-variance bar — otherwise a stale, non-trading name
+        would look like the quietest name in the universe and win the
+        low-vol ranking on bad data)."""
+    finite   = np.isfinite(open_) & np.isfinite(high) & np.isfinite(low) & np.isfinite(close)
+    positive = (open_ > 0) & (high > 0) & (low > 0) & (close > 0)
+    bounded  = (high >= open_) & (high >= close) & (low <= open_) & (low <= close)
+    ranged   = high > low
+    valid = finite & positive & bounded & ranged
     hl = np.log(high.where(valid) / low.where(valid))
     co = np.log(close.where(valid) / open_.where(valid))
     return 0.5 * hl ** 2 - _GK_C * co ** 2
@@ -82,7 +111,11 @@ class LowVolatilityUSGK63(BaseStrategy):
     MIN_VALID   = 45          # usable GK bars required inside the window
     DECILE_FRAC = 0.10
     MIN_TICKERS = 10
-    DATE_FLOOR  = '2021-01-01'
+    # Chosen so GK_WINDOW=63 equity bars are already available before
+    # unified_backtest.DEFAULT_START_DATE = '2016-04-11', so the parent and
+    # this variant share the same fleet backtest window from the first bar
+    # (see module docstring) — fix round 1, R3.
+    DATE_FLOOR  = '2016-01-01'
 
     def generate_signals(
         self,
@@ -108,29 +141,46 @@ class LowVolatilityUSGK63(BaseStrategy):
             print('[debug] signals=0', file=sys.stderr)
             return []
 
-        # ── Self-load OHLC, POINT-IN-TIME ─────────────────────────────────────
-        # asof is the signal bar; .loc[:asof] before .tail() is _extra_panels'
-        # documented caller contract and is what makes this look-ahead-safe.
+        # ── Self-load OHL, POINT-IN-TIME ──────────────────────────────────────
+        # asof is the signal bar. Fix round 1:
         #
-        # Key load_wide by the STABLE full close-panel column set
-        # (prices.columns), not by `available` (universe intersected with
-        # prices.columns) — `available` tracks the per-bar `universe` arg,
-        # which a backtest's point-in-time resolver can vary every bar
-        # (unified_backtest.py's bar_universe = resolver.resolve(...)). A
-        # bar-varying ticker tuple would defeat load_wide's cache key on
-        # every call for a DAILY-cadence strategy (4 chunked full-parquet
-        # reads/bar; _extra_panels.py:125-131 documents ~3s/bar for exactly
-        # this pattern). Mirrors liquid_pool's own precedent for the same
-        # reason. `cols` below still restricts the result to `available`, so
-        # this changes nothing about what gets ranked — only the cache key.
+        # R1(a) — load_wide is keyed by EQUITY-ONLY tickers
+        # (lib.price_panel.is_equity_ticker), not the full `prices.columns`.
+        # `apply_equity_calendar` only ever drops ROWS, never columns, so
+        # requesting a 7-day-market ticker such as BTC-USD would pull load_wide's
+        # OWN returned panel onto the union calendar (weekend/holiday rows that
+        # exist only because a crypto ticker trades that day) — a `.tail(63)`
+        # over that union index would then span far more than 63 equity
+        # sessions and could starve MIN_VALID. `equity_cols` is still derived
+        # entirely from `prices.columns` (not from `available`, which tracks
+        # the per-bar `universe` arg a backtest's point-in-time resolver can
+        # vary every bar — unified_backtest.py's bar_universe =
+        # resolver.resolve(...)), so the load_wide cache key stays BAR-STABLE
+        # for this daily-cadence strategy (4 chunked full-parquet reads/bar
+        # otherwise; _extra_panels.py:125-131 documents ~3s/bar for exactly
+        # this pattern; mirrors liquid_pool's own precedent).
+        #
+        # R1(b) — belt-and-suspenders regardless of what calendar load_wide's
+        # own OHLC panel ends up on: reindex to the EQUITY calendar the
+        # backtest actually handed us (`prices.index`, filtered to <= asof)
+        # BEFORE the tail, so the window is always exactly GK_WINDOW rows of
+        # `prices.index`, never a union-calendar span.
+        #
+        # R2 — only OPEN/HIGH/LOW are self-loaded; CLOSE comes from the
+        # engine's own `prices` panel below (same source, already PIT-sliced,
+        # and what the parent ranks on) instead of a fourth load_wide call —
+        # cuts self-loaded panel memory by a quarter.
         asof = prices.index[-1]
+        equity_cols = [t for t in prices.columns if is_equity_ticker(t)]
+        equity_calendar = prices.index[prices.index <= asof]
+
         panels = {}
-        for field in ('open', 'high', 'low', 'close'):
-            w = load_wide(field, list(prices.columns), date_floor=self.DATE_FLOOR)
+        for field in ('open', 'high', 'low'):
+            w = load_wide(field, equity_cols, date_floor=self.DATE_FLOOR)
             if w is None or w.empty:
                 print('[debug] signals=0', file=sys.stderr)
                 return []
-            panels[field] = w.loc[:asof].tail(self.GK_WINDOW)
+            panels[field] = w.reindex(equity_calendar).tail(self.GK_WINDOW)
 
         cols = None
         for w in panels.values():
@@ -140,9 +190,10 @@ class LowVolatilityUSGK63(BaseStrategy):
             print('[debug] signals=0', file=sys.stderr)
             return []
 
-        idx = panels['close'].index
-        for field in ('open', 'high', 'low'):
+        idx = panels['open'].index
+        for field in ('high', 'low'):
             idx = idx.intersection(panels[field].index)
+        idx = idx.intersection(prices.index)
         if len(idx) < self.MIN_VALID:
             print('[debug] signals=0', file=sys.stderr)
             return []
@@ -150,7 +201,7 @@ class LowVolatilityUSGK63(BaseStrategy):
         o = panels['open'].loc[idx, cols].astype('float64')
         h = panels['high'].loc[idx, cols].astype('float64')
         low_ = panels['low'].loc[idx, cols].astype('float64')
-        c = panels['close'].loc[idx, cols].astype('float64')
+        c = prices.loc[idx, cols].astype('float64')
 
         gk = garman_klass_variance(o, h, low_, c)
         counts = gk.notna().sum()

@@ -97,6 +97,36 @@ def test_garman_klass_nans_non_positive_legs():
     assert pd.isna(out.iloc[1, 0])
 
 
+def test_garman_klass_nans_zero_range_bars():
+    """R4 — a stale/illiquid O=H=L=C bar must be NaN, not a legitimate
+    zero-variance bar (0.5*ln(1)^2 - c*ln(1)^2 == 0 under the raw formula),
+    or an illiquid non-trading name would look like the quietest name in the
+    universe and win the low-vol ranking on bad data."""
+    o = pd.DataFrame({'A': [100.0, 100.0]})
+    h = pd.DataFrame({'A': [100.0, 102.0]})
+    l = pd.DataFrame({'A': [100.0, 99.0]})
+    c = pd.DataFrame({'A': [100.0, 101.0]})
+    out = gk.garman_klass_variance(o, h, l, c)
+    assert pd.isna(out.iloc[0, 0]), 'zero-range O=H=L=C bar must be NaN, not 0'
+    assert not pd.isna(out.iloc[1, 0])
+
+
+def test_garman_klass_nans_inconsistent_bars():
+    """R4 — H must bound max(O, C) and L must bound min(O, C), or the bar is
+    an internally inconsistent bad print (e.g. O above H) and must be NaN,
+    not fed into the formula as-is."""
+    # row 0: O above H (bad print). row 1: L above C (bad print). row 2: a
+    # normal, consistent bar.
+    o = pd.DataFrame({'A': [105.0, 100.0, 100.0]})
+    h = pd.DataFrame({'A': [102.0, 102.0, 102.0]})
+    l = pd.DataFrame({'A': [99.0,  101.0, 99.0]})
+    c = pd.DataFrame({'A': [101.0, 100.5, 101.0]})
+    out = gk.garman_klass_variance(o, h, l, c)
+    assert pd.isna(out.iloc[0, 0])
+    assert pd.isna(out.iloc[1, 0])
+    assert not pd.isna(out.iloc[2, 0])
+
+
 # ── the strategy ──────────────────────────────────────────────────────────────
 
 def test_ranking_selects_the_low_gk_names(wired):
@@ -175,10 +205,11 @@ def test_load_wide_key_is_stable_across_universe_subsets(monkeypatch, wired):
     """load_wide must be keyed by the full close-panel column set
     (prices.columns), not by the per-call `universe` argument — else a
     backtest whose point-in-time resolver varies `bar_universe` every bar
-    would cache-miss load_wide on every single bar (4 chunked full-parquet
+    would cache-miss load_wide on every single bar (chunked full-parquet
     reads/bar for a daily-cadence strategy; _extra_panels.py:125-131
     documents ~3s/bar for exactly this pattern). Mirrors the liquid_pool
-    precedent (_extra_panels.py:125-131)."""
+    precedent (_extra_panels.py:125-131). Fix round 1 R2 dropped the fourth
+    (CLOSE) load_wide call, so this is 3 OHL fields x 2 calls, not 4x2."""
     _, panels = _panels()
     seen_tickers = []
     def _load_wide(field, tickers, date_floor='2021-01-01'):
@@ -190,11 +221,191 @@ def test_load_wide_key_is_stable_across_universe_subsets(monkeypatch, wired):
     s.generate_signals(wired, _regime(), TICKERS)        # full universe
     s.generate_signals(wired, _regime(), TICKERS[:20])    # narrower universe, same price panel
 
-    assert len(seen_tickers) == 8   # 4 OHLC fields x 2 generate_signals calls
+    assert len(seen_tickers) == 6   # 3 OHL fields x 2 generate_signals calls
     assert len(set(seen_tickers)) == 1, (
         'load_wide was called with a different ticker set across two calls '
         'sharing the SAME price panel but different `universe` arguments — '
         'the cache key must track prices.columns, not the per-bar universe list')
+
+
+def test_ohlc_panel_calendar_never_dilutes_the_equity_window(monkeypatch):
+    """R1 — reviewer repro: `load_wide(field, list(prices.columns))` used to
+    include 7-day tickers (BTC-USD etc.); apply_equity_calendar drops rows,
+    never columns, so the OHLC panel load_wide handed back was on the union
+    calendar and `.tail(63)` spanned ~63 CALENDAR days (~43-45 equity bars)
+    — starving MIN_VALID and dropping signals to 0.
+
+    Fixture: `prices` (the engine's close panel) carries a BTC-USD column
+    (R1(a) — this must never reach load_wide's tickers argument) and is
+    missing one mid-window row (`holiday`, a date load_wide's OHLC panel
+    still has real data for — e.g. a stale/bad print — but which is not an
+    equity trading day in `prices`). The stubbed load_wide UNCONDITIONALLY
+    returns its OHLC panel on a 7-day/union calendar (every calendar day,
+    weekends included) REGARDLESS of which tickers were requested, so this
+    pins R1(b)'s reindex-to-prices.index-before-tail fix independently of
+    R1(a) — if R1(b) were reverted to a plain `.loc[:asof].tail(63)`, this
+    union-calendar panel alone would already starve the window and let
+    `holiday` leak into it, even with R1(a) correctly excluding BTC-USD.
+
+    The three quiet names must still be selected, and the window that
+    actually reaches garman_klass_variance must be exactly GK_WINDOW rows,
+    all a subset of prices.index, with the dropped holiday excluded."""
+    closes, panels = _panels()
+    holiday = closes.index[-30]     # a mid-window date, not near either edge
+    prices = closes.drop(index=holiday).copy()
+    prices['BTC-USD'] = 100.0       # non-equity column present in prices.columns
+
+    # Unconditional 7-day/union calendar: model load_wide's own OHLC pivot as
+    # always spanning every calendar day in range (weekends + `holiday`
+    # included, since the underlying parquet still has a — possibly stale —
+    # row there), independent of which tickers were requested.
+    union_idx = pd.date_range(closes.index[0], closes.index[-1], freq='D')
+    seen_tickers = []
+
+    def _load_wide(field, tickers, date_floor='2016-01-01'):
+        seen_tickers.append(tuple(sorted(tickers)))
+        base = panels[field][[t for t in tickers if t in panels[field].columns]]
+        return base.reindex(union_idx)
+    monkeypatch.setattr(gk, 'load_wide', _load_wide)
+
+    recorded = {}
+    _real_gk_variance = gk.garman_klass_variance
+    def _spy(open_, high, low, close):
+        recorded['index'] = open_.index
+        return _real_gk_variance(open_, high, low, close)
+    monkeypatch.setattr(gk, 'garman_klass_variance', _spy)
+
+    s = gk.LowVolatilityUSGK63()
+    signals = s.generate_signals(prices, _regime(), TICKERS + ['BTC-USD'])
+
+    # R1(a): load_wide must never have been asked for the non-equity ticker.
+    for tickers in seen_tickers:
+        assert 'BTC-USD' not in tickers, (
+            'load_wide was called with a non-equity ticker — apply_equity_calendar '
+            'only drops rows, never columns, so this would pull the OHLC panel '
+            'onto the union calendar and starve the 63-bar equity window')
+
+    # R1(b): the window that reached the estimator is exactly GK_WINDOW rows,
+    # all drawn from prices.index — never diluted by load_wide's own (here,
+    # unconditionally union) calendar, and the dropped holiday never leaks in.
+    assert 'index' in recorded
+    assert len(recorded['index']) == gk.LowVolatilityUSGK63.GK_WINDOW
+    assert set(recorded['index']).issubset(set(prices.index))
+    assert holiday not in recorded['index']
+
+    # Reviewer repro, inverted: with the fix, neither the crypto column nor
+    # the union-calendar OHLC panel starves the selection — still exactly
+    # the 3 quiet names.
+    assert len(signals) == 3, f'decile of 30 = 3, got {len(signals)}'
+    assert sorted(sig.ticker for sig in signals) == sorted(QUIET)
+
+
+def test_zero_range_bars_are_never_selected_as_quietest(monkeypatch):
+    """R4 (i) — a name whose ENTIRE window is zero-range (O=H=L=C, a
+    stale/non-trading print) must not be selected even though the raw,
+    unmasked GK formula would score it a literal 0 (the lowest possible
+    'variance' in the universe) and let it win the low-vol decile on bad
+    data instead of on genuinely low realized risk."""
+    closes, panels = _panels()
+    stale = QUIET[0]
+    flat_val = float(closes[stale].iloc[-1])
+    closes = closes.copy()
+    closes[stale] = flat_val
+    for field in ('open', 'high', 'low'):
+        panels[field] = panels[field].copy()
+        panels[field][stale] = flat_val
+
+    def _load_wide(field, tickers, date_floor='2016-01-01'):
+        return panels[field][[t for t in tickers if t in panels[field].columns]]
+    monkeypatch.setattr(gk, 'load_wide', _load_wide)
+
+    s = gk.LowVolatilityUSGK63()
+    signals = s.generate_signals(closes, _regime(), TICKERS)
+
+    assert stale not in [sig.ticker for sig in signals], (
+        f'{stale} has a zero-range window (stale/illiquid bad data) and must '
+        'never be selected as the "quietest" name in the universe')
+
+
+def test_inconsistent_bars_are_masked_not_pulled_negative(monkeypatch):
+    """R4 (ii) — a name with 10 inconsistent bars (O pushed above H) inside
+    its 63-bar window must be ranked on its remaining 53 valid bars, not
+    have its mean pulled toward a spurious negative value by feeding the
+    unmasked formula a bad print (with O above H, ln(C/O) can dominate
+    ln(H/L) and drive the raw, unmasked per-bar 'variance' sharply negative
+    for that one bar)."""
+    idx = pd.bdate_range(end='2026-08-21', periods=N_DAYS)
+    window = idx[-gk.LowVolatilityUSGK63.GK_WINDOW:]
+    bad_dates = window[15:25]   # 10 consecutive business days inside the window
+
+    tickers = ['QUIETEST', 'BAD'] + [f'BG{i:02d}' for i in range(18)]
+    rng = np.random.default_rng(31)
+    base = 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.006, N_DAYS)))
+    closes = pd.DataFrame({t: base + i * 0.01 for i, t in enumerate(tickers)}, index=idx)
+
+    opens, highs, lows = {}, {}, {}
+    for t in tickers:
+        c = closes[t].to_numpy()
+        width = 0.0007 if t in ('QUIETEST', 'BAD') else 0.02
+        opens[t] = c * (1.0 - width * 0.25)
+        highs[t] = c * (1.0 + width)
+        lows[t]  = c * (1.0 - width)
+    open_df = pd.DataFrame(opens, index=idx)
+    high_df = pd.DataFrame(highs, index=idx)
+    low_df  = pd.DataFrame(lows,  index=idx)
+
+    # Corrupt BAD's 10 bad_dates: push O above H (inconsistent print).
+    open_df.loc[bad_dates, 'BAD'] = high_df.loc[bad_dates, 'BAD'] * 1.5
+
+    panels = {'open': open_df, 'high': high_df, 'low': low_df}
+
+    def _load_wide(field, req_tickers, date_floor='2016-01-01'):
+        return panels[field][[t for t in req_tickers if t in panels[field].columns]]
+    monkeypatch.setattr(gk, 'load_wide', _load_wide)
+
+    s = gk.LowVolatilityUSGK63()
+    signals = s.generate_signals(closes, _regime(), tickers)
+
+    bad_sig = next((sig for sig in signals if sig.ticker == 'BAD'), None)
+    assert bad_sig is not None, 'BAD should still be ranked on its 53 remaining valid bars'
+    assert bad_sig.signal_params['gk_bars_used'] == gk.LowVolatilityUSGK63.GK_WINDOW - 10
+    assert bad_sig.signal_params['gk_var_63d'] > 0, (
+        'a masked-out bad print must not pull the mean to a spurious negative value')
+
+    # Cross-check against computing the estimator directly on just the 53
+    # valid (non-corrupted) bars.
+    good_dates = window.difference(bad_dates)
+    o = open_df.loc[good_dates, ['BAD']].astype('float64')
+    h = high_df.loc[good_dates, ['BAD']].astype('float64')
+    l = low_df.loc[good_dates, ['BAD']].astype('float64')
+    c = closes.loc[good_dates, ['BAD']].astype('float64')
+    expected = gk.garman_klass_variance(o, h, l, c).mean(skipna=True).iloc[0]
+    # signal_params rounds to 10 decimal places; expected is ~1e-6 in scale,
+    # so bound the comparison in absolute terms rather than relative.
+    assert bad_sig.signal_params['gk_var_63d'] == pytest.approx(expected, abs=1e-9)
+
+
+def test_short_ohlc_history_returns_empty_no_raise(monkeypatch):
+    """R6 — prices has 200 bars but the self-loaded O/H/L panels only cover
+    the trailing 30 of those dates (e.g. a name added to prices.parquet's
+    OHLC columns much later than its close history): too few real GK bars
+    inside the 63-bar window (30 < MIN_VALID=45) must return [], never raise."""
+    idx200 = pd.bdate_range(end='2026-08-21', periods=200)
+    rng = np.random.default_rng(7)
+    base = 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.005, 200)))
+    closes200 = pd.DataFrame({t: base for t in TICKERS}, index=idx200)
+
+    idx30 = idx200[-30:]
+    c30 = closes200.loc[idx30]
+    short_panels = {'open': c30 * 0.999, 'high': c30 * 1.002, 'low': c30 * 0.998}
+
+    def _load_wide(field, tickers, date_floor='2016-01-01'):
+        panel = short_panels[field]
+        return panel[[t for t in tickers if t in panel.columns]]
+    monkeypatch.setattr(gk, 'load_wide', _load_wide)
+
+    s = gk.LowVolatilityUSGK63()
+    assert s.generate_signals(closes200, _regime(), TICKERS) == []
 
 
 def test_contract_surface_matches_the_parent():
