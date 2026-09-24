@@ -45,8 +45,18 @@ realized execution quality, not book composition.
 from __future__ import annotations
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+# F3 / review I-4: an exception raised while connecting (own=True path above)
+# can be a psycopg2 error whose message embeds the DSN, credentials and all
+# (e.g. `connection to server ... failed: FATAL: password authentication
+# failed for user "x"` variants, or a raw `postgresql://user:pw@host/db`).
+# This line is posted to Discord — scrub the DSN's userinfo BEFORE truncating
+# to 60 chars, since truncation alone offers no guarantee the credentials
+# land before the cut.
+_DSN_USERINFO_RE = re.compile(r'postgres(ql)?://[^@\s]*@')
 
 OK_MULT = 1.5
 WARN_MULT = 3.0
@@ -284,7 +294,8 @@ def fill_slippage_line(run_date, *, conn=None, cost_bps=None, bench_ids=None):
                        cost_bps=cost_bps, bench_ids=bench_ids)
         return format_line(st, run_date)
     except Exception as e:  # noqa: BLE001
-        reason = f'{type(e).__name__}: {str(e)[:60]}'
+        scrubbed = _DSN_USERINFO_RE.sub('postgres://***@', str(e))
+        reason = f'{type(e).__name__}: {scrubbed[:60]}'
         logger.warning('[fill_slippage] degraded (%s)', reason)
         return f'fill_slippage: n/a ({reason})'
     finally:

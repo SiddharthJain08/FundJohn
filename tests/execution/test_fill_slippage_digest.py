@@ -182,6 +182,32 @@ def test_fill_slippage_line_renders_na_with_reason_on_any_failure(monkeypatch):
     assert line == 'fill_slippage: n/a (RuntimeError: db down)'
 
 
+def test_fill_slippage_line_scrubs_a_dsn_before_truncating(monkeypatch):
+    """F3 / review I-4: a psycopg2-like error carrying the DSN (credentials
+    and all) must never reach the Discord-posted line — the userinfo is
+    scrubbed BEFORE the 60-char truncation, not after (truncation alone
+    offers no guarantee the credentials land before the cut)."""
+    dsn_err = 'conn failed: postgresql://tradejohn:s3cr3t@10.0.0.5/db boom'
+    monkeypatch.setattr(fs, 'load_entry_rows',
+                        lambda conn, rd: (_ for _ in ()).throw(RuntimeError(dsn_err)))
+    line = fs.fill_slippage_line('2026-09-15', conn=object(), bench_ids=set())
+    assert 's3cr3t' not in line
+    assert 'tradejohn' not in line
+    assert 'postgres://***@' in line
+
+    # A DSN sitting past the 60-char cutoff must still never leak — the
+    # scrub runs before truncation, so worst case the secret is simply gone
+    # from the truncated tail, never partially exposed.
+    long_prefix_err = ('could not connect to server: FATAL: password '
+                       'authentication failed for user "x" at '
+                       'postgresql://tradejohn:s3cr3t-pw@10.0.0.5:5432/fundjohn')
+    monkeypatch.setattr(fs, 'load_entry_rows',
+                        lambda conn, rd: (_ for _ in ()).throw(RuntimeError(long_prefix_err)))
+    line2 = fs.fill_slippage_line('2026-09-15', conn=object(), bench_ids=set())
+    assert 's3cr3t-pw' not in line2
+    assert 'tradejohn' not in line2
+
+
 def test_fill_slippage_line_uses_the_injected_connection(monkeypatch):
     monkeypatch.setattr(fs, 'load_entry_rows', lambda conn, rd: list(ENTRY))
     monkeypatch.setattr(fs, 'load_exit_rows', lambda conn, rd: list(EXIT))
