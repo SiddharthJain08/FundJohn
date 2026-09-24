@@ -328,36 +328,81 @@ def _evidence_counts(strategy_id: str, regime_state: str) -> dict:
     return evidence_counts(strategy_id, regime_state)
 
 
+def _fmt4(x) -> str:
+    """Render a possibly-None float with 4 decimals, for calibration reason
+    strings. Used for raw/calibrated/effective only — evidence_cap is one of
+    four fixed constants (0.35/0.55/0.75/1.0) and is left unformatted so
+    audit text stays greppable verbatim, e.g. 'cap 0.35 [none]'."""
+    return 'None' if x is None else f'{float(x):.4f}'
+
+
 def _calibration_inputs(strategy_id: str, regime_state: str, raw) -> dict:
     """Everything auto_approve needs to decide and to record (spec D2).
 
-    Fail-OPEN on any calibration error: `calibrated` falls back to raw and
-    `cap` to 1.0, with the exception text kept under 'error'. A broken
-    calibration table must never turn into a silent tightening the operator
-    cannot see.
+    Two INDEPENDENT failure domains, each with its own contract — a broken
+    calibration table and a broken evidence table fail in opposite
+    directions on purpose:
+
+    - The calibration-report step (bucket table -> calibrated_confidence)
+      fails OPEN: any exception falls back to `calibrated = raw`, clamped
+      into [0, 1] with NaN -> None (mirroring calibrated_confidence's own
+      raw handling), so a NaN/out-of-range raw can never reach a bogus
+      `min(nan, cap)` downstream. A broken calibration table must never
+      turn into a silent tightening the operator cannot see.
+
+    - The evidence step (evidence_counts -> evidence_cap) fails CLOSED: ANY
+      exception — a DB error escaping the seam, a bad row, a raise inside
+      evidence_cap's own parsing — drops straight to evidence_level='none',
+      cap=0.35 (the same cap a sleeve with zero closed trades gets), and
+      sets evidence_error=True. An unreadable evidence table must never
+      read as strong evidence; unlike the calibration step, it is itself a
+      reason to tighten the gate, not loosen it.
+
+    The two steps are independent: a report failure does not force the
+    evidence cap down, and an evidence failure does not force calibrated
+    back to raw.
     """
     raw_f = float(raw) if raw is not None else None
-    out = {'raw': raw_f, 'calibrated': raw_f, 'cap': 1.0, 'evidence_level': None,
+    if raw_f is not None and raw_f == raw_f:  # not NaN
+        raw_clamped = max(0.0, min(1.0, raw_f))
+    else:
+        raw_clamped = None
+
+    out = {'raw': raw_f, 'calibrated': raw_clamped, 'cap': 1.0, 'evidence_level': None,
            'n_closed': None, 'staleness_days': None, 'binding_bound': 'calibrated',
-           'error': None}
+           'error': None, 'evidence_error': False}
+
+    # Step 1 — calibration report: fail OPEN (see docstring).
     try:
         # Imported inside the try (not at module/function top) so a broken
         # metrics.mastermind_calibration import also fails OPEN rather than
         # raising out of auto_approve — same contract as a bad DB call.
-        from metrics.mastermind_calibration import calibrated_confidence, evidence_cap
+        from metrics.mastermind_calibration import calibrated_confidence
         buckets = (_calibration_report() or {}).get('buckets') or []
         out['calibrated'] = calibrated_confidence(raw_f, buckets)
-        ev = _evidence_counts(strategy_id, regime_state) or {}
-        out['n_closed'] = ev.get('n_closed')
-        out['staleness_days'] = ev.get('staleness_days')
-        level, cap = evidence_cap(ev.get('n_closed') or 0, ev.get('staleness_days'))
-        out['evidence_level'] = level
-        out['cap'] = cap
     except Exception as e:  # noqa: BLE001 — fail-open, see docstring
         out['error'] = f'{type(e).__name__}: {e}'
-        out['calibrated'] = raw_f
-        out['cap'] = 1.0
-        out['evidence_level'] = None
+        out['calibrated'] = raw_clamped
+
+    # Step 2 — evidence: fail CLOSED (see docstring). Independent try block:
+    # this must never inherit or be masked by a Step 1 failure/success.
+    try:
+        from metrics.mastermind_calibration import evidence_cap
+        ev = _evidence_counts(strategy_id, regime_state) or {}
+        n_closed = ev.get('n_closed')
+        staleness_days = ev.get('staleness_days')
+        level, cap = evidence_cap(n_closed or 0, staleness_days)
+        out['n_closed'] = n_closed
+        out['staleness_days'] = staleness_days
+        out['evidence_level'] = level
+        out['cap'] = cap
+    except Exception as e:  # noqa: BLE001 — fail CLOSED, see docstring
+        out['evidence_error'] = True
+        out['evidence_level'] = 'none'
+        out['cap'] = 0.35
+        if out['error'] is None:
+            out['error'] = f'{type(e).__name__}: {e}'
+
     cal = out['calibrated'] if out['calibrated'] is not None else float('inf')
     out['binding_bound'] = 'cap' if out['cap'] < cal else 'calibrated'
     out['effective'] = None if out['calibrated'] is None else min(out['calibrated'], out['cap'])
@@ -482,10 +527,11 @@ def auto_approve(*, proposal_id: int) -> dict:
     if calibrated_enabled:
         if would_skip:
             return {'id': proposal_id, 'status': 'skipped',
-                    'reason': (f'calibrated confidence {effective} below threshold {min_conf} '
-                               f'(raw {conf}, calibrated {calib["calibrated"]}, '
+                    'reason': (f'calibrated confidence {_fmt4(effective)} below threshold {min_conf} '
+                               f'(raw {_fmt4(conf)}, calibrated {_fmt4(calib["calibrated"])}, '
                                f'cap {calib["cap"]} [{calib["evidence_level"]}], '
-                               f'bound {calib["binding_bound"]})'),
+                               f'bound {calib["binding_bound"]}'
+                               f'{", evidence_error" if calib["evidence_error"] else ""})'),
                     'calibration': calib_out}
     elif conf is None or float(conf) < min_conf:
         return {'id': proposal_id, 'status': 'skipped',
@@ -515,11 +561,21 @@ def auto_approve(*, proposal_id: int) -> dict:
     # All rails passed → route through the normal approve path. Use an
     # actor tag that clearly identifies this as auto-approval for audit.
     auto_actor = 'auto-approval'
-    auto_reason = (
-        f'auto-approved: confidence={conf:.2f} (calibrated={calib["calibrated"]}, '
-        f'cap={calib["cap"]} [{calib["evidence_level"]}]) >= {min_conf}, '
-        f'rails (size_delta<={max_size}, stop<={max_stop}) all passed'
-    )
+    if calibrated_enabled:
+        auto_reason = (
+            f'auto-approved: confidence={_fmt4(conf)} '
+            f'(calibrated={_fmt4(calib["calibrated"])}, '
+            f'cap={calib["cap"]} [{calib["evidence_level"]}]) >= {min_conf}, '
+            f'rails (size_delta<={max_size}, stop<={max_stop}) all passed'
+        )
+    else:
+        # §0 / spec D2: the unset path must be byte-identical to base — no
+        # calibrated=/cap= fragments. Those facts live only in the five
+        # recorded columns (migration 159) + the SHADOW log line above.
+        auto_reason = (
+            f'auto-approved: confidence={conf:.2f} >= {min_conf}, '
+            f'rails (size_delta<={max_size}, stop<={max_stop}) all passed'
+        )
     result = _decide(proposal_id=proposal_id, actor=auto_actor,
                      reason=auto_reason, source='auto-approval',
                      overrides=None, terminal_status='approved')
