@@ -272,12 +272,104 @@ Memo content must:
 No hedge language. Every claim must cite a number from the data.
 `;
 
-// 2026-05-19: Phase 2F calibration-addenda prepend logic removed.
-// Operators no longer interact with MastermindJohn's weekly review prompt —
-// the research-page dashboard is the only operator entry into the research
-// pipeline (add papers / sources / hand-developed strategies). The
-// mastermind_prompt_addenda table stays as a historical record but is
-// neither read nor written by this codebase.
+// 2026-05-19: the Phase 2F OPERATOR addenda prepend was removed (operators no
+// longer interact with this prompt — the research-page dashboard is the only
+// operator entry into the research pipeline). The mastermind_prompt_addenda
+// table stays a historical record and is still neither read nor written here.
+//
+// 2026-09-12 (spec §4 D2): the CALIBRATION addendum is restored — a different
+// thing from the operator addenda. It is the model's own empirical track
+// record, the same bucket table doctor.py's mastermind_calibration_brier check
+// reports, in the same shape the corpus curator already receives from
+// mastermind.js:_renderCalibration (:747-850). The memo writer is being asked
+// for a `confidence` it has been measurably bad at (2026-09-06: Brier 0.254 on
+// 41 resolved outcomes, hit rate 0.66 vs mean stated 0.75, and 0.56 inside the
+// >=0.8 bucket that auto-approval reads); withholding that from the prompt is
+// what let it drift. Fail-soft everywhere: no data => no block => the prompt is
+// byte-identical to before this change.
+
+// Mirror of doctor.py CALIBRATION_BRIER_WARN / _FAIL / _MIN_SAMPLES
+// (src/maintenance/doctor.py:1197-1199). Keep in sync.
+const CALIBRATION_BRIER_WARN  = 0.10;
+const CALIBRATION_BRIER_FAIL  = 0.20;
+const CALIBRATION_MIN_SAMPLES = 10;
+
+/**
+ * Render the confidence-calibration block. '' when there is nothing to say.
+ * Defensive against a malformed bucket entry (e.g. `null`, from a corrupt
+ * report) — a single bad row is skipped rather than thrown, per the "never a
+ * throw that kills the Saturday review" fail-soft requirement.
+ */
+function _renderProposalCalibration(cal) {
+  if (!cal || !Array.isArray(cal.buckets) || cal.buckets.length === 0) return '';
+  const buckets = cal.buckets.filter(b => b && typeof b === 'object');
+  const withData = buckets.filter(b => (b.count ?? 0) > 0);
+  if (!withData.length) return '';
+
+  const num = (v, d = 3) => (v === null || v === undefined ? 'n/a' : Number(v).toFixed(d));
+  const parts = [];
+  parts.push('--- CONFIDENCE CALIBRATION (your own track record) ---');
+  parts.push('');
+  parts.push('Every `confidence` you emit below is scored 30 days later against the live');
+  parts.push('Sharpe direction for that (strategy, regime). This is how those scores came out:');
+  parts.push('');
+  parts.push('  bucket        n    matched  match_rate');
+  for (const b of buckets) {
+    const n = b.count ?? 0;
+    const rate = n < CALIBRATION_MIN_SAMPLES ? 'n/a (thin sample)' : num(b.match_rate);
+    parts.push(`  ${String(b.range).padEnd(12)} ${String(n).padStart(4)}  `
+             + `${String(b.matched ?? 0).padStart(7)}  ${rate}`);
+  }
+  parts.push('');
+  parts.push(`  Brier score: ${num(cal.brier_score)} `
+           + `(warn >= ${CALIBRATION_BRIER_WARN.toFixed(2)}, fail >= ${CALIBRATION_BRIER_FAIL.toFixed(2)})`);
+  parts.push(`  Overall hit rate: ${num(cal.hit_rate, 2)} against mean stated confidence `
+           + `${num(cal.mean_confidence, 2)} `
+           + `(${cal.resolved_observations ?? 0} resolved of ${cal.total_observations ?? 0})`);
+  parts.push('');
+  if (cal.hit_rate != null && cal.mean_confidence != null
+      && Number(cal.hit_rate) < Number(cal.mean_confidence) - 0.05) {
+    parts.push('You are OVER-CONFIDENT: your stated confidence exceeds your realised hit rate.');
+    parts.push('A bucket whose match_rate sits well below its own midpoint is one you should stop');
+    parts.push('using — move those calls down a bucket. Reserve >= 0.8 for recommendations you');
+    parts.push('would defend on the trade-level numbers alone, not on the shape of the story.');
+  } else {
+    parts.push('Use these rates as a prior on your own confidence. Reserve >= 0.8 for');
+    parts.push('recommendations you would defend on the trade-level numbers alone.');
+  }
+  parts.push('Ignore "thin sample" buckets until they accumulate enough observations.');
+  parts.push('');
+  return parts.join('\n');
+}
+
+/**
+ * Best-effort read of the calibration report. Uses the file's existing
+ * spawnSync/PYTHON convention. Any failure (missing table, Postgres down,
+ * unparseable stdout) returns null and the prompt simply omits the block.
+ *
+ * `spawn` is injectable (defaults to the real `spawnSync`) so tests can
+ * exercise the fail-open path — bad exit status, unparseable stdout, a
+ * report missing `buckets`, or the spawn call itself throwing — without a
+ * real Python/Postgres round trip. The production call site (`_reviewOne`)
+ * calls this with no arguments and is unaffected.
+ */
+function _loadProposalCalibration({ spawn = spawnSync } = {}) {
+  try {
+    const res = spawn(PYTHON, ['-m', 'metrics.mastermind_calibration', '--report'], {
+      encoding: 'utf-8',
+      cwd: OPENCLAW_DIR,
+      timeout: 60_000,
+      env: { ...process.env, PYTHONPATH: 'src' },
+    });
+    if (res.status !== 0 || !res.stdout) return null;
+    const parsed = JSON.parse(res.stdout);
+    return (parsed && typeof parsed === 'object' && Array.isArray(parsed.buckets))
+      ? parsed : null;
+  } catch (e) {
+    console.error(`[review] calibration report unavailable: ${e.message}`);
+    return null;
+  }
+}
 
 // SP-4: mirror of lifecycle.py PROMOTION_THRESHOLDS (keep in sync). Used to
 // tell the reviewer the correct per-class promotion floor for this strategy.
@@ -290,12 +382,21 @@ const PROMOTION_THRESHOLDS = {
   crypto: { min_sharpe: 0, max_drawdown: 0.70, min_trades: 100 },
 };
 
-function buildStrategyPrompt(strategy, tradePack, counterfactuals) {
+function buildStrategyPrompt(strategy, tradePack, counterfactuals, calibration = null) {
   const ic = strategy.instrument_class || 'equity';
   const thr = PROMOTION_THRESHOLDS[ic] || PROMOTION_THRESHOLDS.equity;
   const classLine = `Instrument class: ${ic} (promotion floor per regime sleeve: Sharpe > ${thr.min_sharpe.toFixed(2)}, MaxDD ≤ ${(thr.max_drawdown * 100).toFixed(0)}%, trades ≥ ${thr.min_trades})`;
+  // Defense-in-depth on top of _renderProposalCalibration's own guards: this
+  // block must never be the reason the Saturday review throws.
+  let calBlock = '';
+  try {
+    calBlock = _renderProposalCalibration(calibration);
+  } catch (e) {
+    console.error(`[review] calibration block render failed: ${e.message}`);
+    calBlock = '';
+  }
   return `${MEMO_SYSTEM_PREAMBLE}
-
+${calBlock ? '\n' + calBlock : ''}
 Strategy: ${strategy.id} (${strategy.name})
 Status: ${strategy.status}
 Tier: ${strategy.tier}
@@ -368,7 +469,8 @@ async function _reviewOne(strategy, { dryRun, notify }) {
   }
 
   const counterfactuals = _counterfactuals(tradePack.pnl);
-  const prompt = buildStrategyPrompt(strategy, tradePack, counterfactuals);
+  const prompt = buildStrategyPrompt(strategy, tradePack, counterfactuals,
+                                     _loadProposalCalibration());
   log(`prompting Opus (signals=${tradePack.signals.length} pnl=${tradePack.pnl.length})`);
 
   const memoModel = resolveModel('mastermind', 'comprehensive-review', 'memo_writer');
@@ -597,4 +699,5 @@ async function run({ dryRun = false, strategyIds = null, notify = () => {} } = {
   };
 }
 
-module.exports = { run, buildStrategyPrompt, _counterfactuals };
+module.exports = { run, buildStrategyPrompt, _counterfactuals,
+                   _renderProposalCalibration, _loadProposalCalibration };
