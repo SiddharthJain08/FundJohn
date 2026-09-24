@@ -87,6 +87,7 @@ _IMPL_MAP = {
     'S_TR04_zarattini_intraday_spy':          ('strategies.implementations.str04_zarattini_intraday_spy',          'ZarattiniIntradaySPY'),
     'S_TR06_baltussen_eod_reversal':          ('strategies.implementations.str06_baltussen_eod_reversal',          'BaltussenEODReversal'),
     'low_volatility_us':                      ('strategies.implementations.low_volatility_us',                      'LowVolatilityUS'),
+    'S_low_volatility_us_gk63':               ('strategies.implementations.S_low_volatility_us_gk63',               'LowVolatilityUSGK63'),
     'S_cross_sectional_price_momentum':       ('strategies.implementations.S_cross_sectional_price_momentum',       'CrossSectionalPriceMomentum'),
     'S_pairs_trading_jump_diffusion_intraday': ('strategies.implementations.S_pairs_trading_jump_diffusion_intraday', 'PairsTradingJumpDiffusionIntraday'),
     # Task D3: sector cointegration pairs — offline EG/FDR-gated pair ledger, live z-score edge-trigger entries
