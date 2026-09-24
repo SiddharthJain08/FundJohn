@@ -78,15 +78,19 @@ def test_156_declares_every_position_ownership_column():
         assert re.search(rf'^\s*{col}\s+\w', body, re.M), f'position_ownership.{col} missing'
 
 
-def test_156_primary_key_supports_the_append_only_upsert():
+def test_156_primary_key_supports_the_upsert():
     assert 'PRIMARY KEY (cycle_date, ticker)' in _sql('156_position_ownership.sql')
 
 
-def test_156_is_idempotent_and_append_only():
+def test_156_is_idempotent_and_never_deletes():
+    """position_ownership is a derived ledger, not append-only: the
+    reconcile step upserts it (INSERT … ON CONFLICT DO UPDATE) keyed on
+    (cycle_date, ticker) — the invariant is idempotent + never DELETE, not
+    "only ever inserted"."""
     upper = _sql('156_position_ownership.sql').upper()
     assert 'CREATE TABLE IF NOT EXISTS' in _sql('156_position_ownership.sql')
     for stmt in ('DROP ', 'DELETE ', 'TRUNCATE '):
-        assert stmt not in upper, f'{stmt.strip()} violates the append-only invariant'
+        assert stmt not in upper, f'{stmt.strip()} violates the never-DELETE invariant'
 
 
 def test_156_is_the_next_free_number():

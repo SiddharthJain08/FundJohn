@@ -1,7 +1,7 @@
 -- 156: per-ticker ownership ledger.
 -- Stream B item 15 (docs/specs/2026-09-12-quantdinger-adoptions-spec.md:167-181).
 --
--- APPEND-ONLY: one row per (cycle_date, ticker), written by the reconcile step.
+-- upsert (INSERT … ON CONFLICT DO UPDATE) — derived ledger, never DELETE: one row per (cycle_date, ticker), written by the reconcile step.
 -- account_qty is the broker's signed share count; signal_qty is what the open
 -- execution_signals rows claim (entry fills netted by attributed exit fills);
 -- unknown_qty = account_qty - signal_qty; status is 'ok' | 'unallocated'
