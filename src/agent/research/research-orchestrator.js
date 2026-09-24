@@ -1635,7 +1635,7 @@ class ResearchOrchestrator {
       });
     }
 
-    notify?.(`  ✅ ${stratId} factor prescreen passed — running IC screen...`);
+    notify?.(`  ✅ ${stratId} factor prescreen did not block — running IC screen...`);
     onPhase('ic_screen', 57);
 
     // ── Phase 1.9: rank-IC / quantile / turnover screen (spec D1, Task 8) ────
@@ -1669,7 +1669,7 @@ class ResearchOrchestrator {
         reasonDetail: icInfraReason,
         metadata:     { enforced: icEnforced },
       });
-      notify?.(`  ⚠️ ${stratId} IC screen infra failure — WARN-and-pass, continuing to backtest.`);
+      notify?.(`  ⚠️ [ic_screen] ${stratId} infra failure (${icInfraReason}) — WARN-and-pass, continuing to backtest.`);
     } else {
       const v = icResult?.verdict || null;
       const n3 = (x) => (x === null || x === undefined ? 'n/a' : Number(x).toFixed(4));
@@ -1703,7 +1703,7 @@ class ResearchOrchestrator {
           reasonDetail: detail,
           metadata:     { ic_screen: icResult, enforced: true },
         });
-        notify?.(`  ❌ ${stratId} blocked by the IC screen — ${detail}`);
+        notify?.(`  ❌ [ic_screen] ${stratId} blocked (flat, enforced) — ${detail}`);
         channelNotify?.(`❌ **${stratId}** skipped backtest — IC screen flat (${line})`);
         return { ok: false, result: { promoted: false, reasonCode: 'ic_screen_flat', error: detail } };
       }

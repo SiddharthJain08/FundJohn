@@ -73,6 +73,7 @@ function makeOrch({ warnings = [], redteamVerdict = 'pass' } = {}) {
   orch._validateFn = async () => ({ ok: true, errors: [], signal_count: warnings.length ? 0 : 7, warnings });
   orch._redteamFn = async () => { calls.redteam += 1; return { verdict: redteamVerdict, findings: [], infra_fail: false }; };
   orch._prescreenFn = async () => { calls.prescreen += 1; return { psResult: { pass: true, reason: null, stats: {} }, psInfraFail: false, psInfraReason: null }; };
+  orch._icScreenFn = async () => { calls.icScreen = (calls.icScreen || 0) + 1; return { icResult: { verdict: 'pass', reason: null, ic: { '5': 0.05 }, icir: { '5': 0.5 }, n_rebalances: 20 }, icInfraFail: false, icInfraReason: null }; };
   orch._backtestFn = async () => { calls.backtest += 1; return { run_id: 'r1', sharpe: 0.5 }; };
   orch._emitDecisionFn = async (d) => { decisions.push(d); };
   return { orch, calls, decisions };
@@ -155,6 +156,7 @@ test('a validate result with no warnings key is treated as no warnings', async (
   orch._validateFn = async () => ({ ok: true, errors: [], signal_count: 3 });  // legacy shape
   orch._redteamFn = async () => { redteamCalls += 1; return { verdict: 'pass', findings: [], infra_fail: false }; };
   orch._prescreenFn = async () => ({ psResult: { pass: true }, psInfraFail: false, psInfraReason: null });
+  orch._icScreenFn = async () => ({ icResult: { verdict: 'pass', reason: null, ic: { '5': 0.05 }, icir: { '5': 0.5 }, n_rebalances: 20 }, icInfraFail: false, icInfraReason: null });
   orch._backtestFn = async () => ({ run_id: 'r1' });
   orch._emitDecisionFn = async () => {};
   const out = await orch._runGateChain({ ...ARGS });
@@ -175,6 +177,7 @@ test('ok:false with warnings: zero_signals_synthetic never reaches the red-team 
   orch._validateFn = async () => ({ ok: false, errors: ['boom'], signal_count: 0, warnings: ['zero_signals_synthetic'] });
   orch._redteamFn = async () => { calls.redteam += 1; return { verdict: 'pass', findings: [], infra_fail: false }; };
   orch._prescreenFn = async () => ({ psResult: { pass: true }, psInfraFail: false, psInfraReason: null });
+  orch._icScreenFn = async () => ({ icResult: { verdict: 'pass', reason: null, ic: { '5': 0.05 }, icir: { '5': 0.5 }, n_rebalances: 20 }, icInfraFail: false, icInfraReason: null });
   orch._backtestFn = async () => ({ run_id: 'r1' });
   orch._emitDecisionFn = async (d) => { decisions.push(d); };
 

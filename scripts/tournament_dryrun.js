@@ -33,7 +33,7 @@
  *   4. orch._query is overridden to a stub that records calls and returns no
  *      rows — covers the direct _query() calls _runTournament makes for DB
  *      re-attribution and the terminal implementation_queue status write.
- *   5. orch._validateFn / _redteamFn / _prescreenFn / _backtestFn (the four
+ *   5. orch._validateFn / _redteamFn / _prescreenFn / _icScreenFn / _backtestFn (the five
  *      test seams _runGateChain calls through) and orch._assignEligibility /
  *      _verifyWinnerLoadable are all stubbed, so no subprocess or LLM call is
  *      ever made. The "tiny pre-written variant files" are dropped straight
@@ -146,6 +146,7 @@ async function scenarioWinner() {
   orch._validateFn  = async () => ({ ok: true, signal_count: 42 });
   orch._redteamFn   = async () => ({ verdict: 'pass', findings: [] });
   orch._prescreenFn = async () => ({ psResult: { pass: true, reason: null, stats: {} }, psInfraFail: false, psInfraReason: null });
+  orch._icScreenFn = async () => ({ icResult: { verdict: 'pass', reason: null, ic: { '5': 0.05 }, icir: { '5': 0.5 }, n_rebalances: 20 }, icInfraFail: false, icInfraReason: null });
   orch._backtestFn  = async (implPath) => btByPath.get(implPath) || { error: `dryrun: no fixture for ${implPath}` };
 
   const strategy_spec = { strategy_id: STRAT_ID, inferred_instrument_class: 'equity' };
@@ -209,6 +210,7 @@ async function scenarioFloorMiss() {
   orch._validateFn  = async () => ({ ok: true });
   orch._redteamFn   = async () => ({ verdict: 'pass', findings: [] });
   orch._prescreenFn = async () => ({ psResult: { pass: true, reason: null, stats: {} }, psInfraFail: false, psInfraReason: null });
+  orch._icScreenFn = async () => ({ icResult: { verdict: 'pass', reason: null, ic: { '5': 0.05 }, icir: { '5': 0.5 }, n_rebalances: 20 }, icInfraFail: false, icInfraReason: null });
   orch._backtestFn  = async (implPath) => btByPath.get(implPath) || { error: 'dryrun: no fixture' };
 
   const strategy_spec = { strategy_id: STRAT_ID, inferred_instrument_class: 'equity' };
@@ -254,6 +256,7 @@ async function scenarioAllGatesFailed() {
   orch._validateFn  = async () => ({ ok: false, errors: ['fake contract violation'] });
   orch._redteamFn   = async () => ({ verdict: 'pass', findings: [] });
   orch._prescreenFn = async () => ({ psResult: { pass: true, reason: null, stats: {} }, psInfraFail: false, psInfraReason: null });
+  orch._icScreenFn = async () => ({ icResult: { verdict: 'pass', reason: null, ic: { '5': 0.05 }, icir: { '5': 0.5 }, n_rebalances: 20 }, icInfraFail: false, icInfraReason: null });
   orch._backtestFn  = async () => ({ error: 'dryrun: should never be reached — validate must reject first' });
 
   const strategy_spec = { strategy_id: STRAT_ID, inferred_instrument_class: 'equity' };
