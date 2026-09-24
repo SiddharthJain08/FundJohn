@@ -19,13 +19,17 @@ decile fraction, same house ATR brackets as the parent — the ONLY change is th
 ranking statistic, so the fleet gates measure the estimator, not a new
 strategy. `DATE_FLOOR = '2016-01-01'` matches the fleet's shared backtest
 window: `unified_backtest.DEFAULT_START_DATE = '2016-04-11'` (the earliest
-`historical_regimes` row) is the actual start of any backtest run, and
-GK_WINDOW=63 equity bars past `2016-01-01` are already available by
-`2016-03-29` — BEFORE that start date. So this variant can produce a signal
-on the very first backtest bar, exactly like the parent: the two are compared
-over the SAME span from day one, not a shorter one, which is the whole point
-of the D4 experiment (an earlier `2021-01-01` floor would instead have cost
-~5 years of missing comparison window at the start of the backtest).
+`historical_regimes` row) is the actual start of any backtest run, and the
+per-bar `prices_to_date = close_wide.loc[:current_date]` the engine builds is
+NOT itself bounded at `start_dt` (unified_backtest.py:993) — it carries the
+close panel's full available history. The 63-equity-bar window ending exactly
+on `DEFAULT_START_DATE` (2016-04-11) begins 2016-01-14 (bdate_range check),
+safely inside `DATE_FLOOR` — so this variant's self-loaded OHL panels already
+have a full window on the very first backtest bar, exactly like the parent:
+the two are compared over the SAME span from day one, not a shorter one,
+which is the whole point of the D4 experiment (an earlier `2021-01-01` floor
+would instead have started this variant's own coverage ~5 years later than
+the parent's).
 
 Data: close panel (engine) + self-loaded OPEN/HIGH/LOW panels from
 prices.parquet via _extra_panels.load_wide (CLOSE is taken from the engine's

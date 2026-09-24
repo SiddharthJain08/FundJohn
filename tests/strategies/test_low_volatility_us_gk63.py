@@ -243,9 +243,14 @@ def test_ohlc_panel_calendar_never_dilutes_the_equity_window(monkeypatch):
     returns its OHLC panel on a 7-day/union calendar (every calendar day,
     weekends included) REGARDLESS of which tickers were requested, so this
     pins R1(b)'s reindex-to-prices.index-before-tail fix independently of
-    R1(a) — if R1(b) were reverted to a plain `.loc[:asof].tail(63)`, this
-    union-calendar panel alone would already starve the window and let
-    `holiday` leak into it, even with R1(a) correctly excluding BTC-USD.
+    R1(a). If R1(b) were reverted to a plain `.loc[:asof].tail(63)`, the
+    window would be 63 CALENDAR days — about 45 weekdays, 44 once `holiday`
+    (present in the raw union-calendar panel but not in `prices.index`) is
+    dropped by the `idx.intersection(prices.index)` guard downstream — which
+    is below `MIN_VALID (45)`, so `generate_signals` would return `[]` before
+    `garman_klass_variance` is ever called: the `'index' in recorded`
+    assertion below is what actually catches a reverted R1(b), not a leaked
+    `holiday` row (the intersection guard drops it either way).
 
     The three quiet names must still be selected, and the window that
     actually reaches garman_klass_variance must be exactly GK_WINDOW rows,
