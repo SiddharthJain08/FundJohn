@@ -22,9 +22,15 @@ VERDICTS
   flat    |IC_5| < 0.01 AND |ls_q5q1| < turnover x round-trip cost.
           The factor neither ranks nor pays for its own trading. Under
           OPENCLAW_IC_SCREEN=1 this is the one verdict that skips the backtest.
-  weak    |ICIR_5| < 0.30 — real but unstable. Annotate, still backtest.
-  skipped Not enough cross-section to judge (see below). Annotate, still
-          backtest.
+  weak    |ICIR_5| < 0.30 — real but unstable. Annotate, still backtest. ICIR
+          is ANNUALIZED (mean(IC) / std(IC) x sqrt(252/H)), so this 0.30
+          threshold is on the annualized number, not a raw per-period one —
+          at H=5 it is equivalent to a per-period IC-Sharpe of only
+          ~0.30 / sqrt(252/5) ~= 0.042. Spec-mandated (§4 D1), not a
+          rule-of-thumb 0.3 (fix round 1, ruling R7, 2026-09-24).
+  skipped Not enough cross-section to judge (see below), OR the strategy is
+          one-sided (all-LONG or all-SHORT) over a minority of the universe
+          (see `one_sided_partial_coverage` below). Annotate, still backtest.
   pass    Everything else.
 
 WHY `skipped` EXISTS (not in the spec's three-verdict list; added 2026-09-12
@@ -39,13 +45,44 @@ prevent. A rebalance only counts toward the verdict when it carries at least
 MIN_CROSS_SECTION non-NaN values AND MIN_DISTINCT_VALUES distinct ones; fewer
 than MIN_REBALANCES such rebalances => `skipped`, never `flat`.
 
+`one_sided_partial_coverage` (added fix round 1, ruling R1, 2026-09-24). A
+one-directional strategy (all-LONG or all-SHORT over the window) that covers
+only a MINORITY of the universe gets its picks ranked only against each
+other by `position_size_pct`/confidence — a quantity that carries no alpha
+signal across the whole cross-section — so IC collapses toward 0 for a
+reason that has nothing to do with the factor being bad. `coverage` (median,
+over qualifying H=5 dates, of non-NaN factor names / universe names) and
+`one_sided` (bool, over every non-NaN factor cell in the whole window) are
+reported as top-level JSON keys on EVERY result, including `skipped` ones.
+When `one_sided` and `coverage < ONE_SIDED_MIN_COVERAGE (0.5)`, verdict is
+`skipped` / `one_sided_partial_coverage` — checked AFTER
+`insufficient_cross_section` and BEFORE `flat`/`weak`/`pass`.
+
+TURNOVER / COST SEMANTICS (documented, not changed — ruling R6, fix round 1,
+2026-09-24). `turnover` is the mean Jaccard DISTANCE of Q1 union Q5
+membership between consecutive rebalances (see `quintile_stats`).
+`cost_per_rebalance` = `round_trip_cost(one_way_bps) x turnover` — i.e. it
+charges ONE round trip scaled by that turnover fraction. This UNDERCHARGES
+two real costs: (1) a Q1<->Q5 flip (a name that was long becomes short, or
+vice versa) is really TWO round trips' worth of trading on that name, not
+one; (2) turnover only measures extreme-quintile membership churn, so a name
+that drops out of the long/short book but is still re-ranked within Q2-Q4
+pays no charge here even though a live book might still trade it. Both
+errors bias `cost_per_rebalance` low, which makes `flat` (|ls_q5q1| < cost)
+HARDER to reach, never easier — the safe direction for a pre-backtest screen
+whose only failure mode that matters is false-blocking a real backtest.
+
 MEMORY: prices are read ONLY through factor_prescreen.load_price_window (the
 two-pass, row-group-stats, ticker-pushdown reader) sliced to ~2 years. This box
 is 2-core / 8 GB / no swap.
 
-CLI (one JSON line on stdout, exit 0 whenever the screen COMPLETES; exit 1 on
-any infra problem, which the orchestrator treats as ic_screen_infra_fail and
-passes through):
+CLI: exactly one JSON line on stdout on every invocation. Exit 0 with the
+result dict whenever the screen COMPLETES. Exit 1 on any infra problem —
+`main()` still prints a one-line diagnostic to stderr, but ALSO prints a
+single `{"reason": "ic_screen_infra_fail", ...}` JSON line to stdout (fix
+round 1, ruling R8d, 2026-09-24) so a line-oriented stdout consumer never
+sees zero output; the orchestrator (Task 8) may key off the exit code, the
+reason string, or both.
     python3 -m research.factor_ic_screen --strategy-file <path> \
         [--sessions 504] [--max-tickers 300] [--step 5]
 """
@@ -82,6 +119,11 @@ MIN_CROSS_SECTION   = 20
 MIN_DISTINCT_VALUES = 5
 MIN_REBALANCES      = 12
 
+# Ruling R1 (fix round 1, 2026-09-24): a one-directional strategy covering
+# less than half the universe gets false-blocked by IC alone — see the
+# `one_sided_partial_coverage` note above.
+ONE_SIDED_MIN_COVERAGE = 0.5
+
 FLAT_IC_ABS   = 0.01
 WEAK_ICIR_ABS = 0.30
 
@@ -114,8 +156,15 @@ def _spearman(a: pd.Series, b: pd.Series) -> Optional[float]:
 def forward_returns(closes: pd.DataFrame, horizon: int) -> pd.DataFrame:
     """close[t+H] / close[t] - 1, indexed at t. Never reads a bar before t, and
     the trailing H rows are NaN by construction — no look-ahead into a window
-    that has not closed."""
-    return closes.shift(-int(horizon)) / closes - 1.0
+    that has not closed.
+
+    Ruling R2 (fix round 1, 2026-09-24): a 0 close turns this into a division
+    by zero (+/-inf, or NaN on 0/0). +/-inf is not valid JSON — main() would
+    otherwise raise a raw ValueError out of json.dumps(..., allow_nan=False)
+    deep inside a downstream aggregate. Collapse it to NaN here, at the
+    source, same as any other "no opinion" cell."""
+    fwd = closes.shift(-int(horizon)) / closes - 1.0
+    return fwd.replace([np.inf, -np.inf], np.nan)
 
 
 def rebalance_dates(factor: pd.DataFrame, session_index, horizon: int, step: int) -> list:
@@ -139,9 +188,32 @@ def rebalance_dates(factor: pd.DataFrame, session_index, horizon: int, step: int
     return picked
 
 
+def _qualifying_row(factor_row: pd.Series, fwd_row: pd.Series) -> Optional[pd.Series]:
+    """The subset of `factor_row` with both a factor opinion AND a forward
+    return, gated to the MIN_CROSS_SECTION / MIN_DISTINCT_VALUES quality
+    floor. Returns None when the date doesn't qualify.
+
+    Ruling R3+R5 (fix round 1, 2026-09-24): this is the ONE guard shared by
+    the `qualifying` count in compute_ic_screen, ic_series, and
+    quintile_stats, so all three statistics average over exactly the same
+    dates. Intersecting factor-notna with fwd-notna (not just checking each
+    side's count separately) matters: a date could carry >=20 non-NaN
+    factor values and >=20 non-NaN forward returns while still joining to
+    fewer than 20 common names (e.g. a 0-close date after forward_returns'
+    R2 NaN-collapse) — the intersection is what actually reaches
+    _spearman/pd.qcut, so it is the intersection that must clear the floor."""
+    row = factor_row.dropna()
+    row = row[row.index.intersection(fwd_row.dropna().index)]
+    if len(row) < MIN_CROSS_SECTION or row.nunique() < MIN_DISTINCT_VALUES:
+        return None
+    return row
+
+
 def ic_series(factor: pd.DataFrame, fwd: pd.DataFrame, dates: list) -> List[float]:
     out = []
     for d in dates:
+        if _qualifying_row(factor.loc[d], fwd.loc[d]) is None:
+            continue
         rho = _spearman(factor.loc[d], fwd.loc[d])
         if rho is not None:
             out.append(rho)
@@ -149,6 +221,13 @@ def ic_series(factor: pd.DataFrame, fwd: pd.DataFrame, dates: list) -> List[floa
 
 
 def _icir(ics: List[float], horizon: int) -> Optional[float]:
+    """mean(IC)/std(IC) x sqrt(252/H) — the `icir` key's value is ANNUALIZED
+    by trading-day count over the horizon, not a raw per-period IC-Sharpe.
+    The WEAK_ICIR_ABS=0.30 threshold in compute_ic_screen is spec-mandated
+    (§4 D1) on THIS annualized number — at H=5 that is a per-period
+    equivalent of only ~0.30 / sqrt(252/5) ~= 0.042, not the "0.3 sounds like
+    a rule of thumb" reading a per-period-only reader might default to
+    (ruling R7, fix round 1, 2026-09-24)."""
     if len(ics) < 2:
         return None
     mean = sum(ics) / len(ics)
@@ -169,10 +248,9 @@ def quintile_stats(factor: pd.DataFrame, fwd: pd.DataFrame, dates: list, n_q: in
     per_q = [[] for _ in range(n_q)]
     ls, extremes = [], []
     for d in dates:
-        row = factor.loc[d].dropna()
         r = fwd.loc[d]
-        row = row[row.index.intersection(r.dropna().index)]
-        if len(row) < MIN_CROSS_SECTION or row.nunique() < MIN_DISTINCT_VALUES:
+        row = _qualifying_row(factor.loc[d], r)
+        if row is None:
             continue
         try:
             labels = pd.qcut(row.rank(method='first'), n_q, labels=False)
@@ -222,11 +300,33 @@ def compute_ic_screen(factor: pd.DataFrame, closes: pd.DataFrame, *,
     fwd0 = forward_returns(closes, h0)
     dates0 = rebalance_dates(factor, session_index, h0, step)
 
-    qualifying = 0
-    for d in dates0:
-        row = factor.loc[d].dropna()
-        if len(row) >= MIN_CROSS_SECTION and row.nunique() >= MIN_DISTINCT_VALUES:
-            qualifying += 1
+    # Ruling R3 (fix round 1, 2026-09-24): gate `qualifying` on the SAME
+    # factor-intersect-fwd guard ic_series/quintile_stats use (via
+    # _qualifying_row), not just factor's own notna/nunique — so
+    # `qualifying >= MIN_REBALANCES` really does guarantee that many usable
+    # ICs, even on a date where forward_returns' R2 NaN-collapse (e.g. a
+    # 0-close day) trims the joined cross-section below the factor's own
+    # raw count.
+    qualifying_dates = [d for d in dates0 if _qualifying_row(factor.loc[d], fwd0.loc[d]) is not None]
+    qualifying = len(qualifying_dates)
+
+    # Ruling R1 (fix round 1, 2026-09-24): `coverage` = median, over
+    # qualifying H=5 dates, of (# non-NaN factor names) / (# universe
+    # names — the aligned `common` column count). `one_sided` = True iff
+    # every non-NaN factor cell in the WHOLE window shares the same sign
+    # (post-R4, FLAT/unrecognized directions are already NaN, not 0, so no
+    # extra exclusion is needed here beyond a defensive sign!=0 filter).
+    n_universe = len(common)
+    if qualifying_dates and n_universe:
+        coverage_vals = [float(factor.loc[d].notna().sum()) / n_universe for d in qualifying_dates]
+        coverage = float(np.median(coverage_vals))
+    else:
+        coverage = None
+
+    _flat_vals = factor.to_numpy(dtype='float64').ravel()
+    _signs = np.sign(_flat_vals[~np.isnan(_flat_vals)])
+    _signs = _signs[_signs != 0]
+    one_sided = bool(_signs.size > 0 and np.all(_signs == _signs[0]))
 
     ic, icir = {}, {}
     for h in horizons:
@@ -260,6 +360,11 @@ def compute_ic_screen(factor: pd.DataFrame, closes: pd.DataFrame, *,
     icir0 = icir[str(h0)]
     if qualifying < MIN_REBALANCES:
         verdict, reason = 'skipped', 'insufficient_cross_section'
+    elif one_sided and coverage is not None and coverage < ONE_SIDED_MIN_COVERAGE:
+        # Ruling R1: evaluated AFTER insufficient_cross_section, BEFORE
+        # flat/weak/pass — see the module docstring's one_sided_partial_
+        # coverage note.
+        verdict, reason = 'skipped', 'one_sided_partial_coverage'
     elif (ic0 is not None and abs(ic0) < FLAT_IC_ABS
           and ls_q5q1 is not None and abs(ls_q5q1) < cost):
         verdict, reason = 'flat', 'ic_below_noise_and_ls_below_cost'
@@ -278,6 +383,8 @@ def compute_ic_screen(factor: pd.DataFrame, closes: pd.DataFrame, *,
         'monotonic':               monotonic,
         'turnover':                turnover,
         'cost_per_rebalance':      cost,
+        'coverage':                coverage,
+        'one_sided':               one_sided,
         'n_rebalances':            len(dates0),
         'n_qualifying_rebalances': qualifying,
         'horizons':                [int(h) for h in horizons],
@@ -295,7 +402,14 @@ def factor_from_signals(daily_signals: List[list], dates: list,
     ordering) and the confidence weight otherwise. NaN = the strategy said
     nothing about that ticker that day — which is the honest encoding: a
     long-only decile strategy really has no opinion on the other 90 %, and the
-    resulting thin cross-section is what MIN_DISTINCT_VALUES detects."""
+    resulting thin cross-section is what MIN_DISTINCT_VALUES detects.
+
+    Ruling R4 (fix round 1, 2026-09-24): a FLAT or unrecognized direction
+    (DIRECTION_SIGN sign == 0) also leaves the cell NaN, not 0.0. A written
+    0.0 would claim the strategy took a real, neutral position on that name
+    that day — a value the IC/quintile machinery would rank alongside actual
+    LONG/SHORT opinions — when what FLAT really means is the same "no
+    opinion" as a name the strategy never mentioned at all."""
     frame = pd.DataFrame(index=pd.Index(dates, name='date'),
                           columns=list(universe), dtype='float64')
     for d, sigs in zip(dates, daily_signals):
@@ -304,6 +418,8 @@ def factor_from_signals(daily_signals: List[list], dates: list,
             if t is None or t not in frame.columns:
                 continue
             sign = DIRECTION_SIGN.get(getattr(s, 'direction', None), 0.0)
+            if sign == 0.0:
+                continue
             size = getattr(s, 'position_size_pct', None)
             if isinstance(size, (int, float)) and size and not pd.isna(size):
                 mag = abs(float(size))
@@ -331,6 +447,7 @@ def run_ic_screen(strategy_file: str, *, sessions: int = LOOKBACK_SESSIONS,
         return {'ic': {}, 'icir': {}, 'ic_half': {}, 'rank_ac': None,
                 'ls_q5q1': None, 'quintile_means': None, 'monotonic': None,
                 'turnover': None, 'cost_per_rebalance': None,
+                'coverage': None, 'one_sided': False,
                 'n_rebalances': 0, 'n_qualifying_rebalances': 0,
                 'horizons': [int(h) for h in HORIZONS],
                 'verdict': 'skipped', 'reason': 'ic_screen_skipped_aux_dependent'}
@@ -384,15 +501,26 @@ def main(argv=None) -> int:
     try:
         result = run_ic_screen(args.strategy_file, sessions=args.sessions,
                                 max_tickers=args.max_tickers, step=args.step)
+        # Ruling R2 (fix round 1, 2026-09-24): allow_nan=False lives INSIDE
+        # the try. Every field compute_ic_screen returns is a finite float
+        # or None by construction, so this never raises in practice — but a
+        # future regression that lets a non-finite value through must exit 1
+        # via the SAME infra-failure path below, not a raw ValueError
+        # traceback out of main().
+        line = json.dumps(result, allow_nan=False)
     except Exception as e:  # noqa: BLE001 — any infra failure -> exit 1
         print(f'ic screen infra error: {e}', file=sys.stderr)
+        # Ruling R8d (fix round 1, 2026-09-24): still emit exactly one JSON
+        # line on stdout so a line-oriented stdout consumer never sees empty
+        # output on failure, tagged with the `ic_screen_infra_fail` reason
+        # this module's docstring promises. `verdict` stays None — none of
+        # the four frozen verdict names (pass|weak|flat|skipped) describes
+        # an infra failure, and inventing a fifth is out of scope here.
+        print(json.dumps({'verdict': None, 'reason': 'ic_screen_infra_fail',
+                           'error': str(e)}))
         return 1
 
-    # allow_nan=False: every field above is either a finite float or None by
-    # construction (see compute_ic_screen), so this never raises in practice —
-    # it is a hard guarantee for the Node-side JSON.parse() in the orchestrator
-    # (Task 8), which chokes on a bare `NaN` token in the stream.
-    print(json.dumps(result, allow_nan=False))
+    print(line)
     return 0
 
 
