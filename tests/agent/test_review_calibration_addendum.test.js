@@ -102,18 +102,19 @@ test('_renderProposalCalibration renders the exact pinned block for the CAL fixt
     '  Brier score: 0.254 (warn >= 0.10, fail >= 0.20)\n' +
     '  Overall hit rate: 0.66 against mean stated confidence 0.75 (41 resolved of 96)\n' +
     '\n' +
-    '  Your confidence is also capped by how much LIVE evidence backs the\n' +
-    '  specific (strategy, regime) decision at approval time — a trailing\n' +
-    '  30-day closed-trade count, staleness-adjusted:\n' +
+    '  auto_approve can ALSO cap your confidence by how much LIVE evidence\n' +
+    '  backs the specific (strategy, regime) decision at approval time — a\n' +
+    '  trailing 30-day closed-trade count, staleness-adjusted:\n' +
     '    <10 closed trades  -> "none"   cap 0.35\n' +
     '    <30 closed trades  -> "low"    cap 0.55\n' +
     '    <100 closed trades -> "medium" cap 0.75\n' +
     '    >=100 closed trades -> "high"  cap 1.0\n' +
     '  (drop one tier if the most recent closed trade is >45 days old).\n' +
-    '  auto_approve compares min(calibrated_confidence, cap) against the 0.85\n' +
-    '  floor when OPENCLAW_PROPOSAL_CALIBRATED=1; while unset it computes and\n' +
-    '  logs this without changing the decision. A thin-evidence regime cannot\n' +
-    '  earn auto-approval on confidence alone regardless of what you state.\n' +
+    '  When OPENCLAW_PROPOSAL_CALIBRATED=1, auto_approve compares\n' +
+    '  min(calibrated_confidence, cap) against the 0.85 floor, so a\n' +
+    '  thin-evidence regime cannot earn approval on confidence alone. While\n' +
+    '  the flag is unset (today\'s default), the floor compare uses your raw\n' +
+    '  stated confidence only — the cap is computed and logged, not enforced.\n' +
     '\n' +
     'You are OVER-CONFIDENT: your stated confidence exceeds your realised hit rate.\n' +
     'A bucket whose match_rate sits well below its own midpoint is one you should stop\n' +

@@ -296,23 +296,28 @@ const CALIBRATION_MIN_SAMPLES = 10;
 
 // Mirror of mastermind_calibration.py EVIDENCE_CAPS / count tiers / staleness
 // (src/metrics/mastermind_calibration.py:145-149, evidence_level():241-267).
-// Keep in sync. This is STATIC guidance text — it is not computed per
-// (strategy, regime) here (that would cost 4 extra DB round trips per
-// strategy per review, one per canonical regime); it tells the model the
-// RULE proposal_manager.py's auto_approve applies downstream.
+// 0.85 = proposal_manager.py's unified auto-approve floor (D2a, one constant
+// at :311). Keep both in sync. This is STATIC guidance text — it is not
+// computed per (strategy, regime) here (that would cost 4 extra DB round
+// trips per strategy per review, one per canonical regime); it tells the
+// model the RULE proposal_manager.py's auto_approve applies downstream, and
+// is careful not to overstate it: with OPENCLAW_PROPOSAL_CALIBRATED unset
+// (today's default), the floor compare still uses the RAW stated confidence
+// only — the cap is computed and logged, not yet enforced.
 const EVIDENCE_CAP_TEXT = [
-  '  Your confidence is also capped by how much LIVE evidence backs the',
-  '  specific (strategy, regime) decision at approval time — a trailing',
-  '  30-day closed-trade count, staleness-adjusted:',
+  '  auto_approve can ALSO cap your confidence by how much LIVE evidence',
+  '  backs the specific (strategy, regime) decision at approval time — a',
+  '  trailing 30-day closed-trade count, staleness-adjusted:',
   '    <10 closed trades  -> "none"   cap 0.35',
   '    <30 closed trades  -> "low"    cap 0.55',
   '    <100 closed trades -> "medium" cap 0.75',
   '    >=100 closed trades -> "high"  cap 1.0',
   '  (drop one tier if the most recent closed trade is >45 days old).',
-  '  auto_approve compares min(calibrated_confidence, cap) against the 0.85',
-  '  floor when OPENCLAW_PROPOSAL_CALIBRATED=1; while unset it computes and',
-  '  logs this without changing the decision. A thin-evidence regime cannot',
-  '  earn auto-approval on confidence alone regardless of what you state.',
+  '  When OPENCLAW_PROPOSAL_CALIBRATED=1, auto_approve compares',
+  '  min(calibrated_confidence, cap) against the 0.85 floor, so a',
+  '  thin-evidence regime cannot earn approval on confidence alone. While',
+  '  the flag is unset (today\'s default), the floor compare uses your raw',
+  '  stated confidence only — the cap is computed and logged, not enforced.',
 ].join('\n');
 
 /**
