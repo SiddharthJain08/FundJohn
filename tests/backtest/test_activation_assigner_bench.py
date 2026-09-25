@@ -362,6 +362,8 @@ class TestStampGainsBenchFields(unittest.TestCase):
         self.assertEqual(payload['threshold'], 0.95)   # LOW_VOL bench, not the retired slider
         self.assertEqual(payload['bench_sharpe'], bench)
         self.assertEqual(payload['bench_run_id'], 'r51b5b915')
+        # spec §5-B: "stored with the vector in the last-applied stamp".
+        self.assertEqual(payload['bench_hysteresis'], aa.ACTIVATION_HYSTERESIS)
 
     def test_stamp_bench_sharpe_config_writes_the_fallback_vector(self):
         conn = FakeConn([None])
@@ -373,6 +375,30 @@ class TestStampGainsBenchFields(unittest.TestCase):
         self.assertIn('INSERT INTO pipeline_config', sql)
         self.assertEqual(params[0], aa.CONFIG_KEY_BENCH_SHARPE)
         self.assertEqual(json.loads(params[1]), bench)
+
+    def test_stamp_bench_sharpe_config_excludes_default_sourced_regimes(self):
+        # A regime resolved via DEFAULT_MIN_SHARPE this run must NOT be
+        # persisted as if it were a real observation -- otherwise the next
+        # run reads 0.5 back as pipeline_config-sourced and the §2 WARN
+        # never fires again.
+        conn = FakeConn([None])
+        bench = {'LOW_VOL': 0.95, 'TRANSITIONING': 0.44, 'HIGH_VOL': 0.53, 'CRISIS': aa.DEFAULT_MIN_SHARPE}
+        regime_source = {'LOW_VOL': 'sleeve', 'TRANSITIONING': 'pipeline_config',
+                         'HIGH_VOL': 'sleeve', 'CRISIS': 'default'}
+        ok = aa.stamp_bench_sharpe_config(conn, bench, regime_source=regime_source)
+        self.assertTrue(ok)
+        sql, params = conn.executed[-1]
+        persisted = json.loads(params[1])
+        self.assertNotIn('CRISIS', persisted)
+        self.assertEqual(persisted, {'LOW_VOL': 0.95, 'TRANSITIONING': 0.44, 'HIGH_VOL': 0.53})
+
+    def test_stamp_bench_sharpe_config_skips_write_when_everything_defaulted(self):
+        conn = FakeConn([None])
+        bench = {r: aa.DEFAULT_MIN_SHARPE for r in aa.CANONICAL_REGIMES}
+        regime_source = {r: 'default' for r in aa.CANONICAL_REGIMES}
+        ok = aa.stamp_bench_sharpe_config(conn, bench, regime_source=regime_source)
+        self.assertFalse(ok)
+        self.assertEqual(len(conn.executed), 0)   # no INSERT attempted at all
 
     def test_apply_one_audit_reason_uses_bench_not_slider(self):
         # Spec §3: audit rows record the per-regime threshold ACTUALLY used
@@ -388,7 +414,7 @@ class TestStampGainsBenchFields(unittest.TestCase):
         self.assertTrue(any('threshold=1.0' in str(p) and '9.9' not in str(p) for p in inserts))
         self.assertTrue(any('rule=qualifies(>0·classDD·trades)+bench_relative' in str(p) for p in inserts))
 
-    def test_apply_one_audit_reason_uses_loosened_band_when_prior_eligible(self):
+    def test_apply_one_audit_reason_unchanged_cell_inside_band_writes_nothing(self):
         bench = {'LOW_VOL': 1.0, 'TRANSITIONING': 1.0, 'HIGH_VOL': 1.0, 'CRISIS': 1.0}
         rows = [_regime_row('LOW_VOL', 0.95, 150)]   # inside the band
         prior_rows = [_prior_row('LOW_VOL', True)]
@@ -398,6 +424,19 @@ class TestStampGainsBenchFields(unittest.TestCase):
         # unchanged -> no INSERT for LOW_VOL was issued at all; assert no
         # crash and the cell stayed eligible via the band.
         self.assertTrue(result['new']['LOW_VOL'])
+
+    def test_apply_one_audit_reason_uses_loosened_band_threshold_on_deactivation(self):
+        # A True->True cell is 'unchanged' and writes no audit row at all,
+        # so the only path that actually WRITES bench-0.10 to an audit row
+        # is a prior-eligible cell that fails even the loosened band.
+        bench = {'LOW_VOL': 1.0, 'TRANSITIONING': 1.0, 'HIGH_VOL': 1.0, 'CRISIS': 1.0}
+        rows = [_regime_row('LOW_VOL', 0.85, 150)]   # below bench-0.10 (0.90)
+        prior_rows = [_prior_row('LOW_VOL', True)]
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows, prior_rows])
+        result = aa.apply_one(conn, 'S_test', threshold=9.9, dry_run=False, bench=bench)
+        self.assertEqual(result['actions']['LOW_VOL'], 'deactivated')
+        inserts = [p for sql, p in conn.executed if 'strategy_regime_param_changes' in sql]
+        self.assertTrue(any('threshold=0.9' in str(p) for p in inserts))
 
 
 # ── Scenario 7: dry-run prints the bench vector + per-regime diff ──────────

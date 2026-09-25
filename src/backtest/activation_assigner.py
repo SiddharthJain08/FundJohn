@@ -161,7 +161,11 @@ def stamp_last_applied(conn, threshold: float, min_trades, activated: int,
     per-regime comparator vector and the S_beta_spy run it came from, so a
     later run can tell whether the sleeve's primary run is newer than what
     was last applied (the re-apply trigger activation_apply.py owns --
-    Task 2)."""
+    Task 2). The hysteresis band itself is stored alongside the vector
+    (spec §5-B: "stored with the vector in the last-applied stamp") as
+    `bench_hysteresis` -- ACTIVATION_HYSTERESIS is a code constant today,
+    not dashboard-adjustable, but the stamp is the audit trail an operator
+    reads to know what band was actually in force for a given apply."""
     payload = json.dumps({
         'threshold': threshold,
         'min_trades': min_trades,
@@ -171,6 +175,7 @@ def stamp_last_applied(conn, threshold: float, min_trades, activated: int,
         'actor': ACTOR,
         'bench_sharpe': bench_sharpe,
         'bench_run_id': bench_run_id,
+        'bench_hysteresis': ACTIVATION_HYSTERESIS,
     }, sort_keys=True)
     try:
         cur = conn.cursor()
@@ -198,13 +203,32 @@ def stamp_last_applied(conn, threshold: float, min_trades, activated: int,
         return False
 
 
-def stamp_bench_sharpe_config(conn, bench: dict) -> bool:
+def stamp_bench_sharpe_config(conn, bench: dict, regime_source: Optional[dict] = None) -> bool:
     """Persist the resolved bench vector to pipeline_config (spec §2 tier 2
     fail-safe): a later run whose sleeve primary_window run is missing or
     stale falls back to THIS vector instead of jumping straight to
     DEFAULT_MIN_SHARPE for every regime. Same non-fatal contract as
     stamp_last_applied -- called at the identical gate (--all, non-dry-run,
-    zero per-strategy errors)."""
+    zero per-strategy errors).
+
+    regime_source: load_bench_sharpe's per-regime provenance
+    ({regime: 'sleeve'|'pipeline_config'|'default'}). A regime resolved via
+    DEFAULT_MIN_SHARPE THIS run must NOT be written back as if it were a
+    real observation -- otherwise the next run reads 0.5 back as a
+    legitimate pipeline_config-sourced value instead of hitting tier 3 and
+    WARNing again, silencing the fail-safe after exactly one degraded
+    apply. Only regimes sourced from the sleeve or a prior pipeline_config
+    vector are persisted; if that leaves nothing (every regime defaulted
+    this run), the write is skipped entirely (returns False, logged) rather
+    than persisting an all-default vector. regime_source=None (back-compat
+    direct callers) persists `bench` as-is."""
+    to_write = bench
+    if regime_source is not None:
+        to_write = {r: v for r, v in bench.items() if regime_source.get(r) in ('sleeve', 'pipeline_config')}
+        if not to_write:
+            _log(f'{CONFIG_KEY_BENCH_SHARPE}: nothing to persist (every regime this run '
+                 f'came from DEFAULT_MIN_SHARPE)')
+            return False
     try:
         cur = conn.cursor()
         cur.execute(
@@ -214,12 +238,14 @@ def stamp_bench_sharpe_config(conn, bench: dict) -> bool:
             ON CONFLICT (key) DO UPDATE
                SET value = EXCLUDED.value, updated_at = NOW()
             """,
-            (CONFIG_KEY_BENCH_SHARPE, json.dumps(bench, sort_keys=True),
+            (CONFIG_KEY_BENCH_SHARPE, json.dumps(to_write, sort_keys=True),
              "Last-applied S_beta_spy per-regime Sharpe vector (spec "
              '2026-09-25-activation-bench-relative-spec.md §2 tier 2 fail-safe): '
              "used by a later run when it cannot read the benchmark sleeve's "
              'primary_window strategy_backtest_regimes rows. Written by '
-             'activation_assigner on every successful --all non-dry-run apply.'))
+             'activation_assigner on every successful --all non-dry-run apply. '
+             'Regimes resolved via DEFAULT_MIN_SHARPE are excluded -- see '
+             'stamp_bench_sharpe_config docstring.'))
         conn.commit()
         cur.close()
         return True
@@ -427,8 +453,14 @@ def load_bench_sharpe(conn, sleeve_id: Optional[str] = None) -> tuple[dict, dict
             _log(f'WARN: {r} bench sharpe unavailable (no sleeve run, no pipeline_config '
                  f'vector); using DEFAULT_MIN_SHARPE={DEFAULT_MIN_SHARPE}')
 
+    # str(): defensive against a psycopg2 typed adapter (e.g. a registered
+    # UUID codec) handing back a non-JSON-serializable object for run_id --
+    # this value only ever flows into stamp_last_applied's json.dumps
+    # payload downstream, never back into a parameterized query, so the
+    # cast is safe. The query above still uses the raw `run_id` variable.
     return bench, {'sleeve_id': sleeve_id, 'sleeve_source': sleeve_source,
-                   'run_id': run_id, 'regime_source': regime_source}
+                   'run_id': (str(run_id) if run_id is not None else None),
+                   'regime_source': regime_source}
 
 
 def _resolve_bench(bench: Optional[dict]) -> dict:
@@ -1031,7 +1063,7 @@ def main() -> int:
                               deactivated_cells, trigger=args.trigger,
                               bench_sharpe=bench_vector, bench_run_id=bench_meta.get('run_id')):
             _log(f'stamped {LAST_APPLIED_KEY} (trigger={args.trigger})')
-        if stamp_bench_sharpe_config(conn, bench_vector):
+        if stamp_bench_sharpe_config(conn, bench_vector, regime_source=bench_meta.get('regime_source')):
             _log(f'stamped {CONFIG_KEY_BENCH_SHARPE} (fail-safe tier 2 vector)')
 
     conn.close()
