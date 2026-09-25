@@ -46,7 +46,14 @@ class SparseCCAMeanRevert(BaseStrategy):
             print('[debug] signals=0', file=sys.stderr)
             return []
 
-        rets = px.pct_change().dropna()
+        # Row-wise ANY-nan drop (`.dropna()`) empties the frame across a wide,
+        # sparsely-populated live universe (~5.8k tickers): one NaN anywhere
+        # in a row removes the whole row. Drop only rows that are entirely
+        # NaN (a genuinely missing session) — per-ticker gaps are handled
+        # below (autocorr loop's `s.dropna()` + `< 60` floor, the
+        # complete-price-history filter on `sparse_tickers`, and the
+        # min_count-guarded spread sum further down).
+        rets = px.pct_change().iloc[1:].dropna(how='all')
         if len(rets) < self.LOOKBACK:
             print('[debug] signals=0', file=sys.stderr)
             return []
@@ -70,9 +77,28 @@ class SparseCCAMeanRevert(BaseStrategy):
             print('[debug] signals=0', file=sys.stderr)
             return []
 
-        # Select K_ASSETS most negatively autocorrelated (most mean-reverting)
+        # Select K_ASSETS most negatively autocorrelated (most mean-reverting),
+        # restricted to columns with a COMPLETE price history across the
+        # wider price window the spread is built from (`px_live` below) --
+        # not just a complete LOOKBACK-tail of RETURNS (`r`). A ticker can
+        # have a fully-populated 252-row return tail yet still be NaN
+        # earlier in the wider min_rows+10 price window (e.g. a recent
+        # listing whose first few sessions in this specific window predate
+        # real trading) — that ticker's r-column looks clean, but the
+        # spread normalizes off `px_sparse.iloc[0]` (the EARLIEST row of
+        # the wider window), so a NaN there NaNs that ticker's entire
+        # normalized column and, combined with `min_count` below, silently
+        # zeroes out every day's z-score. Restricting selection to columns
+        # with zero NaN across the full px_live window prevents that by
+        # construction; the min_count/isnan guards further down stay on as
+        # defense in depth for anything this doesn't catch.
+        px_live = px.dropna(how='all')   # mirror the rets all-NaN-row drop for the price frame
         sorted_tickers = sorted(autocorrs, key=lambda t: autocorrs[t])
-        sparse_tickers = sorted_tickers[:self.K_ASSETS]
+        complete_tickers = [t for t in sorted_tickers if px_live[t].notna().all()]
+        if len(complete_tickers) < 10:
+            print('[debug] signals=0', file=sys.stderr)
+            return []
+        sparse_tickers = complete_tickers[:self.K_ASSETS]
 
         # Rank-based weights: proportional to -autocorr, normalized by abs-sum
         raw = np.array([-autocorrs[t] for t in sparse_tickers])
@@ -83,12 +109,26 @@ class SparseCCAMeanRevert(BaseStrategy):
         weights = {t: float(raw[i] / abs_sum) for i, t in enumerate(sparse_tickers)}
 
         # --- compute portfolio spread z-score ---
-        px_sparse = px[sparse_tickers].copy()
+        px_sparse = px_live[sparse_tickers].copy()
         # Normalize each price to base 1 at start of window
         base = px_sparse.iloc[0].replace(0, np.nan)
         px_norm = px_sparse.div(base)
         w_series = pd.Series(weights)
-        spread = px_norm.mul(w_series).sum(axis=1)
+        # Defense in depth: the complete-tickers selection above should make
+        # every cell here non-NaN by construction, but DataFrame.sum(axis=1)
+        # defaults to skipna=True, which would silently treat any NaN cell
+        # that slips through as a zero contribution instead of propagating
+        # NaN — silently understating (or, if every leg were missing that
+        # day, zeroing out) the portfolio spread rather than flagging the
+        # day as unusable. min_count=K forces any such row to be NaN
+        # instead of a fabricated partial (or zero) sum; roll.mean()/
+        # roll.std() then skip NaN days (pandas default skipna=True)
+        # rather than being poisoned by a fabricated value, and the
+        # explicit isnan guards below stop a NaN from ever reaching the
+        # Z_ENTRY compare silently (NaN comparisons are always False in
+        # Python, so an unguarded NaN z would fall through the elif/else
+        # exactly like a real no-signal day).
+        spread = px_norm.mul(w_series).sum(axis=1, min_count=len(sparse_tickers))
 
         if len(spread) < self.LOOKBACK:
             print('[debug] signals=0', file=sys.stderr)
@@ -97,11 +137,15 @@ class SparseCCAMeanRevert(BaseStrategy):
         roll = spread.tail(self.LOOKBACK)
         roll_mean = float(roll.mean())
         roll_std  = float(roll.std())
-        if roll_std < 1e-8:
+        if np.isnan(roll_mean) or np.isnan(roll_std) or roll_std < 1e-8:
             print('[debug] signals=0', file=sys.stderr)
             return []
 
-        z = float((float(spread.iloc[-1]) - roll_mean) / roll_std)
+        last_spread = float(spread.iloc[-1])
+        if np.isnan(last_spread):
+            print('[debug] signals=0', file=sys.stderr)
+            return []
+        z = float((last_spread - roll_mean) / roll_std)
 
         # --- threshold check ---
         if z < -self.Z_ENTRY:
