@@ -175,18 +175,25 @@ class TestComputeEligible(unittest.TestCase):
         self.assertIn('universe_shrink_metrics', conn.executed[1][0])
 
     def test_sharpe_threshold_boundary(self):
+        # 2026-09-25 bench-relative: `threshold` is retired plumbing; the
+        # comparator is now `bench=`. Explicit bench=0.5 keeps this test's
+        # original intent (boundary at 0.5) instead of relying on the
+        # DEFAULT_MIN_SHARPE fallback (also 0.5) by coincidence.
         rows = [_regime_row('LOW_VOL', 0.5, 100), _regime_row('CRISIS', 0.4999, 100)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
-        self.assertTrue(eligible['LOW_VOL'])     # exactly at threshold -> eligible (>=)
+        bench = {r: 0.5 for r in aa.CANONICAL_REGIMES}
+        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5, bench=bench)
+        self.assertTrue(eligible['LOW_VOL'])     # exactly at bench -> eligible (>=)
         self.assertFalse(eligible['CRISIS'])     # just below -> not eligible
 
-    def test_slider_zero_requires_strictly_positive_sharpe(self):
-        # 2026-07-13 v2: slider at 0 activates exactly the QUALIFYING regimes
-        # (sharpe strictly > 0) -- a 0.0 sleeve stays dormant.
+    def test_zero_bench_requires_strictly_positive_sharpe(self):
+        # 2026-09-25 bench-relative: a bench of 0.0 (analogous to the old
+        # "slider at 0") activates exactly the QUALIFYING regimes (sharpe
+        # strictly > 0, class gate) -- a 0.0 sleeve stays dormant.
         rows = [_regime_row('LOW_VOL', 0.0, 100), _regime_row('CRISIS', 0.01, 100)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0)
+        bench = {r: 0.0 for r in aa.CANONICAL_REGIMES}
+        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0, bench=bench)
         self.assertFalse(eligible['LOW_VOL'])
         self.assertTrue(eligible['CRISIS'])
 
@@ -440,14 +447,20 @@ class TestBenchmarkSleeveAlwaysOn(unittest.TestCase):
         return FakeConn([{'run_id': 'r1'}, [], rows])
 
     def test_always_on_makes_every_regime_eligible_but_keeps_diag(self):
+        # 2026-09-25 bench-relative: `threshold` is retired; explicit
+        # bench=1.0 for every regime reproduces this test's original
+        # boundary (LOW_VOL/TRANSITIONING/HIGH_VOL below, CRISIS above).
+        bench = {r: 1.0 for r in aa.CANONICAL_REGIMES}
         elig, diag = aa.compute_eligible(self._conn(), 'S_beta_spy', threshold=1.0,
-                                         instrument_class='etp', always_on=True)
+                                         instrument_class='etp', always_on=True, bench=bench)
         self.assertEqual(elig, {r: True for r in aa.CANONICAL_REGIMES})
-        self.assertFalse(diag['LOW_VOL']['eligible'])      # slider verdict still recorded
+        self.assertFalse(diag['LOW_VOL']['eligible'])      # bench-relative verdict still recorded
         self.assertTrue(diag['CRISIS']['eligible'])
 
     def test_default_is_unchanged(self):
-        elig, _ = aa.compute_eligible(self._conn(), 'S_beta_spy', threshold=1.0, instrument_class='etp')
+        bench = {r: 1.0 for r in aa.CANONICAL_REGIMES}
+        elig, _ = aa.compute_eligible(self._conn(), 'S_beta_spy', threshold=1.0,
+                                      instrument_class='etp', bench=bench)
         self.assertEqual(elig, {'LOW_VOL': False, 'TRANSITIONING': False, 'HIGH_VOL': False, 'CRISIS': True})
 
     def test_no_run_is_still_skipped(self):
@@ -465,5 +478,5 @@ class TestBenchmarkSleeveAlwaysOn(unittest.TestCase):
         cur2 = FakeCursor([None, None])
         aa._apply_regime(cur2, 'S_y', 'LOW_VOL', True, {}, sharpe=1.2, trade_count=300,
                          threshold=1.0, min_trades=100)
-        self.assertTrue(any('rule=qualifies(>0·classDD·trades)+slider' in str(p)
+        self.assertTrue(any('rule=qualifies(>0·classDD·trades)+bench_relative' in str(p)
                             for sql, p in cur2.executed if 'strategy_regime_param_changes' in sql))
