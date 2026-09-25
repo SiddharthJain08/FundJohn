@@ -317,3 +317,62 @@ def test_empty_or_none_prices_returns_empty():
     strat = SparseCCAMeanRevert()
     assert strat.generate_signals(pd.DataFrame(), REGIME, ['A', 'B']) == []
     assert strat.generate_signals(None, REGIME, ['A', 'B']) == []
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Review round 1 (2026-09-25): trailing all-NaN row, a simultaneous
+# multi-column two-row data hole, completeness tolerance, 7-day rows.
+# ─────────────────────────────────────────────────────────────────────────
+def test_trailing_all_nan_row_never_emits_nan_entry_prices():
+    strat = SparseCCAMeanRevert()
+    px = _build_panel(n_rows=300, n_engineered=10, n_noise=50)
+    px.loc[px.index[-1] + pd.Timedelta(days=1)] = np.nan   # today: no prints at all
+    signals = strat.generate_signals(px, REGIME, list(px.columns))
+    assert all(np.isfinite(s.entry_price) and s.entry_price > 0 for s in signals)
+
+
+def test_two_row_hole_across_most_columns_does_not_bias_selection():
+    """The 2026-09-15/16 shape: two sessions where ~80 % of the universe has
+    no row. Under a zero-NaN completeness rule only the reporting minority
+    could be selected (here: noise columns); under the tolerance rule the
+    engineered mean-reverting legs still win."""
+    strat = SparseCCAMeanRevert()
+    px = _build_panel(n_rows=300, n_engineered=10, n_noise=50)
+    hole_cols = [c for c in px.columns if c in ENGINEERED_TICKERS or int(c[-1]) < 8]
+    px.iloc[150:152, [px.columns.get_loc(c) for c in hole_cols]] = np.nan
+    signals = strat.generate_signals(px, REGIME, list(px.columns))
+    assert len(signals) >= 1
+    assert {s.ticker for s in signals} <= ENGINEERED_TICKERS
+    assert all(np.isfinite(s.entry_price) for s in signals)
+
+
+def test_leg_missing_base_or_today_or_too_many_rows_is_excluded():
+    strat = SparseCCAMeanRevert()
+    px = _build_panel(n_rows=300, n_engineered=10, n_noise=50)
+    prepped = _replicate_px_prep(px, list(px.columns), strat)
+    first_row = px.index.get_loc(prepped.index[0])
+    px.iloc[first_row, px.columns.get_loc('ENG0')] = np.nan              # base row missing
+    px.iloc[-1, px.columns.get_loc('ENG1')] = np.nan                     # today missing
+    for r in range(200, 206):                                            # 6 interior misses
+        px.iloc[r, px.columns.get_loc('ENG2')] = np.nan
+    for r in range(210, 214):                                            # 4 interior misses — tolerated
+        px.iloc[r, px.columns.get_loc('ENG3')] = np.nan
+    signals = strat.generate_signals(px, REGIME, list(px.columns))
+    tickers = {s.ticker for s in signals}
+    assert len(signals) >= 1
+    assert not ({'ENG0', 'ENG1', 'ENG2'} & tickers)
+    assert 'ENG3' in tickers
+
+
+def test_seven_day_ticker_rows_do_not_break_completeness_without_the_calendar():
+    """Weekend rows contributed by a crypto column must not make every equity
+    column look incomplete; with no upstream calendar the strategy still
+    selects the engineered legs (or returns [] — never raises, never NaN)."""
+    strat = SparseCCAMeanRevert()
+    px = _build_panel(n_rows=300, n_engineered=10, n_noise=50)
+    full = pd.date_range(px.index[0], px.index[-1], freq='D')
+    px = px.reindex(full)                                                # weekends → NaN for equities
+    px['BTC-USD'] = 100.0 + np.arange(len(px)) * 0.1                     # 7-day ticker
+    signals = strat.generate_signals(px, REGIME, list(px.columns))
+    assert len(signals) >= 1
+    assert {s.ticker for s in signals} <= ENGINEERED_TICKERS
