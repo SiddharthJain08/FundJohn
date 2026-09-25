@@ -173,6 +173,19 @@ class TestBenchSleeveIdResolution(unittest.TestCase):
         self.assertIn('WARN', out)
         self.assertIn('multiple benchmark sleeves', out)
 
+    def test_multiple_sleeves_without_fallback_literal_uses_alphabetically_first(self):
+        # Review carry-over test: BENCH_SLEEVE_FALLBACK_ID ('S_beta_spy')
+        # is absent from the registry's multiple benchmark_sleeve rows --
+        # the tie-break falls to sorted(ids)[0], not the literal.
+        conn = FakeConn(responses=[
+            [('S_zeta',), ('S_alpha',)],
+            ('r1',),
+            [('LOW_VOL', 1.2)],
+        ])
+        bench, meta = aa.load_bench_sharpe(conn)
+        self.assertEqual(meta['sleeve_id'], 'S_alpha')
+        self.assertEqual(meta['sleeve_source'], 'registry')
+
 
 # ── Scenario 4: per-regime fail-safe tiers (spec §2) ────────────────────────
 class TestBenchFailSafeTiers(unittest.TestCase):
@@ -228,6 +241,77 @@ class TestBenchFailSafeTiers(unittest.TestCase):
         self.assertTrue(eligible['LOW_VOL'])
         self.assertEqual(diag['LOW_VOL']['bench'], aa.DEFAULT_MIN_SHARPE)
 
+    def test_sleeve_row_with_none_sharpe_falls_back_for_that_regime_only(self):
+        # Review carry-over test: production shape for a zero-trade regime
+        # in the sleeve's window -- the row exists but sharpe is NULL. Must
+        # resolve tier 2/3 for THAT regime only, not discard the vector.
+        pc_vector = json.dumps({'CRISIS': 1.5})
+        conn = FakeConn(responses=[
+            ('r9',),
+            [('LOW_VOL', 0.9), ('TRANSITIONING', 0.4), ('HIGH_VOL', 0.5), ('CRISIS', None)],
+            (pc_vector,),
+        ])
+        bench, meta = aa.load_bench_sharpe(conn, sleeve_id='S_beta_spy')
+        self.assertEqual(bench['LOW_VOL'], 0.9)
+        self.assertEqual(meta['regime_source']['LOW_VOL'], 'sleeve')
+        self.assertEqual(bench['CRISIS'], 1.5)
+        self.assertEqual(meta['regime_source']['CRISIS'], 'pipeline_config')
+
+    def test_non_canonical_sleeve_row_does_not_mask_a_missing_canonical_regime(self):
+        # Review carry-over test: 4 total sleeve rows, but one is a
+        # non-canonical regime_state -- len(sleeve_sharpe) == 4 must NOT be
+        # read as "all four canonical regimes present" (the bug the
+        # per-regime `missing` list replaces).
+        pc_vector = json.dumps({'CRISIS': 1.5})
+        conn = FakeConn(responses=[
+            ('r9',),
+            [('LOW_VOL', 0.9), ('TRANSITIONING', 0.4), ('HIGH_VOL', 0.5), ('BOGUS_REGIME', 9.9)],
+            (pc_vector,),
+        ])
+        bench, meta = aa.load_bench_sharpe(conn, sleeve_id='S_beta_spy')
+        self.assertEqual(bench['CRISIS'], 1.5)
+        self.assertEqual(meta['regime_source']['CRISIS'], 'pipeline_config')
+        self.assertEqual(len(conn.executed), 3)   # pipeline_config WAS queried
+
+    def test_non_finite_sleeve_sharpe_treated_as_missing_for_that_regime(self):
+        # Review carry-over test: a NaN/inf sleeve sharpe must never be
+        # compared or persisted -- treated as missing, falls to tier 2/3.
+        pc_vector = json.dumps({'CRISIS': 1.5})
+        conn = FakeConn(responses=[
+            ('r9',),
+            [('LOW_VOL', 0.9), ('TRANSITIONING', 0.4), ('HIGH_VOL', 0.5), ('CRISIS', float('nan'))],
+            (pc_vector,),
+        ])
+        (bench, meta), out = _captured_stdout(aa.load_bench_sharpe, conn, 'S_beta_spy')
+        self.assertEqual(bench['CRISIS'], 1.5)
+        self.assertEqual(meta['regime_source']['CRISIS'], 'pipeline_config')
+        self.assertIn('non-finite', out)
+
+    def test_pipeline_config_vector_skips_non_finite_entries_but_keeps_others(self):
+        # Review carry-over test: one non-finite entry in the tier-2 JSON
+        # must not discard the other, otherwise-valid regimes.
+        pc_vector = json.dumps({'LOW_VOL': 0.8, 'CRISIS': float('inf')})
+        conn = FakeConn(responses=[None, (pc_vector,)])
+        bench, meta = aa.load_bench_sharpe(conn, sleeve_id='S_beta_spy')
+        self.assertEqual(bench['LOW_VOL'], 0.8)
+        self.assertEqual(meta['regime_source']['LOW_VOL'], 'pipeline_config')
+        self.assertEqual(bench['CRISIS'], aa.DEFAULT_MIN_SHARPE)
+        self.assertEqual(meta['regime_source']['CRISIS'], 'default')
+
+    def test_malformed_pipeline_config_json_falls_through_to_default_with_warn(self):
+        # Review carry-over test: a top-level parse failure (not just a bad
+        # entry) must fall all the way to tier 3 + WARN for every regime,
+        # not raise or silently return a partial/garbage vector.
+        conn = FakeConn(responses=[
+            None,                  # no sleeve run
+            ('{not valid json',),  # malformed pipeline_config value
+        ])
+        (bench, meta), out = _captured_stdout(aa.load_bench_sharpe, conn, 'S_beta_spy')
+        self.assertEqual(bench, {r: aa.DEFAULT_MIN_SHARPE for r in aa.CANONICAL_REGIMES})
+        self.assertEqual(meta['regime_source'], {r: 'default' for r in aa.CANONICAL_REGIMES})
+        for r in aa.CANONICAL_REGIMES:
+            self.assertIn(f'WARN: {r} bench sharpe unavailable', out)
+
 
 # ── Decimal safety (psycopg2 returns NUMERIC as Decimal) ────────────────────
 class TestDecimalSharpeIsCastToFloat(unittest.TestCase):
@@ -249,6 +333,20 @@ class TestDecimalSharpeIsCastToFloat(unittest.TestCase):
                                              bench=bench, prior_eligible=prior_eligible)
         self.assertTrue(eligible['LOW_VOL'])   # 0.90 >= 0.95 - 0.10 (band)
         self.assertTrue(diag['LOW_VOL']['band_applied'])
+
+    def test_decimal_strategy_sharpe_exactly_at_bench_is_eligible(self):
+        # Review carry-over test: Decimal('0.53') >= 0.53 (float) is FALSE
+        # in raw Python (exact decimal vs inexact binary representation)
+        # even though the two are semantically equal -- _judge must cast
+        # the strategy's OWN sharpe (fetched via DictCursor, also NUMERIC)
+        # to float before comparing against the bench, on the equality
+        # boundary specifically (spec §1: "sharpe[r] >= bench[r]").
+        bench = {'HIGH_VOL': 0.53, 'LOW_VOL': 1.0, 'TRANSITIONING': 1.0, 'CRISIS': 1.0}
+        rows = [_regime_row('HIGH_VOL', Decimal('0.53'), 150)]
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
+        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0, bench=bench)
+        self.assertTrue(eligible['HIGH_VOL'])
+        self.assertIsInstance(diag['HIGH_VOL']['sharpe'], float)
 
 
 # ── Scenario 2: hysteresis band (spec §5-B) ─────────────────────────────────
@@ -299,6 +397,27 @@ class TestHysteresisBand(unittest.TestCase):
         eligible, _ = aa.compute_eligible(conn, 'S_test', threshold=0.0,
                                           bench=self.BENCH, prior_eligible=prior)
         self.assertFalse(eligible['LOW_VOL'])
+
+    def test_band_floor_survives_float_subtraction_artifact(self):
+        # Review carry-over test: 0.53 - 0.10 == 0.43000000000000005 in raw
+        # binary float. A prior-eligible cell sitting exactly at the
+        # INTENDED band floor (0.43) must stay eligible, not get spuriously
+        # deactivated by the float artifact -- band_floor is rounded.
+        bench = {'HIGH_VOL': 0.53, 'LOW_VOL': 1.0, 'TRANSITIONING': 1.0, 'CRISIS': 1.0}
+        rows = [_regime_row('HIGH_VOL', 0.43, 150)]
+        prior = {'HIGH_VOL': True, 'LOW_VOL': None, 'TRANSITIONING': None, 'CRISIS': None}
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
+        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0,
+                                             bench=bench, prior_eligible=prior)
+        self.assertTrue(eligible['HIGH_VOL'])
+        self.assertEqual(diag['HIGH_VOL']['band_floor'], 0.43)
+
+    def test_diag_carries_the_rule_literal(self):
+        bench = {r: 0.5 for r in aa.CANONICAL_REGIMES}
+        rows = [_regime_row('LOW_VOL', 0.9, 150)]
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
+        _, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0, bench=bench)
+        self.assertEqual(diag['LOW_VOL']['rule'], 'qualifies(>0·classDD·trades)+bench_relative')
 
 
 # ── Scenario 3: class-gate failure deactivates even inside the band ────────
@@ -380,10 +499,11 @@ class TestStampGainsBenchFields(unittest.TestCase):
         # A regime resolved via DEFAULT_MIN_SHARPE this run must NOT be
         # persisted as if it were a real observation -- otherwise the next
         # run reads 0.5 back as pipeline_config-sourced and the §2 WARN
-        # never fires again.
+        # never fires again. No regime here is pipeline_config-sourced (see
+        # the dedicated skip-on-tier-2 test below for that path).
         conn = FakeConn([None])
         bench = {'LOW_VOL': 0.95, 'TRANSITIONING': 0.44, 'HIGH_VOL': 0.53, 'CRISIS': aa.DEFAULT_MIN_SHARPE}
-        regime_source = {'LOW_VOL': 'sleeve', 'TRANSITIONING': 'pipeline_config',
+        regime_source = {'LOW_VOL': 'sleeve', 'TRANSITIONING': 'sleeve',
                          'HIGH_VOL': 'sleeve', 'CRISIS': 'default'}
         ok = aa.stamp_bench_sharpe_config(conn, bench, regime_source=regime_source)
         self.assertTrue(ok)
@@ -399,6 +519,25 @@ class TestStampGainsBenchFields(unittest.TestCase):
         ok = aa.stamp_bench_sharpe_config(conn, bench, regime_source=regime_source)
         self.assertFalse(ok)
         self.assertEqual(len(conn.executed), 0)   # no INSERT attempted at all
+
+    def test_stamp_bench_sharpe_config_skips_entire_write_when_any_regime_is_pipeline_config_sourced(self):
+        # Review carry-over: a regime resolved via the tier-2
+        # pipeline_config fallback THIS run must not be re-persisted with a
+        # fresh updated_at (it would look like a brand-new observation
+        # forever, masking a sleeve backtest missing for weeks). Rather
+        # than write a partial vector that silently DROPS the tier-2
+        # regime from the stored row (demoting it to tier-3/DEFAULT on the
+        # very next run), the write is skipped ENTIRELY and the existing
+        # row -- and its true updated_at -- is left in place. This is a
+        # deviation from a literal "persist only sleeve-sourced values"
+        # reading of the carried review item; see task-2-report.md.
+        conn = FakeConn([None])
+        bench = {'LOW_VOL': 0.95, 'TRANSITIONING': 0.44, 'HIGH_VOL': 0.53, 'CRISIS': 1.5}
+        regime_source = {'LOW_VOL': 'sleeve', 'TRANSITIONING': 'pipeline_config',
+                         'HIGH_VOL': 'sleeve', 'CRISIS': 'sleeve'}
+        ok = aa.stamp_bench_sharpe_config(conn, bench, regime_source=regime_source)
+        self.assertFalse(ok)
+        self.assertEqual(len(conn.executed), 0)   # nothing written; old row survives untouched
 
     def test_apply_one_audit_reason_uses_bench_not_slider(self):
         # Spec §3: audit rows record the per-regime threshold ACTUALLY used

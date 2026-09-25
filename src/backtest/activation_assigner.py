@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -217,14 +218,35 @@ def stamp_bench_sharpe_config(conn, bench: dict, regime_source: Optional[dict] =
     real observation -- otherwise the next run reads 0.5 back as a
     legitimate pipeline_config-sourced value instead of hitting tier 3 and
     WARNing again, silencing the fail-safe after exactly one degraded
-    apply. Only regimes sourced from the sleeve or a prior pipeline_config
-    vector are persisted; if that leaves nothing (every regime defaulted
-    this run), the write is skipped entirely (returns False, logged) rather
-    than persisting an all-default vector. regime_source=None (back-compat
-    direct callers) persists `bench` as-is."""
+    apply.
+
+    Review carry-over (2026-09-25 Task 1 review): a regime resolved via
+    the tier-2 pipeline_config fallback THIS run must also not be
+    re-persisted -- this row's own `updated_at` would refresh to NOW(),
+    making a value that is really just being copied forward look like a
+    fresh observation forever, which would mask a sleeve backtest that has
+    been missing for weeks. The naive fix (persist only sleeve-sourced
+    regimes) would instead silently DROP the tier-2 regime from the stored
+    JSON row on THIS write (the INSERT/UPDATE replaces the whole value
+    column, it doesn't merge) -- demoting it straight to tier-3/DEFAULT on
+    the very next run, a bigger behavior change than "don't touch the
+    timestamp". So: if ANY regime this run is pipeline_config-sourced, the
+    write is skipped ENTIRELY (returns False, logged) and the existing row
+    -- vector and updated_at both -- is left exactly as it was. Only when
+    every present regime is sleeve-sourced (or default-sourced, which is
+    excluded from the payload) does a write happen at all; if that leaves
+    nothing to write (every regime defaulted this run), the write is also
+    skipped (returns False, logged). regime_source=None (back-compat
+    direct callers) persists `bench` as-is, no filtering."""
     to_write = bench
     if regime_source is not None:
-        to_write = {r: v for r, v in bench.items() if regime_source.get(r) in ('sleeve', 'pipeline_config')}
+        if any(src == 'pipeline_config' for src in regime_source.values()):
+            _log(f'{CONFIG_KEY_BENCH_SHARPE}: skipping write -- at least one regime this run '
+                 f'is tier-2 (pipeline_config)-sourced; re-persisting it would refresh its '
+                 f'updated_at and make a stale fallback look like a fresh observation. '
+                 f'Leaving the existing row in place.')
+            return False
+        to_write = {r: v for r, v in bench.items() if regime_source.get(r) == 'sleeve'}
         if not to_write:
             _log(f'{CONFIG_KEY_BENCH_SHARPE}: nothing to persist (every regime this run '
                  f'came from DEFAULT_MIN_SHARPE)')
@@ -330,18 +352,39 @@ def get_activation_min_trades(cur) -> Optional[int]:
 def _load_pipeline_config_bench_vector(conn) -> dict:
     """Read strategy_activation_bench_sharpe (JSON {regime: sharpe}) from
     pipeline_config -- fail-safe tier 2 (spec §2). Fail-safe: missing row /
-    malformed value / query error -> {} (caller falls through to
+    malformed top-level value / query error -> {} (caller falls through to
     DEFAULT_MIN_SHARPE per regime). `value` may come back as a jsonb dict
-    or as text depending on driver/column config -- handle both."""
+    or as text depending on driver/column config -- handle both.
+
+    Per-entry, not per-dict: a single bad regime value (non-numeric, or
+    non-finite -- NaN/±inf, which `json.loads` happily round-trips) must
+    not discard the OTHER three, otherwise-valid regimes. Each entry is
+    resolved independently; only a malformed top-level payload (not a
+    dict, or fails to parse at all) falls back to {} for the whole vector
+    (review carry-over, spec 2026-09-25 Task 1 review)."""
     try:
         cur = conn.cursor()
         cur.execute("SELECT value FROM pipeline_config WHERE key=%s", (CONFIG_KEY_BENCH_SHARPE,))
         row = cur.fetchone()
         cur.close()
-        if row and row[0] is not None:
-            val = row[0]
-            data = val if isinstance(val, dict) else json.loads(val)
-            return {r: float(v) for r, v in data.items() if v is not None}
+        if not row or row[0] is None:
+            return {}
+        val = row[0]
+        data = val if isinstance(val, dict) else json.loads(val)
+        if not isinstance(data, dict):
+            return {}
+        out: dict = {}
+        for r, v in data.items():
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(fv):
+                continue
+            out[r] = fv
+        return out
     except Exception:
         pass
     return {}
@@ -421,9 +464,20 @@ def load_bench_sharpe(conn, sleeve_id: Optional[str] = None) -> tuple[dict, dict
             for regime_state, sharpe in cur.fetchall():
                 # NUMERIC columns come back as Decimal via psycopg2 -- cast
                 # now so every downstream consumer (hysteresis subtraction,
-                # json.dumps in the stamps) sees a plain float.
-                if sharpe is not None:
-                    sleeve_sharpe[regime_state] = float(sharpe)
+                # json.dumps in the stamps) sees a plain float. A None
+                # sharpe (production shape for a zero-trade regime in the
+                # sleeve's window) is treated as missing for that regime
+                # only -- falls through to tier 2/3 below, never widens.
+                # Same for a non-finite value (NaN/±inf): never compared,
+                # never persisted (review carry-over).
+                if sharpe is None:
+                    continue
+                sharpe = float(sharpe)
+                if not math.isfinite(sharpe):
+                    _log(f'WARN: sleeve run {run_id} regime {regime_state} sharpe is '
+                         f'non-finite ({sharpe}); treating as missing for this regime')
+                    continue
+                sleeve_sharpe[regime_state] = sharpe
     except Exception as e:
         _log(f'bench sleeve run lookup failed ({e})')
         try:
@@ -433,8 +487,13 @@ def load_bench_sharpe(conn, sleeve_id: Optional[str] = None) -> tuple[dict, dict
     finally:
         cur.close()
 
-    fallback_vector = (_load_pipeline_config_bench_vector(conn)
-                       if len(sleeve_sharpe) < len(CANONICAL_REGIMES) else {})
+    # Tier-2 trigger: whether to bother querying pipeline_config at all.
+    # Per-CANONICAL-REGIME membership, not len(sleeve_sharpe) < 4 -- a stray
+    # non-canonical regime_state row (or duplicate) can make the COUNT hit 4
+    # while a real canonical regime is still absent, which would silently
+    # skip the tier-2 fallback for it (review carry-over).
+    missing = [r for r in CANONICAL_REGIMES if r not in sleeve_sharpe]
+    fallback_vector = _load_pipeline_config_bench_vector(conn) if missing else {}
 
     bench: dict = {}
     regime_source: dict = {}
@@ -445,7 +504,7 @@ def load_bench_sharpe(conn, sleeve_id: Optional[str] = None) -> tuple[dict, dict
         elif r in fallback_vector:
             bench[r] = fallback_vector[r]
             regime_source[r] = 'pipeline_config'
-            _log(f'{r}: bench sharpe missing from sleeve run {run_id or "<none>"}; '
+            _log(f'WARN: {r} bench sharpe missing from sleeve run {run_id or "<none>"}; '
                  f'using last-applied pipeline_config vector')
         else:
             bench[r] = DEFAULT_MIN_SHARPE
@@ -466,19 +525,28 @@ def load_bench_sharpe(conn, sleeve_id: Optional[str] = None) -> tuple[dict, dict
 def _resolve_bench(bench: Optional[dict]) -> dict:
     """Innermost fail-safe layer for direct callers of compute_eligible/
     apply_one that pass a partial or absent bench vector: any regime
-    missing from `bench` gets DEFAULT_MIN_SHARPE + a WARN naming it (spec
-    §2's final tier). The sleeve/pipeline_config tiering itself happens
-    once per run in load_bench_sharpe (main()), not here -- this function
+    missing from `bench` -- or present but non-finite (NaN/±inf; review
+    carry-over) -- gets DEFAULT_MIN_SHARPE + a WARN naming it (spec §2's
+    final tier). The sleeve/pipeline_config tiering itself happens once
+    per run in load_bench_sharpe (main()), not here -- this function
     never touches the DB."""
     bench = bench or {}
     out = {}
     for r in CANONICAL_REGIMES:
         v = bench.get(r)
+        if v is not None:
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                v = None
+            else:
+                if not math.isfinite(v):
+                    v = None
         if v is None:
             _log(f'WARN: bench sharpe for {r} not supplied; using DEFAULT_MIN_SHARPE={DEFAULT_MIN_SHARPE}')
             out[r] = DEFAULT_MIN_SHARPE
         else:
-            out[r] = float(v)
+            out[r] = v
     return out
 
 
@@ -565,13 +633,23 @@ def _judge(rows, gate: dict, eff_min_trades: int, bench: dict,
     no prior row must clear the full, un-loosened bench).
 
     Returns (eligible_by_regime, diag) with the same contract as the old
-    compute_eligible: diag gains `bench` (the raw bench[r] used) and
-    `band_applied` (bool -- True only when the cell is kept eligible
-    SOLELY by the hysteresis band: prior True, class gate passing, and
-    bench-0.10 <= sharpe < bench)."""
+    compute_eligible: diag gains `bench` (the raw bench[r] used),
+    `band_floor` (the rounded, ready-to-compare deactivate-edge: bench[r]
+    - ACTIVATION_HYSTERESIS), `band_applied` (bool -- True only when the
+    cell is kept eligible SOLELY by the hysteresis band: prior True, class
+    gate passing, and band_floor <= sharpe < bench), and `rule` (the
+    literal audit-row rule string, spec §3)."""
     diag: dict[str, dict] = {}
     for r in rows:
         s = r['sharpe']
+        # NUMERIC (Decimal) vs a float bench compares WRONG at exact
+        # equality: Decimal('0.53') >= 0.53 is False (binary 0.53 is not
+        # exactly decimal 0.53), even though the strategy's sharpe and the
+        # bench are semantically equal. Cast once here so every comparison
+        # below (class gate AND the bench leg) is float-float (review
+        # carry-over).
+        if s is not None:
+            s = float(s)
         n = r['trade_count'] if r['trade_count'] is not None else 0
         dd = r['max_dd_pct']
         # .get: tolerate legacy fixture rows without a calmar key — missing
@@ -587,16 +665,23 @@ def _judge(rows, gate: dict, eff_min_trades: int, bench: dict,
                      and s > gate['min_sharpe']
                      and dd_leg_passes(dd, cal, gate)
                      and n >= eff_min_trades)
+        # round(): a plain `b - ACTIVATION_HYSTERESIS` can land on a binary
+        # float artifact (0.53 - 0.10 == 0.43000000000000005) that would
+        # spuriously deactivate a cell sitting exactly at the intended band
+        # floor (review carry-over). Rounded once here and reused for both
+        # the comparison and the audit-row threshold (apply_one).
+        band_floor = round(b - ACTIVATION_HYSTERESIS, 10)
         if s is None:
             bench_leg = False
             band_applied = False
         else:
-            band_floor = (b - ACTIVATION_HYSTERESIS) if pe else b
-            bench_leg = s >= band_floor
-            band_applied = bool(pe) and class_gate and s < b and s >= (b - ACTIVATION_HYSTERESIS)
+            bench_leg = s >= (band_floor if pe else b)
+            band_applied = bool(pe) and class_gate and s < b and s >= band_floor
         passes = class_gate and bench_leg
         diag[regime] = {'sharpe': s, 'trade_count': n, 'max_dd_pct': dd, 'calmar': cal,
-                        'eligible': passes, 'bench': b, 'band_applied': band_applied}
+                        'eligible': passes, 'bench': b, 'band_floor': band_floor,
+                        'band_applied': band_applied,
+                        'rule': 'qualifies(>0·classDD·trades)+bench_relative'}
     if not diag:
         return None, {}
     if always_on:
@@ -810,11 +895,15 @@ def apply_one(conn, strategy_id: str, threshold: float,
                 d = diag.get(r, {})
                 # Audit rows record the per-regime comparator ACTUALLY used
                 # (spec §3), not the retired global slider: bench[r], or the
-                # hysteresis-loosened bench[r]-0.10 when this cell was kept
-                # eligible by the band.
-                eff_threshold = resolved_bench.get(r, DEFAULT_MIN_SHARPE)
+                # hysteresis-loosened, rounded band_floor when this cell was
+                # kept eligible by the band. Read both from diag (same
+                # rounded value _judge already compared against) rather than
+                # recomputing here -- a second, unrounded `- ACTIVATION_
+                # HYSTERESIS` would drift from the band_floor that actually
+                # decided eligibility (review carry-over).
+                eff_threshold = d.get('bench', resolved_bench.get(r, DEFAULT_MIN_SHARPE))
                 if not always_on and prior_eligible.get(r):
-                    eff_threshold = eff_threshold - ACTIVATION_HYSTERESIS
+                    eff_threshold = d.get('band_floor', round(eff_threshold - ACTIVATION_HYSTERESIS, 10))
                 actions[r] = _apply_regime(
                     cur, strategy_id, r, eligible_by_regime[r], prior_rows,
                     sharpe=d.get('sharpe'), trade_count=d.get('trade_count'),
