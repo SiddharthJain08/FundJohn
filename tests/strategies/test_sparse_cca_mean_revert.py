@@ -376,3 +376,18 @@ def test_seven_day_ticker_rows_do_not_break_completeness_without_the_calendar():
     signals = strat.generate_signals(px, REGIME, list(px.columns))
     assert len(signals) >= 1
     assert {s.ticker for s in signals} <= ENGINEERED_TICKERS
+
+
+def test_last_row_only_print_in_thresh_dropped_column_hits_finite_guard():
+    """Review note: when the last row's ONLY print sits in a column that the
+    thresh step drops, `px` still ends in a NaN row (the row has an equity
+    print, so the equity-row filter keeps it) — the finite-price guard must
+    then skip every leg rather than emit NaN entries."""
+    strat = SparseCCAMeanRevert()
+    px = _build_panel(n_rows=300, n_engineered=10, n_noise=50)
+    sparse_col = pd.Series(np.nan, index=px.index)
+    sparse_col.iloc[-1] = 42.0                       # a single print, on the last row only
+    px['THIN'] = sparse_col                          # dropped by thresh, but keeps the row
+    px.iloc[-1, [px.columns.get_loc(c) for c in px.columns if c != 'THIN']] = np.nan
+    signals = strat.generate_signals(px, REGIME, list(px.columns))
+    assert all(np.isfinite(s.entry_price) and s.entry_price > 0 for s in signals)

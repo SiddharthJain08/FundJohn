@@ -94,20 +94,8 @@ class SparseCCAMeanRevert(BaseStrategy):
             return []
 
         # Select K_ASSETS most negatively autocorrelated (most mean-reverting),
-        # restricted to columns with a COMPLETE price history across the
-        # wider price window the spread is built from (`px_live` below) --
-        # not just a complete LOOKBACK-tail of RETURNS (`r`). A ticker can
-        # have a fully-populated 252-row return tail yet still be NaN
-        # earlier in the wider min_rows+10 price window (e.g. a recent
-        # listing whose first few sessions in this specific window predate
-        # real trading) — that ticker's r-column looks clean, but the
-        # spread normalizes off `px_sparse.iloc[0]` (the EARLIEST row of
-        # the wider window), so a NaN there NaNs that ticker's entire
-        # normalized column and, combined with `min_count` below, silently
-        # zeroes out every day's z-score. Restricting selection to columns
-        # with zero NaN across the full px_live window prevents that by
-        # construction; the min_count/isnan guards further down stay on as
-        # defense in depth for anything this doesn't catch.
+        # restricted to legs that pass the completeness rule below (first and
+        # last row valid, at most MAX_MISSING_ROWS interior misses).
         px_live = px.dropna(how='all')   # rows already on the equity calendar (see above)
         # Completeness is a TOLERANCE, not zero-NaN (review 2026-09-25): a
         # data-layer hole such as the 2026-09-15/16 collect miss (~5k tickers
