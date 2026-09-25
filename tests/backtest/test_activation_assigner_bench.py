@@ -133,7 +133,7 @@ class TestLoadBenchSharpeFromSleeve(unittest.TestCase):
         bench = {'LOW_VOL': 0.95, 'TRANSITIONING': 0.44, 'HIGH_VOL': 0.53, 'CRISIS': 1.58}
         rows = [_regime_row('LOW_VOL', 0.95, 200)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0, bench=bench)
+        eligible, diag = aa.compute_eligible(conn, 'S_test', bench=bench)
         self.assertTrue(eligible['LOW_VOL'])
         self.assertEqual(diag['LOW_VOL']['bench'], 0.95)
 
@@ -237,7 +237,7 @@ class TestBenchFailSafeTiers(unittest.TestCase):
         bench, _ = aa.load_bench_sharpe(conn, sleeve_id='S_beta_spy')
         rows = [_regime_row('LOW_VOL', 0.6, 150)]
         conn2 = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
-        eligible, diag = aa.compute_eligible(conn2, 'S_test', threshold=0.0, bench=bench)
+        eligible, diag = aa.compute_eligible(conn2, 'S_test', bench=bench)
         self.assertTrue(eligible['LOW_VOL'])
         self.assertEqual(diag['LOW_VOL']['bench'], aa.DEFAULT_MIN_SHARPE)
 
@@ -329,7 +329,7 @@ class TestDecimalSharpeIsCastToFloat(unittest.TestCase):
         rows = [_regime_row('LOW_VOL', 0.90, 150)]
         prior_eligible = {'LOW_VOL': True, 'TRANSITIONING': None, 'HIGH_VOL': None, 'CRISIS': None}
         conn2 = FakeConn(responses=[{'run_id': 'r2'}, [], rows])
-        eligible, diag = aa.compute_eligible(conn2, 'S_test', threshold=0.0,
+        eligible, diag = aa.compute_eligible(conn2, 'S_test',
                                              bench=bench, prior_eligible=prior_eligible)
         self.assertTrue(eligible['LOW_VOL'])   # 0.90 >= 0.95 - 0.10 (band)
         self.assertTrue(diag['LOW_VOL']['band_applied'])
@@ -344,7 +344,7 @@ class TestDecimalSharpeIsCastToFloat(unittest.TestCase):
         bench = {'HIGH_VOL': 0.53, 'LOW_VOL': 1.0, 'TRANSITIONING': 1.0, 'CRISIS': 1.0}
         rows = [_regime_row('HIGH_VOL', Decimal('0.53'), 150)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0, bench=bench)
+        eligible, diag = aa.compute_eligible(conn, 'S_test', bench=bench)
         self.assertTrue(eligible['HIGH_VOL'])
         self.assertIsInstance(diag['HIGH_VOL']['sharpe'], float)
 
@@ -357,7 +357,7 @@ class TestHysteresisBand(unittest.TestCase):
         rows = [_regime_row('LOW_VOL', 0.95, 150)]
         prior = {'LOW_VOL': True, 'TRANSITIONING': None, 'HIGH_VOL': None, 'CRISIS': None}
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0,
+        eligible, diag = aa.compute_eligible(conn, 'S_test',
                                              bench=self.BENCH, prior_eligible=prior)
         self.assertTrue(eligible['LOW_VOL'])
         self.assertTrue(diag['LOW_VOL']['band_applied'])
@@ -366,7 +366,7 @@ class TestHysteresisBand(unittest.TestCase):
         rows = [_regime_row('LOW_VOL', 0.85, 150)]
         prior = {'LOW_VOL': True, 'TRANSITIONING': None, 'HIGH_VOL': None, 'CRISIS': None}
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0,
+        eligible, diag = aa.compute_eligible(conn, 'S_test',
                                              bench=self.BENCH, prior_eligible=prior)
         self.assertFalse(eligible['LOW_VOL'])
         self.assertFalse(diag['LOW_VOL']['band_applied'])
@@ -375,7 +375,7 @@ class TestHysteresisBand(unittest.TestCase):
         rows = [_regime_row('LOW_VOL', 0.95, 150)]
         prior = {'LOW_VOL': False, 'TRANSITIONING': None, 'HIGH_VOL': None, 'CRISIS': None}
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0,
+        eligible, diag = aa.compute_eligible(conn, 'S_test',
                                              bench=self.BENCH, prior_eligible=prior)
         self.assertFalse(eligible['LOW_VOL'])   # strict leg: 0.95 < 1.0
         self.assertFalse(diag['LOW_VOL']['band_applied'])
@@ -385,7 +385,7 @@ class TestHysteresisBand(unittest.TestCase):
         # must clear the strict bench, never the loosened band.
         rows = [_regime_row('LOW_VOL', 0.95, 150)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0, bench=self.BENCH)
+        eligible, diag = aa.compute_eligible(conn, 'S_test', bench=self.BENCH)
         self.assertFalse(eligible['LOW_VOL'])
 
     def test_activate_edge_is_always_strict_never_the_band(self):
@@ -394,7 +394,7 @@ class TestHysteresisBand(unittest.TestCase):
         rows = [_regime_row('LOW_VOL', 0.95, 150)]
         prior = {'LOW_VOL': False, 'TRANSITIONING': None, 'HIGH_VOL': None, 'CRISIS': None}
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
-        eligible, _ = aa.compute_eligible(conn, 'S_test', threshold=0.0,
+        eligible, _ = aa.compute_eligible(conn, 'S_test',
                                           bench=self.BENCH, prior_eligible=prior)
         self.assertFalse(eligible['LOW_VOL'])
 
@@ -407,7 +407,7 @@ class TestHysteresisBand(unittest.TestCase):
         rows = [_regime_row('HIGH_VOL', 0.43, 150)]
         prior = {'HIGH_VOL': True, 'LOW_VOL': None, 'TRANSITIONING': None, 'CRISIS': None}
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0,
+        eligible, diag = aa.compute_eligible(conn, 'S_test',
                                              bench=bench, prior_eligible=prior)
         self.assertTrue(eligible['HIGH_VOL'])
         self.assertEqual(diag['HIGH_VOL']['band_floor'], 0.43)
@@ -416,7 +416,7 @@ class TestHysteresisBand(unittest.TestCase):
         bench = {r: 0.5 for r in aa.CANONICAL_REGIMES}
         rows = [_regime_row('LOW_VOL', 0.9, 150)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
-        _, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0, bench=bench)
+        _, diag = aa.compute_eligible(conn, 'S_test', bench=bench)
         self.assertEqual(diag['LOW_VOL']['rule'], 'qualifies(>0·classDD·trades)+bench_relative')
 
 
@@ -428,7 +428,7 @@ class TestClassGateOverridesBand(unittest.TestCase):
         rows = [_regime_row('LOW_VOL', 0.95, 50)]
         prior = {'LOW_VOL': True, 'TRANSITIONING': None, 'HIGH_VOL': None, 'CRISIS': None}
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0,
+        eligible, diag = aa.compute_eligible(conn, 'S_test',
                                              bench=bench, prior_eligible=prior)
         self.assertFalse(eligible['LOW_VOL'])
         self.assertFalse(diag['LOW_VOL']['band_applied'])
@@ -438,7 +438,7 @@ class TestClassGateOverridesBand(unittest.TestCase):
         rows = [_regime_row('LOW_VOL', 0.95, 150, max_dd_pct=25.0)]  # equity ceiling 20
         prior = {'LOW_VOL': True, 'TRANSITIONING': None, 'HIGH_VOL': None, 'CRISIS': None}
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0,
+        eligible, diag = aa.compute_eligible(conn, 'S_test',
                                              bench=bench, prior_eligible=prior,
                                              instrument_class='equity')
         self.assertFalse(eligible['LOW_VOL'])
@@ -450,7 +450,7 @@ class TestAlwaysOnAndCrypto(unittest.TestCase):
         bench = {r: 5.0 for r in aa.CANONICAL_REGIMES}   # deliberately unreachable
         rows = [_regime_row('LOW_VOL', 0.2, 900)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_beta_spy', threshold=0.0,
+        eligible, diag = aa.compute_eligible(conn, 'S_beta_spy',
                                              bench=bench, always_on=True)
         self.assertTrue(eligible['LOW_VOL'])
         self.assertFalse(diag['LOW_VOL']['eligible'])   # underlying verdict still recorded
@@ -462,7 +462,7 @@ class TestAlwaysOnAndCrypto(unittest.TestCase):
         bench = {'LOW_VOL': 0.53, 'TRANSITIONING': 1.58, 'HIGH_VOL': 0.95, 'CRISIS': 0.44}
         rows = [_regime_row('CRISIS', 0.44, 150, max_dd_pct=60.0)]  # would fail equity DD (20)
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_btc_momentum', threshold=0.0,
+        eligible, diag = aa.compute_eligible(conn, 'S_btc_momentum',
                                              bench=bench, instrument_class='crypto')
         self.assertTrue(eligible['CRISIS'])            # 0.44 >= 0.44, DD 60 <= crypto ceiling 70
         self.assertEqual(diag['CRISIS']['bench'], 0.44)
@@ -473,12 +473,14 @@ class TestStampGainsBenchFields(unittest.TestCase):
     def test_stamp_last_applied_persists_bench_vector_and_run_id(self):
         conn = FakeConn([None])
         bench = {'LOW_VOL': 0.95, 'TRANSITIONING': 0.44, 'HIGH_VOL': 0.53, 'CRISIS': 1.58}
-        ok = aa.stamp_last_applied(conn, bench['LOW_VOL'], 100, 3, 7, trigger='weekly_cron',
+        ok = aa.stamp_last_applied(conn, 100, 3, 7, trigger='weekly_cron',
                                    bench_sharpe=bench, bench_run_id='r51b5b915')
         self.assertTrue(ok)
         sql, params = conn.executed[-1]
         payload = json.loads(params[1])
-        self.assertEqual(payload['threshold'], 0.95)   # LOW_VOL bench, not the retired slider
+        # Task 2: the retired slider's `threshold` JSON key is gone --
+        # bench_sharpe['LOW_VOL'] already carries the same information.
+        self.assertNotIn('threshold', payload)
         self.assertEqual(payload['bench_sharpe'], bench)
         self.assertEqual(payload['bench_run_id'], 'r51b5b915')
         # spec §5-B: "stored with the vector in the last-applied stamp".
@@ -541,16 +543,17 @@ class TestStampGainsBenchFields(unittest.TestCase):
 
     def test_apply_one_audit_reason_uses_bench_not_slider(self):
         # Spec §3: audit rows record the per-regime threshold ACTUALLY used
-        # -- bench[r], not the retired global slider (threshold=9.9 here
-        # would show up in the old `reason` string if the bug regressed).
+        # -- bench[r]. The retired global slider parameter is gone from
+        # apply_one's signature entirely as of Task 2 (not just unused), so
+        # there's no stale value it could leak into the reason string.
         bench = {'LOW_VOL': 1.0, 'TRANSITIONING': 1.0, 'HIGH_VOL': 1.0, 'CRISIS': 1.0}
         rows = [_regime_row('LOW_VOL', 1.2, 150)]
         prior_rows = [_prior_row('LOW_VOL', False)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows, prior_rows])
-        result = aa.apply_one(conn, 'S_test', threshold=9.9, dry_run=False, bench=bench)
+        result = aa.apply_one(conn, 'S_test', dry_run=False, bench=bench)
         self.assertEqual(result['actions']['LOW_VOL'], 'activated')
         inserts = [p for sql, p in conn.executed if 'strategy_regime_param_changes' in sql]
-        self.assertTrue(any('threshold=1.0' in str(p) and '9.9' not in str(p) for p in inserts))
+        self.assertTrue(any('threshold=1.0' in str(p) for p in inserts))
         self.assertTrue(any('rule=qualifies(>0·classDD·trades)+bench_relative' in str(p) for p in inserts))
 
     def test_apply_one_audit_reason_unchanged_cell_inside_band_writes_nothing(self):
@@ -558,7 +561,7 @@ class TestStampGainsBenchFields(unittest.TestCase):
         rows = [_regime_row('LOW_VOL', 0.95, 150)]   # inside the band
         prior_rows = [_prior_row('LOW_VOL', True)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows, prior_rows])
-        result = aa.apply_one(conn, 'S_test', threshold=9.9, dry_run=False, bench=bench)
+        result = aa.apply_one(conn, 'S_test', dry_run=False, bench=bench)
         self.assertEqual(result['actions']['LOW_VOL'], 'unchanged')   # True->True, no write
         # unchanged -> no INSERT for LOW_VOL was issued at all; assert no
         # crash and the cell stayed eligible via the band.
@@ -572,7 +575,7 @@ class TestStampGainsBenchFields(unittest.TestCase):
         rows = [_regime_row('LOW_VOL', 0.85, 150)]   # below bench-0.10 (0.90)
         prior_rows = [_prior_row('LOW_VOL', True)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows, prior_rows])
-        result = aa.apply_one(conn, 'S_test', threshold=9.9, dry_run=False, bench=bench)
+        result = aa.apply_one(conn, 'S_test', dry_run=False, bench=bench)
         self.assertEqual(result['actions']['LOW_VOL'], 'deactivated')
         inserts = [p for sql, p in conn.executed if 'strategy_regime_param_changes' in sql]
         self.assertTrue(any('threshold=0.9' in str(p) for p in inserts))
@@ -620,9 +623,12 @@ class TestDryRunBenchOutput(unittest.TestCase):
         self.assertFalse(self.ERROR_RE.match(line))
 
     def test_pinned_header_and_summary_lines_are_unaffected(self):
-        # The retired slider's threshold/min_trades/dry_run/strategies
-        # header stays byte-stable -- the bench vector is new, additional
-        # output, not a replacement for the pinned line.
+        # The header/summary `threshold=…` token stays byte-stable (Task 2
+        # removed the slider CONTROL and the concept it read, not this
+        # printed shape -- activation_preview.js still parses it; the
+        # value main() now feeds it is display-only, the LOW_VOL bench).
+        # The bench vector/diff lines are new, additional output, not a
+        # replacement for this pinned line.
         header = '[activation_assigner] threshold=0.5 min_trades=100 dry_run=True strategies=149'
         self.assertIsNotNone(self.HEADER_RE.match(header))
         summary = ('[activation_assigner] activation_assigner summary: 145 strategies evaluated, '

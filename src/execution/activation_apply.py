@@ -1,24 +1,41 @@
 #!/usr/bin/env python3
 """src/execution/activation_apply.py — daily-cycle `activation` step.
 
-Makes the dashboard's Strategy Activation sliders take effect at the NEXT
-DAILY CYCLE instead of the next weekly refresh (operator directive
-2026-08-22). Runs FIRST in every compute chain (before `sentiment` /
-`signals`), resolved by resolve_script.js / pipeline_orchestrator.py as a
-plain src/execution step (300s budget; ~10s in practice).
+Makes the dashboard's Strategy Activation min-TRADES slider, and a fresh
+benchmark-sleeve backtest, take effect at the NEXT DAILY CYCLE instead of
+the next weekly refresh (operator directive 2026-08-22; bench-relative
+eligibility added 2026-09-25, spec docs/specs/2026-09-25-activation-
+bench-relative-spec.md §2/§3). Runs FIRST in every compute chain (before
+`sentiment` / `signals`), resolved by resolve_script.js /
+pipeline_orchestrator.py as a plain src/execution step (300s budget; ~10s
+in practice).
 
 What it does
   1. Gate: OPENCLAW_ACTIVATION_ASSIGNER must be '1' (same switch the weekly
      Mon 00:00 ET weekly_live_sharpe.js run honours). Otherwise: log + rc 0.
-  2. Pending check (pipeline_config, server-clock timestamps):
-        slider rows   strategy_activation_min_sharpe / strategy_activation_min_trades
-        marker row    strategy_activation_last_applied (stamped by
-                      activation_assigner after every clean non-dry-run --all)
-     pending := marker missing OR any slider row's updated_at > marker.updated_at
+  2. Pending check (pipeline_config, server-clock timestamps), pending :=
+     ANY of:
+        - marker row strategy_activation_last_applied missing
+        - the min-TRADES slider row (strategy_activation_min_trades) has
+          updated_at newer than the marker (the min-Sharpe slider row is
+          no longer read here at all -- it no longer affects eligibility,
+          Task 2)
+        - a primary backtest run for any approved strategy landed after
+          the marker (fresh re-backtests invalidate eligibility, 2026-09-08)
+        - the benchmark sleeve's (registry `benchmark_sleeve=true`,
+          S_beta_spy today -- same id resolution activation_assigner.
+          resolve_bench_sleeve_id uses, reused here not re-derived) own
+          latest primary_window run_id differs from the marker's
+          `bench_sharpe`/`bench_run_id` (spec §2: "the re-apply trigger
+          becomes 'sleeve primary run newer than last applied'"). A marker
+          with no `bench_run_id` at all (pre-Task-1 marker, or a sleeve
+          lookup that failed at stamp time) counts as pending too -- fail
+          toward re-applying, not toward silently trusting a marker that
+          never recorded what it was benchmarked against.
      Not pending → log the last-applied state, rc 0, nothing touched.
   3. Apply (only when pending, or --force):
         nice -n 19 python3 -m backtest.activation_assigner --all --notify --trigger=daily_cycle
-        nice -n 19 python3 -m execution.strategy_weights --rebuild --trigger=activation_slider --verbose
+        nice -n 19 python3 -m execution.strategy_weights --rebuild --trigger=activation_bench --verbose
      The assigner re-derives strategy_regime_params.eligible (what the
      engine's is_eligible() and the sizer's calendar-edge clause read); the
      weights rebuild is REQUIRED after it — the sizer sizes from
@@ -26,7 +43,7 @@ What it does
      eligible has no weight row until a rebuild (weight 0 ⇒ never sized).
      The rebuild here is WEIGHTS-ONLY: OPENCLAW_AUTO_DEMOTE is forced to '0'
      for this invocation so the registry auto-demote chain keeps its weekly
-     cadence (a slider nudge must never demote a strategy mid-week).
+     cadence (an activation nudge must never demote a strategy mid-week).
 
 Exit codes
   0  nothing to do / applied cleanly / --dry-run
@@ -53,21 +70,66 @@ from typing import Optional
 import psycopg2
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'src'))
 
 ENV_GATE = 'OPENCLAW_ACTIVATION_ASSIGNER'
-SLIDER_KEYS = ('strategy_activation_min_sharpe', 'strategy_activation_min_trades')
+# strategy_activation_min_sharpe (the min-Sharpe slider) REMOVED here
+# (Task 2, spec 2026-09-25-activation-bench-relative §3): eligibility no
+# longer reads it at all, so a slider row moving is no longer a pending
+# reason. The row itself is left in pipeline_config, unread (append-only).
+# The min-TRADES slider is UNCHANGED.
+SLIDER_KEYS = ('strategy_activation_min_trades',)
 MARKER_KEY = 'strategy_activation_last_applied'
 STEP = 'activation'
 
 ASSIGNER_ARGV = ['nice', '-n', '19', sys.executable, '-m', 'backtest.activation_assigner',
                  '--all', '--notify', '--trigger=daily_cycle']
 WEIGHTS_ARGV = ['nice', '-n', '19', sys.executable, '-m', 'execution.strategy_weights',
-                '--rebuild', '--trigger=activation_slider', '--verbose']
+                '--rebuild', '--trigger=activation_bench', '--verbose']
 SUBPROCESS_TIMEOUT_SEC = 120
 
 
 def _log(msg: str) -> None:
     print(f'[{STEP}] {msg}', flush=True)
+
+
+def _bench_sleeve_run_id(conn) -> Optional[str]:
+    """Latest primary_window run_id for the registry's benchmark sleeve, as
+    a string (matches backtest.activation_assigner.load_bench_sharpe's own
+    `str(run_id)` cast, so the comparison in pending_state is string-to-
+    string regardless of the underlying driver/column type). Sleeve id is
+    resolved via activation_assigner.resolve_bench_sleeve_id -- REUSED, not
+    re-derived, so a registry with multiple benchmark_sleeve=true rows
+    ties-break identically here and in the assigner itself. Local import
+    (mirrors activation_assigner.main()'s own `from execution.
+    benchmark_sleeve import ...` pattern): keeps this fast, frequently-run
+    step's module-load path lean when OPENCLAW_ACTIVATION_ASSIGNER is off
+    (main() returns before this is ever called in that case) and avoids a
+    backtest<->execution import cycle at module-import time.
+
+    Fail-safe: any lookup failure returns None, which pending_state()
+    treats as "can't tell" (no reason added on this check alone) -- NOT
+    treated as pending, since the general newest-run-approved-strategies
+    check above already covers a broken runs-table read; a broken
+    registry/sleeve-id read must not force a re-apply every single cycle
+    forever."""
+    try:
+        from backtest.activation_assigner import resolve_bench_sleeve_id
+        sleeve_id, _source = resolve_bench_sleeve_id(conn)
+        cur = conn.cursor()
+        cur.execute("""SELECT run_id FROM strategy_backtest_runs
+                        WHERE strategy_id = %s AND primary_window = TRUE
+                        ORDER BY run_at DESC LIMIT 1""", (sleeve_id,))
+        row = cur.fetchone()
+        cur.close()
+        return str(row[0]) if row and row[0] is not None else None
+    except Exception as e:
+        _log(f'benchmark sleeve run_id probe failed ({e}) — bench re-apply check skipped this cycle')
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
 
 
 def pending_state(conn) -> dict:
@@ -155,6 +217,31 @@ def pending_state(conn) -> dict:
             conn.rollback()
         except Exception:
             pass
+
+    # Benchmark-sleeve re-apply trigger (spec §2, Task 2): "the re-apply
+    # trigger 'slider row newer than last applied' becomes 'sleeve primary
+    # run newer than last applied'". The general staleness probe above only
+    # looks at APPROVED strategies' runs -- the benchmark sleeve itself may
+    # not be `status='approved'` (it's a sizing/comparator sleeve, not a
+    # tradeable alpha strategy), so its own fresh backtest needs its own
+    # check. Compared by run_id (not run_at): the marker stores the exact
+    # run the bench vector was derived from (`bench_run_id`, spec §2), so
+    # comparing ids is exact where a timestamp comparison could be fooled by
+    # clock skew or a same-timestamp re-run. Fail-safe: any lookup failure,
+    # or a marker with no `bench_run_id` at all (pre-Task-1 marker, or a
+    # sleeve lookup that failed at stamp time), counts as pending -- an
+    # eligibility run can't tell whether it was actually benchmarked against
+    # something real without this field.
+    bench_run_id = _bench_sleeve_run_id(conn)
+    out['bench_run_id'] = bench_run_id
+    if bench_run_id is not None:
+        marker_bench_run_id = out['marker'].get('bench_run_id') if isinstance(out['marker'], dict) else None
+        if marker_bench_run_id != bench_run_id:
+            out['pending'] = True
+            out['reasons'].append(
+                f'benchmark sleeve primary run {bench_run_id!r} != last-applied '
+                f'bench_run_id {marker_bench_run_id!r} — eligibility derived from a '
+                f'stale or absent bench comparator')
     return out
 
 
@@ -203,12 +290,13 @@ def main(argv: Optional[list[str]] = None, env: Optional[dict] = None,
     ap = argparse.ArgumentParser(description=__doc__.split('\n', 1)[0])
     ap.add_argument('--date', default=None, help='run date (accepted for step-runner parity; unused)')
     ap.add_argument('--dry-run', action='store_true', help='pending check only; no subprocesses, no writes')
-    ap.add_argument('--force', action='store_true', help='apply even when no slider changed')
+    ap.add_argument('--force', action='store_true', help='apply even when nothing is pending')
     args = ap.parse_args(argv)
     env = dict(os.environ if env is None else env)
 
     if env.get(ENV_GATE) != '1':
-        _log(f'SKIP: {ENV_GATE}!=1 (activation is operator-gated off; sliders are stored but not applied)')
+        _log(f'SKIP: {ENV_GATE}!=1 (activation is operator-gated off; the min-trades slider row and '
+             f'the benchmark sleeve\'s own backtests are stored but not applied)')
         return 0
 
     uri = env.get('POSTGRES_URI') or env.get('DATABASE_URL')
@@ -236,7 +324,8 @@ def main(argv: Optional[list[str]] = None, env: Optional[dict] = None,
         _log(f'last applied {st["marker_updated_at"].isoformat()} {json.dumps(st["marker"], sort_keys=True)}')
 
     if not st['pending'] and not args.force:
-        _log('no slider change since last apply — nothing to do (eligibility + weights unchanged)')
+        _log('nothing pending since last apply (min-trades slider, backtests, bench sleeve) '
+             '— nothing to do (eligibility + weights unchanged)')
         return 0
 
     why = '; '.join(st['reasons']) if st['reasons'] else '--force'

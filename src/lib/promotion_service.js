@@ -12,9 +12,11 @@
 //     now judged per regime, not total-window),
 //   trade_count of the SLEEVE ≥ min_trades (100).
 // It then goes live in exactly its qualifying regimes. Post-promotion, live
-// execution is gated by the activation min-Sharpe slider
-// (pipeline_config.strategy_activation_min_sharpe → activation_assigner), so
-// this entry gate is deliberately permissive; the slider is the risk dial.
+// execution is gated by bench-relative activation (spec 2026-09-25-
+// activation-bench-relative: sharpe[r] >= S_beta_spy's own per-regime
+// Sharpe, hysteresis 0.10 → activation_assigner; the min-Sharpe SLIDER
+// this used to be is RETIRED), so this entry gate is deliberately
+// permissive; the bench comparator is the risk dial.
 // 2026-07-27 Calmar escape hatch on the DD leg (mirrors lifecycle.py): max DD
 // is a running-max extreme that deepens mechanically with backtest duration /
 // breadth, so the flat ceiling systematically killed long-history sleeves
@@ -26,7 +28,8 @@ const PROMOTION_THRESHOLDS = {
   etp:    { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 50 },
   // option/crypto keep their looser DD ceilings (synthetic options engine /
   // BTC 60-80% DD asset — see lifecycle.py history). Sharpe floor is now the
-  // shared ">0"; the option engine's uncertainty is carried by the slider.
+  // shared ">0"; the option engine's uncertainty is carried by bench-relative
+  // activation, not this gate.
   option: { min_sharpe: 0, max_drawdown_pct: 30, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 60 },
   crypto: { min_sharpe: 0, max_drawdown_pct: 70, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 85 },
 };

@@ -36,13 +36,18 @@ and tighter in crisis." Rule (spec §1, §5-A/B):
   eligible in all four regimes (Amendment 1 D-D1) — the bench rule never
   touches them.
 
-  The `threshold` parameter/CLI flag/`pipeline_config.strategy_activation_
-  min_sharpe` slider is ACCEPTED BUT UNUSED for the eligibility rule as of
-  the 2026-09-25 spec — it is retired plumbing kept only for backward
-  compat (printed header/summary lines the dashboard parses, the persisted
-  last-applied marker's `threshold` key, which now carries the LOW_VOL bench
-  value instead) until Task 2 of that spec removes it from all 12 call sites
-  across the codebase.
+  The `threshold` parameter/CLI flag (`--min-sharpe`)/`pipeline_config.
+  strategy_activation_min_sharpe` slider is REMOVED as of Task 2 of that
+  spec (2026-09-25): `compute_eligible`/`apply_one` no longer accept a
+  `threshold` argument at all (a stale positional call raises TypeError,
+  not a silent no-op), `get_activation_threshold`/`CONFIG_KEY` are gone,
+  and `main()`'s printed header/summary lines display the LOW_VOL bench
+  value under the same `threshold=` token for back-compat with anything
+  still reading it (byte-shape pinned by activation_preview.js). The
+  `pipeline_config.strategy_activation_min_sharpe` row itself is left in
+  place, unread (append-only, CLAUDE.md core invariant). The min-TRADES
+  slider (`strategy_activation_min_trades`) is UNCHANGED and still reads
+  from pipeline_config below.
 
 Unlike the legacy manifest-writing `eligibility_assigner` (which REFUSES to
 wipe `eligible_regimes` to empty), this deriver is authoritative for the
@@ -71,8 +76,8 @@ gets an explicit write (even eligible=False) so eligibility is fully
 determined for all 4 canonical regimes, never left implicit-by-omission.
 
 CLI:
-  python3 -m backtest.activation_assigner --strategy-id S_xxx [--dry-run] [--min-sharpe X] [--notify]
-  python3 -m backtest.activation_assigner --all [--dry-run] [--min-sharpe X] [--notify] [--trigger LABEL]
+  python3 -m backtest.activation_assigner --strategy-id S_xxx [--dry-run] [--min-trades N] [--notify]
+  python3 -m backtest.activation_assigner --all [--dry-run] [--min-trades N] [--notify] [--trigger LABEL]
 
 --dry-run computes the full prior->new diff and prints it but performs NO
 database writes whatsoever (the write helper is never called).
@@ -101,7 +106,12 @@ from backtest.regime_qualification import class_thresholds, dd_leg_passes  # noq
 
 CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
 
-CONFIG_KEY = 'strategy_activation_min_sharpe'
+# pipeline_config.strategy_activation_min_sharpe (the removed "min-Sharpe
+# slider", Task 2 of spec 2026-09-25-activation-bench-relative) is no
+# longer read anywhere in this module. The row itself is left in place
+# (append-only, CLAUDE.md core invariant) -- just unread. DEFAULT_MIN_SHARPE
+# below is unrelated: it is tier 3 of the BENCH fail-safe (spec §2), not
+# the old slider's default.
 DEFAULT_MIN_SHARPE = 0.5
 
 # Activation bench-relative (spec 2026-09-25-activation-bench-relative-spec.md
@@ -146,7 +156,7 @@ ACTOR = 'activation_assigner'
 LAST_APPLIED_KEY = 'strategy_activation_last_applied'
 
 
-def stamp_last_applied(conn, threshold: float, min_trades, activated: int,
+def stamp_last_applied(conn, min_trades, activated: int,
                        deactivated: int, trigger: str = 'manual',
                        bench_sharpe: Optional[dict] = None,
                        bench_run_id=None) -> bool:
@@ -154,21 +164,23 @@ def stamp_last_applied(conn, threshold: float, min_trades, activated: int,
     on any failure — a marker miss only costs one redundant (idempotent)
     re-apply at the next daily cycle, never a trading day.
 
-    threshold: kept for old readers of this marker (spec 2026-09-25 Task 1
-    brief) -- callers now pass the LOW_VOL bench value here instead of the
-    retired slider, since that is the closest single-number analog under
-    the new regime-aware rule ("around the same in low vol" per the
-    operator directive). bench_sharpe/bench_run_id (NEW, spec §2): the full
-    per-regime comparator vector and the S_beta_spy run it came from, so a
-    later run can tell whether the sleeve's primary run is newer than what
-    was last applied (the re-apply trigger activation_apply.py owns --
-    Task 2). The hysteresis band itself is stored alongside the vector
-    (spec §5-B: "stored with the vector in the last-applied stamp") as
-    `bench_hysteresis` -- ACTIVATION_HYSTERESIS is a code constant today,
-    not dashboard-adjustable, but the stamp is the audit trail an operator
+    The `threshold` parameter/JSON key (the retired min-Sharpe slider's
+    closest single-number analog, LOW_VOL bench -- kept through Task 1 for
+    old readers) is REMOVED as of Task 2 (spec 2026-09-25-activation-
+    bench-relative §3): bench_sharpe already carries LOW_VOL (and every
+    other regime), so the redundant scalar added nothing once nothing
+    reads it as "the slider" anymore.
+
+    bench_sharpe/bench_run_id (spec §2): the full per-regime comparator
+    vector and the S_beta_spy run it came from, so a later run (execution.
+    activation_apply's pending check) can tell whether the sleeve's
+    primary run is newer than what was last applied. The hysteresis band
+    itself is stored alongside the vector (spec §5-B: "stored with the
+    vector in the last-applied stamp") as `bench_hysteresis` --
+    ACTIVATION_HYSTERESIS is a code constant today, not
+    dashboard-adjustable, but the stamp is the audit trail an operator
     reads to know what band was actually in force for a given apply."""
     payload = json.dumps({
-        'threshold': threshold,
         'min_trades': min_trades,
         'activated_cells': int(activated),
         'deactivated_cells': int(deactivated),
@@ -191,7 +203,8 @@ def stamp_last_applied(conn, threshold: float, min_trades, activated: int,
              'Stamped by activation_assigner after each non-dry-run --all apply '
              '(weekly Mon 00:00 ET, Sunday finale, or the daily-cycle activation '
              'step). updated_at = when eligibility was last derived; the daily '
-             'activation step re-applies when a slider row is newer than this.'))
+             'activation step re-applies when the min-trades row or the '
+             'benchmark sleeve\'s primary backtest run is newer than this.'))
         conn.commit()
         cur.close()
         return True
@@ -297,30 +310,11 @@ def _log(msg: str) -> None:
 
 
 # ── Config accessor ─────────────────────────────────────────────────────────
-# Co-located with the deriver (mirrors strategy_weights._get_bt_sharpe_cap's
-# placement next to its sole consumer). A future dashboard slider reads the
-# same pipeline_config key directly — no separate module needed for that.
-def get_activation_threshold(cur) -> float:
-    """Read strategy_activation_min_sharpe from pipeline_config; default 0.5.
-    Fail-safe: missing row / malformed value / query error all fall back to
-    0.5 (mirrors strategy_weights._get_bt_sharpe_cap's fail-safe pattern).
-    Callers MUST NOT rely on the connection's transaction state after a
-    failure here without rolling back first — see main()'s explicit
-    conn.rollback() immediately after calling this, which guarantees a
-    clean transaction before the write loop regardless of outcome (2026-
-    05-16 tier-1 lesson: an uncaught exception on a SELECT like this left
-    the connection aborted for every subsequent statement in
-    strategy_weights.py until an explicit rollback was added)."""
-    try:
-        cur.execute("SELECT value FROM pipeline_config WHERE key=%s", (CONFIG_KEY,))
-        row = cur.fetchone()
-        if row and row[0] is not None:
-            return float(row[0])
-    except Exception:
-        pass
-    return DEFAULT_MIN_SHARPE
-
-
+# get_activation_threshold (read strategy_activation_min_sharpe -- the
+# retired min-Sharpe slider) was REMOVED here (Task 2, spec 2026-09-25-
+# activation-bench-relative §3): the eligibility rule no longer reads a
+# scalar slider at all, it reads the bench vector (load_bench_sharpe). The
+# pipeline_config row itself is left in place, unread (append-only).
 def get_activation_min_trades(cur) -> Optional[int]:
     """Read strategy_activation_min_trades from pipeline_config.
 
@@ -390,6 +384,53 @@ def _load_pipeline_config_bench_vector(conn) -> dict:
     return {}
 
 
+def resolve_bench_sleeve_id(conn, sleeve_id: Optional[str] = None) -> tuple[str, str]:
+    """Resolve the registry's benchmark-sleeve strategy id (`parameters ->>
+    'benchmark_sleeve' = 'true'`; S_beta_spy today) -- factored out of
+    load_bench_sharpe (Task 2, spec 2026-09-25-activation-bench-relative)
+    so OTHER callers can resolve the SAME sleeve id, with the SAME
+    tie-break, without re-deriving this logic. Today's only other caller:
+    execution.activation_apply's re-apply trigger ("sleeve primary run
+    newer than the last-applied marker" -- it needs the sleeve id to look
+    up that run, independently of eligibility computation itself).
+
+    Tie-break when the registry has more than one benchmark_sleeve=true
+    row: prefer the literal BENCH_SLEEVE_FALLBACK_ID if it's among them,
+    else the alphabetically first, with a WARN naming all of them. Falls
+    back to the literal outright if the registry lookup fails or returns
+    nothing (spec §1: "not hard-coded ... literal only if the registry
+    lookup fails").
+
+    Returns (sleeve_id, sleeve_source): sleeve_source is 'registry' (a
+    lookup succeeded, OR `sleeve_id` was already supplied by the caller --
+    trusted as-if-registry, no query issued -- matches load_bench_sharpe's
+    pre-existing contract for that case) or 'literal_fallback' (the lookup
+    returned nothing / raised, and BENCH_SLEEVE_FALLBACK_ID was used)."""
+    if sleeve_id is not None:
+        return sleeve_id, 'registry'
+    cur = conn.cursor()
+    ids: set = set()
+    try:
+        cur.execute("SELECT id FROM strategy_registry WHERE (parameters ->> %s) = 'true'",
+                    (BENCH_SLEEVE_PARAM_KEY,))
+        ids = {row[0] for row in cur.fetchall()}
+    except Exception as e:
+        _log(f'bench sleeve id lookup failed ({e}); using literal {BENCH_SLEEVE_FALLBACK_ID}')
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    finally:
+        cur.close()
+    if ids:
+        resolved = BENCH_SLEEVE_FALLBACK_ID if BENCH_SLEEVE_FALLBACK_ID in ids else sorted(ids)[0]
+        if len(ids) > 1:
+            _log(f'WARN: multiple benchmark sleeves in the registry {sorted(ids)}; '
+                 f'using {resolved} for the activation bench vector')
+        return resolved, 'registry'
+    return BENCH_SLEEVE_FALLBACK_ID, 'literal_fallback'
+
+
 def load_bench_sharpe(conn, sleeve_id: Optional[str] = None) -> tuple[dict, dict]:
     """Resolve the per-regime benchmark-sleeve Sharpe vector used as the
     activation comparator (spec §1, §2, §5-A).
@@ -420,30 +461,7 @@ def load_bench_sharpe(conn, sleeve_id: Optional[str] = None) -> tuple[dict, dict
     load_benchmark_sleeve_ids, whose `with conn.cursor() as cur:` usage not
     every caller's cursor stub supports.
     """
-    sleeve_source = 'registry'
-    if sleeve_id is None:
-        cur = conn.cursor()
-        ids: set = set()
-        try:
-            cur.execute("SELECT id FROM strategy_registry WHERE (parameters ->> %s) = 'true'",
-                        (BENCH_SLEEVE_PARAM_KEY,))
-            ids = {row[0] for row in cur.fetchall()}
-        except Exception as e:
-            _log(f'bench sleeve id lookup failed ({e}); using literal {BENCH_SLEEVE_FALLBACK_ID}')
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-        finally:
-            cur.close()
-        if ids:
-            sleeve_id = BENCH_SLEEVE_FALLBACK_ID if BENCH_SLEEVE_FALLBACK_ID in ids else sorted(ids)[0]
-            if len(ids) > 1:
-                _log(f'WARN: multiple benchmark sleeves in the registry {sorted(ids)}; '
-                     f'using {sleeve_id} for the activation bench vector')
-        else:
-            sleeve_id = BENCH_SLEEVE_FALLBACK_ID
-            sleeve_source = 'literal_fallback'
+    sleeve_id, sleeve_source = resolve_bench_sleeve_id(conn, sleeve_id)
 
     run_id = None
     sleeve_sharpe: dict = {}
@@ -691,9 +709,9 @@ def _judge(rows, gate: dict, eff_min_trades: int, bench: dict,
     return eligible_by_regime, diag
 
 
-def compute_eligible(conn, strategy_id: str, threshold: float,
+def compute_eligible(conn, strategy_id: str, *,
                      min_trades: Optional[int] = None,
-                     instrument_class: str = 'equity', *,
+                     instrument_class: str = 'equity',
                      always_on: bool = False,
                      bench: Optional[dict] = None,
                      prior_eligible: Optional[dict] = None) -> tuple[Optional[dict], dict]:
@@ -707,14 +725,16 @@ def compute_eligible(conn, strategy_id: str, threshold: float,
     (not touch strategy_regime_params) in either case.
 
     diag: per-regime {sharpe, trade_count, max_dd_pct, calmar, eligible,
-    bench, band_applied} for every regime row actually present in
-    strategy_backtest_regimes (used for the prior->new diff report and the
-    audit-row bt_sharpe_after/bt_n_trades columns).
+    bench, band_floor, band_applied, rule} for every regime row actually
+    present in strategy_backtest_regimes (used for the prior->new diff
+    report and the audit-row bt_sharpe_after/bt_n_trades columns).
 
-    threshold: retained for CLI/back-compat plumbing only -- NOT used in
-    the eligibility rule (spec 2026-09-25 activation bench-relative; see
-    module docstring). Slider removal across the other 11 call sites is
-    Task 2 of that spec.
+    Every parameter after `strategy_id` is keyword-only (Task 2, spec
+    2026-09-25-activation-bench-relative §3): the retired global
+    `threshold` slider parameter that used to sit here has been removed
+    entirely (not just unused) so a stale positional call from before the
+    slider removal raises a TypeError instead of silently rebinding its
+    old `threshold` argument to `min_trades`.
 
     bench: fully-resolved {regime: float} comparator vector, normally
     produced once per run by load_bench_sharpe and threaded down from
@@ -839,9 +859,9 @@ def _apply_regime(cur, strategy_id: str, regime_state: str, new_eligible: bool,
     return action
 
 
-def apply_one(conn, strategy_id: str, threshold: float,
+def apply_one(conn, strategy_id: str, *,
              dry_run: bool = False, min_trades: Optional[int] = None,
-             instrument_class: str = 'equity', *,
+             instrument_class: str = 'equity',
              always_on: bool = False, bench: Optional[dict] = None) -> dict:
     """Compute + (unless dry_run) write eligibility for one strategy.
 
@@ -851,11 +871,14 @@ def apply_one(conn, strategy_id: str, threshold: float,
     prior/new/diag/actions are all {} and NOTHING is touched in the DB —
     not even a read of strategy_regime_params.
 
-    threshold: retained for back-compat only, NOT used in the eligibility
-    rule (see compute_eligible's docstring). bench: fully-resolved
-    {regime: float} comparator vector -- normally load_bench_sharpe's
-    output, loaded ONCE per run by main() and threaded through every
-    apply_one call (not re-loaded per strategy). None falls back to
+    Every parameter after `strategy_id` is keyword-only (Task 2, spec
+    2026-09-25-activation-bench-relative §3): the retired global
+    `threshold` slider parameter that used to sit here has been removed
+    entirely, so a stale positional call raises TypeError instead of
+    silently rebinding into `dry_run`. bench: fully-resolved {regime:
+    float} comparator vector -- normally load_bench_sharpe's output,
+    loaded ONCE per run by main() and threaded through every apply_one
+    call (not re-loaded per strategy). None falls back to
     DEFAULT_MIN_SHARPE for every regime (see _resolve_bench).
 
     Sequencing (hysteresis needs the strategy's CURRENT eligibility before
@@ -974,8 +997,11 @@ def main() -> int:
                    help='Run for every strategy with a primary_window backtest')
     ap.add_argument('--dry-run', action='store_true',
                     help='Compute + print prior->new diff only; NO writes')
-    ap.add_argument('--min-sharpe', type=float, default=None,
-                    help='Override the pipeline_config threshold for this run')
+    # --min-sharpe (override pipeline_config.strategy_activation_min_sharpe)
+    # REMOVED (Task 2, spec 2026-09-25-activation-bench-relative §3): the
+    # eligibility rule doesn't read a scalar slider anymore, it reads the
+    # per-regime bench vector (load_bench_sharpe) -- there is nothing left
+    # for this flag to override.
     ap.add_argument('--min-trades', type=int, default=None,
                     help='Override the per-class gate trade floor (default: '
                          'regime_qualification class_thresholds, 100)')
@@ -991,16 +1017,6 @@ def main() -> int:
     if not uri:
         _log('POSTGRES_URI not set'); return 1
     conn = psycopg2.connect(uri)
-
-    if args.min_sharpe is not None:
-        threshold = args.min_sharpe
-    else:
-        cur0 = conn.cursor()
-        threshold = get_activation_threshold(cur0)
-        cur0.close()
-        # Guarantee a clean transaction before the write loop regardless of
-        # whether the config read above succeeded or raised.
-        conn.rollback()
 
     # min_trades: explicit --min-trades > pipeline_config > per-class gate (None
     # here → compute_eligible applies class_thresholds). Resolved once per run so
@@ -1065,22 +1081,31 @@ def main() -> int:
 
     # NOTE: header + summary line formats are PINNED by activation_preview.js
     # (HEADER_RE / SUMMARY_RE, consumed by the dashboard dry-run endpoint) —
-    # keep `threshold=… min_trades=… dry_run=… strategies=…` byte-stable.
-    # `threshold` here is the retired slider value (back-compat plumbing
-    # only, see module docstring) -- the actual comparator is bench_vector,
-    # printed above and used inside apply_one.
+    # keep `threshold=… min_trades=… dry_run=… strategies=…` byte-stable
+    # (Task 2 removed the control it displayed, not the parser -- reshaping
+    # this line is a separate dashboard change activation_preview.js's own
+    # docstring now calls out, not a Task 2 requirement). `display_threshold`
+    # is NOT read by the eligibility rule anywhere -- it is the LOW_VOL bench
+    # value, printed purely so this pinned token keeps meaning something to
+    # anything still reading it (mirrors the same substitution
+    # stamp_last_applied used through Task 1, before its own `threshold` key
+    # was dropped in Task 2 -- the JSON stamp had bench_sharpe['LOW_VOL']
+    # already; this printed line does not, so it keeps a display copy). The
+    # real comparator is bench_vector, printed in full above and used inside
+    # apply_one.
     # min_trades is uniform across classes (gate floor 100), so one number
     # remains printable even though the rule is class-aware.
     eff_min_trades = (resolved_min_trades if resolved_min_trades is not None
                       else class_thresholds('equity')['min_trades'])
-    _log(f'threshold={threshold} min_trades={eff_min_trades} dry_run={args.dry_run} '
+    display_threshold = bench_vector['LOW_VOL']
+    _log(f'threshold={display_threshold} min_trades={eff_min_trades} dry_run={args.dry_run} '
         f'strategies={len(sids)}')
 
     results = []
     n_errors = 0
     for sid in sids:
         try:
-            r = apply_one(conn, sid, threshold, dry_run=args.dry_run,
+            r = apply_one(conn, sid, dry_run=args.dry_run,
                           min_trades=resolved_min_trades,
                           instrument_class=classes.get(sid, 'equity'),
                           always_on=(sid in bench_ids),
@@ -1132,7 +1157,7 @@ def main() -> int:
         f'{activated_cells} cell(s) activated, {deactivated_cells} cell(s) deactivated, '
         f'{len(newly_dormant)} newly-dormant strateg{"y" if len(newly_dormant) == 1 else "ies"}'
         + (f' ({", ".join(newly_dormant)})' if newly_dormant else '')
-        + f', threshold={threshold}, min_trades={eff_min_trades}, dry_run={args.dry_run}, errors={n_errors}'
+        + f', threshold={display_threshold}, min_trades={eff_min_trades}, dry_run={args.dry_run}, errors={n_errors}'
     )
     _log(summary)
 
@@ -1142,13 +1167,12 @@ def main() -> int:
     # Markers: only a clean, complete, non-dry-run apply counts as "applied".
     # A run with per-strategy errors leaves the old markers so the next
     # daily cycle retries; a --strategy-id run never represents the whole
-    # fleet. `threshold` in the last-applied marker is now the LOW_VOL bench
-    # value (spec 2026-09-25 Task 1 brief: "keep the threshold key for the
-    # old readers, write the LOW_VOL bench there") -- NOT the retired slider
-    # variable used for the printed header/summary lines above, which stays
-    # byte-stable for activation_preview.js.
+    # fleet. The last-applied marker's own `threshold` JSON key is GONE as
+    # of Task 2 (bench_sharpe already carries LOW_VOL) -- display_threshold
+    # above is display-only, for the printed header/summary lines, which
+    # stay byte-stable for activation_preview.js.
     if args.all and not args.dry_run and n_errors == 0:
-        if stamp_last_applied(conn, bench_vector['LOW_VOL'], eff_min_trades, activated_cells,
+        if stamp_last_applied(conn, eff_min_trades, activated_cells,
                               deactivated_cells, trigger=args.trigger,
                               bench_sharpe=bench_vector, bench_run_id=bench_meta.get('run_id')):
             _log(f'stamped {LAST_APPLIED_KEY} (trigger={args.trigger})')

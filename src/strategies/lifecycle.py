@@ -132,8 +132,8 @@ PROMOTION_THRESHOLDS: dict[str, dict[str, float]] = {
     # option/crypto keep their looser DD ceilings (VIX-anchored SYNTHETIC
     # options engine — SP-4 2026-05-27; BTC is a 60-80% DD asset — SP-3.1
     # 2026-05-26). The Sharpe floor is the shared strictly-positive 0.0 as of
-    # policy 2026-07-13 v2; the option engine's uncertainty is carried by the
-    # activation min-Sharpe slider, not the entry gate.
+    # policy 2026-07-13 v2; the option engine's uncertainty is carried by
+    # bench-relative activation, not the entry gate.
     "option": {"min_sharpe": 0.0,
                "max_drawdown": 0.30,
                "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES,

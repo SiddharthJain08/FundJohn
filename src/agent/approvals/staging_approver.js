@@ -603,7 +603,7 @@ async function _phaseCodeAndBacktest(job, ctx) {
     // Fully-automatic pipeline (operator directive 2026-07-13): continue
     // candidate → live through the per-regime qualification gate. Goes via
     // the HTTP route (same process, :3000) so registry-first sync,
-    // strategy_regime_params, activation slider and the weights rebuild all
+    // strategy_regime_params, bench-relative activation and the weights rebuild all
     // run exactly as an operator approval would. A 422 (no qualifying
     // regime) leaves the strategy candidate — the Sunday sweep re-offers it
     // whenever a fresh backtest lands.

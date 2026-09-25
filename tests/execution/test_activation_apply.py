@@ -18,25 +18,53 @@ T1 = dt.datetime(2026, 8, 22, 19, 0, 0, tzinfo=UTC)   # operator moved slider
 
 
 class FakeCur:
-    def __init__(self, rows, raise_on_execute=False, newest_run=None):
+    def __init__(self, rows, raise_on_execute=False, newest_run=None,
+                sleeve_ids=('S_beta_spy',), sleeve_run_id=None,
+                raise_on_registry=False):
         self._rows = rows
         self._raise = raise_on_execute
         self._newest_run = newest_run
+        # sleeve_ids/sleeve_run_id back the bench-sleeve re-apply trigger
+        # (Task 2, spec §2): resolve_bench_sleeve_id's registry lookup
+        # (`strategy_registry` in the SQL) and activation_apply's own
+        # "latest primary_window run_id for that sleeve" query
+        # (`SELECT run_id FROM strategy_backtest_runs`, distinct from the
+        # pre-existing `MAX(r.run_at)` staleness probe below even though
+        # both touch strategy_backtest_runs). Defaults reproduce the
+        # pre-Task-2 fixture shape exactly: a resolvable sleeve id, but NO
+        # sleeve run found (sleeve_run_id=None) -- so this new check stays
+        # silent (bench_run_id ends up None) unless a test opts in.
+        self._sleeve_ids = sleeve_ids
+        self._sleeve_run_id = sleeve_run_id
+        # raise_on_registry: fail ONLY the registry lookup inside
+        # resolve_bench_sleeve_id (scoped, unlike raise_on_execute which
+        # fails every query) -- exercises _bench_sleeve_run_id's own
+        # fail-safe (returns None, does not force pending on its own)
+        # without also tripping the pipeline_config read's fail-safe.
+        self._raise_on_registry = raise_on_registry
         self._last_sql = ''
 
     def execute(self, sql, params=()):
         if self._raise:
             raise RuntimeError('boom')
+        if self._raise_on_registry and 'strategy_registry' in sql:
+            self._last_sql = sql
+            raise RuntimeError('registry down')
         self._last_sql = sql
         self.params = params
 
     def fetchall(self):
+        if 'strategy_registry' in self._last_sql:
+            return [(sid,) for sid in self._sleeve_ids]
         return list(self._rows)
 
     def fetchone(self):
         # The 2026-09-08 staleness probe (MAX(run_at) over primary runs).
-        if 'strategy_backtest_runs' in self._last_sql:
+        if 'MAX(r.run_at)' in self._last_sql:
             return (self._newest_run,)
+        # The bench-sleeve's own latest primary_window run_id (Task 2).
+        if 'SELECT run_id FROM strategy_backtest_runs' in self._last_sql:
+            return (self._sleeve_run_id,)
         return None
 
     def close(self):
@@ -44,8 +72,12 @@ class FakeCur:
 
 
 class FakeConn:
-    def __init__(self, rows, raise_on_execute=False, newest_run=None):
-        self._cur = FakeCur(rows, raise_on_execute, newest_run=newest_run)
+    def __init__(self, rows, raise_on_execute=False, newest_run=None,
+                sleeve_ids=('S_beta_spy',), sleeve_run_id=None,
+                raise_on_registry=False):
+        self._cur = FakeCur(rows, raise_on_execute, newest_run=newest_run,
+                            sleeve_ids=sleeve_ids, sleeve_run_id=sleeve_run_id,
+                            raise_on_registry=raise_on_registry)
         self.rolled_back = False
         self.closed = False
 
@@ -59,8 +91,11 @@ class FakeConn:
         self.closed = True
 
 
-def _marker(ts=T0, threshold=0.5):
-    return (aa.MARKER_KEY, json.dumps({'threshold': threshold, 'trigger': 'weekly_cron'}), ts)
+def _marker(ts=T0, threshold=0.5, bench_run_id=None):
+    payload = {'threshold': threshold, 'trigger': 'weekly_cron'}
+    if bench_run_id is not None:
+        payload['bench_run_id'] = bench_run_id
+    return (aa.MARKER_KEY, json.dumps(payload), ts)
 
 
 # ── pending_state ───────────────────────────────────────────────────────────
@@ -73,11 +108,17 @@ def test_not_pending_when_sliders_older_than_marker():
     assert st['marker_updated_at'] == T0
 
 
-def test_pending_when_min_sharpe_newer_than_marker():
+def test_min_sharpe_row_change_no_longer_triggers_pending():
+    # Task 2 (spec 2026-09-25-activation-bench-relative §3): the min-Sharpe
+    # slider is REMOVED from SLIDER_KEYS -- eligibility no longer reads it
+    # at all, so a fresh min-Sharpe row (even newer than the marker) must
+    # NOT mark the step pending. Contrast with min-trades below, which
+    # still does (the min-TRADES slider stays).
     conn = FakeConn([('strategy_activation_min_sharpe', '1', T1), _marker(T0)])
     st = aa.pending_state(conn)
-    assert st['pending'] is True
-    assert any('strategy_activation_min_sharpe=1' in r for r in st['reasons'])
+    assert st['pending'] is False
+    assert st['sliders'] == {}
+    assert not any('min_sharpe' in r for r in st['reasons'])
 
 
 def test_pending_when_min_trades_newer_than_marker():
@@ -121,6 +162,57 @@ def test_not_pending_when_runs_older_than_marker():
     assert st['newest_primary_run_at'] == T0 - dt.timedelta(days=2)
 
 
+# ── benchmark-sleeve re-apply trigger (Task 2, spec §2) ─────────────────────
+def test_pending_when_bench_sleeve_run_id_differs_from_marker():
+    # A fresh S_beta_spy primary backtest landed since the marker was
+    # stamped -- eligibility was derived from a stale bench comparator.
+    conn = FakeConn([_marker(T0, bench_run_id='r-old')],
+                    newest_run=T0 - dt.timedelta(days=2),   # no OTHER staleness reason
+                    sleeve_run_id='r-new')
+    st = aa.pending_state(conn)
+    assert st['pending'] is True
+    assert st['bench_run_id'] == 'r-new'
+    assert any("benchmark sleeve primary run 'r-new'" in r for r in st['reasons'])
+
+
+def test_not_pending_when_bench_sleeve_run_id_matches_marker():
+    conn = FakeConn([_marker(T0, bench_run_id='r-same')],
+                    newest_run=T0 - dt.timedelta(days=2),
+                    sleeve_run_id='r-same')
+    st = aa.pending_state(conn)
+    assert st['pending'] is False
+    assert st['bench_run_id'] == 'r-same'
+
+
+def test_pending_when_marker_has_no_bench_run_id_but_a_sleeve_run_exists():
+    # Pre-Task-1 marker (or a sleeve lookup that failed at stamp time): no
+    # `bench_run_id` recorded at all. A missing field must count as
+    # pending, not be silently trusted as "nothing changed".
+    conn = FakeConn([_marker(T0)],   # no bench_run_id key in the payload
+                    newest_run=T0 - dt.timedelta(days=2),
+                    sleeve_run_id='r-new')
+    st = aa.pending_state(conn)
+    assert st['pending'] is True
+    assert any('bench_run_id None' in r for r in st['reasons'])
+
+
+def test_bench_sleeve_registry_lookup_failure_is_not_pending_on_its_own():
+    # A broken registry read (resolve_bench_sleeve_id's own scoped
+    # fail-safe: falls back to the literal sleeve id, rolls back, keeps
+    # going -- see backtest.activation_assigner.resolve_bench_sleeve_id)
+    # must not force a re-apply every cycle forever. With no sleeve run
+    # found under the fallback id either (sleeve_run_id=None, the default),
+    # bench_run_id resolves to None and this check contributes no reason --
+    # the general newest-run-approved-strategies staleness check already
+    # covers the fail-toward-pending case for a broken runs-table read.
+    conn = FakeConn([_marker(T0)], newest_run=T0 - dt.timedelta(days=2),
+                    raise_on_registry=True)
+    st = aa.pending_state(conn)
+    assert st['pending'] is False
+    assert st['bench_run_id'] is None
+    assert conn.rolled_back is True   # resolve_bench_sleeve_id's own rollback ran
+
+
 def test_read_failure_is_fail_safe_pending():
     conn = FakeConn([], raise_on_execute=True)
     st = aa.pending_state(conn)
@@ -153,7 +245,7 @@ def test_apply_runs_assigner_then_weights_only_rebuild():
     w_argv, w_env = calls[1]
     assert 'backtest.activation_assigner' in a_argv and '--all' in a_argv and '--trigger=daily_cycle' in a_argv
     assert '--dry-run' not in a_argv
-    assert 'execution.strategy_weights' in w_argv and '--rebuild' in w_argv and '--trigger=activation_slider' in w_argv
+    assert 'execution.strategy_weights' in w_argv and '--rebuild' in w_argv and '--trigger=activation_bench' in w_argv
     # weights-only: demote chain forced off for THIS invocation only
     assert w_env['OPENCLAW_AUTO_DEMOTE'] == '0'
     assert a_env['OPENCLAW_AUTO_DEMOTE'] == '1'
@@ -196,8 +288,11 @@ def test_main_no_change_is_noop(capsys):
 
 
 def test_main_pending_applies(capsys):
+    # strategy_activation_min_trades (the slider that STAYS) newer than the
+    # marker -- min_sharpe would no longer trigger this (see
+    # test_min_sharpe_row_change_no_longer_triggers_pending above).
     calls = []
-    conn = FakeConn([('strategy_activation_min_sharpe', '1', T1), _marker(T0)])
+    conn = FakeConn([('strategy_activation_min_trades', '150', T1), _marker(T0)])
     rc = aa.main(['--date', '2026-08-24'], env={'OPENCLAW_ACTIVATION_ASSIGNER': '1', 'POSTGRES_URI': 'x'},
                  connect=lambda uri: conn, runner=_runner([0, 0], calls))
     assert rc == 0 and len(calls) == 2
@@ -207,7 +302,7 @@ def test_main_pending_applies(capsys):
 
 def test_main_dry_run_runs_nothing(capsys):
     calls = []
-    conn = FakeConn([('strategy_activation_min_sharpe', '1', T1), _marker(T0)])
+    conn = FakeConn([('strategy_activation_min_trades', '150', T1), _marker(T0)])
     rc = aa.main(['--date', '2026-08-24', '--dry-run'],
                  env={'OPENCLAW_ACTIVATION_ASSIGNER': '1', 'POSTGRES_URI': 'x'},
                  connect=lambda uri: conn, runner=_runner([], calls))
@@ -227,7 +322,7 @@ def test_main_failure_is_rc1_never_higher():
     # rc must stay ≤1: daily_cycle_node.js exempts `activation` from abort on
     # rc≠0, but rc≥2 is the documented "always abort" band for every step.
     calls = []
-    conn = FakeConn([('strategy_activation_min_sharpe', '1', T1), _marker(T0)])
+    conn = FakeConn([('strategy_activation_min_trades', '150', T1), _marker(T0)])
     rc = aa.main([], env={'OPENCLAW_ACTIVATION_ASSIGNER': '1', 'POSTGRES_URI': 'x'},
                  connect=lambda uri: conn, runner=_runner([137], calls))
     assert rc == 1

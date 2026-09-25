@@ -11,7 +11,7 @@ const { runAlpaca } = require('./alpaca_cli');
 const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
 const { buildStrategyRow } = require('./strategy_row');
 const { blendScope } = require('./blend_scope');
-const { parseActivationDryRun } = require('./activation_preview');
+const { parseActivationDryRun, benchCardPayload, minSharpeGone } = require('./activation_preview');
 const { isRegimeEligibleNow, regimeForStrategy } = require('./regime_active');
 const { regimeFreshness } = require('./regime_freshness');
 const { realizedLeverage } = require('./leverage');
@@ -781,37 +781,43 @@ app.put('/api/config/risk-toggles', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── Strategy Activation threshold + dry-run preview ─────────────────────────
-// Slider band for pipeline_config.strategy_activation_min_sharpe — the extra
-// sharpe floor the activation assigner (src/backtest/activation_assigner.py)
-// applies ON TOP of the shared per-regime qualification gate (>0 sharpe,
-// class-DD sleeve ceiling, ≥100 trades — regime_qualification.py /
-// promotion_service.js, policy 2026-07-13 v2). Slider at 0 → a strategy is
-// active in exactly its qualifying regimes. The assigner reads this key fresh
-// on every run and fail-safes to 0.5 when the row is absent/malformed — the
-// GET mirrors that exact fallback so slider and assigner can never disagree.
+// ── Strategy Activation: bench-relative comparator + dry-run preview ───────
+// Eligibility is bench-relative as of 2026-09-25 (spec docs/specs/2026-09-
+// 25-activation-bench-relative-spec.md §1, §5-A/B): a regime activates when
+// sharpe[r] >= S_beta_spy's own per-regime Sharpe[r] (its latest
+// primary_window backtest), and deactivates only below bench[r] - 0.10
+// (hysteresis). The min-Sharpe SLIDER that used to set a flat extra floor
+// on top of the qualification gate is REMOVED — see the 410 Gone on the PUT
+// below. GET /api/config/activation-min-sharpe (path KEPT, repurposed) is
+// now READ-ONLY: it surfaces the S_beta_spy vector + hysteresis band
+// actually in force (from strategy_activation_last_applied.bench_sharpe /
+// .bench_hysteresis, falling back to the tier-2 pipeline_config.
+// strategy_activation_bench_sharpe vector — spec §2 — if the marker
+// predates Task 1). pipeline_config.strategy_activation_min_sharpe itself
+// is left in place, unread (append-only, CLAUDE.md core invariant).
+//
 // LIVE since 2026-07-13 (OPENCLAW_ACTIVATION_ASSIGNER=1): the Mon 00:00 ET
-// weekly_live_sharpe.js run applies this threshold to
-// strategy_regime_params.eligible before the weights rebuild. Since
-// 2026-08-22 the daily compute chain's FIRST step (`activation` →
-// src/execution/activation_apply.py) does the same whenever a slider row is
-// newer than the `strategy_activation_last_applied` marker the assigner
-// stamps — so a slider moved today is applied (eligibility + weights) at
-// the next daily compute (15:00 ET same-day lane), not next Monday. This
-// dashboard endpoint itself still only (a) sets the threshold and (b)
-// previews via --dry-run — the server MUST NEVER invoke the assigner without
-// --dry-run; see the hard-coded argv + guard in POST /api/activation/dry-run
-// below. The GETs report `pending` / `last_applied` from the marker so the
-// card can say whether the saved value is live yet.
-const ACTIVATION_MIN_SHARPE_MIN     = 0.0;
-const ACTIVATION_MIN_SHARPE_MAX     = 3.0;
-const ACTIVATION_MIN_SHARPE_DEFAULT = 0.5;   // mirrors the assigner's fail-safe
+// weekly_live_sharpe.js run applies eligibility to strategy_regime_params.
+// eligible before the weights rebuild. Since 2026-08-22 the daily compute
+// chain's FIRST step (activation → src/execution/activation_apply.py)
+// does the same whenever the min-TRADES row (still a slider) OR the
+// benchmark sleeve's own primary backtest is newer than the
+// strategy_activation_last_applied marker (bench trigger added 2026-09-25,
+// spec §2) — so a fresh sleeve backtest or a min-trades change is applied
+// (eligibility + weights) at the next daily compute (15:00 ET same-day
+// lane), not next Monday. This dashboard endpoint itself only (a) reads
+// the comparator read-only and (b) previews via --dry-run — the server
+// MUST NEVER invoke the assigner without --dry-run; see the hard-coded
+// argv + guard in POST /api/activation/dry-run below.
 const ACTIVATION_DRY_RUN_TIMEOUT_MS = 120_000;
 
 // Marker written by activation_assigner.stamp_last_applied after every clean
 // non-dry-run --all (weekly, Sunday finale, daily activation step). pending =
-// the slider row is newer than the marker (server-clock updated_at on both
-// sides — the same comparison activation_apply.py makes), or no marker yet.
+// the (min-trades) slider row is newer than the marker (server-clock
+// updated_at on both sides — the same comparison activation_apply.py
+// makes), or no marker yet. Used by the min-TRADES card only as of Task 2 —
+// the bench-relative card below is read-only and has no "pending" concept
+// (its GET builds its own response shape directly, not through this helper).
 async function _activationApplyState(sliderUpdatedAt) {
   const out = { last_applied: null, applied_at: null, pending: null };
   try {
@@ -825,46 +831,38 @@ async function _activationApplyState(sliderUpdatedAt) {
   return out;
 }
 
+// READ-ONLY as of Task 2 (spec 2026-09-25-activation-bench-relative §3):
+// surfaces the S_beta_spy per-regime Sharpe vector + hysteresis band the
+// assigner is ACTUALLY comparing every strategy against right now. ONE
+// query for both candidate rows (marker + tier-2 fallback); benchCardPayload
+// (activation_preview.js — pure, DB-free, unit-tested standalone) picks the
+// tier and shapes the response.
 app.get('/api/config/activation-min-sharpe', async (req, res) => {
   try {
-    const r = await dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'strategy_activation_min_sharpe'");
-    const row = r.rows[0];
-    const raw = row ? parseFloat(row.value) : NaN;
-    const applyState = await _activationApplyState(row ? row.updated_at : null);
-    res.json({
-      ...applyState,
-      value:      isFinite(raw)
-                    ? Math.max(ACTIVATION_MIN_SHARPE_MIN, Math.min(raw, ACTIVATION_MIN_SHARPE_MAX))
-                    : ACTIVATION_MIN_SHARPE_DEFAULT,
-      min:        ACTIVATION_MIN_SHARPE_MIN, max: ACTIVATION_MIN_SHARPE_MAX,
-      default:    ACTIVATION_MIN_SHARPE_DEFAULT,
-      row_exists: !!row,
-      updated_at: row ? row.updated_at : null,
-    });
+    const r = await dbQuery(
+      "SELECT key, value, updated_at FROM pipeline_config WHERE key IN ($1, $2)",
+      ['strategy_activation_last_applied', 'strategy_activation_bench_sharpe']);
+    const byKey = Object.fromEntries(r.rows.map(row => [row.key, row]));
+    res.json(benchCardPayload(byKey.strategy_activation_last_applied, byKey.strategy_activation_bench_sharpe));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.put('/api/config/activation-min-sharpe', async (req, res) => {
-  const v = parseFloat(req.body && req.body.value);
-  if (!isFinite(v) || v < ACTIVATION_MIN_SHARPE_MIN || v > ACTIVATION_MIN_SHARPE_MAX) {
-    return res.status(400).json({ error: `value must be a number in [${ACTIVATION_MIN_SHARPE_MIN}, ${ACTIVATION_MIN_SHARPE_MAX}]` });
-  }
-  try {
-    // Upsert — the row may not exist yet (the assigner fail-safes to 0.5
-    // when absent, so first write creates it with a description).
-    await dbQuery(`
-      INSERT INTO pipeline_config (key, value, description, updated_at)
-      VALUES ('strategy_activation_min_sharpe', $1, 'Activation min-Sharpe slider: extra per-regime sharpe floor on top of the qualification gate (>0 sharpe, class-DD sleeve, >=100 trades). 0 = trade in exactly the qualifying regimes. Range [0.0, 3.0]; assigner fail-safe default 0.5. Applied by activation_assigner at the next daily compute (daily-cycle activation step, 15:00 ET same-day lane) and by the weekly Mon 00:00 ET refresh (OPENCLAW_ACTIVATION_ASSIGNER=1). Adjustable via dashboard.', NOW())
-      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, description = EXCLUDED.description, updated_at = NOW()
-    `, [String(v)]);
-    res.json({ value: v });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+// REMOVED (Task 2, spec 2026-09-25-activation-bench-relative §3): the
+// min-Sharpe slider no longer exists — eligibility is bench-relative and
+// there is nothing left to set. minSharpeGone (activation_preview.js) is
+// DB-free and unit-tested standalone: 410 Gone (the resource existed and
+// was intentionally, permanently retired), not 404 (this isn't "never
+// existed" or "wrong path") — no catch-all route intercepts this verb
+// ahead of Express's own routing, so a stale client gets this exact body,
+// not a generic 200/404.
+app.put('/api/config/activation-min-sharpe', minSharpeGone);
 
 // ── Activation min-TRADES slider ────────────────────────────────────────────
-// Sibling of the min-Sharpe slider above, for the per-regime SAMPLE-SIZE floor:
-// a regime only activates when its backtest produced >= this many trades in that
-// regime. Previously reachable only from regime_qualification.class_thresholds
+// The min-Sharpe slider that used to sit alongside this one is RETIRED
+// (2026-09-25, bench-relative activation) — this is the only activation
+// slider left. Per-regime SAMPLE-SIZE floor: a regime only activates when
+// its backtest produced >= this many trades in that regime. Previously
+// reachable only from regime_qualification.class_thresholds
 // (a hardcoded 100) or the assigner's --min-trades flag, so tuning it needed a
 // code change; operator directive 2026-07-16 made it dashboard-adjustable.
 //
@@ -2263,10 +2261,11 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
   // skip_weights_rebuild lets batch callers suppress the per-transition
   // spawn and run ONE rebuild at the end (racing rebuilds corrupt the
   // is_current snapshot generation — 2026-07-13 lesson).
-  // candidate→live promotions first apply the activation min-Sharpe slider
+  // candidate→live promotions first apply bench-relative activation
   // to the just-synced strategy_regime_params rows (activation_assigner
-  // --strategy-id: qualification gate AND slider) so a sub-slider sleeve
-  // never carries weight even transiently before the Monday refresh.
+  // --strategy-id: qualification gate AND the S_beta_spy bench comparator)
+  // so a sub-bench sleeve never carries weight even transiently before the
+  // Monday refresh.
   if (result.weights_rebuild_triggered && !skipWeightsRebuild) {
     const { spawn } = require('child_process');
     const path = require('path');
@@ -2279,7 +2278,7 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
       { cwd: rootDir, env: { ...process.env, PYTHONPATH: 'src' }, detached: true, stdio: 'ignore' });
     child.unref();
     console.log('[lifecycle] strategy_weights rebuild triggered (' + sid + ': ' + fromState + '→' + toState +
-                (tKey === 'candidate:live' ? ', activation slider applied first' : '') + ')');
+                (tKey === 'candidate:live' ? ', bench-relative activation applied first' : '') + ')');
   } else if (result.weights_rebuild_triggered) {
     console.log('[lifecycle] weights rebuild SKIPPED by caller (' + sid + ': ' + fromState + '→' + toState + ') — batch finale owns it');
   }
@@ -4910,29 +4909,36 @@ body.rs-chat-locked{overflow:hidden}
       </div>
     </div>
 
-    <!-- Strategy Activation threshold slider + assigner dry-run preview.
-         Slider binds pipeline_config.strategy_activation_min_sharpe via
-         debounced PUT /api/config/activation-min-sharpe (same UX as the
-         conviction gates above). Preview POSTs /api/activation/dry-run —
-         the server only ever runs the assigner in dry-run mode; the LIVE
-         apply happens in the daily compute chain's 'activation' step (first
-         step, 15:00 ET same-day lane — only when a slider moved since the
-         last apply; 2026-08-22) and in the weekly Mon 00:00 ET
-         weekly_live_sharpe.js run (OPENCLAW_ACTIVATION_ASSIGNER=1). -->
+    <!-- Strategy Activation: bench-relative comparator (read-only) + the
+         min-TRADES slider + assigner dry-run preview.
+         As of 2026-09-25 (spec docs/specs/2026-09-25-activation-bench-
+         relative-spec.md) eligibility is sharpe[r] >= S_beta_spy's
+         per-regime Sharpe[r] (hysteresis band 0.10 on the deactivate
+         edge) — the min-Sharpe SLIDER is RETIRED; the first card below is
+         read-only, sourced from GET /api/config/activation-min-sharpe
+         (repurposed, same path, no longer a PUT target — see the 410
+         Gone on that verb). The min-TRADES slider is unchanged: binds
+         pipeline_config.strategy_activation_min_trades via debounced PUT
+         /api/config/activation-min-trades (same UX as the conviction
+         gates above). Preview POSTs /api/activation/dry-run — the server
+         only ever runs the assigner in dry-run mode; the LIVE apply
+         happens in the daily compute chain's 'activation' step (first
+         step, 15:00 ET same-day lane — only when the min-trades row or
+         the benchmark sleeve's own backtest is newer than the last apply;
+         2026-08-22 / bench trigger added 2026-09-25) and in the weekly
+         Mon 00:00 ET weekly_live_sharpe.js run
+         (OPENCLAW_ACTIVATION_ASSIGNER=1). -->
     <div class="pf-section">
       <div class="pf-section-header">
-        <span>🎚️ Strategy Activation <span class="st-sub-label">per-regime floors applied on top of the qualification gate (&gt;0 Sharpe · class max-DD)</span></span>
+        <span>🎚️ Strategy Activation <span class="st-sub-label">bench-relative comparator applied on top of the qualification gate (&gt;0 Sharpe · class max-DD)</span></span>
       </div>
       <div class="st-act-grid">
         <div class="st-sharpe-card">
           <div class="st-sharpe-card-head">
-            <span class="st-sharpe-card-regime">Activation min Sharpe</span>
-            <span class="st-sub-label">pipeline_config</span>
+            <span class="st-sharpe-card-regime">Activation bench (S_beta_spy regime Sharpe)</span>
+            <span class="st-sub-label">read-only</span>
           </div>
           <div class="st-sharpe-card-value" id="st-act-val">—</div>
-          <input type="range" class="st-sharpe-card-slider" id="st-act-slider"
-                 min="0" max="3" step="0.05" value="0.5" disabled />
-          <div class="st-sharpe-card-range"><span>0.00</span><span>3.00</span></div>
           <div class="st-sharpe-card-status" id="st-act-status"></div>
         </div>
         <!-- Sample-size floor. Was hardcoded at 100 in
@@ -4955,7 +4961,7 @@ body.rs-chat-locked{overflow:hidden}
         <div class="st-act-preview">
           <div class="st-act-preview-bar">
             <button class="st-action-btn" id="st-act-preview-btn" onclick="_actPreviewDryRun()">Preview (dry-run)</button>
-            <span class="st-sub-label">hypothetical — zero DB writes; compares current eligible flags (DB reality) vs what the assigner would set at the saved threshold</span>
+            <span class="st-sub-label">hypothetical — zero DB writes; compares current eligible flags (DB reality) vs what the assigner would set against the bench comparator above</span>
           </div>
           <div id="st-act-preview-out"><div class="st-act-preview-empty">No preview yet — set the threshold, then run a dry-run preview.</div></div>
         </div>
@@ -9094,21 +9100,23 @@ async function _corrSharpeGatePut(regime, value, statEl) {
   }
 }
 
-// ── Strategy Activation slider + dry-run preview ────────────────────────────
-// Slider binds pipeline_config.strategy_activation_min_sharpe (debounced PUT,
-// same UX as the conviction gates above). The Preview button POSTs
+// ── Strategy Activation: bench-relative comparator (read-only) + dry-run
+// preview ─────────────────────────────────────────────────────────────────
+// As of 2026-09-25 eligibility is bench-relative (spec docs/specs/2026-09-
+// 25-activation-bench-relative-spec.md): the "Activation min Sharpe" slider
+// this card used to bind is RETIRED. GET /api/config/activation-min-sharpe
+// (path unchanged, repurposed) now returns the S_beta_spy per-regime Sharpe
+// vector actually in force + the hysteresis band, read-only — no PUT, no
+// debounce, no save state. The Preview button still POSTs
 // /api/activation/dry-run — the server only ever shells the assigner with
 // --dry-run (the LIVE apply is the daily-cycle 'activation' step at the next
 // compute, plus the weekly Mon 00:00 ET run), and we render the
 // parsed prior→new eligibility diff: per-regime "eligible now" is DB
 // reality, everything else is hypothetical.
-let _actSaveTimer   = null;
-let _actPutInflight = false;
-let _actWired       = false;
 
 // ── Activation min-TRADES slider ────────────────────────────────────────────
-// Sibling of the min-Sharpe slider: the per-regime SAMPLE-SIZE floor. Own
-// timer/inflight/wired state so a save on one card can't cancel the other's.
+// The only activation slider left (the min-Sharpe slider is retired,
+// 2026-09-25 bench-relative activation) — the per-regime SAMPLE-SIZE floor.
 let _actnSaveTimer   = null;
 let _actnPutInflight = false;
 let _actnWired       = false;
@@ -9176,11 +9184,14 @@ async function _actnPut(value, statEl) {
   }
 }
 
+// Read-only as of 2026-09-25 (spec docs/specs/2026-09-25-activation-bench-
+// relative-spec.md): no slider, no PUT, no debounce. Renders the S_beta_spy
+// per-regime Sharpe vector + hysteresis band GET /api/config/activation-
+// min-sharpe (path kept, repurposed) reports as actually in force.
 async function _loadActivationCard() {
-  const slider = document.getElementById('st-act-slider');
   const valEl  = document.getElementById('st-act-val');
   const statEl = document.getElementById('st-act-status');
-  if (!slider || !valEl) return;
+  if (!valEl) return;
   let cfg;
   try {
     const r = await fetch('/api/config/activation-min-sharpe');
@@ -9190,69 +9201,31 @@ async function _loadActivationCard() {
     if (statEl) statEl.textContent = '✗ load failed: ' + (e.message || 'network error');
     return;
   }
-  const v = (cfg.value != null && isFinite(cfg.value)) ? Number(cfg.value) : 0.5;
-  slider.value    = v;
-  slider.disabled = false;
-  valEl.textContent = v.toFixed(2);
-  if (statEl && !statEl.textContent) {
-    statEl.textContent = cfg.row_exists
-      ? _actApplyStatus(cfg)
-      : 'row not set — assigner fail-safe default 0.50';
-  }
-  if (_actWired) return;   // re-loads refresh the value; listeners wire once
-  _actWired = true;
-  slider.addEventListener('input', () => {
-    valEl.textContent = parseFloat(slider.value).toFixed(2);
-  });
-  slider.addEventListener('change', () => {
-    if (_actSaveTimer) clearTimeout(_actSaveTimer);
-    _actSaveTimer = setTimeout(() => {
-      _actSaveTimer = null;
-      _actPut(parseFloat(slider.value), statEl);
-    }, 300);
-  });
-}
-
-async function _actPut(value, statEl) {
-  if (_actPutInflight) return;
-  _actPutInflight = true;
-  if (statEl) statEl.textContent = 'saving…';
-  try {
-    const resp = await fetch('/api/config/activation-min-sharpe', {
-      method:  'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ value }),
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      if (statEl) statEl.textContent = '✗ ' + (err.error || resp.statusText);
-    } else if (statEl) {
-      statEl.textContent = '✓ saved ' + value.toFixed(2) + ' · pending — applies at the next daily compute (15:00 ET)';
-      _noteDashboardBuild(resp);
-      setTimeout(() => {
-        if (statEl && statEl.textContent.indexOf('✓') === 0) statEl.textContent = '';
-      }, 6000);
-    }
-  } catch (e) {
-    if (statEl) statEl.textContent = '✗ ' + (e.message || 'network error');
-  } finally {
-    _actPutInflight = false;
-  }
+  const b = cfg.bench;
+  const band = isFinite(Number(cfg.hysteresis)) ? Number(cfg.hysteresis) : 0.10;
+  // Per-regime, not all-or-nothing: the tier-2 fallback vector
+  // (pipeline_config_fallback) can now be PARTIAL (stamp_bench_sharpe_
+  // config persists sleeve-sourced regimes only, spec 2026-09-25 Task 1
+  // review) — a regime missing from the vector renders '—', not NaN.
+  const fmtRegime = r => (b && isFinite(Number(b[r]))) ? Number(b[r]).toFixed(2) : '—';
+  valEl.textContent = b
+    ? 'LOW_VOL ' + fmtRegime('LOW_VOL') +
+      ' / TRANS ' + fmtRegime('TRANSITIONING') +
+      ' / HIGH_VOL ' + fmtRegime('HIGH_VOL') +
+      ' / CRISIS ' + fmtRegime('CRISIS') +
+      ', band ' + band.toFixed(2)
+    : '—';
+  if (statEl) statEl.textContent = _actBenchStatus(cfg);
 }
 
 async function _actPreviewDryRun() {
   const btn = document.getElementById('st-act-preview-btn');
   const out = document.getElementById('st-act-preview-out');
   if (!btn || !out || btn.disabled) return;
-  // Flush any pending debounced threshold save first — the assigner reads
-  // pipeline_config fresh, so the preview must reflect the slider position.
-  const slider = document.getElementById('st-act-slider');
-  const statEl = document.getElementById('st-act-status');
-  if (_actSaveTimer) {
-    clearTimeout(_actSaveTimer);
-    _actSaveTimer = null;
-    if (slider && !slider.disabled) await _actPut(parseFloat(slider.value), statEl);
-  }
+  // No slider to flush a debounced save for anymore (2026-09-25,
+  // bench-relative activation is read-only) — the assigner reads its
+  // comparator (the S_beta_spy sleeve's own latest backtest) fresh on
+  // every run regardless of anything this dashboard does.
   btn.disabled = true;
   const label = btn.textContent;
   btn.textContent = 'running dry-run…';
@@ -9303,6 +9276,21 @@ function _actRenderPreview(data, host) {
   const errs  = _actNum(data.errors, 0);
   const warns = (data.warnings || []).length
     ? '<div class="st-act-preview-empty">⚠ ' + escapeHtml((data.warnings || []).join(' · ')) + '</div>' : '';
+  // spec §5-E: the REAL per-regime comparator this dry-run used (bench)
+  // and the prior->new gained/lost tally per regime (bench_diff) — the
+  // threshold line above is a single display number (LOW_VOL only), so
+  // this is the actual ack material for the operator.
+  const bv = data.bench && data.bench.values;
+  const benchLine = bv
+    ? '<div class="st-sub-label">bench (S_beta_spy' + (data.bench.sleeve_id && data.bench.sleeve_id !== 'S_beta_spy' ? ': ' + escapeHtml(data.bench.sleeve_id) : '') + '): ' +
+      regs.map(r => r + ' ' + _actNum(bv[r], 0).toFixed(2)).join(' / ') + '</div>'
+    : '';
+  const bd = data.bench_diff;
+  const benchDiffLine = bd
+    ? '<div class="st-sub-label">bench diff: ' +
+      regs.map(r => r + ' +' + _actNum(bd[r] && bd[r].gained, 0) + '/-' + _actNum(bd[r] && bd[r].lost, 0)).join(' · ') +
+      '</div>'
+    : '';
   host.innerHTML =
     '<div class="st-act-summary"><span class="st-act-hypo">Preview — hypothetical, nothing written</span>' +
       'threshold <b>' + (data.threshold != null ? _actNum(data.threshold, 0).toFixed(2) : '?') + '</b> · ' +
@@ -9313,6 +9301,7 @@ function _actRenderPreview(data, host) {
       '<b>' + ndCnt + '</b> strateg' + (ndCnt === 1 ? 'y' : 'ies') + ' newly fully-dormant' +
       (errs ? ' · <span style="color:var(--red)">' + errs + ' assigner errors</span>' : '') +
       ' · ' + Math.round(_actNum(data.duration_ms, 0) / 1000) + 's</div>' +
+    benchLine + benchDiffLine +
     '<table class="st-act-table"><thead><tr>' +
       '<th>Regime</th><th>eligible now (DB reality)</th><th>eligible after (preview)</th>' +
       '<th>would activate</th><th>would deactivate</th></tr></thead>' +
@@ -9321,7 +9310,7 @@ function _actRenderPreview(data, host) {
     (nd.length
       ? '<div class="st-sub-label">Newly fully-dormant (' + nd.length + ') — eligible somewhere today, would lose all 4 regimes:</div>' +
         '<div class="st-act-dormant">' + nd.map(s => '<span>' + escapeHtml(s) + '</span>').join('') + '</div>'
-      : '<div class="st-act-preview-empty">No strategy would go fully dormant at this threshold.</div>') +
+      : '<div class="st-act-preview-empty">No strategy would go fully dormant against this bench comparator.</div>') +
     warns;
 }
 
@@ -9596,9 +9585,9 @@ function _regimeBreakdown(r) {
     const isEligible = eligible.includes(rg);
     const b      = breakdown[rg];
     const trades = b && b.trade_count ? parseInt(b.trade_count) : 0;
-    // Cell value = raw per-regime BACKTEST Sharpe — the quantity the
-    // activation slider gates on (and, since 2026-09-08, the ONLY Sharpe
-    // shown anywhere on this page: live + blended-effective retired).
+    // Cell value = raw per-regime BACKTEST Sharpe — the quantity
+    // bench-relative activation gates on (and, since 2026-09-08, the ONLY
+    // Sharpe shown anywhere on this page: live + blended-effective retired).
     const sharpe = (b && b.sharpe != null) ? parseFloat(b.sharpe) : null;
     const klass = ['st-regime-cell', \`st-rg-\${rg}\`];
     if (current === rg) klass.push('st-rg-current');
@@ -11029,8 +11018,12 @@ function renderValueChart(rows, regimeRows) {
 }
 
 // ── Pipeline badge ────────────────────────────────────────────────────────────
-// Activation slider apply-state line (2026-08-22). "pending" comes from the
-// server's comparison of the slider row vs the assigner's last-applied marker.
+// Activation min-TRADES slider apply-state line (2026-08-22). "pending" comes
+// from the server's comparison of the slider row vs the assigner's
+// last-applied marker. (The min-Sharpe slider this was originally shared
+// with is retired 2026-09-25 — see _actBenchStatus below for its read-only
+// replacement, which has no "pending" concept since nothing on the
+// dashboard can trigger one anymore.)
 function _actApplyStatus(cfg) {
   const setAt = cfg.updated_at ? new Date(cfg.updated_at).toLocaleString() : null;
   const appliedAt = cfg.applied_at ? new Date(cfg.applied_at).toLocaleString() : null;
@@ -11044,6 +11037,21 @@ function _actApplyStatus(cfg) {
     return '✓ applied ' + appliedAt + via + (setAt ? ' · set ' + setAt : '');
   }
   return setAt ? 'last set ' + setAt : '';
+}
+
+// Bench-relative activation status line (2026-09-25, read-only — no
+// "pending", nothing on the dashboard can create one). cfg is GET
+// /api/config/activation-min-sharpe's response: {bench, hysteresis,
+// bench_run_id, source, applied_at, row_exists}.
+function _actBenchStatus(cfg) {
+  if (!cfg.row_exists || !cfg.bench) {
+    return 'not yet applied — the assigner hasn\'t run since bench-relative activation shipped';
+  }
+  const appliedAt = cfg.applied_at ? new Date(cfg.applied_at).toLocaleString() : null;
+  const tierNote = cfg.source === 'pipeline_config_fallback'
+    ? ' · tier-2 fallback vector (sleeve backtest unavailable at apply time)'
+    : '';
+  return (appliedAt ? '✓ as of ' + appliedAt : '✓ last applied') + tierNote;
 }
 
 // ── Stale-tab guard (2026-08-22) ─────────────────────────────────────────────
