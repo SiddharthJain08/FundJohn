@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_btc_kelly_powerlaw_vol_decay",
+  "required": ["prices"],
+  "optional": []
+}

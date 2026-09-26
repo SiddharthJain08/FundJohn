@@ -420,6 +420,12 @@ _IMPL_MAP = {
     'S_golden_cross_trend_signal': ('strategies.implementations.S_golden_cross_trend_signal', 'GoldenCrossTrendSignal'),
     # crackingmarkets.com 2025: 3-day -6% dip + above-200SMA uptrend filter, short-horizon LONG-only bounce (variant 1 of 2)
     'S_short_term_dip_reversion': ('strategies.implementations.S_short_term_dip_reversion', 'ShortTermDipReversion'),
+    # Vera-Marun 2026: power-law growth + vol-decay (gamma~1/2) imply near time-invariant Kelly-optimal BTC-USD allocation (variant 1 of 2)
+    'S_btc_kelly_powerlaw_vol_decay': ('strategies.implementations.S_btc_kelly_powerlaw_vol_decay', 'BtcKellyPowerlawVolDecay'),
+    # Hsieh 2026: robust drawdown invariance + closed-form Bellman-optimal exposure policy, convex cushion ramp on SPY (variant 1 of 2)
+    'S_drawdown_cushion_exposure_control': ('strategies.implementations.S_drawdown_cushion_exposure_control', 'DrawdownCushionExposureControl'),
+    # Cotton 2026: NCO/global-MV Schur bridge, gamma-damped cross-cluster complement, closed-form gamma* (variant 1 of 2)
+    'S_nco_schur_bridge_minvar': ('strategies.implementations.S_nco_schur_bridge_minvar', 'NcoSchurBridgeMinVar'),
 }
 
 

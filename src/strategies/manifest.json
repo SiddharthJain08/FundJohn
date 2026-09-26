@@ -1,18 +1,7 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-09-19T19:24:09.650Z",
+  "updated_at": "2026-09-26T19:22:50.312Z",
   "strategies": {
-    "S_leadlag_cluster_minirocket": {
-      "state": "candidate",
-      "state_since": "2026-08-29T20:40:00.000Z",
-      "metadata": {
-        "canonical_file": "S_leadlag_cluster_minirocket.py",
-        "class": "LeadLagClusterMinirocket",
-        "description": "Cluster names into lead-lag groups via MiniRocket-style features + KMeans; LONG/SHORT followers in the leader's prior-return direction (variant 1 of source paper's ambiguous parameters)."
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
     "S_leadlag_cluster_minirocket_v2": {
       "state": "live",
       "state_since": "2026-09-05T20:37:51.919Z",
@@ -4215,47 +4204,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_ast_short_term_reversal_in_stocks": {
-      "state": "candidate",
-      "state_since": "2026-08-31T04:00:13.802733+00:00",
-      "metadata": {
-        "canonical_file": "S_ast_short_term_reversal_in_stocks.py",
-        "class": "AstShortTermReversalInStocks",
-        "description": "Large-cap stocks that underperformed last week mean-revert upward, while last month's winners revert downward — exploiting short-term price reversal in the top 100 US stocks by market cap.",
-        "eligible_regimes": [
-          "CRISIS"
-        ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-07-26T00:22:33.868Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": [
-              "TRANSITIONING",
-              "HIGH_VOL"
-            ],
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-08-31T04:00:13.802733+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_weekly_cron",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S_ast_sector_momentum_rotational_system": {
       "state": "live",
       "state_since": "2026-07-13T12:52:55.144Z",
@@ -6083,44 +6031,6 @@
       ],
       "instrument_class": "etp"
     },
-    "S_split_session_cluster_garch_gmv": {
-      "state": "candidate",
-      "state_since": "2026-08-31T04:00:13.890619+00:00",
-      "metadata": {
-        "canonical_file": "S_split_session_cluster_garch_gmv.py",
-        "class": "SplitSessionClusterGarchGMV",
-        "description": "Split-session EWMA covariance (overnight slow λ, intraday fast λ) with sector cluster kurtosis blending — long-only GMV (Chen, Hansen & Tong 2026)",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
-        "eligible_regimes": [
-          "CRISIS"
-        ]
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-07-26T00:22:34.035Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-08-31T04:00:13.890619+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_weekly_cron",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S_intramonth_momentum_cycle": {
       "state": "candidate",
       "state_since": "2026-09-07T04:00:19.167870+00:00",
@@ -6499,59 +6409,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_lstm_sector_embedding_sp500": {
-      "state": "candidate",
-      "state_since": "2026-08-30T07:36:39.541153+00:00",
-      "metadata": {
-        "canonical_file": "S_lstm_sector_embedding_sp500.py",
-        "class": "LSTMSectorEmbeddingSP500",
-        "description": "Sector-aware LSTM proxy: 60d reversal + 12m industry momentum cross-sectional long/short on S&P 500",
-        "universe_filter_ref": "src.strategies.universe_default:sp500",
-        "universe_filter_source": "paperhunter_inferred"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-08-15T18:19:27.359Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-01-04→2026-08-06, providers polygon/yahoo/alpha_vantage)",
-                "returns: backfilled (2016-01-04→2026-08-06, providers polygon/yahoo/alpha_vantage/computed)",
-                "macro: reachable but not backfilled (providers yfinance)",
-                "financials: backfilled (2009-09-01→2026-07-15, providers fmp/yahoo)"
-              ],
-              "missing_columns": [
-                "macro"
-              ],
-              "provider_route": [
-                {
-                  "provider": "yfinance",
-                  "column": "macro",
-                  "data_type": "macro",
-                  "gap_from": "2024-07-20",
-                  "gap_to": "2026-08-15"
-                }
-              ]
-            },
-            "candidate_id": "574194e4-c2fb-481f-a7c5-0e8e09b9be1d"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-08-30T07:36:39.541153+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S_btc_halving_clock_cycle_timing": {
       "state": "live",
       "state_since": "2026-08-22T22:27:23.019Z",
@@ -6628,58 +6485,6 @@
       ],
       "instrument_class": "etp"
     },
-    "S_inflation_compass_sector_rotation": {
-      "state": "candidate",
-      "state_since": "2026-08-30T07:24:01.569113+00:00",
-      "metadata": {
-        "canonical_file": "S_inflation_compass_sector_rotation.py",
-        "class": "InflationCompassSectorRotation",
-        "description": "Monthly sector-ETF rotation (XLE/XLK/XLU/IEF) driven by a dual growth-inflation compass — SP500 trend vs SMA(200) for the growth axis and a sector-implied cyclical/defensive spread for the inflation axis (T5YIE not in macro.parquet; strategy is self-sufficient on prices only)",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
-        "universe_filter_source": "fused_approval_default"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-08-22T22:27:22.820Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-01-04→2026-08-21, providers polygon/yahoo/alpha_vantage)",
-                "macro: reachable but not backfilled (providers yfinance)",
-                "returns: backfilled (2016-01-04→2026-08-21, providers polygon/yahoo/alpha_vantage/computed)"
-              ],
-              "missing_columns": [
-                "macro"
-              ],
-              "provider_route": [
-                {
-                  "provider": "yfinance",
-                  "column": "macro",
-                  "data_type": "macro",
-                  "gap_from": "2025-04-05",
-                  "gap_to": "2026-08-22"
-                }
-              ]
-            },
-            "candidate_id": "37eb3499-7a6d-4043-922e-71fbe911a65f"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-08-30T07:24:01.569113+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 1.64, DD 16.0%, trades 100",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "etp"
-    },
     "S_commodity_seasonal_ssa_dvr": {
       "state": "candidate",
       "state_since": "2026-09-19T18:20:10.146357+00:00",
@@ -6744,17 +6549,6 @@
         }
       ],
       "instrument_class": "crypto"
-    },
-    "S_entropic_factor_replication": {
-      "state": "candidate",
-      "state_since": "2026-09-05T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_entropic_factor_replication.py",
-        "class": "EntropicFactorReplication",
-        "description": "Fermi-Dirac entropic two-stage factor replication: robust entropic beta estimation + long-only tracking basket weights with a circuit breaker for corrupted/idiosyncratic-shock names."
-      },
-      "history": [],
-      "instrument_class": "equity"
     },
     "S_spxw_0dte_ltr_put_ranker": {
       "state": "candidate",
@@ -7114,6 +6908,80 @@
         }
       ],
       "instrument_class": "option"
+    },
+    "S_btc_kelly_powerlaw_vol_decay": {
+      "state": "live",
+      "state_since": "2026-09-26T19:04:34.945Z",
+      "metadata": {
+        "canonical_file": "S_btc_kelly_powerlaw_vol_decay.py",
+        "class": "BtcKellyPowerlawVolDecay",
+        "description": "Power-law growth + vol-decay exponent (gamma~1/2) imply a near time-invariant Kelly-optimal BTC-USD allocation fraction (interpretation variant 2 of 2: 9yr vol window, weekly sampling, ledger-inception age origin, 0.15 portfolio cap).",
+        "backtest_results": {
+          "run_date": "2026-09-26",
+          "regime_partition": {
+            "LOW_VOL": {
+              "trade_count": 0,
+              "sharpe": 0,
+              "avg_r_multiple": 0,
+              "win_rate": 0
+            },
+            "TRANSITIONING": {
+              "trade_count": 1,
+              "sharpe": 0,
+              "avg_r_multiple": -10.59,
+              "win_rate": 0
+            },
+            "HIGH_VOL": {
+              "trade_count": 0,
+              "sharpe": 0,
+              "avg_r_multiple": 0,
+              "win_rate": 0
+            },
+            "CRISIS": {
+              "trade_count": 0,
+              "sharpe": 0,
+              "avg_r_multiple": 0,
+              "win_rate": 0
+            }
+          },
+          "eligible_regimes_proposed": [],
+          "gate_result": "requires_regime_qualification",
+          "failure_reason": "Structural constant-fraction sizing rule (not a market-timing signal, per source paper) is active continuously once min_lookback is satisfied -- a binary active/inactive backtest harness records only 1 enter/exit transition over 2016-2026, below min_trade_count=20. eligible_regimes set manually per source-paper literature support (regime_applicability unspecified in spec -> applied across all 4 canonical regimes, matching the class's active_in_regimes)."
+        },
+        "eligible_regimes": [
+          "LOW_VOL"
+        ]
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-09-26T19:04:34.945Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        }
+      ],
+      "instrument_class": "crypto"
+    },
+    "S_nco_schur_bridge_minvar": {
+      "state": "candidate",
+      "state_since": "2026-09-26T19:04:34.827970+00:00",
+      "metadata": {
+        "canonical_file": "S_nco_schur_bridge_minvar.py",
+        "class": "NcoSchurBridgeMinVar",
+        "description": "Nested-clustered min-variance with a gamma-damped Schur-complement bridge between block-diagonal NCO and full min-variance coupling (interpretation variant 1 of 2: fixed cluster count, average-linkage flat cut, closed-form gamma*, signed long/short weights)."
+      },
+      "history": [],
+      "instrument_class": "equity"
     }
   },
   "decommissioned": {

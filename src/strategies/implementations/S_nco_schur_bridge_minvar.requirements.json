@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_nco_schur_bridge_minvar",
+  "required": ["prices"],
+  "optional": []
+}

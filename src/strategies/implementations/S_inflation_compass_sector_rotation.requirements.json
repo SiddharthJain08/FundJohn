@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_inflation_compass_sector_rotation",
-  "required": ["prices"],
-  "optional": []
-}

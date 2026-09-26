@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_drawdown_cushion_exposure_control",
+  "required": ["prices"],
+  "optional": []
+}
