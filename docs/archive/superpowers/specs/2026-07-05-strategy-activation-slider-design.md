@@ -1,5 +1,10 @@
 # Strategy Activation Slider — design
 
+> **⚠️ SUPERSEDED (2026-09-26)** by `docs/specs/2026-09-25-activation-bench-relative-spec.md`. The
+> min-Sharpe slider (§1, threshold store) is removed; eligibility is now benchmark-relative
+> (`sharpe[r] >= S_beta_spy`'s own regime Sharpe, hysteresis band 0.10). Applied 2026-09-26 02:41Z.
+> Historical text below is unchanged.
+
 **Status:** DESIGN — recommended defaults below are PENDING operator confirmation of 3 points
 (trades guard / zero-regime handling / manual override). Implementation is deploy-gated and
 live-affecting (changes which strategy-regimes are sized). Do not build until confirmed.

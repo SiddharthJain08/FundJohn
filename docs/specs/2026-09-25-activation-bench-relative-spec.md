@@ -1,5 +1,13 @@
 # Activation: benchmark-relative eligibility (replaces the activation slider) — SPEC (RULED 2026-09-25 19:2x UTC)
 
+**Status:** APPLIED 2026-09-26 02:41Z (merge `0c4e5425`, `--no-ff` of `a574d43c`, pushed; apply
+`PYTHONPATH=src python3 -m backtest.activation_assigner --all --notify` same run: 278 evaluated, 24
+activated, 14 deactivated, 9 newly dormant; bench run `51b5b915`, vector LOW_VOL 0.9457 /
+TRANSITIONING 0.4409 / HIGH_VOL 0.5326 / CRISIS 1.575, hysteresis 0.10; operator ack 2026-09-25
+22:16Z of the dry-run `dryrun-2026-09-25.txt`). Ledger:
+`.superpowers/sdd/2026-09-25-activation-bench-relative/progress.md`. Changelog entry:
+`docs/archive/changelog.md` (2026-09-26 bullet).
+
 **Operator directive (2026-09-25, verbatim intent):** "remove the activation slider entirely and instead activate in
 regime if strategy sharpe is >= to beta_spy, so around the same in low vol but looser in transitioning/high vol and
 tighter in crisis."
@@ -65,3 +73,10 @@ E. Rollout: assigner dry-run diff posted to #general → operator ack → single
 
 ## 6. Out of scope
 Sizing (`S_m`, rule C, beta budget) is untouched; the sleeve's own eligibility is untouched; the manifest is untouched.
+
+## 7. Future
+Ruling D (§5) judges crypto strategies against the SPY vector for now because their backtest regime
+rows are already keyed by the four canonical equity regimes. Not built in this apply: add BTC as its
+own benchmark ticker with a dedicated benchmark sleeve, and judge crypto strategies against THAT
+vector on the crypto regime structure (`crypto_regime_states`) instead of the equity one. No code
+change proposed here; this is an operator-intent placeholder for a future spec.

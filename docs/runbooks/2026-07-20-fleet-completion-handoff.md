@@ -78,7 +78,15 @@ runs activation inline during the shrink and ahead of the conviction-floor read.
 3. **Weights rebuild** — ⚠️ see ORDERING CORRECTION above, run this AFTER step 5 activation:
    `PYTHONPATH=src python3 -m execution.strategy_weights --rebuild --trigger=manual_post_uniform --verbose`
 4. **Conviction-floor recheck** — verify live `regime_sizer_params.min_corr_cum_sharpe` floors are sane for the rebuilt metrics (they've been retuned twice; restoring a floor can dump backlog in one execute — see [[project_conviction_floor_trading_halt]]).
-5. **Activation:** restore `OPENCLAW_ACTIVATION_ASSIGNER=1` first, then `PYTHONPATH=src python3 -m backtest.activation_assigner --all --notify`; eyeball the eligibility diff.
+5. **Activation:** restore `OPENCLAW_ACTIVATION_ASSIGNER=1` first (the flag's own semantics — whether
+   the assigner runs at all — are unchanged), then `PYTHONPATH=src python3 -m backtest.activation_assigner --all --notify`;
+   eyeball the eligibility diff. Since 2026-09-26 the assigner is benchmark-relative, NOT slider-based
+   (`docs/specs/2026-09-25-activation-bench-relative-spec.md`, applied): there is no min-Sharpe slider
+   value to restore or set — eligibility compares each strategy-regime's Sharpe against `S_beta_spy`'s
+   own regime Sharpe from its latest primary run (hysteresis band 0.10), and the `--min-sharpe` CLI
+   flag no longer exists. `--dry-run` prints the bench vector and `bench diff:` lines instead of a
+   single threshold; eyeball those. `min_trades` (100) is still read from the last-applied stamp as
+   before.
 6. **Restore flags:** `sed -i 's/^OPENCLAW_ACTIVATION_ASSIGNER=0$/OPENCLAW_ACTIVATION_ASSIGNER=1/; s/^OPENCLAW_AUTO_DEMOTE=0$/OPENCLAW_AUTO_DEMOTE=1/' .env`
 7. **Re-enable the 3 timers (stamp-touch first):** for each `<unit>` above —
    `touch /var/lib/systemd/timers/stamp-<unit>` ; `systemctl enable <unit>` ; `systemctl start <unit>` ; then confirm `systemctl list-timers <unit>` shows the NEXT natural fire (not an immediate catch-up).
