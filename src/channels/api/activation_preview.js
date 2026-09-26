@@ -15,9 +15,9 @@
 // The min-TRADES slider is unchanged.
 //
 // The assigner is line-oriented; every line it owns is prefixed
-// `[activation_assigner] ` via its _log helper. The six shapes we parse
+// `[activation_assigner] ` via its _log helper. The seven shapes we parse
 // (verbatim from activation_assigner.py main()/_fmt_diff/_fmt_bench_vector/
-// _fmt_bench_diff):
+// _fmt_bench_diff/_log):
 //
 //   [activation_assigner] threshold=0.5 min_trades=20 dry_run=True strategies=149
 //   [activation_assigner]   S_alpha: LOW_VOL: True->False (deactivated), TRANSITIONING: None->False (initialized), HIGH_VOL: False->False, CRISIS: True->True
@@ -26,7 +26,14 @@
 //   [activation_assigner] activation_assigner summary: 145 strategies evaluated, 4 skipped (no corrected backtest), 12 cell(s) activated, 33 cell(s) deactivated, 2 newly-dormant strategies (S_a, S_b), threshold=0.5, min_trades=20, dry_run=True, errors=0
 //   [activation_assigner] bench: sleeve=S_beta_spy source=registry run=r51b5b915 LOW_VOL=0.95 TRANSITIONING=0.44 HIGH_VOL=0.53 CRISIS=1.58
 //   [activation_assigner] bench diff: LOW_VOL +4/-1 TRANSITIONING +7/-0 HIGH_VOL +12/-0 CRISIS +0/-14
+//   [activation_assigner] WARN: CRISIS bench sharpe missing from sleeve run r1; using last-applied pipeline_config vector
 //
+// The WARN: shape (F1-a, fix round 1) is emitted whenever a regime's bench
+// comparator degrades to the tier-2 pipeline_config fallback or the tier-3
+// DEFAULT_MIN_SHARPE (spec §2) -- previously these lines fell straight
+// through this parser (no branch matched them) and were invisible to the
+// operator anywhere on the dashboard; every one is now collected into
+// `warnings` below, alongside the parser's own cross-check discrepancies.
 // Per-strategy diff bodies come from _fmt_diff iterating CANONICAL_REGIMES
 // in fixed order, so a diff body ALWAYS starts with `LOW_VOL: ` — that
 // anchors the detail-line discriminator against SKIP/ERROR lines. In each
@@ -71,6 +78,12 @@ const BENCH_DIFF_RE = new RegExp(
   'HIGH_VOL \\+(\\d+)/-(\\d+) CRISIS \\+(\\d+)/-(\\d+)\\s*$'
 );
 const CELL_RE = /(LOW_VOL|TRANSITIONING|HIGH_VOL|CRISIS): (True|False|None)->(True|False)(?: \((\w+)\))?/g;
+// [activation_assigner] WARN: CRISIS bench sharpe missing from sleeve run r1; using last-applied pipeline_config vector
+// (F1-a, fix round 1) -- degraded bench fallback (tier-2 pipeline_config /
+// tier-3 DEFAULT_MIN_SHARPE), a multi-sleeve registry, or a non-finite
+// sleeve sharpe. Captured verbatim (message only, prefix stripped) into
+// `warnings` so a degraded comparator is never invisible to the operator.
+const WARN_RE = /^\[activation_assigner\] WARN: (.+)$/;
 
 /**
  * Parse `python3 -m backtest.activation_assigner --all --dry-run` stdout.
@@ -91,7 +104,9 @@ const CELL_RE = /(LOW_VOL|TRANSITIONING|HIGH_VOL|CRISIS): (True|False|None)->(Tr
  *   newly_dormant_count
  *   changed_strategies   — [{strategy_id, cells:{REGIME:{before,after,action}}, newly_dormant}]
  *                          for strategies with ≥1 changing cell (capped)
- *   warnings             — parse cross-check discrepancies (never throws)
+ *   warnings             — assigner WARN: lines (degraded bench fallback,
+ *                          F1-a fix round 1), THEN parse cross-check
+ *                          discrepancies (never throws)
  */
 function parseActivationDryRun(stdout) {
   const perRegime = {};
@@ -103,6 +118,7 @@ function parseActivationDryRun(stdout) {
   }
   const changed = [];
   const newlyDormantParsed = [];
+  const warnLines = [];   // F1-a: assigner WARN: lines, collected verbatim
   let header = null;
   let summary = null;
   let summaryLine = null;
@@ -112,6 +128,7 @@ function parseActivationDryRun(stdout) {
 
   for (const line of String(stdout || '').split('\n')) {
     let m;
+    if ((m = line.match(WARN_RE))) { warnLines.push(m[1].trim()); continue; }
     if ((m = line.match(DETAIL_RE))) {
       detailCount += 1;
       const sid = m[1];
@@ -190,7 +207,7 @@ function parseActivationDryRun(stdout) {
   // Cross-checks: the per-line recomputation must agree with the summary
   // the assigner printed. Disagreement means the printed format drifted —
   // surface it loudly instead of silently trusting one side.
-  const warnings = [];
+  const warnings = [...warnLines];   // F1-a: assigner WARN: lines first
   const cellsActivated   = CANONICAL_REGIMES.reduce((s, r) => s + perRegime[r].activated, 0);
   const cellsDeactivated = CANONICAL_REGIMES.reduce((s, r) => s + perRegime[r].deactivated, 0);
   if (!summary) {
@@ -273,14 +290,43 @@ function benchCardPayload(markerRow, benchRow, defaultBand) {
   }
   let bench = (marker && marker.bench_sharpe) ? marker.bench_sharpe : null;
   let source = bench ? 'last_applied' : null;
+  // F1-c (fix round 1): per-regime provenance for THIS bench vector, from
+  // stamp_last_applied's bench_regime_source (Task 1 review item, wired up
+  // in this fix round). Only meaningful when `source === 'last_applied'`
+  // -- the tier-2 fallback row below has no per-regime provenance of its
+  // own (the MARKER predates the bench rule entirely, see source ===
+  // 'pipeline_config_fallback' below) and an older last_applied marker
+  // (stamped before this fix landed) never carried the field either.
+  // Both cases leave regimeSource null -- NEVER guessed at, so a regime
+  // with unknown provenance gets no note rather than a wrong one.
+  let regimeSource = (bench && marker && marker.bench_regime_source
+                      && typeof marker.bench_regime_source === 'object')
+    ? marker.bench_regime_source : null;
   if (!bench && benchRow && benchRow.value != null) {
     try {
       const parsed = JSON.parse(benchRow.value);
       if (parsed && typeof parsed === 'object') { bench = parsed; source = 'pipeline_config_fallback'; }
     } catch (_) { /* leave bench null — malformed tier-2 row */ }
   }
+  // Per-regime display note for a degraded (non-sleeve) regime this apply:
+  // 'fallback' (this regime's number came from the tier-2 pipeline_config
+  // vector, not a live S_beta_spy backtest) or 'DEFAULT 0.50 — WARN' (no
+  // sleeve run AND no tier-2 vector -- DEFAULT_MIN_SHARPE, and a WARN was
+  // logged). A regime absent from bench_notes is sleeve-sourced, or its
+  // provenance is unknown (older marker) -- no note either way, never
+  // claimed as good or bad without evidence.
+  const bench_notes = {};
+  if (bench && regimeSource) {
+    for (const r of Object.keys(bench)) {
+      const src = regimeSource[r];
+      if (src === 'pipeline_config') bench_notes[r] = 'fallback';
+      else if (src === 'default') bench_notes[r] = 'DEFAULT 0.50 — WARN';
+    }
+  }
   return {
     bench,
+    bench_notes,
+    regime_source: regimeSource,
     hysteresis:   (marker && marker.bench_hysteresis != null) ? marker.bench_hysteresis : band,
     bench_run_id: marker ? (marker.bench_run_id || null) : null,
     source,

@@ -127,6 +127,24 @@ class TestLoadBenchSharpeFromSleeve(unittest.TestCase):
         self.assertEqual(meta['sleeve_source'], 'registry')
         self.assertEqual(len(conn.executed), 2)   # sleeve id NOT re-queried
 
+    def test_sleeve_run_id_query_ties_break_deterministically(self):
+        # F3 (fix round 1): two sleeve primary_window runs stamped at the
+        # identical run_at (a backfill, or a fast rerun in the same second)
+        # must resolve to the same row every time this runs, not whichever
+        # tied row Postgres happens to hand back first. The fakes here
+        # don't evaluate ORDER BY themselves (FakeCursor just returns the
+        # canned response), so this asserts the SQL TEXT carries the
+        # tie-break, matching execution.activation_apply._bench_sleeve_
+        # run_id's identical query shape.
+        conn = FakeConn(responses=[
+            ('r9',),
+            [('LOW_VOL', 1.0), ('TRANSITIONING', 1.0), ('HIGH_VOL', 1.0), ('CRISIS', 1.0)],
+        ])
+        bench, meta = aa.load_bench_sharpe(conn, sleeve_id='S_beta_spy')
+        run_id_sql = conn.executed[0][0]
+        self.assertIn('ORDER BY run_at DESC, run_id DESC', run_id_sql)
+        self.assertEqual(meta['run_id'], 'r9')
+
     def test_sharpe_equal_to_bench_is_eligible(self):
         # A strategy whose sharpe exactly equals the loaded bench is
         # eligible (>=, spec §1's "sharpe >= bench").
@@ -473,8 +491,11 @@ class TestStampGainsBenchFields(unittest.TestCase):
     def test_stamp_last_applied_persists_bench_vector_and_run_id(self):
         conn = FakeConn([None])
         bench = {'LOW_VOL': 0.95, 'TRANSITIONING': 0.44, 'HIGH_VOL': 0.53, 'CRISIS': 1.58}
+        regime_source = {'LOW_VOL': 'sleeve', 'TRANSITIONING': 'sleeve',
+                         'HIGH_VOL': 'sleeve', 'CRISIS': 'pipeline_config'}
         ok = aa.stamp_last_applied(conn, 100, 3, 7, trigger='weekly_cron',
-                                   bench_sharpe=bench, bench_run_id='r51b5b915')
+                                   bench_sharpe=bench, bench_run_id='r51b5b915',
+                                   bench_regime_source=regime_source)
         self.assertTrue(ok)
         sql, params = conn.executed[-1]
         payload = json.loads(params[1])
@@ -485,6 +506,25 @@ class TestStampGainsBenchFields(unittest.TestCase):
         self.assertEqual(payload['bench_run_id'], 'r51b5b915')
         # spec §5-B: "stored with the vector in the last-applied stamp".
         self.assertEqual(payload['bench_hysteresis'], aa.ACTIVATION_HYSTERESIS)
+        # F1-c (fix round 1): per-regime provenance, so the dashboard bench
+        # card can tell WHICH regimes in bench_sharpe were a live sleeve
+        # observation vs a degraded fallback at THIS apply.
+        self.assertEqual(payload['bench_regime_source'], regime_source)
+
+    def test_stamp_last_applied_bench_regime_source_defaults_to_none(self):
+        # Back-compat: an existing direct caller that doesn't pass the new
+        # kwarg still stamps cleanly, and the key is present with an
+        # explicit null rather than being omitted -- old markers omit the
+        # key entirely (it didn't exist yet), a caller that opts out
+        # writes null; benchCardPayload treats both the same (no per-regime
+        # notes), but this keeps that distinction visible in the payload.
+        conn = FakeConn([None])
+        ok = aa.stamp_last_applied(conn, 100, 1, 1, trigger='manual')
+        self.assertTrue(ok)
+        sql, params = conn.executed[-1]
+        payload = json.loads(params[1])
+        self.assertIn('bench_regime_source', payload)
+        self.assertIsNone(payload['bench_regime_source'])
 
     def test_stamp_bench_sharpe_config_writes_the_fallback_vector(self):
         conn = FakeConn([None])
@@ -579,6 +619,56 @@ class TestStampGainsBenchFields(unittest.TestCase):
         self.assertEqual(result['actions']['LOW_VOL'], 'deactivated')
         inserts = [p for sql, p in conn.executed if 'strategy_regime_param_changes' in sql]
         self.assertTrue(any('threshold=0.9' in str(p) for p in inserts))
+
+
+# ── Scenario 6b: notify content assembly (F1-b, fix round 1) ────────────────
+class TestNotifyContent(unittest.TestCase):
+    """_notify_content (pure, no DB/network) -- the #botjohn-log post body
+    assembler factored out of _notify_botjohn_log. Before this fix the post
+    carried ONLY the summary line; a degraded (tier-2 pipeline_config /
+    tier-3 DEFAULT_MIN_SHARPE) bench comparator was invisible to the
+    operator unless they also happened to read stdout."""
+
+    def setUp(self):
+        self.bench_line = aa._fmt_bench_vector(
+            {r: 1.0 for r in aa.CANONICAL_REGIMES},
+            {'sleeve_id': 'S_beta_spy', 'sleeve_source': 'registry', 'run_id': 'r1'})
+        self.bench_diff_line = aa._fmt_bench_diff(
+            {r: 0 for r in aa.CANONICAL_REGIMES}, {r: 0 for r in aa.CANONICAL_REGIMES})
+
+    def test_content_carries_summary_bench_line_bench_diff_line_and_warns(self):
+        content = aa._notify_content(
+            'activation_assigner summary: 4 strategies evaluated, 0 skipped, dry_run=False',
+            [], False,
+            bench_line=self.bench_line, bench_diff_line=self.bench_diff_line,
+            warn_lines=['[activation_assigner] WARN: CRISIS bench sharpe unavailable; using DEFAULT_MIN_SHARPE=0.5'])
+        self.assertIn('activation_assigner summary:', content)
+        self.assertIn(self.bench_line, content)
+        self.assertIn(self.bench_diff_line, content)
+        self.assertIn('WARN: CRISIS bench sharpe unavailable', content)
+
+    def test_content_has_no_warn_text_when_none_emitted(self):
+        content = aa._notify_content(
+            'activation_assigner summary: 4 strategies evaluated', [], False,
+            bench_line=self.bench_line, bench_diff_line=self.bench_diff_line, warn_lines=[])
+        self.assertNotIn('WARN', content)
+        self.assertIn(self.bench_line, content)
+        self.assertIn(self.bench_diff_line, content)
+
+    def test_dry_run_prefix_and_newly_dormant_still_present(self):
+        content = aa._notify_content(
+            'activation_assigner summary: ...', ['S_a', 'S_b'], True,
+            bench_line=self.bench_line, bench_diff_line=self.bench_diff_line)
+        self.assertTrue(content.startswith('[DRY-RUN] '))
+        self.assertIn('Newly dormant: S_a, S_b', content)
+        # WARN lines (none passed here) sit ahead of the newly-dormant line
+        # in the join order -- proven directly by the first test above.
+
+    def test_backcompat_defaults_match_pre_fix_two_line_shape(self):
+        # A caller that omits the new kwargs entirely (back-compat) gets
+        # exactly the old two-line shape: summary, then newly-dormant.
+        content = aa._notify_content('summary text', ['S_a'], False)
+        self.assertEqual(content, 'summary text\nNewly dormant: S_a')
 
 
 # ── Scenario 7: dry-run prints the bench vector + per-regime diff ──────────

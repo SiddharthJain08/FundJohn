@@ -213,6 +213,23 @@ def test_bench_sleeve_registry_lookup_failure_is_not_pending_on_its_own():
     assert conn.rolled_back is True   # resolve_bench_sleeve_id's own rollback ran
 
 
+def test_bench_sleeve_run_id_query_ties_break_deterministically():
+    # F3 (fix round 1): two sleeve primary_window runs stamped at the
+    # identical run_at (a backfill, or a fast rerun in the same second)
+    # must resolve to the same row every time this query runs -- the fake
+    # doesn't evaluate ORDER BY itself (FakeCur just returns the canned
+    # response), so this asserts the SQL TEXT carries the tie-break,
+    # matching backtest.activation_assigner.load_bench_sharpe's identical
+    # query shape (same "sleeve's latest primary_window run" intent) so the
+    # two never disagree about which run is "latest" on a tied timestamp.
+    conn = FakeConn([], sleeve_run_id='r9')
+    run_id = aa._bench_sleeve_run_id(conn)
+    assert run_id == 'r9'
+    sql = conn._cur._last_sql
+    assert 'SELECT run_id FROM strategy_backtest_runs' in sql
+    assert 'ORDER BY run_at DESC, run_id DESC' in sql
+
+
 def test_read_failure_is_fail_safe_pending():
     conn = FakeConn([], raise_on_execute=True)
     st = aa.pending_state(conn)

@@ -196,6 +196,31 @@ test('bench: / bench diff: lines never match HEADER/DETAIL/SUMMARY (no double-co
   assert.equal(p.bench.sleeve_id, 'S_beta_spy');
 });
 
+// ── WARN: lines (F1-a, fix round 1) — degraded bench fallback (tier-2
+// pipeline_config / tier-3 DEFAULT_MIN_SHARPE) previously fell through
+// this parser silently and never reached the operator anywhere on the
+// dashboard. Verbatim from activation_assigner.py's own _log(f'WARN: ...')
+// call sites (load_bench_sharpe, tier-2/tier-3 fallback branches).
+test('WARN: lines (tier-2 and tier-3 degraded bench fallback) are collected into warnings; no WARN -> empty', () => {
+  const withWarns = FIXTURE.replace(
+    '[activation_assigner] activation_assigner summary:',
+    '[activation_assigner] WARN: CRISIS bench sharpe missing from sleeve run r51b5b915; using last-applied pipeline_config vector\n' +
+    '[activation_assigner] WARN: HIGH_VOL bench sharpe unavailable (no sleeve run, no pipeline_config vector); using DEFAULT_MIN_SHARPE=0.5\n' +
+    '[activation_assigner] activation_assigner summary:'
+  );
+  const p = parseActivationDryRun(withWarns);
+  assert.equal(p.evaluated, 4);   // unaffected -- WARN lines aren't detail/skip/error lines
+  assert.equal(p.warnings.length, 2);
+  assert.ok(p.warnings.some(w => /^CRISIS bench sharpe missing from sleeve run r51b5b915/.test(w)));
+  assert.ok(p.warnings.some(w => /^HIGH_VOL bench sharpe unavailable \(no sleeve run, no pipeline_config vector\); using DEFAULT_MIN_SHARPE=0\.5$/.test(w)));
+
+  // No WARN lines at all -> warnings stays empty (the base FIXTURE test
+  // above already asserts this too; repeated here to pair explicitly with
+  // the WARN case per the brief).
+  const clean = parseActivationDryRun(FIXTURE);
+  assert.deepEqual(clean.warnings, []);
+});
+
 // ── minSharpeGone (PUT /api/config/activation-min-sharpe) ──────────────────
 function fakeRes() {
   return {
@@ -262,6 +287,42 @@ test('benchCardPayload: marker with bench_sharpe -> source last_applied, own hys
   assert.equal(out.bench_run_id, 'r51b5b915');
   assert.equal(out.row_exists, true);
   assert.equal(out.applied_at, MARKER_WITH_BENCH.updated_at);
+  // No bench_regime_source on this marker (predates F1-c) -> no per-regime
+  // provenance known, no notes guessed at.
+  assert.equal(out.regime_source, null);
+  assert.deepEqual(out.bench_notes, {});
+});
+
+// ── F1-c (fix round 1): per-regime provenance / degraded-regime notes ──────
+const MARKER_WITH_DEGRADED_REGIME = {
+  value: JSON.stringify({
+    min_trades: 100, activated_cells: 1, deactivated_cells: 2, trigger: 'daily_cycle',
+    bench_sharpe: { LOW_VOL: 0.95, TRANSITIONING: 0.44, HIGH_VOL: 0.53, CRISIS: 0.50 },
+    bench_run_id: 'r51b5b915', bench_hysteresis: 0.10,
+    bench_regime_source: { LOW_VOL: 'sleeve', TRANSITIONING: 'sleeve',
+                           HIGH_VOL: 'pipeline_config', CRISIS: 'default' },
+  }),
+  updated_at: '2026-09-26T15:00:00.000Z',
+};
+
+test('benchCardPayload: a defaulted regime is marked "DEFAULT 0.50 — WARN", a pipeline_config regime "fallback", sleeve regimes unmarked', () => {
+  const out = benchCardPayload(MARKER_WITH_DEGRADED_REGIME, null);
+  assert.deepEqual(out.regime_source,
+    { LOW_VOL: 'sleeve', TRANSITIONING: 'sleeve', HIGH_VOL: 'pipeline_config', CRISIS: 'default' });
+  assert.deepEqual(out.bench_notes, { HIGH_VOL: 'fallback', CRISIS: 'DEFAULT 0.50 — WARN' });
+  assert.equal(out.bench_notes.LOW_VOL, undefined);
+  assert.equal(out.bench_notes.TRANSITIONING, undefined);
+});
+
+test('benchCardPayload: tier-2 fallback source has no per-regime provenance (regime_source null, no notes)', () => {
+  // Even though the tier-2 row IS a fully degraded comparator (the marker
+  // predates the bench rule entirely), it carries no per-regime
+  // bench_regime_source of its own -- that field lives on the MARKER
+  // (stamp_last_applied), not the standalone tier-2 pipeline_config row.
+  const out = benchCardPayload(MARKER_PRE_TASK1, TIER2_FALLBACK_ROW);
+  assert.equal(out.source, 'pipeline_config_fallback');
+  assert.equal(out.regime_source, null);
+  assert.deepEqual(out.bench_notes, {});
 });
 
 test('benchCardPayload: pre-Task-1 marker + tier-2 fallback row -> source pipeline_config_fallback', () => {

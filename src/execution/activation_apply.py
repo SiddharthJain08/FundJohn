@@ -112,14 +112,23 @@ def _bench_sleeve_run_id(conn) -> Optional[str]:
     treated as pending, since the general newest-run-approved-strategies
     check above already covers a broken runs-table read; a broken
     registry/sleeve-id read must not force a re-apply every single cycle
-    forever."""
+    forever.
+
+    ORDER BY run_at DESC, run_id DESC (F3, fix round 1): two sleeve primary
+    runs stamped at the identical run_at (a backfill, or a fast rerun in
+    the same second) must resolve deterministically to the same row every
+    time this query runs, matching backtest.activation_assigner.
+    load_bench_sharpe's own identical tie-break on the same query shape --
+    an ORDER BY on run_at alone would leave Postgres free to return either
+    tied row, which could disagree between this check and the assigner's
+    own resolution of "the sleeve's latest run"."""
     try:
         from backtest.activation_assigner import resolve_bench_sleeve_id
         sleeve_id, _source = resolve_bench_sleeve_id(conn)
         cur = conn.cursor()
         cur.execute("""SELECT run_id FROM strategy_backtest_runs
                         WHERE strategy_id = %s AND primary_window = TRUE
-                        ORDER BY run_at DESC LIMIT 1""", (sleeve_id,))
+                        ORDER BY run_at DESC, run_id DESC LIMIT 1""", (sleeve_id,))
         row = cur.fetchone()
         cur.close()
         return str(row[0]) if row and row[0] is not None else None
@@ -227,11 +236,16 @@ def pending_state(conn) -> dict:
     # check. Compared by run_id (not run_at): the marker stores the exact
     # run the bench vector was derived from (`bench_run_id`, spec §2), so
     # comparing ids is exact where a timestamp comparison could be fooled by
-    # clock skew or a same-timestamp re-run. Fail-safe: any lookup failure,
-    # or a marker with no `bench_run_id` at all (pre-Task-1 marker, or a
-    # sleeve lookup that failed at stamp time), counts as pending -- an
-    # eligibility run can't tell whether it was actually benchmarked against
-    # something real without this field.
+    # clock skew or a same-timestamp re-run. Fail-safe direction (F4, fix
+    # round 1 -- corrected to match the code at :246 and _bench_sleeve_
+    # run_id's own docstring above): a failed lookup is NOT pending (None) --
+    # it adds no reason here and defers to the general staleness probe
+    # above, so a broken registry/runs-table read doesn't force a re-apply
+    # every cycle forever. What DOES count as pending: once the lookup
+    # resolves a real sleeve run_id, a marker with no `bench_run_id` at all
+    # (pre-Task-1 marker, or a sleeve lookup that failed at STAMP time) is
+    # pending -- an eligibility run can't tell whether it was actually
+    # benchmarked against something real without this field.
     bench_run_id = _bench_sleeve_run_id(conn)
     out['bench_run_id'] = bench_run_id
     if bench_run_id is not None:

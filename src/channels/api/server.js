@@ -912,7 +912,9 @@ app.put('/api/config/activation-min-trades', async (req, res) => {
 });
 
 // POST /api/activation/dry-run — on-demand hypothetical preview of what the
-// activation assigner WOULD do at the currently-saved threshold. Shells out
+// activation assigner WOULD do against the bench-relative comparator (the
+// S_beta_spy per-regime Sharpe vector) currently in force -- there is no
+// saved threshold anymore (2026-09-25, bench-relative activation). Shells out
 // to `nice -n 19 python3 -m backtest.activation_assigner --all --dry-run`
 // (VPS is 2-core — always nice heavy python) with the server's own env
 // (dotenv already loaded POSTGRES_URI at boot) + PYTHONPATH=src, then parses
@@ -4963,7 +4965,7 @@ body.rs-chat-locked{overflow:hidden}
             <button class="st-action-btn" id="st-act-preview-btn" onclick="_actPreviewDryRun()">Preview (dry-run)</button>
             <span class="st-sub-label">hypothetical — zero DB writes; compares current eligible flags (DB reality) vs what the assigner would set against the bench comparator above</span>
           </div>
-          <div id="st-act-preview-out"><div class="st-act-preview-empty">No preview yet — set the threshold, then run a dry-run preview.</div></div>
+          <div id="st-act-preview-out"><div class="st-act-preview-empty">No preview yet — run a dry-run preview (bench-relative — no threshold to set).</div></div>
         </div>
       </div>
     </div>
@@ -9207,7 +9209,16 @@ async function _loadActivationCard() {
   // (pipeline_config_fallback) can now be PARTIAL (stamp_bench_sharpe_
   // config persists sleeve-sourced regimes only, spec 2026-09-25 Task 1
   // review) — a regime missing from the vector renders '—', not NaN.
-  const fmtRegime = r => (b && isFinite(Number(b[r]))) ? Number(b[r]).toFixed(2) : '—';
+  // F1-c (fix round 1): a regime this apply that came from the tier-2
+  // pipeline_config vector or DEFAULT_MIN_SHARPE (cfg.bench_notes, from
+  // stamp_last_applied's bench_regime_source) is marked inline so a
+  // degraded comparator is never indistinguishable from a live sleeve
+  // observation just because both happen to render a number.
+  const fmtRegime = r => {
+    if (!(b && isFinite(Number(b[r])))) return '—';
+    const note = cfg.bench_notes && cfg.bench_notes[r];
+    return Number(b[r]).toFixed(2) + (note ? ' (' + note + ')' : '');
+  };
   valEl.textContent = b
     ? 'LOW_VOL ' + fmtRegime('LOW_VOL') +
       ' / TRANS ' + fmtRegime('TRANSITIONING') +
@@ -9293,7 +9304,7 @@ function _actRenderPreview(data, host) {
     : '';
   host.innerHTML =
     '<div class="st-act-summary"><span class="st-act-hypo">Preview — hypothetical, nothing written</span>' +
-      'threshold <b>' + (data.threshold != null ? _actNum(data.threshold, 0).toFixed(2) : '?') + '</b> · ' +
+      'LOW_VOL bench <b>' + (data.threshold != null ? _actNum(data.threshold, 0).toFixed(2) : '?') + '</b> · ' +
       _actNum(data.evaluated, 0) + ' evaluated · ' +
       _actNum(data.skipped, 0) + ' skipped (no corrected backtest) · ' +
       '<span style="color:var(--green)">' + _actNum(cells.activated, 0) + ' cells would activate</span> · ' +
@@ -11041,16 +11052,33 @@ function _actApplyStatus(cfg) {
 
 // Bench-relative activation status line (2026-09-25, read-only — no
 // "pending", nothing on the dashboard can create one). cfg is GET
-// /api/config/activation-min-sharpe's response: {bench, hysteresis,
-// bench_run_id, source, applied_at, row_exists}.
+// /api/config/activation-min-sharpe's response: {bench, bench_notes,
+// regime_source, hysteresis, bench_run_id, source, applied_at, row_exists}.
+//
+// F1-c (fix round 1): the two notes below are DIFFERENT facts and were
+// wrongly folded into one before this fix --
+//   - source === 'pipeline_config_fallback' means the MARKER predates the
+//     bench rule (Task 1): it never carried a bench_sharpe vector at all,
+//     so this card fell back to reading the standalone tier-2 row
+//     directly. Says nothing about any one regime's provenance.
+//   - "sleeve backtest unavailable" is a PER-REGIME fact about the apply
+//     that actually produced the vector on screen (cfg.bench_notes, from
+//     stamp_last_applied's bench_regime_source) -- it only applies when
+//     that source is 'last_applied' AND at least one regime in it is
+//     non-sleeve (pipeline_config or DEFAULT_MIN_SHARPE), and it names
+//     which regimes.
 function _actBenchStatus(cfg) {
   if (!cfg.row_exists || !cfg.bench) {
-    return 'not yet applied — the assigner hasn\'t run since bench-relative activation shipped';
+    return 'not yet applied — the assigner has not run since bench-relative activation shipped';
   }
   const appliedAt = cfg.applied_at ? new Date(cfg.applied_at).toLocaleString() : null;
-  const tierNote = cfg.source === 'pipeline_config_fallback'
-    ? ' · tier-2 fallback vector (sleeve backtest unavailable at apply time)'
-    : '';
+  const degraded = cfg.bench_notes ? Object.keys(cfg.bench_notes) : [];
+  let tierNote = '';
+  if (cfg.source === 'pipeline_config_fallback') {
+    tierNote = ' · marker predates the bench rule — reading the tier-2 fallback comparator row directly';
+  } else if (degraded.length) {
+    tierNote = ' · sleeve backtest unavailable for ' + degraded.join(', ') + ' at apply time';
+  }
   return (appliedAt ? '✓ as of ' + appliedAt : '✓ last applied') + tierNote;
 }
 

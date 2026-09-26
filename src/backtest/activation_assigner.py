@@ -159,7 +159,8 @@ LAST_APPLIED_KEY = 'strategy_activation_last_applied'
 def stamp_last_applied(conn, min_trades, activated: int,
                        deactivated: int, trigger: str = 'manual',
                        bench_sharpe: Optional[dict] = None,
-                       bench_run_id=None) -> bool:
+                       bench_run_id=None,
+                       bench_regime_source: Optional[dict] = None) -> bool:
     """Upsert the last-applied marker. Non-fatal: returns False (and logs)
     on any failure — a marker miss only costs one redundant (idempotent)
     re-apply at the next daily cycle, never a trading day.
@@ -179,7 +180,14 @@ def stamp_last_applied(conn, min_trades, activated: int,
     vector in the last-applied stamp") as `bench_hysteresis` --
     ACTIVATION_HYSTERESIS is a code constant today, not
     dashboard-adjustable, but the stamp is the audit trail an operator
-    reads to know what band was actually in force for a given apply."""
+    reads to know what band was actually in force for a given apply.
+
+    bench_regime_source (F1-c, fix round 1): load_bench_sharpe's per-regime
+    provenance ({regime: 'sleeve'|'pipeline_config'|'default'}) for THIS
+    apply's bench_sharpe vector -- lets a later reader (the dashboard bench
+    card) tell WHICH regimes were a live sleeve observation vs a degraded
+    fallback at apply time, distinct from whether the marker AS A WHOLE
+    predates the bench rule (benchCardPayload's `source` field, unrelated)."""
     payload = json.dumps({
         'min_trades': min_trades,
         'activated_cells': int(activated),
@@ -188,6 +196,7 @@ def stamp_last_applied(conn, min_trades, activated: int,
         'actor': ACTOR,
         'bench_sharpe': bench_sharpe,
         'bench_run_id': bench_run_id,
+        'bench_regime_source': bench_regime_source,
         'bench_hysteresis': ACTIVATION_HYSTERESIS,
     }, sort_keys=True)
     try:
@@ -305,8 +314,22 @@ def _load_instrument_classes() -> dict:
         return {}
 
 
+# Module-level buffer of this run's WARN-prefixed lines (fix round 1,
+# F1-b): lets main() hand every WARN emitted during the run -- degraded
+# tier-2/tier-3 bench fallback, a multi-sleeve registry, a non-finite
+# sleeve sharpe -- to the #botjohn-log notify post below, not just the
+# summary line. Not read by anything else: activation_preview.js's own
+# WARN_RE scans the assigner's raw stdout independently. Cleared at the
+# top of main() so repeated in-process calls (tests) never leak warnings
+# from one run into the next.
+_WARN_LINES: list = []
+
+
 def _log(msg: str) -> None:
-    print(f'[activation_assigner] {msg}', flush=True)
+    line = f'[activation_assigner] {msg}'
+    print(line, flush=True)
+    if msg.startswith('WARN: '):
+        _WARN_LINES.append(line)
 
 
 # ── Config accessor ─────────────────────────────────────────────────────────
@@ -470,7 +493,7 @@ def load_bench_sharpe(conn, sleeve_id: Optional[str] = None) -> tuple[dict, dict
         cur.execute("""
             SELECT run_id FROM strategy_backtest_runs
             WHERE strategy_id = %s AND primary_window = TRUE
-            ORDER BY run_at DESC LIMIT 1
+            ORDER BY run_at DESC, run_id DESC LIMIT 1
         """, (sleeve_id,))
         row = cur.fetchone()
         if row:
@@ -947,13 +970,45 @@ def apply_one(conn, strategy_id: str, *,
 
 
 # ── Discord notify (best-effort, never raises) ──────────────────────────────
-def _notify_botjohn_log(summary: str, newly_dormant: list, dry_run: bool) -> None:
+def _notify_content(summary: str, newly_dormant: list, dry_run: bool,
+                    bench_line: str = '', bench_diff_line: str = '',
+                    warn_lines: Optional[list] = None) -> str:
+    """Pure assembly of the #botjohn-log post body (F1-b, fix round 1): the
+    summary line, the `bench:` vector line, the `bench diff:` line, and
+    every WARN line _log collected this run. Before this fix the post
+    carried ONLY the summary -- a degraded (tier-2 pipeline_config / tier-3
+    DEFAULT_MIN_SHARPE) bench comparator was invisible to the operator
+    unless they also happened to read stdout. WARN lines are placed AHEAD
+    of the newly-dormant list so the 1900-char Discord clip below drops the
+    newly-dormant names (already counted in the summary) before it drops a
+    warning. No DB, no network -- pure string-in/string-out, unit-testable
+    standalone."""
+    prefix = '[DRY-RUN] ' if dry_run else ''
+    lines = [prefix + summary]
+    if bench_line:
+        lines.append(bench_line)
+    if bench_diff_line:
+        lines.append(bench_diff_line)
+    if warn_lines:
+        lines.extend(warn_lines)
+    if newly_dormant:
+        lines.append('Newly dormant: ' + ', '.join(newly_dormant))
+    return '\n'.join(lines)[:1900]
+
+
+def _notify_botjohn_log(summary: str, newly_dormant: list, dry_run: bool,
+                        bench_line: str = '', bench_diff_line: str = '',
+                        warn_lines: Optional[list] = None) -> None:
     """Best-effort post to #botjohn-log. Mirrors regime_blended_sizer.py's
     _post_corr_cumsharpe_log / fold_report.py's webhook pattern: look up
     agent_registry.webhook_urls->>'botjohn-log', POST via urllib with an
     explicit User-Agent (Discord's Cloudflare edge 403s the default
     python-urllib/* UA). NEVER raises — a Discord hiccup must not fail the
-    weekly eligibility refresh or a manual CLI run."""
+    weekly eligibility refresh or a manual CLI run.
+
+    bench_line/bench_diff_line/warn_lines (F1-b, fix round 1, all optional/
+    default-empty for back-compat with any other caller): see
+    _notify_content, which does the actual assembly."""
     try:
         url = None
         with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
@@ -965,11 +1020,9 @@ def _notify_botjohn_log(summary: str, newly_dormant: list, dry_run: bool) -> Non
             _log('notify: no botjohn-log webhook URL found; skipping')
             return
         import urllib.request as _ur
-        prefix = '[DRY-RUN] ' if dry_run else ''
-        lines = [prefix + summary]
-        if newly_dormant:
-            lines.append('Newly dormant: ' + ', '.join(newly_dormant))
-        content = '\n'.join(lines)[:1900]
+        content = _notify_content(summary, newly_dormant, dry_run,
+                                  bench_line=bench_line, bench_diff_line=bench_diff_line,
+                                  warn_lines=warn_lines)
         req = _ur.Request(
             url, data=json.dumps({'content': content}).encode(), method='POST',
             headers={'Content-Type': 'application/json',
@@ -990,6 +1043,10 @@ def _fmt_diff(result: dict) -> str:
 
 
 def main() -> int:
+    # F1-b (fix round 1): reset the WARN buffer at the top of every run so
+    # repeated in-process calls (tests, or any future long-lived caller)
+    # never leak a prior run's warnings into this one's notify post.
+    _WARN_LINES.clear()
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument('--strategy-id')
@@ -1077,7 +1134,10 @@ def main() -> int:
         conn.rollback()
     except Exception:
         pass
-    _log(_fmt_bench_vector(bench_vector, bench_meta))
+    # Stored, not just logged (F1-b, fix round 1): the notify post below
+    # carries this exact text, not a re-derivation of it.
+    bench_vector_line = _fmt_bench_vector(bench_vector, bench_meta)
+    _log(bench_vector_line)
 
     # NOTE: header + summary line formats are PINNED by activation_preview.js
     # (HEADER_RE / SUMMARY_RE, consumed by the dashboard dry-run endpoint) —
@@ -1148,8 +1208,11 @@ def main() -> int:
     # Bench-relative dry-run/apply diff (spec §5-E): the per-regime
     # prior->new gained/lost breakdown the operator acks before the first
     # apply. Printed on both dry-run and real applies (informative either
-    # way); NOT part of the pinned header/summary lines above.
-    _log(_fmt_bench_diff(gained_by_regime, lost_by_regime))
+    # way); NOT part of the pinned header/summary lines above. Stored, not
+    # just logged (F1-b, fix round 1): the notify post below carries this
+    # exact text.
+    bench_diff_line = _fmt_bench_diff(gained_by_regime, lost_by_regime)
+    _log(bench_diff_line)
 
     summary = (
         f'activation_assigner summary: {n_ok} strategies evaluated, '
@@ -1162,7 +1225,22 @@ def main() -> int:
     _log(summary)
 
     if args.notify:
-        _notify_botjohn_log(summary, newly_dormant, args.dry_run)
+        # F2 (fix round 1): `summary`'s `threshold=` token above is
+        # machine-parsed and byte-pinned (activation_preview.js
+        # SUMMARY_RE) -- it stays exactly as printed to stdout. The
+        # Discord post is read by a human directly, so relabel just THIS
+        # copy to name what the number actually is (the LOW_VOL bench
+        # value) without touching `summary` itself or its stdout line.
+        notify_summary = summary.replace(
+            f'threshold={display_threshold}', f'bench_low_vol={display_threshold}', 1)
+        # F1-b: the post used to carry only `summary` -- a degraded (tier-2
+        # pipeline_config / tier-3 DEFAULT_MIN_SHARPE) bench comparator was
+        # invisible to the operator unless they also read stdout. Now
+        # carries the bench: vector line, the bench diff: line, and every
+        # WARN: line _log collected this run.
+        _notify_botjohn_log(notify_summary, newly_dormant, args.dry_run,
+                            bench_line=bench_vector_line, bench_diff_line=bench_diff_line,
+                            warn_lines=list(_WARN_LINES))
 
     # Markers: only a clean, complete, non-dry-run apply counts as "applied".
     # A run with per-strategy errors leaves the old markers so the next
@@ -1174,7 +1252,8 @@ def main() -> int:
     if args.all and not args.dry_run and n_errors == 0:
         if stamp_last_applied(conn, eff_min_trades, activated_cells,
                               deactivated_cells, trigger=args.trigger,
-                              bench_sharpe=bench_vector, bench_run_id=bench_meta.get('run_id')):
+                              bench_sharpe=bench_vector, bench_run_id=bench_meta.get('run_id'),
+                              bench_regime_source=bench_meta.get('regime_source')):
             _log(f'stamped {LAST_APPLIED_KEY} (trigger={args.trigger})')
         if stamp_bench_sharpe_config(conn, bench_vector, regime_source=bench_meta.get('regime_source')):
             _log(f'stamped {CONFIG_KEY_BENCH_SHARPE} (fail-safe tier 2 vector)')
