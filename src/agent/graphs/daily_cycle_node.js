@@ -183,7 +183,7 @@ function makeStepNode(STEP, scriptName) {
     // EOD compute before `signals` — recovered by hand. The Discord failure
     // alert + stderr persistence above still fire; only the abort is skipped.
     // `activation` (2026-08-22) gets the same exemption: it only re-applies
-    // the dashboard activation sliders ahead of `signals`; a failed re-apply
+    // bench-relative activation ahead of `signals`; a failed re-apply
     // leaves last week's eligibility in place (still a valid book) and must
     // never cost the day's COMPUTED set — under OPENCLAW_STRICT_EXIT_CODES=1
     // (live) every other step's rc=1 aborts, so this exemption is load-bearing.

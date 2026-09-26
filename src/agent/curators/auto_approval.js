@@ -28,7 +28,8 @@
  *      job auto-continues candidate→live via the staging_approver finalize
  *      hook, so late finishers (after this stage exits) still land.
  *
- *   C. FINALE — one activation_assigner --all (slider + qualification applied
+ *   C. FINALE — one activation_assigner --all (bench-relative activation +
+ *      qualification applied
  *      to strategy_regime_params) followed by ONE strategy_weights --rebuild.
  *      Never per-strategy fire-and-forget: racing rebuilds duplicated the
  *      is_current snapshot generation (2026-07-13 lesson, 247 dupe pairs).
@@ -252,7 +253,7 @@ async function processStaging({ log, dryRun, apiBase, budgetMs, perJobTimeoutMs 
   return { completed, failed, deferred };
 }
 
-// ── Finale: slider apply + ONE weights rebuild ──────────────────────────────
+// ── Finale: bench-relative activation apply + ONE weights rebuild ───────────
 function runFinale({ log, dryRun, trigger }) {
   if (dryRun) { log('finale: dry-run — skipping assigner + rebuild'); return false; }
   // Actuation freeze: during a fleet re-backtest campaign the operator sets
@@ -265,7 +266,7 @@ function runFinale({ log, dryRun, trigger }) {
   }
   const { spawnSync } = require('child_process');
   const env = { ...process.env, PYTHONPATH: 'src' };
-  log('finale: activation_assigner --all (qualification gate + slider) …');
+  log('finale: activation_assigner --all (qualification gate + bench-relative activation) …');
   const a = spawnSync('/bin/bash',
     ['-c', 'nice -n 19 python3 -m backtest.activation_assigner --all --notify --trigger=sunday_auto_approval'],
     { cwd: OPENCLAW_DIR, env, encoding: 'utf8', timeout: 15 * 60_000 });

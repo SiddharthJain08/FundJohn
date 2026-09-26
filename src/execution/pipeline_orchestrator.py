@@ -74,7 +74,7 @@ def _build_steps() -> list[tuple[str, str]]:
     value preserves the legacy 10-step pipeline byte-for-byte.
     """
     base: list[tuple[str, str]] = [
-        ('activation',           'activation_apply'),          # dashboard activation sliders → eligibility + weights (only when a slider moved; never aborts in the JS graph)
+        ('activation',           'activation_apply'),          # bench-relative activation → eligibility + weights (only when the min-trades slider or the bench sleeve's own backtest moved; never aborts in the JS graph)
         ('collect',              'run_collector_once'),        # one cycle of collector.js
         ('signals',              'engine'),                    # zero-LLM strategy executor
         ('ic_gate',              'ic_gate_runner'),            # IC approval gate (DEFAULT-OFF; gated on OPENCLAW_IC_GATE=1; fail-open)

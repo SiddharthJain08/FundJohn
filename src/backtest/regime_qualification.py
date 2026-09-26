@@ -9,9 +9,11 @@ regime's sleeve of its latest primary backtest has
 
 This is the single python source of the rule; the JS twin is
 judgeRegimeSleeve in src/lib/promotion_service.js — keep them in sync.
-Consumers: backtest.activation_assigner (live sizer eligibility, where the
-dashboard's activation min-Sharpe slider adds a further sharpe floor on top)
-and backtest.eligibility_assigner (manifest eligible_regimes hint). NOTE
+Consumers: backtest.activation_assigner (live sizer eligibility, where a
+per-regime bench-relative comparator — S_beta_spy's own Sharpe per regime,
+spec 2026-09-25-activation-bench-relative — adds a further leg on top,
+replacing the retired min-Sharpe slider) and backtest.eligibility_assigner
+(manifest eligible_regimes hint). NOTE
 (verified 2026-08-24, R1): both of those actually reimplement the LEGACY
 gate INLINE from class_thresholds()/dd_leg_passes() rather than calling
 qualifies_regime() itself — qualifies_regime is the reference rule and unit

@@ -96,20 +96,12 @@ class FakeCur0:
         return self._row
 
 
-class TestGetActivationThreshold(unittest.TestCase):
-    def test_present_value_parsed(self):
-        self.assertEqual(aa.get_activation_threshold(FakeCur0(row=('0.75',))), 0.75)
-
-    def test_absent_key_defaults_half(self):
-        self.assertEqual(aa.get_activation_threshold(FakeCur0(row=None)), 0.5)
-
-    def test_malformed_value_defaults_half(self):
-        self.assertEqual(aa.get_activation_threshold(FakeCur0(row=('abc',))), 0.5)
-
-    def test_query_error_defaults_half(self):
-        self.assertEqual(aa.get_activation_threshold(FakeCur0(raise_on_execute=True)), 0.5)
-
-
+# TestGetActivationThreshold (get_activation_threshold /
+# strategy_activation_min_sharpe) REMOVED (Task 2, spec 2026-09-25-
+# activation-bench-relative §3): the function itself no longer exists --
+# the eligibility rule reads the bench vector (load_bench_sharpe), not a
+# scalar slider. FakeCur0 stays; TestGetActivationMinTrades below still
+# uses it (the min-TRADES slider is unchanged).
 class TestGetActivationMinTrades(unittest.TestCase):
     """min_trades is a dashboard-adjustable activation parameter (2026-07-16).
 
@@ -145,7 +137,7 @@ class TestGetActivationMinTrades(unittest.TestCase):
 class TestComputeEligible(unittest.TestCase):
     def test_no_primary_window_run_returns_none(self):
         conn = FakeConn(responses=[None])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
+        eligible, diag = aa.compute_eligible(conn, 'S_test')
         self.assertIsNone(eligible)
         self.assertEqual(diag, {})
         # Only the run_id lookup should have executed -- caller must skip,
@@ -157,7 +149,7 @@ class TestComputeEligible(unittest.TestCase):
         children (malformed/partial write) -- treated the same as no run.
         (3 executes since W3: run_id, empty shrink probe, empty fallback.)"""
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], []])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
+        eligible, diag = aa.compute_eligible(conn, 'S_test')
         self.assertIsNone(eligible)
         self.assertEqual(diag, {})
         self.assertEqual(len(conn.executed), 3)
@@ -169,31 +161,38 @@ class TestComputeEligible(unittest.TestCase):
         shrink = [_regime_row('LOW_VOL', 2.0, 150)]
         poison = [_regime_row('LOW_VOL', -5.0, 1)]   # must NOT be consumed
         conn = FakeConn(responses=[{'run_id': 'r1'}, shrink, poison])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
+        eligible, diag = aa.compute_eligible(conn, 'S_test')
         self.assertTrue(eligible['LOW_VOL'])
         self.assertEqual(len(conn.executed), 2)      # no fallback query
         self.assertIn('universe_shrink_metrics', conn.executed[1][0])
 
     def test_sharpe_threshold_boundary(self):
+        # 2026-09-25 bench-relative: `threshold` is retired plumbing; the
+        # comparator is now `bench=`. Explicit bench=0.5 keeps this test's
+        # original intent (boundary at 0.5) instead of relying on the
+        # DEFAULT_MIN_SHARPE fallback (also 0.5) by coincidence.
         rows = [_regime_row('LOW_VOL', 0.5, 100), _regime_row('CRISIS', 0.4999, 100)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
-        self.assertTrue(eligible['LOW_VOL'])     # exactly at threshold -> eligible (>=)
+        bench = {r: 0.5 for r in aa.CANONICAL_REGIMES}
+        eligible, diag = aa.compute_eligible(conn, 'S_test', bench=bench)
+        self.assertTrue(eligible['LOW_VOL'])     # exactly at bench -> eligible (>=)
         self.assertFalse(eligible['CRISIS'])     # just below -> not eligible
 
-    def test_slider_zero_requires_strictly_positive_sharpe(self):
-        # 2026-07-13 v2: slider at 0 activates exactly the QUALIFYING regimes
-        # (sharpe strictly > 0) -- a 0.0 sleeve stays dormant.
+    def test_zero_bench_requires_strictly_positive_sharpe(self):
+        # 2026-09-25 bench-relative: a bench of 0.0 (analogous to the old
+        # "slider at 0") activates exactly the QUALIFYING regimes (sharpe
+        # strictly > 0, class gate) -- a 0.0 sleeve stays dormant.
         rows = [_regime_row('LOW_VOL', 0.0, 100), _regime_row('CRISIS', 0.01, 100)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0)
+        bench = {r: 0.0 for r in aa.CANONICAL_REGIMES}
+        eligible, diag = aa.compute_eligible(conn, 'S_test', bench=bench)
         self.assertFalse(eligible['LOW_VOL'])
         self.assertTrue(eligible['CRISIS'])
 
     def test_trade_count_guard_boundary(self):
         rows = [_regime_row('LOW_VOL', 1.0, 20), _regime_row('HIGH_VOL', 1.0, 19)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5, min_trades=20)
+        eligible, diag = aa.compute_eligible(conn, 'S_test', min_trades=20)
         self.assertTrue(eligible['LOW_VOL'])     # n==20 -> passes (>=, explicit override)
         self.assertFalse(eligible['HIGH_VOL'])   # n==19 -> fails
 
@@ -201,7 +200,7 @@ class TestComputeEligible(unittest.TestCase):
         # Default trade floor comes from the shared per-regime gate (100).
         rows = [_regime_row('LOW_VOL', 1.0, 100), _regime_row('HIGH_VOL', 1.0, 99)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
+        eligible, diag = aa.compute_eligible(conn, 'S_test')
         self.assertTrue(eligible['LOW_VOL'])
         self.assertFalse(eligible['HIGH_VOL'])
 
@@ -210,24 +209,24 @@ class TestComputeEligible(unittest.TestCase):
         rows = [_regime_row('LOW_VOL', 1.0, 100, max_dd_pct=25.0),
                 _regime_row('CRISIS', 1.0, 100, max_dd_pct=15.0)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
+        eligible, diag = aa.compute_eligible(conn, 'S_test')
         self.assertFalse(eligible['LOW_VOL'])    # dd 25 > equity 20
         self.assertTrue(eligible['CRISIS'])
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],[_regime_row('LOW_VOL', 1.0, 100, max_dd_pct=25.0)]])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5,
+        eligible, diag = aa.compute_eligible(conn, 'S_test',
                                              instrument_class='option')
         self.assertTrue(eligible['LOW_VOL'])     # dd 25 <= option 30
 
     def test_null_dd_fails_closed(self):
         rows = [_regime_row('LOW_VOL', 1.0, 100, max_dd_pct=None)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
+        eligible, diag = aa.compute_eligible(conn, 'S_test')
         self.assertFalse(eligible['LOW_VOL'])
 
     def test_null_sharpe_excludes(self):
         rows = [_regime_row('LOW_VOL', None, 200)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
+        eligible, diag = aa.compute_eligible(conn, 'S_test')
         self.assertFalse(eligible['LOW_VOL'])
 
     def test_regime_absent_from_backtest_defaults_false(self):
@@ -237,7 +236,7 @@ class TestComputeEligible(unittest.TestCase):
         determined."""
         rows = [_regime_row('LOW_VOL', 2.0, 100)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
+        eligible, diag = aa.compute_eligible(conn, 'S_test')
         self.assertEqual(set(eligible.keys()), set(aa.CANONICAL_REGIMES))
         self.assertTrue(eligible['LOW_VOL'])
         self.assertFalse(eligible['TRANSITIONING'])
@@ -253,7 +252,7 @@ class TestComputeEligible(unittest.TestCase):
             _regime_row('CRISIS', -0.5, 50),          # fails sharpe (negative)
         ]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
+        eligible, diag = aa.compute_eligible(conn, 'S_test')
         self.assertEqual(eligible, {'LOW_VOL': True, 'TRANSITIONING': False,
                                     'HIGH_VOL': False, 'CRISIS': False})
 
@@ -265,7 +264,7 @@ class TestComputeEligible(unittest.TestCase):
             _regime_row('CRISIS', None, 50),
         ]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
-        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
+        eligible, diag = aa.compute_eligible(conn, 'S_test')
         self.assertEqual(eligible, {r: False for r in aa.CANONICAL_REGIMES})
 
 
@@ -294,7 +293,7 @@ class TestApplyOneDryRun(unittest.TestCase):
         regime_rows = [_regime_row('LOW_VOL', 1.0, 100)]
         prior_rows = [_prior_row('LOW_VOL', True)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],regime_rows, prior_rows])
-        result = aa.apply_one(conn, 'S_test', threshold=0.5, dry_run=True)
+        result = aa.apply_one(conn, 'S_test', dry_run=True)
         self.assertEqual(result['status'], 'ok')
         # Exactly 4 reads (run_id, shrink probe, regime rows, prior rows) --
         # no INSERT/UPDATE.
@@ -305,7 +304,7 @@ class TestApplyOneDryRun(unittest.TestCase):
 
     def test_skipped_strategy_is_fully_untouched(self):
         conn = FakeConn(responses=[None])
-        result = aa.apply_one(conn, 'S_test', threshold=0.5, dry_run=False)
+        result = aa.apply_one(conn, 'S_test', dry_run=False)
         self.assertEqual(result['status'], 'skipped_no_run')
         self.assertEqual(result['prior'], {})
         self.assertEqual(result['new'], {})
@@ -327,7 +326,7 @@ class TestApplyOneWrites(unittest.TestCase):
         # fully active before this derive run).
         prior_rows = [_prior_row(r, True) for r in aa.CANONICAL_REGIMES]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],regime_rows, prior_rows])
-        result = aa.apply_one(conn, 'S_test', threshold=0.5, dry_run=False)
+        result = aa.apply_one(conn, 'S_test', dry_run=False)
         self.assertEqual(result['status'], 'ok')
         self.assertEqual(result['new'], {'LOW_VOL': True, 'TRANSITIONING': False,
                                          'HIGH_VOL': False, 'CRISIS': False})
@@ -358,7 +357,7 @@ class TestApplyOneWrites(unittest.TestCase):
         ]
         prior_rows = [_prior_row('LOW_VOL', True), _prior_row('CRISIS', True)]  # partially active before
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],regime_rows, prior_rows])
-        result = aa.apply_one(conn, 'S_test', threshold=0.5, dry_run=False)
+        result = aa.apply_one(conn, 'S_test', dry_run=False)
         self.assertEqual(result['new'], {r: False for r in aa.CANONICAL_REGIMES})
         # LOW_VOL/CRISIS True->False = deactivated; TRANSITIONING/HIGH_VOL
         # had no prior row and compute False = initialized (still written).
@@ -375,7 +374,7 @@ class TestApplyOneWrites(unittest.TestCase):
         regime_rows = [_regime_row(r, 2.0, 100) for r in aa.CANONICAL_REGIMES]  # all pass
         prior_rows = [_prior_row(r, True) for r in aa.CANONICAL_REGIMES]        # already all True
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],regime_rows, prior_rows])
-        result = aa.apply_one(conn, 'S_test', threshold=0.5, dry_run=False)
+        result = aa.apply_one(conn, 'S_test', dry_run=False)
         self.assertTrue(all(a == 'unchanged' for a in result['actions'].values()))
         # 4 reads only (incl. shrink probe), zero writes (commit() is still
         # issued -- harmless, just closes the read-only transaction).
@@ -389,7 +388,7 @@ class TestApplyOneWrites(unittest.TestCase):
         regime_rows = [_regime_row('LOW_VOL', -1.0, 100)]  # fails -> False
         prior_rows = []  # no prior rows at all for this strategy
         conn = FakeConn(responses=[{'run_id': 'r1'}, [],regime_rows, prior_rows])
-        result = aa.apply_one(conn, 'S_test', threshold=0.5, dry_run=False)
+        result = aa.apply_one(conn, 'S_test', dry_run=False)
         self.assertEqual(result['actions']['LOW_VOL'], 'initialized')
         inserts = [sql for sql, _ in conn.executed if sql.strip().upper().startswith('INSERT')]
         # LOW_VOL(2) + TRANSITIONING(2) + HIGH_VOL(2) + CRISIS(2) = 8 (all 4
@@ -405,7 +404,7 @@ if __name__ == '__main__':
 class TestStampLastApplied(unittest.TestCase):
     def test_upserts_marker_and_commits(self):
         conn = FakeConn([None])
-        ok = aa.stamp_last_applied(conn, 1.0, 100, 3, 7, trigger='daily_cycle')
+        ok = aa.stamp_last_applied(conn, 100, 3, 7, trigger='daily_cycle')
         self.assertTrue(ok)
         self.assertTrue(conn.committed)
         sql, params = conn.executed[-1]
@@ -413,7 +412,11 @@ class TestStampLastApplied(unittest.TestCase):
         self.assertIn('ON CONFLICT (key) DO UPDATE', sql)
         self.assertEqual(params[0], aa.LAST_APPLIED_KEY)
         payload = json.loads(params[1])
-        self.assertEqual(payload['threshold'], 1.0)
+        # Task 2 (spec 2026-09-25-activation-bench-relative §3): the
+        # retired slider's `threshold` JSON key is GONE -- bench_sharpe
+        # (tested separately, TestStampGainsBenchFields) already carries
+        # LOW_VOL and every other regime.
+        self.assertNotIn('threshold', payload)
         self.assertEqual(payload['min_trades'], 100)
         self.assertEqual(payload['activated_cells'], 3)
         self.assertEqual(payload['deactivated_cells'], 7)
@@ -424,7 +427,7 @@ class TestStampLastApplied(unittest.TestCase):
             def cursor(self, cursor_factory=None):
                 raise RuntimeError('db down')
         conn = BoomConn()
-        ok = aa.stamp_last_applied(conn, 0.5, None, 0, 0)
+        ok = aa.stamp_last_applied(conn, None, 0, 0)
         self.assertFalse(ok)
         self.assertTrue(conn.rolled_back)
         self.assertFalse(conn.committed)
@@ -440,18 +443,24 @@ class TestBenchmarkSleeveAlwaysOn(unittest.TestCase):
         return FakeConn([{'run_id': 'r1'}, [], rows])
 
     def test_always_on_makes_every_regime_eligible_but_keeps_diag(self):
-        elig, diag = aa.compute_eligible(self._conn(), 'S_beta_spy', threshold=1.0,
-                                         instrument_class='etp', always_on=True)
+        # 2026-09-25 bench-relative: `threshold` is retired; explicit
+        # bench=1.0 for every regime reproduces this test's original
+        # boundary (LOW_VOL/TRANSITIONING/HIGH_VOL below, CRISIS above).
+        bench = {r: 1.0 for r in aa.CANONICAL_REGIMES}
+        elig, diag = aa.compute_eligible(self._conn(), 'S_beta_spy',
+                                         instrument_class='etp', always_on=True, bench=bench)
         self.assertEqual(elig, {r: True for r in aa.CANONICAL_REGIMES})
-        self.assertFalse(diag['LOW_VOL']['eligible'])      # slider verdict still recorded
+        self.assertFalse(diag['LOW_VOL']['eligible'])      # bench-relative verdict still recorded
         self.assertTrue(diag['CRISIS']['eligible'])
 
     def test_default_is_unchanged(self):
-        elig, _ = aa.compute_eligible(self._conn(), 'S_beta_spy', threshold=1.0, instrument_class='etp')
+        bench = {r: 1.0 for r in aa.CANONICAL_REGIMES}
+        elig, _ = aa.compute_eligible(self._conn(), 'S_beta_spy',
+                                      instrument_class='etp', bench=bench)
         self.assertEqual(elig, {'LOW_VOL': False, 'TRANSITIONING': False, 'HIGH_VOL': False, 'CRISIS': True})
 
     def test_no_run_is_still_skipped(self):
-        elig, diag = aa.compute_eligible(FakeConn([None]), 'S_beta_spy', threshold=1.0, always_on=True)
+        elig, diag = aa.compute_eligible(FakeConn([None]), 'S_beta_spy', always_on=True)
         self.assertIsNone(elig)
         self.assertEqual(diag, {})
 
@@ -465,5 +474,5 @@ class TestBenchmarkSleeveAlwaysOn(unittest.TestCase):
         cur2 = FakeCursor([None, None])
         aa._apply_regime(cur2, 'S_y', 'LOW_VOL', True, {}, sharpe=1.2, trade_count=300,
                          threshold=1.0, min_trades=100)
-        self.assertTrue(any('rule=qualifies(>0·classDD·trades)+slider' in str(p)
+        self.assertTrue(any('rule=qualifies(>0·classDD·trades)+bench_relative' in str(p)
                             for sql, p in cur2.executed if 'strategy_regime_param_changes' in sql))

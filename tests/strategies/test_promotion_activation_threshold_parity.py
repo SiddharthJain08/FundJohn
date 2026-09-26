@@ -5,9 +5,10 @@ The candidate->live PROMOTION gate lives in JS (`src/lib/promotion_service.js`,
 in Python and derives its numbers from `strategies.lifecycle.PROMOTION_THRESHOLDS`
 via `backtest.regime_qualification.class_thresholds()`.
 
-Operator policy: activation is promotion's gate PLUS the min-Sharpe slider on
-top (`pipeline_config.strategy_activation_min_sharpe`) — so the two must agree
-on every underlying threshold, including the 2026-07-27 Calmar escape hatch on
+Operator policy: activation is promotion's gate PLUS a bench-relative leg on
+top (sharpe[r] >= S_beta_spy's own per-regime Sharpe, spec 2026-09-25-
+activation-bench-relative — replaces the retired min-Sharpe slider) — so the
+two must agree on every underlying threshold, including the 2026-07-27 Calmar escape hatch on
 the drawdown leg. The JS side is a HAND-MAINTAINED mirror whose own header says
 "keep in sync"; before this test, nothing enforced that. Editing lifecycle.py
 moved activation automatically while promotion silently kept the old values,

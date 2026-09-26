@@ -356,7 +356,7 @@ async function main() {
   // sleeve; promotes into exactly the qualifying regimes), then serially
   // pushes staging strategies through the fused build+backtest pipeline
   // within a time budget (leftovers roll to next Sunday), then runs ONE
-  // activation-slider apply + ONE weights rebuild. Never blocks phases 5–8:
+  // bench-relative activation apply + ONE weights rebuild. Never blocks phases 5–8:
   // any failure here is logged and the run still closes out.
   let autoApproval = null;
   try {
