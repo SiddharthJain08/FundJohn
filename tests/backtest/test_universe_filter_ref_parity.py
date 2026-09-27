@@ -21,8 +21,15 @@ parquet, no live engine/backtest run):
               -> backtest.precomputed_resolver.PrecomputedResolver, reading a
               frozen tier_liquid membership snapshot built (in this test) by
               applying the SAME tier_liquid predicate to the SAME synthetic
-              metadata -- exactly mirroring how the real offline artifact is
-              built from ticker_metadata_snapshots.
+              metadata -- confirmed (by reading scripts/build_tier_membership.
+              py:41-52) to mirror how the real offline artifact is built:
+              tiers_for_rows() applies each ladder predicate directly to
+              TickerMetadata rows after a coverage-floor check, no
+              intermediate "cap" step (that's a live-resolver-only concept,
+              a no-op here since the predicate itself already IS tier_liquid).
+              This test omits the coverage floor deliberately -- it's
+              orthogonal to the predicate-parity question and has no
+              backtest-side analog either.
 
 Honesty note (do not oversell this as "engine == backtest on everything"):
 the live engine's mirror-clamp (SP-7 spec D3) passes non-equity / absent-
