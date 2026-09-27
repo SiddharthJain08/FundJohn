@@ -77,8 +77,14 @@ ENV_GATE = 'OPENCLAW_ACTIVATION_ASSIGNER'
 # (Task 2, spec 2026-09-25-activation-bench-relative §3): eligibility no
 # longer reads it at all, so a slider row moving is no longer a pending
 # reason. The row itself is left in pipeline_config, unread (append-only).
-# The min-TRADES slider is UNCHANGED.
-SLIDER_KEYS = ('strategy_activation_min_trades',)
+# The min-TRADES slider is UNCHANGED. strategy_activation_excess_sharpe (the
+# EXCESS slider, spec 2026-09-25-activation-bench-relative §8 / Amendment 1,
+# Task 4) is a NEW re-apply trigger: a newer excess row than the marker
+# means eligibility was derived at a different threshold than what's now
+# saved, so the daily activation step must re-derive it -- this reuses the
+# existing generic "any SLIDER_KEYS row newer than the marker" loop below
+# unchanged; only the key tuple grew.
+SLIDER_KEYS = ('strategy_activation_min_trades', 'strategy_activation_excess_sharpe')
 MARKER_KEY = 'strategy_activation_last_applied'
 STEP = 'activation'
 

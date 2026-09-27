@@ -129,6 +129,23 @@ def test_pending_when_min_trades_newer_than_marker():
     assert len(st['reasons']) == 1 and 'min_trades=150' in st['reasons'][0]
 
 
+def test_pending_when_excess_newer_than_marker():
+    # Amendment 1 §8 / Task 4: the EXCESS slider (strategy_activation_
+    # excess_sharpe) is a NEW SLIDER_KEYS member -- a fresh row newer than
+    # the marker marks the step pending, exactly like min-trades above.
+    conn = FakeConn([('strategy_activation_excess_sharpe', '0.30', T1), _marker(T0)])
+    st = aa.pending_state(conn)
+    assert st['pending'] is True
+    assert len(st['reasons']) == 1 and 'strategy_activation_excess_sharpe=0.30' in st['reasons'][0]
+
+
+def test_not_pending_when_excess_older_than_marker():
+    conn = FakeConn([('strategy_activation_excess_sharpe', '0.30', T0 - dt.timedelta(days=1)),
+                     _marker(T0)])
+    st = aa.pending_state(conn)
+    assert st['pending'] is False
+
+
 def test_pending_when_marker_missing():
     conn = FakeConn([('strategy_activation_min_sharpe', '0.5', T0)])
     st = aa.pending_state(conn)
