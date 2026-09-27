@@ -349,7 +349,9 @@ async function run(opts, deps = {}) {
   const now = deps.now || (() => Date.now());
   const pricesPath = deps.pricesPath || PRICES_PATH;
   const calendarPath = deps.calendarPath || CALENDAR_PATH;
-  const readPanel = deps.readPanel || ((args) => readTradingPanel(args));
+  const root = deps.root || ROOT;
+  const pythonBin = deps.pythonBin || PYTHON_BIN;
+  const readPanel = deps.readPanel || ((args) => readTradingPanel({ ...args, root, pythonBin }));
   const writeMarginMs = deps.writeMarginMs ?? DEFAULT_WRITE_MARGIN_MS;
 
   const STOP_AT = deadlineTs(opts.deadline, now());
@@ -407,6 +409,17 @@ async function run(opts, deps = {}) {
   }
 
   // ---- apply path: only now touch store/collector (Postgres + Alpaca) ----
+  if (process.env.OPENCLAW_DRY_RUN === '1') {
+    // store.js has its OWN dry-run gate (distinct from this script's --dry-run):
+    // with this env var set, flushPrices() no-ops and resolves {flushed:0,
+    // total_after:0, dry_run:true} instead of throwing — which would otherwise
+    // look like a silent, successful, zero-row apply. Refuse outright instead
+    // of relying solely on the per-flush check below to catch it.
+    throw new Error(
+      `OPENCLAW_DRY_RUN=1 is set in the environment — store.flushPrices() would silently ` +
+        `no-op instead of writing. Unset it before running --apply.`
+    );
+  }
   const store = deps.store || require(path.join(ROOT, 'src/pipeline/store'));
   const collector = deps.collector || require(path.join(ROOT, 'src/pipeline/collector'));
 
@@ -442,23 +455,57 @@ async function run(opts, deps = {}) {
     });
     totalCalls += calls;
 
+    // Re-check AFTER the fetch, BEFORE the flush: fillPricesAlpacaBatch can
+    // fall back to per-ticker calls (up to `flushEvery` of them, each up to
+    // ~30s) for a whole slice, so the cutoff can be crossed mid-slice even
+    // though it wasn't at the top of the loop. Do not flush past it — the
+    // just-fetched rows sit only in store's in-memory buffer (nothing
+    // durable), so dropping them here just means a re-run re-fetches that
+    // slice from Alpaca; safe, if wasteful of API calls.
+    if (now() >= FETCH_CUTOFF) {
+      console.warn(
+        `[refill] deadline margin reached mid-slice — DROPPING ${slice.length} tickers' buffered rows ` +
+          `instead of flushing, to stay clear of the ${opts.deadline} UTC deadline. Re-run to pick them up ` +
+          `(idempotent — nothing was written).`
+      );
+      stoppedOnDeadline = true;
+      break;
+    }
+
     const res = await store.flushPrices();
-    if (res && res.flushed) {
-      const expectAfter = expectedTotal + res.flushed;
+    if (res === 0 || res === null || res === undefined) {
+      // Nothing was buffered (e.g. every item in this slice genuinely has no
+      // bars — a holiday for that ticker, or already-covered by a prior slice
+      // in the same run). Nothing to check or log.
+    } else if (typeof res !== 'object') {
+      throw new Error(`[refill] flushPrices() returned an unexpected value (${JSON.stringify(res)}) — aborting.`);
+    } else if (res.dry_run) {
+      // store.js's OWN dry-run gate (OPENCLAW_DRY_RUN=1), distinct from this
+      // script's --dry-run: flushPrices() no-op'd instead of writing. The
+      // upfront env check above should have caught this before we got here;
+      // this is defense-in-depth in case the env var changed mid-run.
+      throw new Error(
+        `[refill] flushPrices() returned dry_run:true (OPENCLAW_DRY_RUN=1 in the environment) — ` +
+          `it did NOT write. Aborting instead of silently reporting a successful apply.`
+      );
+    } else {
+      const flushed = res.flushed || 0;
+      const expectAfter = expectedTotal + flushed;
       if (res.total_after !== expectAfter) {
         throw new Error(
           `[refill] FLUSH INVARIANT VIOLATED: expected total_after=${expectAfter} ` +
-            `(prev ${expectedTotal} + flushed ${res.flushed}), got ${res.total_after}. ` +
-            `Aborting — check for a concurrent writer (the 20:15Z collect / redeploy) or ` +
-            `OPENCLAW_DRY_RUN=1 leaking into this shell.`
+            `(prev ${expectedTotal} + flushed ${flushed}), got ${res.total_after}. ` +
+            `Aborting — check for a concurrent writer (the 20:15Z collect / redeploy).`
         );
       }
       expectedTotal = res.total_after;
-      console.log(
-        `[refill] flushed ${res.flushed} rows | master total ${expectedTotal} | ` +
-          `${Math.min(i + opts.flushEvery, items.length)}/${items.length} items | ${errors} err | ` +
-          `rss=${Math.round(process.memoryUsage().rss / 1048576)}MB`
-      );
+      if (flushed) {
+        console.log(
+          `[refill] flushed ${flushed} rows | master total ${expectedTotal} | ` +
+            `${Math.min(i + opts.flushEvery, items.length)}/${items.length} items | ${errors} err | ` +
+            `rss=${Math.round(process.memoryUsage().rss / 1048576)}MB`
+        );
+      }
     }
   }
 
@@ -493,7 +540,15 @@ async function main() {
     return;
   }
   try {
-    await run(opts);
+    const result = await run(opts);
+    if (result && result.stoppedOnDeadline) {
+      // Partial success: some items were fetched but the run stopped before
+      // covering everything. Exit non-zero so a scripted runbook can't treat
+      // this the same as a clean, complete pass.
+      console.error(`[refill] stopped early on the deadline guard — re-run to finish (idempotent).`);
+      process.exit(3);
+      return;
+    }
     process.exit(0);
   } catch (e) {
     console.error(`[refill] FATAL: ${e.message}`);

@@ -321,6 +321,54 @@ test('run(): deadline guard aborts before the first flush when the write-margin 
   assert.equal(result.fetched, 0);
 });
 
+test('run(): deadline crossed DURING a slow fetch (e.g. per-ticker fallback) is caught before the flush, not just before the next slice', async () => {
+  const opts = parseArgs(['--from', '2026-09-15', '--to', '2026-09-16', '--apply', '--flush-every', '10']);
+  const panel = {
+    sessions: ['2026-09-15', '2026-09-16'],
+    anchor_before: '2026-09-14',
+    anchor_after: '2026-09-17',
+    rows: [
+      ['T1', '2026-09-14'], ['T1', '2026-09-17'],
+      ['T2', '2026-09-14'], ['T2', '2026-09-17'],
+    ],
+    total_rows: 1000,
+    peak_rss_kb: 1000,
+  };
+
+  const writeMarginMs = 60_000; // 1 minute, for simple arithmetic
+  let currentNow = FIXED_MORNING; // well before today's 19:30 UTC deadline
+  const deadlineAt = deadlineTs(opts.deadline, currentNow);
+  const fetchCutoff = deadlineAt - writeMarginMs;
+
+  let flushCalls = 0;
+  const result = await run(opts, {
+    skipPreflight: true,
+    now: () => currentNow,
+    writeMarginMs,
+    readPanel: () => panel,
+    collector: {
+      // Simulates a slow fetch (e.g. a multi-bars chunk failure falling back
+      // to per-ticker calls) that eats the remaining margin entirely: by the
+      // time it returns, the cutoff has already elapsed.
+      fillPricesAlpacaBatch: async (items, { onTicker }) => {
+        for (const it of items) await onTicker(it.ticker, 1, null);
+        currentNow = fetchCutoff + 1000;
+        return { calls: items.length };
+      },
+    },
+    store: {
+      flushPrices: async () => {
+        flushCalls++;
+        return { flushed: 2, total_after: panel.total_rows + 2 };
+      },
+    },
+  });
+
+  assert.equal(flushCalls, 0, 'flushPrices must not run once the fetch itself crossed the cutoff');
+  assert.equal(result.stoppedOnDeadline, true);
+  assert.equal(result.fetched, 2, 'onTicker still fired for the in-flight slice; only the flush was skipped');
+});
+
 // ── run(): flush slicing follows --flush-every ──────────────────────────────
 
 test('run(): apply path slices items by --flush-every and flushes once per slice', async () => {
@@ -405,6 +453,33 @@ test('run(): aborts loudly when flushPrices() total_after does not match prev + 
         },
       }),
     /FLUSH INVARIANT VIOLATED/
+  );
+});
+
+test('run(): aborts when flushPrices() reports store.js\'s own OPENCLAW_DRY_RUN=1 no-op shape', async () => {
+  const opts = parseArgs(['--from', '2026-09-15', '--to', '2026-09-16', '--apply']);
+  const panel = makeSyntheticPanel();
+  await assert.rejects(
+    () =>
+      run(opts, {
+        skipPreflight: true,
+        now: () => FIXED_MORNING,
+        readPanel: () => panel,
+        collector: {
+          fillPricesAlpacaBatch: async (items, { onTicker }) => {
+            for (const it of items) await onTicker(it.ticker, 1, null);
+            return { calls: 1 };
+          },
+        },
+        store: {
+          // Exact shape store.js's _flush() returns when OPENCLAW_DRY_RUN=1
+          // is set in the environment: flushed=0 (falsy), so a naive
+          // `if (res && res.flushed)` guard would skip this silently and the
+          // apply would "succeed" having written nothing.
+          flushPrices: async () => ({ flushed: 0, total_after: 0, dry_run: true, would_have_written: 2 }),
+        },
+      }),
+    /dry_run|OPENCLAW_DRY_RUN/
   );
 });
 
