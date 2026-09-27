@@ -137,13 +137,15 @@ def artifact_dir(tmp_path):
     return d
 
 
-def _engine_universe(manifest_path):
+def _engine_universe(manifest_path, monkeypatch):
     """execution.live_universe.build_strategy_universes -- the function
     named in the task brief -- driven by a REAL UniverseResolver over the
     same synthetic metadata, with the SAME manifest file the backtest side
-    reads below."""
+    reads below. monkeypatch.setattr (not a raw mutation) so MANIFEST_PATH
+    is restored automatically at the end of the calling test, never leaking
+    into a later test that imports the same module object."""
     import execution.live_universe as lu
-    lu = _reload_with_manifest(lu, manifest_path)
+    monkeypatch.setattr(lu, 'MANIFEST_PATH', str(manifest_path))
 
     rows = [_Row(sym, meta) for sym, meta in SYNTHETIC_METADATA.items()]
     resolver = UniverseResolver(
@@ -170,11 +172,6 @@ class _Row:
         self.metadata = metadata
 
 
-def _reload_with_manifest(lu, manifest_path):
-    lu.MANIFEST_PATH = str(manifest_path)
-    return lu
-
-
 def _backtest_universe(manifest_path, artifact_dir, monkeypatch):
     """backtest.unified_backtest._bounded_resolver -- the static-universe
     seam named in the task brief -- with the new fallback opted in."""
@@ -185,10 +182,10 @@ def _backtest_universe(manifest_path, artifact_dir, monkeypatch):
     return sorted(resolver.resolve(STRATEGY_ID, AS_OF))
 
 
-def test_engine_resolves_tier_liquid_predicate(manifest_path):
+def test_engine_resolves_tier_liquid_predicate(manifest_path, monkeypatch):
     """No code change needed on the engine side -- pins the existing,
     already-generic behavior for this specific strategy's manifest entry."""
-    info = _engine_universe(manifest_path)
+    info = _engine_universe(manifest_path, monkeypatch)
     assert info['predicate'] == 'tier_liquid'
     assert info['adopted'] is True
     assert info['error'] is None
@@ -207,7 +204,7 @@ def test_engine_and_backtest_agree_on_the_clampable_equity_set(
     """THE parity proof: on the set of names the tier_liquid predicate
     actually governs (the six clampable equities), the live engine and the
     backtest produce the IDENTICAL ticker set for S_sparse_cca_mean_revert."""
-    engine_universe = set(_engine_universe(manifest_path)['universe'])
+    engine_universe = set(_engine_universe(manifest_path, monkeypatch)['universe'])
     backtest_universe = set(_backtest_universe(manifest_path, artifact_dir, monkeypatch))
 
     governed = set(SYNTHETIC_METADATA)  # AAA..FFF
@@ -220,7 +217,7 @@ def test_passthrough_is_the_one_documented_divergence(
     passthrough (non-equity / absent-from-metadata tickers) has no backtest
     analog when a resolver is active. The ONLY difference between the two
     sides' output is exactly the passthrough set -- nothing else leaks."""
-    engine_universe = set(_engine_universe(manifest_path)['universe'])
+    engine_universe = set(_engine_universe(manifest_path, monkeypatch)['universe'])
     backtest_universe = set(_backtest_universe(manifest_path, artifact_dir, monkeypatch))
 
     assert engine_universe - backtest_universe == set(PASSTHROUGH)
