@@ -81,7 +81,7 @@ own benchmark ticker with a dedicated benchmark sleeve, and judge crypto strateg
 vector on the crypto regime structure (`crypto_regime_states`) instead of the equity one. No code
 change proposed here; this is an operator-intent placeholder for a future spec.
 
-## 8. Amendment 1 — activation EXCESS over the benchmark (operator-ruled 2026-09-27 21:2x UTC)
+## 8. Amendment 1 — activation EXCESS over the benchmark (operator-ruled 2026-09-27 21:2x UTC) — **APPLIED 2026-09-27 23:11Z** (merge `30c3522b`; excess row seeded at 0; apply 0/0)
 Operator: "change the activation slider to an excess sharpe over the spy benchmark. It should look the same in the dashboard
 set to 0 for now to match recent developments with the ability to deactivate cells in the same way if the activation excess
 is increased beyond 0."
