@@ -431,11 +431,17 @@ class TestHysteresisBand(unittest.TestCase):
         self.assertEqual(diag['HIGH_VOL']['band_floor'], 0.43)
 
     def test_diag_carries_the_rule_literal(self):
+        # Amendment 1 (spec 2026-09-25-activation-bench-relative-spec.md §8):
+        # the literal gained a trailing '+excess' segment when the EXCESS
+        # slider landed (Task 4) -- unconditionally, not just when excess !=
+        # 0.0 -- since the rule now always includes an excess term (0.0 by
+        # default). See tests/backtest/test_activation_assigner_excess.py
+        # for the excess-specific pin/shift tests.
         bench = {r: 0.5 for r in aa.CANONICAL_REGIMES}
         rows = [_regime_row('LOW_VOL', 0.9, 150)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, [], rows])
         _, diag = aa.compute_eligible(conn, 'S_test', bench=bench)
-        self.assertEqual(diag['LOW_VOL']['rule'], 'qualifies(>0·classDD·trades)+bench_relative')
+        self.assertEqual(diag['LOW_VOL']['rule'], 'qualifies(>0·classDD·trades)+bench_relative+excess')
 
 
 # ── Scenario 3: class-gate failure deactivates even inside the band ────────
@@ -675,8 +681,12 @@ class TestNotifyContent(unittest.TestCase):
 class TestDryRunBenchOutput(unittest.TestCase):
     # Transcribed verbatim from src/channels/api/activation_preview.js so
     # the new lines are proven to collide with none of the dashboard's
-    # pinned parsers.
-    HEADER_RE = re.compile(r'^\[activation_assigner\] threshold=([-+\d.eE]+) min_trades=(\d+) dry_run=(\w+) strategies=(\d+)\s*$')
+    # pinned parsers. HEADER_RE's trailing `excess=` group is OPTIONAL
+    # (Amendment 1 §8, Task 4): an old-shape header (no excess=) still
+    # matches, and the new shape's extra token is captured, not required.
+    # SUMMARY_RE is deliberately left byte-for-byte identical -- the brief
+    # only extends the header, not the summary.
+    HEADER_RE = re.compile(r'^\[activation_assigner\] threshold=([-+\d.eE]+) min_trades=(\d+) dry_run=(\w+) strategies=(\d+)(?: excess=([-+\d.eE]+))?\s*$')
     DETAIL_RE = re.compile(r'^\[activation_assigner\]\s+(\S+): (LOW_VOL: .+)$')
     SKIP_RE   = re.compile(r'^\[activation_assigner\]\s+SKIP\s+\S+:')
     ERROR_RE  = re.compile(r'^\[activation_assigner\]\s+ERROR\s+\S+:')
@@ -685,6 +695,10 @@ class TestDryRunBenchOutput(unittest.TestCase):
         r'(\d+) skipped \(no corrected backtest\), (\d+) cell\(s\) activated, '
         r'(\d+) cell\(s\) deactivated, (\d+) newly-dormant strateg(?:y|ies)'
         r'(?: \(([^)]*)\))?, threshold=([-+\d.eE]+), min_trades=(\d+), dry_run=(\w+), errors=(\d+)\s*$'
+    )
+    THRESHOLDS_RE = re.compile(
+        r'^\[activation_assigner\] thresholds: LOW_VOL=([-+\d.eE]+) TRANSITIONING=([-+\d.eE]+) '
+        r'HIGH_VOL=([-+\d.eE]+) CRISIS=([-+\d.eE]+) \(excess=([-+\d.eE]+)\)\s*$'
     )
 
     def test_bench_vector_line_lists_the_vector_and_matches_no_pinned_regex(self):
@@ -726,6 +740,34 @@ class TestDryRunBenchOutput(unittest.TestCase):
                   '2 newly-dormant strategies (S_a, S_b), threshold=0.5, min_trades=100, '
                   'dry_run=True, errors=0')
         self.assertIsNotNone(self.SUMMARY_RE.match(summary))
+
+    def test_header_with_excess_token_still_matches_and_captures_it(self):
+        # Amendment 1 §8 (Task 4): the header line now ends with an
+        # append-only `excess=…` token. HEADER_RE's new trailing group must
+        # capture it, and the pre-existing groups must be unaffected.
+        header = '[activation_assigner] threshold=1.25 min_trades=100 dry_run=True strategies=278 excess=0.3'
+        m = self.HEADER_RE.match(header)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), '1.25')
+        self.assertEqual(m.group(4), '278')
+        self.assertEqual(m.group(5), '0.3')
+
+    def test_thresholds_line_lists_effective_comparator_and_matches_no_pinned_regex(self):
+        bench = {'LOW_VOL': 0.95, 'TRANSITIONING': 0.44, 'HIGH_VOL': 0.53, 'CRISIS': 1.58}
+        line = '[activation_assigner] ' + aa._fmt_thresholds(bench, 0.3)
+        self.assertIn('LOW_VOL=1.25', line)
+        self.assertIn('TRANSITIONING=0.74', line)
+        self.assertIn('HIGH_VOL=0.83', line)
+        self.assertIn('CRISIS=1.88', line)
+        self.assertIn('(excess=0.3)', line)
+        m = self.THRESHOLDS_RE.match(line)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), '1.25')
+        self.assertEqual(m.group(5), '0.3')
+        for regex in (self.HEADER_RE, self.DETAIL_RE, self.SUMMARY_RE):
+            self.assertIsNone(regex.match(line))
+        self.assertFalse(self.SKIP_RE.match(line))
+        self.assertFalse(self.ERROR_RE.match(line))
 
 
 if __name__ == '__main__':

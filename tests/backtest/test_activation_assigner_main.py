@@ -218,6 +218,114 @@ class TestMainNotifyAndBenchRegimeSource(unittest.TestCase):
         _args, kwargs = mock_stamp_last.call_args
         self.assertEqual(kwargs['bench_regime_source'], _BENCH_META['regime_source'])
 
+    def test_notify_relabel_decomposes_bench_excess_and_effective_threshold(self):
+        # Amendment 1 §8 (Task 4): a bug caught by advisor review -- the F2
+        # relabel used to write `bench_low_vol={display_threshold}`, but
+        # display_threshold is now bench+excess, not the raw bench. With
+        # excess=0.3 (_BENCH_VECTOR is 1.0 in every regime here) that would
+        # have posted `bench_low_vol=1.3` to Discord -- mislabeling the
+        # EFFECTIVE threshold as if it were the raw bench, with no excess
+        # number anywhere in the post. The fixed relabel must emit all
+        # three numbers separately, and must still carry NO `threshold=`
+        # substring (the stdout copy is the only place that token is
+        # pinned) and a thresholds_line kwarg (the full 4-regime companion,
+        # since this relabel only ever names LOW_VOL).
+        rc, _mock_stamp_last, mock_notify = self._run(
+            ['--all', '--dry-run', '--excess', '0.3', '--notify'])
+        self.assertEqual(rc, 0)
+        mock_notify.assert_called_once()
+        args, kwargs = mock_notify.call_args
+        notify_summary = args[0]
+        self.assertIn('bench_low_vol=1.0', notify_summary)
+        self.assertIn('excess=0.3', notify_summary)
+        self.assertIn('effective_low_vol=1.3', notify_summary)
+        self.assertNotIn('threshold=', notify_summary)
+        self.assertIn('thresholds:', kwargs['thresholds_line'])
+        self.assertIn('excess=0.3', kwargs['thresholds_line'])
+
+
+class TestMainExcessCliOverride(unittest.TestCase):
+    """Amendment 1 §8 (spec docs/specs/2026-09-25-activation-bench-relative-
+    spec.md, Task 4 brief): --excess is a DRY-RUN-ONLY preview override,
+    refused on any non-dry-run invocation (rc=1, before any DB connect --
+    the persisted pipeline_config row is the single source of truth for a
+    live apply), rejected outright if non-finite, and threaded into every
+    apply_one call on a dry-run. _FakeCursor.fetchone() always returns None,
+    so an OMITTED --excess resolves via get_activation_excess's own
+    missing-row fail-safe (0.0), not the CLI override -- covered here too
+    since it's the same resolution site."""
+
+    def _run(self, argv):
+        conn = _FakeConn()
+        patches = [
+            mock.patch.object(aa, 'psycopg2'),
+            mock.patch('execution.benchmark_sleeve.load_benchmark_sleeve_ids', return_value=set()),
+            mock.patch.object(aa, 'load_bench_sharpe', return_value=(_BENCH_VECTOR, _BENCH_META)),
+            mock.patch.object(aa, 'apply_one', return_value=_OK_RESULT),
+            mock.patch.object(aa, 'stamp_last_applied'),
+            mock.patch.object(aa, 'stamp_bench_sharpe_config'),
+            mock.patch.object(sys, 'argv', ['activation_assigner.py'] + argv),
+            mock.patch.dict(os.environ, {'POSTGRES_URI': 'postgres://fake/fake'}),
+        ]
+        with patches[0] as mock_psycopg2, patches[1], patches[2], \
+             patches[3] as mock_apply_one, patches[4] as mock_stamp_last, \
+             patches[5] as mock_stamp_bench, patches[6], patches[7]:
+            mock_psycopg2.connect.return_value = conn
+            rc = aa.main()
+        return rc, mock_psycopg2, mock_apply_one, mock_stamp_last, mock_stamp_bench
+
+    def test_excess_with_all_non_dry_run_is_refused_before_any_db_connect(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc, mock_psycopg2, mock_apply_one, _stamp_last, _stamp_bench = self._run(
+                ['--all', '--excess', '0.3'])
+        self.assertEqual(rc, 1)
+        mock_psycopg2.connect.assert_not_called()
+        mock_apply_one.assert_not_called()
+        self.assertIn('--excess', buf.getvalue())
+
+    def test_excess_with_strategy_id_non_dry_run_is_also_refused(self):
+        # The brief's D-clause names only "--excess with --all non-dry-run
+        # refused"; this locks in the broader (advisor-reviewed) reading --
+        # "--excess is dry-run only" applies regardless of --all/
+        # --strategy-id, so a --strategy-id live apply can't write
+        # eligibility under an excess that was never persisted either.
+        rc, mock_psycopg2, mock_apply_one, _stamp_last, _stamp_bench = self._run(
+            ['--strategy-id', 'S_test', '--excess', '0.3'])
+        self.assertEqual(rc, 1)
+        mock_psycopg2.connect.assert_not_called()
+        mock_apply_one.assert_not_called()
+
+    def test_non_finite_excess_is_rejected_even_on_dry_run(self):
+        rc, mock_psycopg2, mock_apply_one, _stamp_last, _stamp_bench = self._run(
+            ['--all', '--dry-run', '--excess', 'nan'])
+        self.assertEqual(rc, 1)
+        mock_psycopg2.connect.assert_not_called()
+        mock_apply_one.assert_not_called()
+
+    def test_excess_override_is_allowed_and_threaded_on_all_dry_run(self):
+        rc, _psycopg2, mock_apply_one, mock_stamp_last, mock_stamp_bench = self._run(
+            ['--all', '--dry-run', '--excess', '0.3'])
+        self.assertEqual(rc, 0)
+        mock_apply_one.assert_called_once()
+        self.assertEqual(mock_apply_one.call_args.kwargs['excess'], 0.3)
+        mock_stamp_last.assert_not_called()   # dry-run never stamps
+        mock_stamp_bench.assert_not_called()
+
+    def test_excess_override_is_allowed_and_threaded_on_strategy_id_dry_run(self):
+        rc, _psycopg2, mock_apply_one, _stamp_last, _stamp_bench = self._run(
+            ['--strategy-id', 'S_test', '--dry-run', '--excess', '-0.2'])
+        self.assertEqual(rc, 0)
+        mock_apply_one.assert_called_once()
+        self.assertEqual(mock_apply_one.call_args.kwargs['excess'], -0.2)
+
+    def test_omitted_excess_resolves_from_pipeline_config_and_is_threaded_and_stamped(self):
+        rc, _psycopg2, mock_apply_one, mock_stamp_last, _stamp_bench = self._run(['--all'])
+        self.assertEqual(rc, 0)
+        self.assertEqual(mock_apply_one.call_args.kwargs['excess'], 0.0)
+        mock_stamp_last.assert_called_once()
+        self.assertEqual(mock_stamp_last.call_args.kwargs['excess'], 0.0)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -141,6 +141,15 @@ BENCH_SLEEVE_FALLBACK_ID = 'S_beta_spy'
 # The old fixed MIN_TRADES=20 is retired.
 CONFIG_KEY_MIN_TRADES = 'strategy_activation_min_trades'
 
+# Activation EXCESS slider (spec Amendment 1, docs/specs/2026-09-25-
+# activation-bench-relative-spec.md §8, operator-ruled 2026-09-27): a single
+# global scalar added to the bench vector before the activate/deactivate
+# comparison (threshold[r] = bench[r] + excess). Default 0.0 reproduces the
+# §1/§5 bench-only rule byte-for-byte. Unlike CONFIG_KEY_MIN_TRADES/bench,
+# this is NOT per-regime and has no fail-safe tiering of its own -- missing/
+# malformed/non-finite always resolves to 0.0 (see get_activation_excess).
+EXCESS_KEY = 'strategy_activation_excess_sharpe'
+
 ACTOR = 'activation_assigner'
 
 # Last-applied marker (2026-08-22). Stamped by every NON-dry-run `--all` run
@@ -160,7 +169,8 @@ def stamp_last_applied(conn, min_trades, activated: int,
                        deactivated: int, trigger: str = 'manual',
                        bench_sharpe: Optional[dict] = None,
                        bench_run_id=None,
-                       bench_regime_source: Optional[dict] = None) -> bool:
+                       bench_regime_source: Optional[dict] = None,
+                       excess: Optional[float] = None) -> bool:
     """Upsert the last-applied marker. Non-fatal: returns False (and logs)
     on any failure — a marker miss only costs one redundant (idempotent)
     re-apply at the next daily cycle, never a trading day.
@@ -187,7 +197,16 @@ def stamp_last_applied(conn, min_trades, activated: int,
     apply's bench_sharpe vector -- lets a later reader (the dashboard bench
     card) tell WHICH regimes were a live sleeve observation vs a degraded
     fallback at apply time, distinct from whether the marker AS A WHOLE
-    predates the bench rule (benchCardPayload's `source` field, unrelated)."""
+    predates the bench rule (benchCardPayload's `source` field, unrelated).
+
+    excess (spec Amendment 1 §8): the global scalar slider actually in
+    force for THIS apply (get_activation_excess, or the --excess override
+    on a dry-run -- though a dry-run never reaches this function). None
+    (an older direct caller that doesn't pass it, or a pre-Amendment-1
+    stamp) is written explicitly rather than omitted, mirroring
+    bench_regime_source's own back-compat convention above -- a reader
+    (the dashboard excess card) treats a missing/null key the same as 0.0
+    (the rule was bench-only before this amendment, i.e. excess=0)."""
     payload = json.dumps({
         'min_trades': min_trades,
         'activated_cells': int(activated),
@@ -198,6 +217,7 @@ def stamp_last_applied(conn, min_trades, activated: int,
         'bench_run_id': bench_run_id,
         'bench_regime_source': bench_regime_source,
         'bench_hysteresis': ACTIVATION_HYSTERESIS,
+        'excess': excess,
     }, sort_keys=True)
     try:
         cur = conn.cursor()
@@ -363,6 +383,43 @@ def get_activation_min_trades(cur) -> Optional[int]:
     except Exception:
         pass
     return None
+
+
+def get_activation_excess(cur) -> float:
+    """Read strategy_activation_excess_sharpe from pipeline_config (spec
+    Amendment 1 §8): a single global scalar added to every regime's bench
+    value before the activate/deactivate comparison. Missing, malformed
+    (non-numeric), or non-finite (NaN/±inf) -> 0.0 -- the excess slider's
+    own fail-safe default, which is also the value that reproduces the
+    pre-Amendment-1 bench-only rule exactly (byte-identical decisions).
+
+    Unlike get_activation_min_trades (silent on failure -- that key's
+    fail-safe is "defer to the class gate", not a printed default), every
+    fail-safe branch here logs a WARN naming the reason: excess directly
+    shifts every regime's comparator, so a degraded read must never be
+    invisible to the operator the way a stale display number could be.
+
+    Same transaction caveat as get_activation_min_trades: callers must
+    rollback after a failure before further statements.
+    """
+    try:
+        cur.execute("SELECT value FROM pipeline_config WHERE key=%s", (EXCESS_KEY,))
+        row = cur.fetchone()
+    except Exception as e:
+        _log(f'WARN: {EXCESS_KEY} read failed ({e}); using excess=0.0')
+        return 0.0
+    if not row or row[0] is None:
+        _log(f'WARN: {EXCESS_KEY} not set; using excess=0.0')
+        return 0.0
+    try:
+        v = float(row[0])
+    except (TypeError, ValueError):
+        _log(f'WARN: {EXCESS_KEY} value {row[0]!r} is not numeric; using excess=0.0')
+        return 0.0
+    if not math.isfinite(v):
+        _log(f'WARN: {EXCESS_KEY} value {v} is non-finite; using excess=0.0')
+        return 0.0
+    return v
 
 
 # ── Bench-relative comparator (spec 2026-09-25-activation-bench-relative) ──
@@ -609,6 +666,18 @@ def _fmt_bench_diff(gained: dict, lost: dict) -> str:
         f'{r} +{gained.get(r, 0)}/-{lost.get(r, 0)}' for r in CANONICAL_REGIMES)
 
 
+def _fmt_thresholds(bench: dict, excess: float) -> str:
+    """Byte-shape for the 'thresholds:' stdout line (spec Amendment 1 §8):
+    the EFFECTIVE per-regime comparator (bench[r] + excess -- the exact
+    value _judge compares sharpe against) printed once per run so the
+    operator sees bench, excess, and the derived threshold together
+    without doing the arithmetic themselves. Deliberately does not match
+    HEADER_RE/DETAIL_RE/SUMMARY_RE/BENCH_VECTOR_RE/BENCH_DIFF_RE/WARN_RE
+    (no leading 'threshold=', no 'bench:'/'bench diff:'/'WARN:' prefix)."""
+    parts = ' '.join(f'{r}={round(bench[r] + excess, 10)}' for r in CANONICAL_REGIMES)
+    return f'thresholds: {parts} (excess={excess})'
+
+
 # ── Eligibility computation ─────────────────────────────────────────────────
 def _fetch_backtest_rows(conn, strategy_id: str):
     """DB-fetch prefix shared by compute_eligible/apply_one: the strategy's
@@ -658,28 +727,35 @@ def _fetch_backtest_rows(conn, strategy_id: str):
 
 
 def _judge(rows, gate: dict, eff_min_trades: int, bench: dict,
-          prior_eligible: dict, always_on: bool) -> tuple[Optional[dict], dict]:
+          prior_eligible: dict, always_on: bool, excess: float = 0.0) -> tuple[Optional[dict], dict]:
     """Pure per-regime eligibility judgment (no DB access) -- the shared
-    class gate AND the bench-relative leg with hysteresis (spec §5-A/B):
-        passes = class_gate AND (sharpe >= bench[r]                if not prior_eligible[r]
-                                  else sharpe >= bench[r] - ACTIVATION_HYSTERESIS)
+    class gate AND the bench-relative leg with hysteresis (spec §5-A/B,
+    Amendment 1 §8):
+        thr[r] = bench[r] + excess
+        passes = class_gate AND (sharpe >= thr[r]                if not prior_eligible[r]
+                                  else sharpe >= thr[r] - ACTIVATION_HYSTERESIS)
     Class-gate failure (sharpe not strictly >0, DD leg, trade floor)
     deactivates immediately regardless of the hysteresis band.
 
     `bench` MUST already be a fully-resolved {regime: float} vector (see
-    _resolve_bench / load_bench_sharpe). `prior_eligible` is {regime:
+    _resolve_bench / load_bench_sharpe). `excess` is the single global
+    scalar slider (Amendment 1 §8, get_activation_excess) -- 0.0 (the
+    default) makes thr[r] == bench[r] exactly, reproducing the §1/§5
+    bench-only rule byte-for-byte. `prior_eligible` is {regime:
     True|False|None} -- the strategy's CURRENT strategy_regime_params.
     eligible per cell; None and False both count as "not prior-eligible"
     (only an explicit prior True unlocks the loosened band -- a cell with
-    no prior row must clear the full, un-loosened bench).
+    no prior row must clear the full, un-loosened threshold).
 
     Returns (eligible_by_regime, diag) with the same contract as the old
-    compute_eligible: diag gains `bench` (the raw bench[r] used),
-    `band_floor` (the rounded, ready-to-compare deactivate-edge: bench[r]
-    - ACTIVATION_HYSTERESIS), `band_applied` (bool -- True only when the
-    cell is kept eligible SOLELY by the hysteresis band: prior True, class
-    gate passing, and band_floor <= sharpe < bench), and `rule` (the
-    literal audit-row rule string, spec §3)."""
+    compute_eligible: diag gains `bench` (the raw bench[r] used), `excess`
+    (this judgment's scalar), `threshold` (= round(bench[r] + excess, 10),
+    the actual activate-edge comparator), `band_floor` (the rounded,
+    ready-to-compare deactivate-edge: threshold[r] - ACTIVATION_HYSTERESIS),
+    `band_applied` (bool -- True only when the cell is kept eligible SOLELY
+    by the hysteresis band: prior True, class gate passing, and
+    band_floor <= sharpe < threshold), and `rule` (the literal audit-row
+    rule string, spec §3 / Amendment 1 §8)."""
     diag: dict[str, dict] = {}
     for r in rows:
         s = r['sharpe']
@@ -698,6 +774,15 @@ def _judge(rows, gate: dict, eff_min_trades: int, bench: dict,
         cal = r.get('calmar') if hasattr(r, 'get') else r['calmar']
         regime = r['regime_state']
         b = bench.get(regime, DEFAULT_MIN_SHARPE)
+        # Amendment 1 §8: thr is the EFFECTIVE comparator this cell is
+        # judged against -- bench shifted by the operator's excess slider.
+        # round(): same binary-float-artifact concern as band_floor below
+        # (e.g. 0.53 + 0.30 can land a few ULPs off 0.83). excess=0.0 (the
+        # default) makes thr == b exactly, so every downstream comparison
+        # is byte-identical to the pre-Amendment-1 bench-only rule.
+        # Review M1: with excess == 0 use b itself — round(b, 10) != b for a
+        # bench carrying more than 10 decimals, which would break byte-identity.
+        thr = b if excess == 0 else round(b + excess, 10)
         pe = prior_eligible.get(regime)
         # QUALIFIES (shared per-regime gate: >0 sharpe, class DD leg — flat
         # ceiling OR Calmar escape hatch under the hard cap (2026-07-27) —
@@ -706,23 +791,23 @@ def _judge(rows, gate: dict, eff_min_trades: int, bench: dict,
                      and s > gate['min_sharpe']
                      and dd_leg_passes(dd, cal, gate)
                      and n >= eff_min_trades)
-        # round(): a plain `b - ACTIVATION_HYSTERESIS` can land on a binary
+        # round(): a plain `thr - ACTIVATION_HYSTERESIS` can land on a binary
         # float artifact (0.53 - 0.10 == 0.43000000000000005) that would
         # spuriously deactivate a cell sitting exactly at the intended band
         # floor (review carry-over). Rounded once here and reused for both
         # the comparison and the audit-row threshold (apply_one).
-        band_floor = round(b - ACTIVATION_HYSTERESIS, 10)
+        band_floor = round(thr - ACTIVATION_HYSTERESIS, 10)
         if s is None:
             bench_leg = False
             band_applied = False
         else:
-            bench_leg = s >= (band_floor if pe else b)
-            band_applied = bool(pe) and class_gate and s < b and s >= band_floor
+            bench_leg = s >= (band_floor if pe else thr)
+            band_applied = bool(pe) and class_gate and s < thr and s >= band_floor
         passes = class_gate and bench_leg
         diag[regime] = {'sharpe': s, 'trade_count': n, 'max_dd_pct': dd, 'calmar': cal,
-                        'eligible': passes, 'bench': b, 'band_floor': band_floor,
-                        'band_applied': band_applied,
-                        'rule': 'qualifies(>0·classDD·trades)+bench_relative'}
+                        'eligible': passes, 'bench': b, 'excess': excess, 'threshold': thr,
+                        'band_floor': band_floor, 'band_applied': band_applied,
+                        'rule': 'qualifies(>0·classDD·trades)+bench_relative+excess'}
     if not diag:
         return None, {}
     if always_on:
@@ -737,6 +822,7 @@ def compute_eligible(conn, strategy_id: str, *,
                      instrument_class: str = 'equity',
                      always_on: bool = False,
                      bench: Optional[dict] = None,
+                     excess: float = 0.0,
                      prior_eligible: Optional[dict] = None) -> tuple[Optional[dict], dict]:
     """Return (eligible_by_regime, diag) for strategy_id's latest
     primary_window=TRUE run.
@@ -777,6 +863,11 @@ def compute_eligible(conn, strategy_id: str, *,
     always_on (Amendment 1 D-D1): benchmark sleeves are eligible in every
     canonical regime regardless of the bench rule; `diag[..]['eligible']`
     still records the bench-relative verdict per regime.
+
+    excess (spec Amendment 1 §8, get_activation_excess): the global scalar
+    added to bench[r] before the comparison (threshold[r] = bench[r] +
+    excess). Defaults to 0.0 -- omitting it reproduces the pre-Amendment-1
+    bench-only rule byte-for-byte (thr == bench exactly).
     """
     rows = _fetch_backtest_rows(conn, strategy_id)
     if rows is None:
@@ -785,7 +876,7 @@ def compute_eligible(conn, strategy_id: str, *,
     eff_min_trades = gate['min_trades'] if min_trades is None else min_trades
     resolved_bench = _resolve_bench(bench)
     resolved_prior = prior_eligible if prior_eligible is not None else {r: None for r in CANONICAL_REGIMES}
-    return _judge(rows, gate, eff_min_trades, resolved_bench, resolved_prior, always_on)
+    return _judge(rows, gate, eff_min_trades, resolved_bench, resolved_prior, always_on, excess=excess)
 
 
 def _load_prior(conn, strategy_id: str) -> dict:
@@ -833,13 +924,21 @@ def _apply_regime(cur, strategy_id: str, regime_state: str, new_eligible: bool,
                   threshold: float, min_trades: int,
                   max_dd_pct: Optional[float] = None,
                   instrument_class: str = 'equity',
-                  rule: str = 'qualifies(>0·classDD·trades)+bench_relative') -> str:
+                  bench: Optional[float] = None,
+                  excess: Optional[float] = None,
+                  rule: str = 'qualifies(>0·classDD·trades)+bench_relative+excess') -> str:
     """Write one (strategy, regime) row IFF it actually changes (or has no
     prior row yet). Returns the action taken/would-be-taken. Exact upsert
     pattern matched from eligibility_manager.py / server.js: 4-column
     INSERT + ON CONFLICT (strategy_id, regime_state) DO UPDATE SET
     eligible/set_at/set_by, preserving size_scalar/stop_pct/target_pct/
-    max_hold_days verbatim (this deriver owns ONLY the eligible flag)."""
+    max_hold_days verbatim (this deriver owns ONLY the eligible flag).
+
+    bench/excess (spec Amendment 1 §8): recorded separately in the audit
+    reason alongside `threshold` (= bench + excess, the value actually
+    compared against) so a reader of strategy_regime_param_changes can see
+    the decomposition, not just the derived number. Both default None for
+    a direct/test caller that only cares about `threshold`/`rule`."""
     before = prior.get(regime_state)
     before_eligible = before['eligible'] if before is not None else None
     action = _classify_action(before_eligible, new_eligible)
@@ -860,7 +959,7 @@ def _apply_regime(cur, strategy_id: str, regime_state: str, new_eligible: bool,
     after_json = _row_json(new_eligible)
     reason = (f'activation_assigner: sharpe={sharpe} n={trade_count} '
              f'dd={max_dd_pct} class={instrument_class} '
-             f'threshold={threshold} min_trades={min_trades} '
+             f'bench={bench} excess={excess} threshold={threshold} min_trades={min_trades} '
              f'rule={rule}')
 
     cur.execute("""
@@ -885,7 +984,8 @@ def _apply_regime(cur, strategy_id: str, regime_state: str, new_eligible: bool,
 def apply_one(conn, strategy_id: str, *,
              dry_run: bool = False, min_trades: Optional[int] = None,
              instrument_class: str = 'equity',
-             always_on: bool = False, bench: Optional[dict] = None) -> dict:
+             always_on: bool = False, bench: Optional[dict] = None,
+             excess: float = 0.0) -> dict:
     """Compute + (unless dry_run) write eligibility for one strategy.
 
     Returns: {status: 'ok'|'skipped_no_run', strategy_id, prior, new, diag,
@@ -903,6 +1003,11 @@ def apply_one(conn, strategy_id: str, *,
     loaded ONCE per run by main() and threaded through every apply_one
     call (not re-loaded per strategy). None falls back to
     DEFAULT_MIN_SHARPE for every regime (see _resolve_bench).
+
+    excess (spec Amendment 1 §8): the global scalar slider, loaded ONCE per
+    run by main() (get_activation_excess) and threaded through every
+    apply_one call exactly like bench. Defaults to 0.0 -- byte-identical to
+    the pre-Amendment-1 bench-only rule.
 
     Sequencing (hysteresis needs the strategy's CURRENT eligibility before
     it can judge a new one, unlike the old flat-threshold rule): fetch the
@@ -926,7 +1031,7 @@ def apply_one(conn, strategy_id: str, *,
                       for r in CANONICAL_REGIMES}
 
     eligible_by_regime, diag = _judge(rows, gate, eff_min_trades, resolved_bench,
-                                      prior_eligible, always_on)
+                                      prior_eligible, always_on, excess=excess)
     # rows was non-empty (checked above), so diag/eligible_by_regime are
     # never None here.
 
@@ -940,14 +1045,15 @@ def apply_one(conn, strategy_id: str, *,
             for r in CANONICAL_REGIMES:
                 d = diag.get(r, {})
                 # Audit rows record the per-regime comparator ACTUALLY used
-                # (spec §3), not the retired global slider: bench[r], or the
-                # hysteresis-loosened, rounded band_floor when this cell was
-                # kept eligible by the band. Read both from diag (same
-                # rounded value _judge already compared against) rather than
-                # recomputing here -- a second, unrounded `- ACTIVATION_
-                # HYSTERESIS` would drift from the band_floor that actually
-                # decided eligibility (review carry-over).
-                eff_threshold = d.get('bench', resolved_bench.get(r, DEFAULT_MIN_SHARPE))
+                # (spec §3, Amendment 1 §8): bench[r] + excess (`threshold`),
+                # or the hysteresis-loosened, rounded band_floor when this
+                # cell was kept eligible by the band. Read from diag (the
+                # same rounded values _judge already compared against)
+                # rather than recomputing here -- a second, unrounded
+                # `- ACTIVATION_HYSTERESIS` would drift from the band_floor
+                # that actually decided eligibility (review carry-over).
+                eff_bench = d.get('bench', resolved_bench.get(r, DEFAULT_MIN_SHARPE))
+                eff_threshold = d.get('threshold', round(eff_bench + excess, 10))
                 if not always_on and prior_eligible.get(r):
                     eff_threshold = d.get('band_floor', round(eff_threshold - ACTIVATION_HYSTERESIS, 10))
                 actions[r] = _apply_regime(
@@ -955,8 +1061,9 @@ def apply_one(conn, strategy_id: str, *,
                     sharpe=d.get('sharpe'), trade_count=d.get('trade_count'),
                     threshold=eff_threshold, min_trades=eff_min_trades,
                     max_dd_pct=d.get('max_dd_pct'), instrument_class=instrument_class,
+                    bench=eff_bench, excess=excess,
                     rule=('benchmark_sleeve_always_on' if always_on
-                          else 'qualifies(>0·classDD·trades)+bench_relative'))
+                          else 'qualifies(>0·classDD·trades)+bench_relative+excess'))
             conn.commit()
         except Exception:
             conn.rollback()
@@ -972,6 +1079,7 @@ def apply_one(conn, strategy_id: str, *,
 # ── Discord notify (best-effort, never raises) ──────────────────────────────
 def _notify_content(summary: str, newly_dormant: list, dry_run: bool,
                     bench_line: str = '', bench_diff_line: str = '',
+                    thresholds_line: str = '',
                     warn_lines: Optional[list] = None) -> str:
     """Pure assembly of the #botjohn-log post body (F1-b, fix round 1): the
     summary line, the `bench:` vector line, the `bench diff:` line, and
@@ -982,13 +1090,21 @@ def _notify_content(summary: str, newly_dormant: list, dry_run: bool,
     of the newly-dormant list so the 1900-char Discord clip below drops the
     newly-dormant names (already counted in the summary) before it drops a
     warning. No DB, no network -- pure string-in/string-out, unit-testable
-    standalone."""
+    standalone.
+
+    thresholds_line (spec Amendment 1 §8, Task 4): the full 4-regime
+    EFFECTIVE comparator (bench[r] + excess) -- the relabeled summary copy
+    below only ever names the LOW_VOL number, so this is the only place in
+    the Discord post an operator can see what excess actually did to every
+    OTHER regime's threshold too."""
     prefix = '[DRY-RUN] ' if dry_run else ''
     lines = [prefix + summary]
     if bench_line:
         lines.append(bench_line)
     if bench_diff_line:
         lines.append(bench_diff_line)
+    if thresholds_line:
+        lines.append(thresholds_line)
     if warn_lines:
         lines.extend(warn_lines)
     if newly_dormant:
@@ -998,6 +1114,7 @@ def _notify_content(summary: str, newly_dormant: list, dry_run: bool,
 
 def _notify_botjohn_log(summary: str, newly_dormant: list, dry_run: bool,
                         bench_line: str = '', bench_diff_line: str = '',
+                        thresholds_line: str = '',
                         warn_lines: Optional[list] = None) -> None:
     """Best-effort post to #botjohn-log. Mirrors regime_blended_sizer.py's
     _post_corr_cumsharpe_log / fold_report.py's webhook pattern: look up
@@ -1006,9 +1123,9 @@ def _notify_botjohn_log(summary: str, newly_dormant: list, dry_run: bool,
     python-urllib/* UA). NEVER raises — a Discord hiccup must not fail the
     weekly eligibility refresh or a manual CLI run.
 
-    bench_line/bench_diff_line/warn_lines (F1-b, fix round 1, all optional/
-    default-empty for back-compat with any other caller): see
-    _notify_content, which does the actual assembly."""
+    bench_line/bench_diff_line/thresholds_line/warn_lines (F1-b, fix round
+    1 + Amendment 1 §8, all optional/default-empty for back-compat with any
+    other caller): see _notify_content, which does the actual assembly."""
     try:
         url = None
         with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
@@ -1022,7 +1139,7 @@ def _notify_botjohn_log(summary: str, newly_dormant: list, dry_run: bool,
         import urllib.request as _ur
         content = _notify_content(summary, newly_dormant, dry_run,
                                   bench_line=bench_line, bench_diff_line=bench_diff_line,
-                                  warn_lines=warn_lines)
+                                  thresholds_line=thresholds_line, warn_lines=warn_lines)
         req = _ur.Request(
             url, data=json.dumps({'content': content}).encode(), method='POST',
             headers={'Content-Type': 'application/json',
@@ -1068,7 +1185,26 @@ def main() -> int:
     ap.add_argument('--trigger', default='manual',
                     help='Label recorded in the last-applied marker '
                          '(weekly_cron | sunday_auto_approval | daily_cycle | manual)')
+    # --excess (spec Amendment 1 §8): DRY-RUN ONLY preview override for
+    # pipeline_config.strategy_activation_excess_sharpe -- lets the operator
+    # preview a candidate excess before saving it via the dashboard PUT.
+    # Refused outright on any non-dry-run invocation (below, before the DB
+    # connect): the persisted pipeline_config row is the single source of
+    # truth for a live apply -- a --strategy-id or --all apply must never
+    # write eligibility/audit rows under an excess value that isn't the one
+    # actually saved.
+    ap.add_argument('--excess', type=float, default=None,
+                    help='DRY-RUN-ONLY override for the excess slider '
+                         '(pipeline_config.strategy_activation_excess_sharpe); '
+                         'refused on any non-dry-run invocation')
     args = ap.parse_args()
+
+    if args.excess is not None and not math.isfinite(args.excess):
+        _log(f'ERROR: --excess {args.excess} is not finite'); return 1
+    if args.excess is not None and not args.dry_run:
+        _log('ERROR: --excess is dry-run only -- refused on a non-dry-run invocation '
+             '(the persisted pipeline_config row is the single source of truth for a live apply)')
+        return 1
 
     uri = os.environ.get('POSTGRES_URI') or os.environ.get('DATABASE_URL')
     if not uri:
@@ -1083,6 +1219,16 @@ def main() -> int:
         cur1 = conn.cursor()
         resolved_min_trades = get_activation_min_trades(cur1)
         cur1.close()
+        conn.rollback()   # same clean-transaction guarantee as above
+
+    # excess: explicit --excess (dry-run only, validated above) > pipeline_config
+    # > 0.0 (get_activation_excess's own fail-safe default). Resolved once per
+    # run and threaded through every apply_one call below, exactly like bench.
+    resolved_excess = args.excess
+    if resolved_excess is None:
+        cur_e = conn.cursor()
+        resolved_excess = get_activation_excess(cur_e)
+        cur_e.close()
         conn.rollback()   # same clean-transaction guarantee as above
 
     if args.strategy_id:
@@ -1157,9 +1303,22 @@ def main() -> int:
     # remains printable even though the rule is class-aware.
     eff_min_trades = (resolved_min_trades if resolved_min_trades is not None
                       else class_thresholds('equity')['min_trades'])
-    display_threshold = bench_vector['LOW_VOL']
+    # display_threshold (Amendment 1 §8): now the LOW_VOL EFFECTIVE threshold
+    # (bench + excess), not the raw bench value -- still NOT read back by the
+    # eligibility rule anywhere (that's apply_one's own per-regime `bench`/
+    # `excess`/_judge's `thr`); this is a display-only convenience for the
+    # pinned header/summary `threshold=` token. round(): same artifact
+    # concern as _judge's own `thr` computation.
+    display_threshold = round(bench_vector['LOW_VOL'] + resolved_excess, 10)
+    # header line: PINNED shape (HEADER_RE) up through `strategies=…` --
+    # `excess=…` is a NEW token appended AFTER the existing fields
+    # (append-only; HEADER_RE's trailing group is optional so an old-shape
+    # line with no excess= still matches). The summary line below is NOT
+    # extended -- its `threshold=…` value still changes (same
+    # display_threshold variable) but its byte-shape (SUMMARY_RE) is
+    # completely unchanged, per the brief.
     _log(f'threshold={display_threshold} min_trades={eff_min_trades} dry_run={args.dry_run} '
-        f'strategies={len(sids)}')
+        f'strategies={len(sids)} excess={resolved_excess}')
 
     results = []
     n_errors = 0
@@ -1169,7 +1328,7 @@ def main() -> int:
                           min_trades=resolved_min_trades,
                           instrument_class=classes.get(sid, 'equity'),
                           always_on=(sid in bench_ids),
-                          bench=bench_vector)
+                          bench=bench_vector, excess=resolved_excess)
         except Exception as e:
             _log(f'  ERROR {sid}: {e}')
             try:
@@ -1214,6 +1373,14 @@ def main() -> int:
     bench_diff_line = _fmt_bench_diff(gained_by_regime, lost_by_regime)
     _log(bench_diff_line)
 
+    # Effective per-regime thresholds (spec Amendment 1 §8): bench[r] +
+    # excess for every canonical regime, so the operator sees the full
+    # 4-regime comparator (not just the LOW_VOL display_threshold above) in
+    # one line. Not part of any pinned shape -- a new, independently-parsed
+    # line (activation_preview.js THRESHOLDS_RE).
+    thresholds_line = _fmt_thresholds(bench_vector, resolved_excess)
+    _log(thresholds_line)
+
     summary = (
         f'activation_assigner summary: {n_ok} strategies evaluated, '
         f'{n_skipped} skipped (no corrected backtest), '
@@ -1229,18 +1396,30 @@ def main() -> int:
         # machine-parsed and byte-pinned (activation_preview.js
         # SUMMARY_RE) -- it stays exactly as printed to stdout. The
         # Discord post is read by a human directly, so relabel just THIS
-        # copy to name what the number actually is (the LOW_VOL bench
-        # value) without touching `summary` itself or its stdout line.
+        # copy to decompose the single `threshold=` number into what it's
+        # actually made of. Amendment 1 §8 (Task 4): `display_threshold` is
+        # now bench+excess, not the raw bench -- the old relabel
+        # (`bench_low_vol={display_threshold}`) would have mislabeled the
+        # EFFECTIVE threshold as if it were the raw bench value the moment
+        # excess != 0, with no excess number anywhere in the post. Emits
+        # all three separately; the substring `threshold=` must still be
+        # ABSENT from the result (test_notify_gets_relabeled_summary_
+        # bench_lines_and_warns asserts this -- the stdout copy is the only
+        # place that token is pinned).
         notify_summary = summary.replace(
-            f'threshold={display_threshold}', f'bench_low_vol={display_threshold}', 1)
+            f'threshold={display_threshold}',
+            f'bench_low_vol={bench_vector["LOW_VOL"]}, excess={resolved_excess}, '
+            f'effective_low_vol={display_threshold}', 1)
         # F1-b: the post used to carry only `summary` -- a degraded (tier-2
         # pipeline_config / tier-3 DEFAULT_MIN_SHARPE) bench comparator was
         # invisible to the operator unless they also read stdout. Now
-        # carries the bench: vector line, the bench diff: line, and every
-        # WARN: line _log collected this run.
+        # carries the bench: vector line, the bench diff: line, the
+        # thresholds: line (Amendment 1 §8 -- the full 4-regime effective
+        # comparator, since the relabel above only ever names LOW_VOL), and
+        # every WARN: line _log collected this run.
         _notify_botjohn_log(notify_summary, newly_dormant, args.dry_run,
                             bench_line=bench_vector_line, bench_diff_line=bench_diff_line,
-                            warn_lines=list(_WARN_LINES))
+                            thresholds_line=thresholds_line, warn_lines=list(_WARN_LINES))
 
     # Markers: only a clean, complete, non-dry-run apply counts as "applied".
     # A run with per-strategy errors leaves the old markers so the next
@@ -1253,7 +1432,8 @@ def main() -> int:
         if stamp_last_applied(conn, eff_min_trades, activated_cells,
                               deactivated_cells, trigger=args.trigger,
                               bench_sharpe=bench_vector, bench_run_id=bench_meta.get('run_id'),
-                              bench_regime_source=bench_meta.get('regime_source')):
+                              bench_regime_source=bench_meta.get('regime_source'),
+                              excess=resolved_excess):
             _log(f'stamped {LAST_APPLIED_KEY} (trigger={args.trigger})')
         if stamp_bench_sharpe_config(conn, bench_vector, regime_source=bench_meta.get('regime_source')):
             _log(f'stamped {CONFIG_KEY_BENCH_SHARPE} (fail-safe tier 2 vector)')

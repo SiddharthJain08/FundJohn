@@ -15,18 +15,28 @@
 // The min-TRADES slider is unchanged.
 //
 // The assigner is line-oriented; every line it owns is prefixed
-// `[activation_assigner] ` via its _log helper. The seven shapes we parse
+// `[activation_assigner] ` via its _log helper. The nine shapes we parse
 // (verbatim from activation_assigner.py main()/_fmt_diff/_fmt_bench_vector/
-// _fmt_bench_diff/_log):
+// _fmt_bench_diff/_fmt_thresholds/_log):
 //
-//   [activation_assigner] threshold=0.5 min_trades=20 dry_run=True strategies=149
+//   [activation_assigner] threshold=0.5 min_trades=20 dry_run=True strategies=149 excess=0.0
 //   [activation_assigner]   S_alpha: LOW_VOL: True->False (deactivated), TRANSITIONING: None->False (initialized), HIGH_VOL: False->False, CRISIS: True->True
 //   [activation_assigner]   SKIP  S_beta: no primary_window backtest with regime rows
 //   [activation_assigner]   ERROR S_gamma: <exception text>
 //   [activation_assigner] activation_assigner summary: 145 strategies evaluated, 4 skipped (no corrected backtest), 12 cell(s) activated, 33 cell(s) deactivated, 2 newly-dormant strategies (S_a, S_b), threshold=0.5, min_trades=20, dry_run=True, errors=0
 //   [activation_assigner] bench: sleeve=S_beta_spy source=registry run=r51b5b915 LOW_VOL=0.95 TRANSITIONING=0.44 HIGH_VOL=0.53 CRISIS=1.58
 //   [activation_assigner] bench diff: LOW_VOL +4/-1 TRANSITIONING +7/-0 HIGH_VOL +12/-0 CRISIS +0/-14
+//   [activation_assigner] thresholds: LOW_VOL=0.95 TRANSITIONING=0.44 HIGH_VOL=0.53 CRISIS=1.58 (excess=0.0)
 //   [activation_assigner] WARN: CRISIS bench sharpe missing from sleeve run r1; using last-applied pipeline_config vector
+//
+// Amendment 1 §8 (Task 4, spec docs/specs/2026-09-25-activation-bench-
+// relative-spec.md): the header line gained an append-only `excess=<x>`
+// token AFTER `strategies=N` (HEADER_RE's trailing group is optional, so an
+// old-shape header with no excess= still matches); `threshold=` in BOTH the
+// header and the summary now prints the EFFECTIVE threshold (bench[r] +
+// excess for LOW_VOL), not the raw bench value — but the summary's own
+// byte-shape (SUMMARY_RE) is completely unchanged, per the brief. The new
+// `thresholds:` line is the full 4-regime companion.
 //
 // The WARN: shape (F1-a, fix round 1) is emitted whenever a regime's bench
 // comparator degrades to the tier-2 pipeline_config fallback or the tier-3
@@ -57,7 +67,13 @@ const CANONICAL_REGIMES = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
 // above the cap stay exact; only the row list is truncated.
 const MAX_CHANGED_STRATEGIES = 500;
 
-const HEADER_RE = /^\[activation_assigner\] threshold=([-+\d.eE]+) min_trades=(\d+) dry_run=(\w+) strategies=(\d+)\s*$/;
+// HEADER_RE's trailing group is OPTIONAL (spec Amendment 1 §8, Task 4): the
+// assigner appends an append-only `excess=<x>` token AFTER `strategies=N`
+// (byte-shape unchanged for everything before it) -- an old-shape header
+// with no excess= still matches (group 5 is undefined then). SUMMARY_RE
+// below is deliberately left byte-for-byte unchanged: the brief only
+// extends the header, not the summary.
+const HEADER_RE = /^\[activation_assigner\] threshold=([-+\d.eE]+) min_trades=(\d+) dry_run=(\w+) strategies=(\d+)(?: excess=([-+\d.eE]+))?\s*$/;
 const DETAIL_RE = /^\[activation_assigner\]\s+(\S+): (LOW_VOL: .+)$/;
 const SKIP_RE   = /^\[activation_assigner\]\s+SKIP\s+\S+:/;
 const ERROR_RE  = /^\[activation_assigner\]\s+ERROR\s+\S+:/;
@@ -84,6 +100,15 @@ const CELL_RE = /(LOW_VOL|TRANSITIONING|HIGH_VOL|CRISIS): (True|False|None)->(Tr
 // sleeve sharpe. Captured verbatim (message only, prefix stripped) into
 // `warnings` so a degraded comparator is never invisible to the operator.
 const WARN_RE = /^\[activation_assigner\] WARN: (.+)$/;
+// [activation_assigner] thresholds: LOW_VOL=1.25 TRANSITIONING=0.74 HIGH_VOL=0.83 CRISIS=1.88 (excess=0.3)
+// (spec Amendment 1 §8, Task 4) -- the EFFECTIVE per-regime comparator
+// (bench[r] + excess, the exact value _judge compares sharpe against) for
+// every canonical regime in one line, plus the excess scalar that produced
+// it. Independent of the bench:/bench diff:/WARN:/HEADER/SUMMARY shapes.
+const THRESHOLDS_RE = new RegExp(
+  '^\\[activation_assigner\\] thresholds: LOW_VOL=([-+\\d.eE]+) TRANSITIONING=([-+\\d.eE]+) ' +
+  'HIGH_VOL=([-+\\d.eE]+) CRISIS=([-+\\d.eE]+) \\(excess=([-+\\d.eE]+)\\)\\s*$'
+);
 
 /**
  * Parse `python3 -m backtest.activation_assigner --all --dry-run` stdout.
@@ -91,6 +116,13 @@ const WARN_RE = /^\[activation_assigner\] WARN: (.+)$/;
  * Returns a structured diff:
  *   summary_found        — the authoritative summary line was present
  *   threshold/min_trades — from the summary (header fallback)
+ *   excess               — the excess slider value (Amendment 1 §8, Task 4):
+ *                          from the header's excess= token (the summary was
+ *                          not extended), falling back to the thresholds:
+ *                          line's own captured excess; null if neither line
+ *                          was present
+ *   thresholds           — {REGIME: bench[r] + excess} from the thresholds:
+ *                          line, or null if that line wasn't present
  *   evaluated/skipped/errors
  *   cells                — { activated, deactivated } totals (summary-preferred)
  *   per_regime           — per canonical regime:
@@ -124,6 +156,8 @@ function parseActivationDryRun(stdout) {
   let summaryLine = null;
   let bench = null;
   let benchDiff = null;
+  let thresholds = null;
+  let thresholdsExcess = null;
   let detailCount = 0, skipCount = 0, errorCount = 0, changedTruncated = false;
 
   for (const line of String(stdout || '').split('\n')) {
@@ -165,6 +199,9 @@ function parseActivationDryRun(stdout) {
       header = {
         threshold: parseFloat(m[1]), min_trades: parseInt(m[2], 10),
         dry_run: m[3] === 'True', strategies: parseInt(m[4], 10),
+        // Amendment 1 §8: undefined on an old-shape header (no excess=
+        // token) -- null, not NaN, so a caller's `!= null` check works.
+        excess: m[5] !== undefined ? parseFloat(m[5]) : null,
       };
       continue;
     }
@@ -201,6 +238,19 @@ function parseActivationDryRun(stdout) {
         HIGH_VOL:      { gained: parseInt(m[5], 10), lost: parseInt(m[6], 10) },
         CRISIS:        { gained: parseInt(m[7], 10), lost: parseInt(m[8], 10) },
       };
+      continue;
+    }
+    // spec Amendment 1 §8 (Task 4): the EFFECTIVE per-regime comparator
+    // (bench[r] + excess) for every canonical regime, plus the excess
+    // scalar that produced it -- the full 4-regime companion to the
+    // header's single-number (LOW_VOL-only) `threshold=`/`excess=` tokens.
+    if ((m = line.match(THRESHOLDS_RE))) {
+      thresholds = {
+        LOW_VOL: parseFloat(m[1]), TRANSITIONING: parseFloat(m[2]),
+        HIGH_VOL: parseFloat(m[3]), CRISIS: parseFloat(m[4]),
+      };
+      thresholdsExcess = parseFloat(m[5]);
+      continue;
     }
   }
 
@@ -234,6 +284,14 @@ function parseActivationDryRun(stdout) {
     summary_found: !!summary,
     threshold:  summary ? summary.threshold  : (header ? header.threshold  : null),
     min_trades: summary ? summary.min_trades : (header ? header.min_trades : null),
+    // Amendment 1 §8 (Task 4): the summary line was NOT extended with an
+    // excess= token (only the header was), so `excess` comes from the
+    // header first (the CLI's canonical value marker), falling back to the
+    // thresholds: line's own captured excess when the header is missing
+    // (e.g. truncated output) -- null when neither is present.
+    excess: (header && header.excess != null) ? header.excess
+          : (thresholds ? thresholdsExcess : null),
+    thresholds,
     evaluated:  summary ? summary.evaluated  : detailCount,
     skipped:    summary ? summary.skipped    : skipCount,
     errors:     summary ? summary.errors     : errorCount,
@@ -335,6 +393,92 @@ function benchCardPayload(markerRow, benchRow, defaultBand) {
   };
 }
 
+// ── Activation EXCESS slider (spec Amendment 1 §8, Task 4) ─────────────────
+// Replaces the removed min-Sharpe slider's control (same dashboard position/
+// look), bound to pipeline_config.strategy_activation_excess_sharpe via
+// PUT/GET /api/config/activation-excess-sharpe. See activation_assigner.py's
+// get_activation_excess for the server-side fail-safe this mirrors.
+const ACTIVATION_EXCESS_MIN     = -1.0;
+const ACTIVATION_EXCESS_MAX     = 2.0;
+const ACTIVATION_EXCESS_STEP    = 0.05;
+const ACTIVATION_EXCESS_DEFAULT = 0.0;
+
+/**
+ * Validate + clamp + round a raw PUT/dry-run-override body value to a legal
+ * excess: finite, in [-1.0, 2.0], rounded to the nearest 0.05 step. Returns
+ * null for anything that isn't a genuine number or numeric string --
+ * Number(null)/Number('')/Number(true)/Number([]) all coerce to 0, which
+ * would otherwise silently save/preview 0 for a missing or wrong-typed
+ * field instead of rejecting the request with a 400.
+ */
+function clampExcessValue(raw) {
+  if (raw == null) return null;
+  if (typeof raw === 'boolean' || Array.isArray(raw)) return null;
+  if (typeof raw !== 'number' && typeof raw !== 'string') return null;
+  if (typeof raw === 'string' && raw.trim() === '') return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  const clamped = Math.min(ACTIVATION_EXCESS_MAX, Math.max(ACTIVATION_EXCESS_MIN, n));
+  // *20/20 (not /0.05*0.05) to round to the nearest 0.05 step without a
+  // binary-float artifact (0.3 / 0.05 === 5.999999999999999 in IEEE-754;
+  // 0.3 * 20 === 6 exactly for every multiple of 0.05 in this range).
+  const stepped = Math.round(clamped * 20) / 20;
+  // toFixed(2) round-trip: the *20/20 arithmetic can still leave a residual
+  // (e.g. -0.05 + 0.35) a few ULPs off a clean 2-decimal value -- store and
+  // return exactly what a human would read back.
+  return Number(stepped.toFixed(2));
+}
+
+function _round10(x) {
+  return Math.round(x * 1e10) / 1e10;
+}
+
+/**
+ * Pure GET /api/config/activation-excess-sharpe response builder: the
+ * EXCESS slider's current saved value, the bench vector + hysteresis
+ * (delegates to benchCardPayload for those — same marker/benchRow
+ * arguments), the derived effective per-regime thresholds (bench[r] +
+ * excess), and `applied_excess` (the excess value actually baked into the
+ * LAST APPLY, from the marker's own `excess` field) so the dashboard's
+ * pending-re-apply indicator can light when the saved excess differs from
+ * what's actually live.
+ *
+ * excessRow: {value, updated_at} | null|undefined — pipeline_config.
+ * strategy_activation_excess_sharpe, same shape as markerRow/benchRow.
+ * Missing/malformed/non-finite -> ACTIVATION_EXCESS_DEFAULT (0.0), mirroring
+ * activation_assigner.get_activation_excess's own fail-safe.
+ */
+function excessCardPayload(markerRow, benchRow, excessRow, defaultBand) {
+  const base = benchCardPayload(markerRow, benchRow, defaultBand);
+  let excess = ACTIVATION_EXCESS_DEFAULT;
+  if (excessRow && excessRow.value != null) {
+    const n = Number(excessRow.value);
+    if (Number.isFinite(n)) excess = n;
+  }
+  let marker = null;
+  if (markerRow && markerRow.value != null) {
+    try { marker = JSON.parse(markerRow.value); } catch (_) { marker = null; }
+  }
+  // A marker predating Amendment 1 (or a direct caller that opted out) has
+  // no `excess` key at all -- that apply WAS the bench-only rule, i.e.
+  // excess=0, so a missing/non-finite field defaults to 0.0, never null
+  // (null would make every pre-Amendment-1 marker look permanently
+  // "pending" against any nonzero saved excess).
+  const markerExcess = marker ? Number(marker.excess) : NaN;
+  const appliedExcess = Number.isFinite(markerExcess) ? markerExcess : 0;
+  const thresholds = {};
+  for (const r of CANONICAL_REGIMES) {
+    const b = base.bench ? Number(base.bench[r]) : NaN;
+    thresholds[r] = Number.isFinite(b) ? _round10(b + excess) : null;
+  }
+  return {
+    ...base,
+    excess,
+    thresholds,
+    applied_excess: appliedExcess,
+  };
+}
+
 // PUT /api/config/activation-min-sharpe: REMOVED (Task 2). 410 Gone (the
 // resource existed and was intentionally, permanently retired) — not 404
 // (this isn't "never existed" or "wrong path").
@@ -351,4 +495,6 @@ module.exports = {
   parseActivationDryRun, CANONICAL_REGIMES,
   benchCardPayload, minSharpeGone, MIN_SHARPE_GONE_BODY,
   ACTIVATION_BENCH_HYSTERESIS_DEFAULT,
+  clampExcessValue, excessCardPayload,
+  ACTIVATION_EXCESS_MIN, ACTIVATION_EXCESS_MAX, ACTIVATION_EXCESS_STEP, ACTIVATION_EXCESS_DEFAULT,
 };

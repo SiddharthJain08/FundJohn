@@ -11,7 +11,8 @@ const { runAlpaca } = require('./alpaca_cli');
 const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
 const { buildStrategyRow } = require('./strategy_row');
 const { blendScope } = require('./blend_scope');
-const { parseActivationDryRun, benchCardPayload, minSharpeGone } = require('./activation_preview');
+const { parseActivationDryRun, benchCardPayload, minSharpeGone,
+       clampExcessValue, excessCardPayload } = require('./activation_preview');
 const { isRegimeEligibleNow, regimeForStrategy } = require('./regime_active');
 const { regimeFreshness } = require('./regime_freshness');
 const { realizedLeverage } = require('./leverage');
@@ -857,6 +858,58 @@ app.get('/api/config/activation-min-sharpe', async (req, res) => {
 // not a generic 200/404.
 app.put('/api/config/activation-min-sharpe', minSharpeGone);
 
+// ── Activation EXCESS slider (spec Amendment 1 §8, Task 4) ──────────────────
+// Operator-ruled 2026-09-27: "change the activation slider to an excess
+// sharpe over the spy benchmark ... set to 0 for now ... deactivate cells in
+// the same way if the activation excess is increased beyond 0." Replaces the
+// removed min-Sharpe slider's dashboard SLOT (same position/look), bound to
+// pipeline_config.strategy_activation_excess_sharpe -- a NEW key/path,
+// distinct from the retired strategy_activation_min_sharpe above (that PUT
+// stays 410; this is not a resurrection of it).
+//
+// GET: one query for all three candidate rows (marker + tier-2 bench
+// fallback + the excess row itself); excessCardPayload (activation_preview.js
+// — pure, DB-free, unit-tested standalone) layers {excess, thresholds,
+// applied_excess} on top of benchCardPayload's existing bench/hysteresis/
+// bench_notes/regime_source/source/applied_at/row_exists shape.
+app.get('/api/config/activation-excess-sharpe', async (req, res) => {
+  try {
+    const r = await dbQuery(
+      "SELECT key, value, updated_at FROM pipeline_config WHERE key IN ($1, $2, $3)",
+      ['strategy_activation_last_applied', 'strategy_activation_bench_sharpe',
+       'strategy_activation_excess_sharpe']);
+    const byKey = Object.fromEntries(r.rows.map(row => [row.key, row]));
+    res.json(excessCardPayload(
+      byKey.strategy_activation_last_applied, byKey.strategy_activation_bench_sharpe,
+      byKey.strategy_activation_excess_sharpe));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// PUT: validate finite, clamp to [-1.0, 2.0], round to the nearest 0.05
+// (clampExcessValue, shared with the dry-run override below so the two
+// paths can never disagree about what's "valid"). `pending: true` always --
+// a save here ALWAYS differs from whatever was last applied, or the row
+// never existed at all, so there is no "unchanged, no-op" case to special-
+// case (contrast with the min-trades slider's PUT, which doesn't compute
+// pending itself). The daily activation step (execution.activation_apply,
+// SLIDER_KEYS) re-derives eligibility against the new value at the next
+// compute (15:00 ET), with the hysteresis band, exactly like the min-Sharpe
+// slider used to.
+app.put('/api/config/activation-excess-sharpe', async (req, res) => {
+  const clamped = clampExcessValue(req.body && req.body.value);
+  if (clamped === null) {
+    return res.status(400).json({ error: 'value must be a finite number in [-1.0, 2.0]' });
+  }
+  try {
+    await dbQuery(`
+      INSERT INTO pipeline_config (key, value, description, updated_at)
+      VALUES ('strategy_activation_excess_sharpe', $1, 'Activation EXCESS slider (spec Amendment 1, docs/specs/2026-09-25-activation-bench-relative-spec.md §8): a global scalar added to the S_beta_spy per-regime bench vector before the activate/deactivate comparison (threshold[r] = bench[r] + excess). Range [-1.0, 2.0] in 0.05 steps; 0.00 (default) reproduces the bench-only rule byte-for-byte. Negative values loosen the rule below bench. Adjustable via dashboard.', NOW())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `, [String(clamped)]);
+    res.json({ excess: clamped, pending: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── Activation min-TRADES slider ────────────────────────────────────────────
 // The min-Sharpe slider that used to sit alongside this one is RETIRED
 // (2026-09-25, bench-relative activation) — this is the only activation
@@ -923,10 +976,27 @@ app.put('/api/config/activation-min-trades', async (req, res) => {
 // never called) — this endpoint is safe to hit at any time. Synchronous
 // (~seconds for ~150 strategies) with a hard 120s kill; one at a time via a
 // simple in-memory busy flag (second caller gets 409).
+//
+// Optional body {excess}: spec Amendment 1 §8 -- lets the operator preview a
+// candidate excess (e.g. the slider's current, UNSAVED position) before
+// writing it via PUT /api/config/activation-excess-sharpe. Validated with
+// the SAME clampExcessValue the PUT route uses (so the two paths never
+// disagree about "valid"); an invalid value is a 400, not a silent drop.
+// Never persists -- passed straight through as `--excess <n>` to the
+// assigner's own dry-run-only CLI flag (refused by the assigner itself on
+// any non-dry-run invocation, so this can never leak into a live apply).
 let _activationDryRunBusy = false;
 app.post('/api/activation/dry-run', (req, res) => {
   if (_activationDryRunBusy) {
     return res.status(409).json({ error: 'an activation dry-run is already running — try again in a moment' });
+  }
+
+  let excessOverride = null;
+  if (req.body && req.body.excess !== undefined && req.body.excess !== null) {
+    excessOverride = clampExcessValue(req.body.excess);
+    if (excessOverride === null) {
+      return res.status(400).json({ error: 'excess must be a finite number in [-1.0, 2.0]' });
+    }
   }
   _activationDryRunBusy = true;
 
@@ -934,9 +1004,11 @@ app.post('/api/activation/dry-run', (req, res) => {
   const path = require('path');
   const rootDir = path.resolve(__dirname, '../../..');
   // HARD INVARIANT (Phase 1e gate): --dry-run is non-negotiable. The argv is
-  // a hard-coded literal (no request-derived args) and the belt-and-braces
-  // guard below refuses to spawn if a future edit ever drops the flag.
+  // a hard-coded literal (no request-derived args other than the validated
+  // --excess override above) and the belt-and-braces guard below refuses to
+  // spawn if a future edit ever drops the flag.
   const args = ['-n', '19', 'python3', '-m', 'backtest.activation_assigner', '--all', '--dry-run'];
+  if (excessOverride !== null) args.push('--excess', String(excessOverride));
   if (!args.includes('--dry-run')) {
     _activationDryRunBusy = false;
     return res.status(500).json({ error: 'refusing to run activation assigner without --dry-run' });
@@ -4911,36 +4983,46 @@ body.rs-chat-locked{overflow:hidden}
       </div>
     </div>
 
-    <!-- Strategy Activation: bench-relative comparator (read-only) + the
-         min-TRADES slider + assigner dry-run preview.
-         As of 2026-09-25 (spec docs/specs/2026-09-25-activation-bench-
-         relative-spec.md) eligibility is sharpe[r] >= S_beta_spy's
-         per-regime Sharpe[r] (hysteresis band 0.10 on the deactivate
-         edge) — the min-Sharpe SLIDER is RETIRED; the first card below is
-         read-only, sourced from GET /api/config/activation-min-sharpe
-         (repurposed, same path, no longer a PUT target — see the 410
-         Gone on that verb). The min-TRADES slider is unchanged: binds
+    <!-- Strategy Activation: the EXCESS slider (spec Amendment 1 §8,
+         operator-ruled 2026-09-27) + the min-TRADES slider + assigner
+         dry-run preview.
+         eligibility is sharpe[r] >= S_beta_spy's per-regime Sharpe[r] +
+         excess (hysteresis band 0.10 on the deactivate edge, relative to
+         that shifted threshold). The min-Sharpe SLIDER stays RETIRED (410
+         Gone on its old PUT path); this card is a NEW slider in that same
+         dashboard slot, bound to a DIFFERENT key
+         (strategy_activation_excess_sharpe) via GET/PUT
+         /api/config/activation-excess-sharpe. Default 0.00 reproduces the
+         bench-only rule byte-for-byte. Deliberately NOT auto-saved on a
+         slider change (unlike the old min-Sharpe slider) — an accidental drag
+         must never silently queue a live deactivation at the next 15:00 ET
+         compute; the operator previews (button below, passes the slider's
+         CURRENT position as a dry-run-only override, nothing persisted)
+         and explicitly Saves. The min-TRADES slider is unchanged: binds
          pipeline_config.strategy_activation_min_trades via debounced PUT
          /api/config/activation-min-trades (same UX as the conviction
-         gates above). Preview POSTs /api/activation/dry-run — the server
-         only ever runs the assigner in dry-run mode; the LIVE apply
-         happens in the daily compute chain's 'activation' step (first
-         step, 15:00 ET same-day lane — only when the min-trades row or
-         the benchmark sleeve's own backtest is newer than the last apply;
-         2026-08-22 / bench trigger added 2026-09-25) and in the weekly
-         Mon 00:00 ET weekly_live_sharpe.js run
-         (OPENCLAW_ACTIVATION_ASSIGNER=1). -->
+         gates above). The LIVE apply happens in the daily compute chain's
+         'activation' step (first step, 15:00 ET same-day lane — only when
+         the min-trades row, the excess row, or the benchmark sleeve's own
+         backtest is newer than the last apply) and in the weekly Mon
+         00:00 ET weekly_live_sharpe.js run (OPENCLAW_ACTIVATION_
+         ASSIGNER=1). -->
     <div class="pf-section">
       <div class="pf-section-header">
-        <span>🎚️ Strategy Activation <span class="st-sub-label">bench-relative comparator applied on top of the qualification gate (&gt;0 Sharpe · class max-DD)</span></span>
+        <span>🎚️ Strategy Activation <span class="st-sub-label">excess Sharpe over S_beta_spy applied on top of the qualification gate (&gt;0 Sharpe · class max-DD)</span></span>
       </div>
       <div class="st-act-grid">
         <div class="st-sharpe-card">
           <div class="st-sharpe-card-head">
-            <span class="st-sharpe-card-regime">Activation bench (S_beta_spy regime Sharpe)</span>
-            <span class="st-sub-label">read-only</span>
+            <span class="st-sharpe-card-regime">Activation excess over S_beta_spy (regime Sharpe)</span>
+            <span class="st-sub-label">pipeline_config</span>
           </div>
           <div class="st-sharpe-card-value" id="st-act-val">—</div>
+          <input type="range" class="st-sharpe-card-slider" id="st-act-slider"
+                 min="-1" max="2" step="0.05" value="0" disabled />
+          <div class="st-sharpe-card-range"><span>-1.00</span><span>2.00</span></div>
+          <div class="st-sub-label" id="st-act-bench-line">—</div>
+          <button class="st-action-btn" id="st-act-save-btn" onclick="_actSaveExcess()" disabled>Save excess</button>
           <div class="st-sharpe-card-status" id="st-act-status"></div>
         </div>
         <!-- Sample-size floor. Was hardcoded at 100 in
@@ -4963,9 +5045,9 @@ body.rs-chat-locked{overflow:hidden}
         <div class="st-act-preview">
           <div class="st-act-preview-bar">
             <button class="st-action-btn" id="st-act-preview-btn" onclick="_actPreviewDryRun()">Preview (dry-run)</button>
-            <span class="st-sub-label">hypothetical — zero DB writes; compares current eligible flags (DB reality) vs what the assigner would set against the bench comparator above</span>
+            <span class="st-sub-label">hypothetical — zero DB writes; previews the slider's CURRENT position (even if unsaved) against the bench comparator above; compares current eligible flags (DB reality) vs what the assigner would set</span>
           </div>
-          <div id="st-act-preview-out"><div class="st-act-preview-empty">No preview yet — run a dry-run preview (bench-relative — no threshold to set).</div></div>
+          <div id="st-act-preview-out"><div class="st-act-preview-empty">No preview yet — run a dry-run preview.</div></div>
         </div>
       </div>
     </div>
@@ -9102,19 +9184,38 @@ async function _corrSharpeGatePut(regime, value, statEl) {
   }
 }
 
-// ── Strategy Activation: bench-relative comparator (read-only) + dry-run
-// preview ─────────────────────────────────────────────────────────────────
-// As of 2026-09-25 eligibility is bench-relative (spec docs/specs/2026-09-
-// 25-activation-bench-relative-spec.md): the "Activation min Sharpe" slider
-// this card used to bind is RETIRED. GET /api/config/activation-min-sharpe
-// (path unchanged, repurposed) now returns the S_beta_spy per-regime Sharpe
-// vector actually in force + the hysteresis band, read-only — no PUT, no
-// debounce, no save state. The Preview button still POSTs
-// /api/activation/dry-run — the server only ever shells the assigner with
-// --dry-run (the LIVE apply is the daily-cycle 'activation' step at the next
-// compute, plus the weekly Mon 00:00 ET run), and we render the
-// parsed prior→new eligibility diff: per-regime "eligible now" is DB
-// reality, everything else is hypothetical.
+// ── Strategy Activation: the EXCESS slider + dry-run preview ────────────────
+// spec Amendment 1 §8 (operator-ruled 2026-09-27): the removed "Activation
+// min Sharpe" slider's dashboard SLOT is reused for a NEW slider bound to a
+// DIFFERENT key (strategy_activation_excess_sharpe) via GET/PUT
+// /api/config/activation-excess-sharpe — the old path/PUT stays 410 Gone.
+// Deliberately NOT auto-saved when the slider moves (unlike the old
+// slider): the operator drags, watches the live-updating thresholds line,
+// Previews (passes the CURRENT slider position as a dry-run-only override —
+// nothing persisted) as many times as they like, then explicitly Saves. The
+// Preview button POSTs /api/activation/dry-run — the server only ever
+// shells the assigner with --dry-run (the LIVE apply is the daily-cycle
+// 'activation' step at the next compute, plus the weekly Mon 00:00 ET run)
+// — and we render the parsed prior→new eligibility diff: per-regime
+// "eligible now" is DB reality, everything else is hypothetical.
+let _actSaveInflight = false;
+let _actWired        = false;
+let _actLastCfg      = null;   // last GET response, for live client-side threshold recompute as the slider moves
+
+// Effective per-regime thresholds (bench[r] + excess) as a display line,
+// shared by the card's own status area and (via the same shape) reused
+// nowhere else — kept as a small pure formatter so _loadActivationCard and
+// the slider's live-update listener render identically.
+function _actBenchThresholdsLine(cfg) {
+  const b = cfg && cfg.bench;
+  const regs = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
+  if (!b) return 'bench —';
+  const ex = isFinite(Number(cfg.excess)) ? Number(cfg.excess) : 0;
+  const fmtBench = r => isFinite(Number(b[r])) ? Number(b[r]).toFixed(2) : '—';
+  const fmtThr   = r => isFinite(Number(b[r])) ? (Number(b[r]) + ex).toFixed(2) : '—';
+  return 'bench ' + regs.map(r => r + ' ' + fmtBench(r)).join(' / ') +
+    ' · thresholds ' + regs.map(r => r + ' ' + fmtThr(r)).join(' / ');
+}
 
 // ── Activation min-TRADES slider ────────────────────────────────────────────
 // The only activation slider left (the min-Sharpe slider is retired,
@@ -9186,63 +9287,97 @@ async function _actnPut(value, statEl) {
   }
 }
 
-// Read-only as of 2026-09-25 (spec docs/specs/2026-09-25-activation-bench-
-// relative-spec.md): no slider, no PUT, no debounce. Renders the S_beta_spy
-// per-regime Sharpe vector + hysteresis band GET /api/config/activation-
-// min-sharpe (path kept, repurposed) reports as actually in force.
+// Loads the EXCESS slider's saved value + the bench vector + the derived
+// effective thresholds, from GET /api/config/activation-excess-sharpe
+// (spec Amendment 1 §8). Wires the slider's live-update listener (updates
+// the value + thresholds line client-side, no request) and the Save button
+// (_actSaveExcess below) exactly once.
 async function _loadActivationCard() {
-  const valEl  = document.getElementById('st-act-val');
-  const statEl = document.getElementById('st-act-status');
-  if (!valEl) return;
+  const slider  = document.getElementById('st-act-slider');
+  const valEl   = document.getElementById('st-act-val');
+  const benchEl = document.getElementById('st-act-bench-line');
+  const saveBtn = document.getElementById('st-act-save-btn');
+  const statEl  = document.getElementById('st-act-status');
+  if (!slider || !valEl) return;
   let cfg;
   try {
-    const r = await fetch('/api/config/activation-min-sharpe');
+    const r = await fetch('/api/config/activation-excess-sharpe');
     cfg = await r.json();
     if (!r.ok) throw new Error(cfg.error || r.statusText);
   } catch (e) {
     if (statEl) statEl.textContent = '✗ load failed: ' + (e.message || 'network error');
     return;
   }
-  const b = cfg.bench;
-  const band = isFinite(Number(cfg.hysteresis)) ? Number(cfg.hysteresis) : 0.10;
-  // Per-regime, not all-or-nothing: the tier-2 fallback vector
-  // (pipeline_config_fallback) can now be PARTIAL (stamp_bench_sharpe_
-  // config persists sleeve-sourced regimes only, spec 2026-09-25 Task 1
-  // review) — a regime missing from the vector renders '—', not NaN.
-  // F1-c (fix round 1): a regime this apply that came from the tier-2
-  // pipeline_config vector or DEFAULT_MIN_SHARPE (cfg.bench_notes, from
-  // stamp_last_applied's bench_regime_source) is marked inline so a
-  // degraded comparator is never indistinguishable from a live sleeve
-  // observation just because both happen to render a number.
-  const fmtRegime = r => {
-    if (!(b && isFinite(Number(b[r])))) return '—';
-    const note = cfg.bench_notes && cfg.bench_notes[r];
-    return Number(b[r]).toFixed(2) + (note ? ' (' + note + ')' : '');
-  };
-  valEl.textContent = b
-    ? 'LOW_VOL ' + fmtRegime('LOW_VOL') +
-      ' / TRANS ' + fmtRegime('TRANSITIONING') +
-      ' / HIGH_VOL ' + fmtRegime('HIGH_VOL') +
-      ' / CRISIS ' + fmtRegime('CRISIS') +
-      ', band ' + band.toFixed(2)
-    : '—';
-  if (statEl) statEl.textContent = _actBenchStatus(cfg);
+  _actLastCfg = cfg;
+  const v = isFinite(Number(cfg.excess)) ? Number(cfg.excess) : 0;
+  slider.value    = v;
+  slider.disabled = false;
+  if (saveBtn) saveBtn.disabled = false;
+  valEl.textContent = 'excess ' + v.toFixed(2);
+  if (benchEl) benchEl.textContent = _actBenchThresholdsLine(cfg);
+  if (statEl) statEl.textContent = _actExcessStatus(cfg);
+  if (_actWired) return;   // re-loads refresh the value; listeners wire once
+  _actWired = true;
+  slider.addEventListener('input', () => {
+    const live = parseFloat(slider.value);
+    valEl.textContent = 'excess ' + live.toFixed(2);
+    if (benchEl && _actLastCfg) benchEl.textContent = _actBenchThresholdsLine({ ..._actLastCfg, excess: live });
+  });
+}
+
+// Applies the SAVED excess (not necessarily the slider's live position —
+// the operator may be mid-drag/preview without having Saved yet) to
+// pipeline_config, spec Amendment 1 §8's PUT /api/config/activation-excess-
+// sharpe. Explicit action, not a debounced auto-save on slider change (see
+// the card's own HTML comment for why) — bound to the Save button's onclick.
+async function _actSaveExcess() {
+  const slider  = document.getElementById('st-act-slider');
+  const statEl  = document.getElementById('st-act-status');
+  if (!slider || slider.disabled || _actSaveInflight) return;
+  const value = parseFloat(slider.value);
+  _actSaveInflight = true;
+  if (statEl) statEl.textContent = 'saving…';
+  try {
+    const resp = await fetch('/api/config/activation-excess-sharpe', {
+      method:  'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ value }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      if (statEl) statEl.textContent = '✗ ' + (data.error || resp.statusText);
+    } else {
+      if (statEl) statEl.textContent = '✓ saved ' + (isFinite(Number(data.excess)) ? Number(data.excess).toFixed(2) : value.toFixed(2)) +
+        ' · pending — applies at the next daily compute (15:00 ET)';
+      _noteDashboardBuild(resp);
+      _loadActivationCard();   // refresh applied_excess so the pending compare is fresh
+    }
+  } catch (e) {
+    if (statEl) statEl.textContent = '✗ ' + (e.message || 'network error');
+  } finally {
+    _actSaveInflight = false;
+  }
 }
 
 async function _actPreviewDryRun() {
-  const btn = document.getElementById('st-act-preview-btn');
-  const out = document.getElementById('st-act-preview-out');
+  const btn    = document.getElementById('st-act-preview-btn');
+  const out    = document.getElementById('st-act-preview-out');
+  const slider = document.getElementById('st-act-slider');
   if (!btn || !out || btn.disabled) return;
-  // No slider to flush a debounced save for anymore (2026-09-25,
-  // bench-relative activation is read-only) — the assigner reads its
-  // comparator (the S_beta_spy sleeve's own latest backtest) fresh on
-  // every run regardless of anything this dashboard does.
+  // Previews the slider's CURRENT position, even if unsaved (spec
+  // Amendment 1 §8: "preview a higher excess before saving it") — passed
+  // as a dry-run-only override, never persisted.
+  const excessVal = (slider && !slider.disabled) ? parseFloat(slider.value) : null;
   btn.disabled = true;
   const label = btn.textContent;
   btn.textContent = 'running dry-run…';
   out.innerHTML = '<div class="st-act-preview-empty">Running assigner --dry-run over all strategies (nice -19, hard 120s cap)…</div>';
   try {
-    const resp = await fetch('/api/activation/dry-run', { method: 'POST' });
+    const resp = await fetch('/api/activation/dry-run', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(excessVal != null ? { excess: excessVal } : {}),
+    });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
       out.innerHTML = '<div class="st-act-preview-empty">✗ ' + escapeHtml(data.error || resp.statusText) +
@@ -9302,9 +9437,17 @@ function _actRenderPreview(data, host) {
       regs.map(r => r + ' +' + _actNum(bd[r] && bd[r].gained, 0) + '/-' + _actNum(bd[r] && bd[r].lost, 0)).join(' · ') +
       '</div>'
     : '';
+  // spec Amendment 1 §8: the full 4-regime EFFECTIVE comparator (bench[r] +
+  // excess) this dry-run actually judged every strategy against — the
+  // header's data.threshold above is LOW_VOL only.
+  const th = data.thresholds;
+  const thresholdsLine = th
+    ? '<div class="st-sub-label">thresholds (excess=' + (isFinite(Number(data.excess)) ? Number(data.excess).toFixed(2) : '?') + '): ' +
+      regs.map(r => r + ' ' + _actNum(th[r], 0).toFixed(2)).join(' / ') + '</div>'
+    : '';
   host.innerHTML =
     '<div class="st-act-summary"><span class="st-act-hypo">Preview — hypothetical, nothing written</span>' +
-      'LOW_VOL bench <b>' + (data.threshold != null ? _actNum(data.threshold, 0).toFixed(2) : '?') + '</b> · ' +
+      'LOW_VOL threshold (bench+excess) <b>' + (data.threshold != null ? _actNum(data.threshold, 0).toFixed(2) : '?') + '</b> · ' +
       _actNum(data.evaluated, 0) + ' evaluated · ' +
       _actNum(data.skipped, 0) + ' skipped (no corrected backtest) · ' +
       '<span style="color:var(--green)">' + _actNum(cells.activated, 0) + ' cells would activate</span> · ' +
@@ -9312,7 +9455,7 @@ function _actRenderPreview(data, host) {
       '<b>' + ndCnt + '</b> strateg' + (ndCnt === 1 ? 'y' : 'ies') + ' newly fully-dormant' +
       (errs ? ' · <span style="color:var(--red)">' + errs + ' assigner errors</span>' : '') +
       ' · ' + Math.round(_actNum(data.duration_ms, 0) / 1000) + 's</div>' +
-    benchLine + benchDiffLine +
+    benchLine + benchDiffLine + thresholdsLine +
     '<table class="st-act-table"><thead><tr>' +
       '<th>Regime</th><th>eligible now (DB reality)</th><th>eligible after (preview)</th>' +
       '<th>would activate</th><th>would deactivate</th></tr></thead>' +
@@ -11080,6 +11223,29 @@ function _actBenchStatus(cfg) {
     tierNote = ' · sleeve backtest unavailable for ' + degraded.join(', ') + ' at apply time';
   }
   return (appliedAt ? '✓ as of ' + appliedAt : '✓ last applied') + tierNote;
+}
+
+// EXCESS slider status line (spec Amendment 1 §8, Task 4). cfg is GET
+// /api/config/activation-excess-sharpe's response: everything
+// _actBenchStatus reads, PLUS {excess, thresholds, applied_excess}.
+// "pending" here means the SAVED excess (pipeline_config, what the next
+// daily compute will use) differs from applied_excess (what was actually
+// baked into the last apply, from the last-applied marker's own excess
+// field) — compared with a small tolerance, not raw float equality, since
+// both round-trip through JSON. When not pending, falls through to
+// _actBenchStatus's own "as of .../degraded regime" reporting — the two
+// concerns (is the EXCESS value stale vs. is the BENCH vector degraded)
+// are independent and both worth surfacing.
+function _actExcessStatus(cfg) {
+  const saved   = isFinite(Number(cfg.excess)) ? Number(cfg.excess) : 0;
+  const applied = isFinite(Number(cfg.applied_excess)) ? Number(cfg.applied_excess) : 0;
+  const pending = Math.abs(saved - applied) > 0.001;
+  if (pending) {
+    const appliedAt = cfg.applied_at ? new Date(cfg.applied_at).toLocaleString() : null;
+    return '⏳ excess ' + saved.toFixed(2) + ' pending — applies at the next daily compute (15:00 ET)'
+      + (appliedAt ? ' · last applied excess ' + applied.toFixed(2) + ' at ' + appliedAt : '');
+  }
+  return _actBenchStatus(cfg);
 }
 
 // ── Stale-tab guard (2026-08-22) ─────────────────────────────────────────────
