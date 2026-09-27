@@ -80,3 +80,31 @@ rows are already keyed by the four canonical equity regimes. Not built in this a
 own benchmark ticker with a dedicated benchmark sleeve, and judge crypto strategies against THAT
 vector on the crypto regime structure (`crypto_regime_states`) instead of the equity one. No code
 change proposed here; this is an operator-intent placeholder for a future spec.
+
+## 8. Amendment 1 — activation EXCESS over the benchmark (operator-ruled 2026-09-27 21:2x UTC)
+Operator: "change the activation slider to an excess sharpe over the spy benchmark. It should look the same in the dashboard
+set to 0 for now to match recent developments with the ability to deactivate cells in the same way if the activation excess
+is increased beyond 0."
+
+Rule (replaces §1's last leg):
+```
+threshold[r] = bench[r] + excess            # excess = pipeline_config.strategy_activation_excess_sharpe (scalar, default 0.0)
+activate    : sharpe[r] >= threshold[r]
+deactivate  : sharpe[r] <  threshold[r] − ACTIVATION_HYSTERESIS (0.10)   # band unchanged, now relative to bench+excess
+```
+- `excess` is a single global scalar (not per regime), read at derive time from `pipeline_config`, fail-safe to 0.0 (missing,
+  malformed or non-finite ⇒ 0.0 + WARN). Negative values are allowed (looser than the bench) but the dashboard clamps the
+  control to [−1.0, +2.0] in 0.05 steps.
+- Dashboard: the control returns to the position and look of the removed min-Sharpe slider, labelled "Activation excess over
+  S_beta_spy (regime Sharpe)", default 0.00; the card keeps the read-only bench vector and now also prints the effective
+  per-regime thresholds `bench + excess`. PUT `/api/config/activation-excess-sharpe` writes the row; GET returns
+  `{excess, bench, thresholds, …}`. The old min-Sharpe PUT stays 410.
+- Re-apply trigger: a newer `strategy_activation_excess_sharpe` row than the last-applied marker marks eligibility pending
+  (restore the `SLIDER_KEYS` entry for the NEW key in `activation_apply.py`; the min-trades key stays). Raising the excess
+  therefore deactivates cells on the next daily activation step exactly as the old slider did, with the band.
+- Marker/audit: `strategy_activation_last_applied` gains `excess`; audit rows record `bench`, `excess`, `threshold`
+  (= bench + excess) per regime; `rule = 'qualifies(>0·classDD·trades)+bench_relative+excess'`.
+- At excess = 0.0 the rule is byte-identical to §1/§5 as applied on 2026-09-26 — the first apply after this amendment must
+  produce 0 activated / 0 deactivated (pin with the live dry-run before merge).
+- Preview endpoint (`POST /api/activation/dry-run`) accepts an optional `excess` override so the operator can preview a
+  higher excess before saving it (read-only; never persists).
