@@ -79,6 +79,27 @@ test('parseArgs: --limit / --deadline / --flush-every parse and validate', () =>
   assert.throws(() => parseArgs(['--from', '2026-09-15', '--to', '2026-09-16', '--limit', '-1']), /--limit must be a non-negative integer/);
 });
 
+// ── parseArgs: --write-margin (F3 — was a phantom flag, now parsed) ────────
+
+test('parseArgs: --write-margin defaults to 5 minutes, parses minutes to ms, and clamps to a 1-minute floor', () => {
+  const dflt = parseArgs(['--from', '2026-09-15', '--to', '2026-09-16']);
+  assert.equal(dflt.writeMarginMs, 5 * 60_000);
+
+  const custom = parseArgs(['--from', '2026-09-15', '--to', '2026-09-16', '--write-margin', '10']);
+  assert.equal(custom.writeMarginMs, 10 * 60_000);
+
+  const zero = parseArgs(['--from', '2026-09-15', '--to', '2026-09-16', '--write-margin', '0']);
+  assert.equal(zero.writeMarginMs, 1 * 60_000, 'clamped up to the 1-minute floor, not rejected');
+
+  const negative = parseArgs(['--from', '2026-09-15', '--to', '2026-09-16', '--write-margin', '-5']);
+  assert.equal(negative.writeMarginMs, 1 * 60_000);
+
+  assert.throws(
+    () => parseArgs(['--from', '2026-09-15', '--to', '2026-09-16', '--write-margin', 'abc']),
+    /--write-margin must be a number/
+  );
+});
+
 // ── deadlineTs ───────────────────────────────────────────────────────────────
 
 test('deadlineTs: resolves to TODAY at HH:MM UTC and does NOT roll to tomorrow when already past', () => {
@@ -481,6 +502,159 @@ test('run(): aborts when flushPrices() reports store.js\'s own OPENCLAW_DRY_RUN=
       }),
     /dry_run|OPENCLAW_DRY_RUN/
   );
+});
+
+// ── run(): F1 — append-only guard drops bars outside a ticker's requested run ──
+
+test('run(): F1 — bars outside a ticker\'s requested [from,to] are dropped before buffering, never flushed', async () => {
+  const opts = parseArgs(['--from', '2026-09-15', '--to', '2026-09-16', '--apply']);
+  const panel = makeSyntheticPanel(); // MSFT missing both sessions -> one item, from=09-15 to=09-16
+  const buffered = [];
+
+  const storeStub = {
+    // The REAL store.upsertPrices signature/behaviour this wrap sits in
+    // front of: buffer whatever it's handed, deriving `date` the same way
+    // store.js's `_priceRow` does (`b.date || iso(b.t)`), and return the
+    // count buffered.
+    upsertPrices: async (ticker, bars) => {
+      for (const b of bars) {
+        const date = b.date || new Date(b.t).toISOString().slice(0, 10);
+        buffered.push({ ticker, date });
+      }
+      return bars.length;
+    },
+    flushPrices: async () => ({ flushed: buffered.length, total_after: panel.total_rows + buffered.length }),
+  };
+
+  const result = await run(opts, {
+    skipPreflight: true,
+    now: () => FIXED_MORNING,
+    readPanel: () => panel,
+    collector: {
+      // Mirrors the real collector: calls store.upsertPrices(ticker, bars, source)
+      // off the shared store object. Real Alpaca bars carry `t` (an RFC3339
+      // timestamp), not `date` — this uses that same shape, not the `date`
+      // shortcut, so the guard's default date-derivation path is exercised.
+      // Simulates Alpaca handing back the exact 09-14/09-17 neighbour-bar
+      // shape the review flagged, alongside the two genuinely-requested dates.
+      fillPricesAlpacaBatch: async (items, { onTicker }) => {
+        for (const it of items) {
+          const bars = [
+            { t: '2026-09-14T04:00:00Z', c: 1 },  // before the requested run — must be dropped
+            { t: `${it.from}T04:00:00Z`, c: 2 },   // in range
+            { t: `${it.to}T04:00:00Z`, c: 3 },     // in range
+            { t: '2026-09-17T04:00:00Z', c: 4 },   // after the requested run — must be dropped
+          ];
+          const written = await storeStub.upsertPrices(it.ticker, bars, 'alpaca');
+          await onTicker(it.ticker, written, null);
+        }
+        return { calls: 1 };
+      },
+    },
+    store: storeStub,
+  });
+
+  assert.deepEqual(
+    buffered.map((b) => b.date).sort(),
+    ['2026-09-15', '2026-09-16'],
+    'only the two in-range bars reach the buffer — the 09-14/09-17 neighbours never do'
+  );
+  assert.equal(result.droppedOutOfRange, 2);
+  assert.equal(result.rowsWritten, 2, 'onTicker sees the POST-filter written count, not the raw fetch count');
+});
+
+// ── run(): F4 — upfront OPENCLAW_DRY_RUN=1 refusal ──────────────────────────
+
+test('run(): F4 — refuses to apply outright when OPENCLAW_DRY_RUN=1 leaks into the environment', async () => {
+  const opts = parseArgs(['--from', '2026-09-15', '--to', '2026-09-16', '--apply']);
+  const panel = makeSyntheticPanel();
+  const prev = process.env.OPENCLAW_DRY_RUN;
+  process.env.OPENCLAW_DRY_RUN = '1';
+  try {
+    await assert.rejects(
+      () =>
+        run(opts, {
+          skipPreflight: true,
+          now: () => FIXED_MORNING,
+          readPanel: () => panel,
+          store: throwingSpy('store'),
+          collector: throwingSpy('collector'),
+        }),
+      /OPENCLAW_DRY_RUN=1/
+    );
+  } finally {
+    if (prev === undefined) delete process.env.OPENCLAW_DRY_RUN;
+    else process.env.OPENCLAW_DRY_RUN = prev;
+  }
+});
+
+// ── main(): F4 / F2 — exit-code mapping 0/1/2/3 ─────────────────────────────
+
+test('main(): exit 0 on a clean dry-run result', async () => {
+  let exitCode;
+  await mod.main(['--from', '2026-09-15', '--to', '2026-09-16'], {
+    skipDotenv: true,
+    run: async () => ({ dryRun: true }),
+    exit: (code) => { exitCode = code; },
+  });
+  assert.equal(exitCode, 0);
+});
+
+test('main(): exit 0 on a clean apply result (dryRun:false, errors:0, not stopped on deadline)', async () => {
+  let exitCode;
+  await mod.main(['--from', '2026-09-15', '--to', '2026-09-16', '--apply'], {
+    skipDotenv: true,
+    run: async () => ({ dryRun: false, errors: 0, stoppedOnDeadline: false }),
+    exit: (code) => { exitCode = code; },
+  });
+  assert.equal(exitCode, 0);
+});
+
+test('main(): exit 1 on bad argv, before run() is ever called', async () => {
+  let exitCode;
+  let runCalled = false;
+  await mod.main(['--from', '2026-09-15'], {
+    skipDotenv: true,
+    run: async () => {
+      runCalled = true;
+      return { dryRun: true };
+    },
+    exit: (code) => { exitCode = code; },
+  });
+  assert.equal(exitCode, 1);
+  assert.equal(runCalled, false);
+});
+
+test('main(): exit 1 when run() throws (fatal)', async () => {
+  let exitCode;
+  await mod.main(['--from', '2026-09-15', '--to', '2026-09-16'], {
+    skipDotenv: true,
+    run: async () => {
+      throw new Error('boom');
+    },
+    exit: (code) => { exitCode = code; },
+  });
+  assert.equal(exitCode, 1);
+});
+
+test('main(): F2 — exit 2 when the apply result has per-ticker errors (was silently exit 0)', async () => {
+  let exitCode;
+  await mod.main(['--from', '2026-09-15', '--to', '2026-09-16', '--apply'], {
+    skipDotenv: true,
+    run: async () => ({ dryRun: false, errors: 3, stoppedOnDeadline: false }),
+    exit: (code) => { exitCode = code; },
+  });
+  assert.equal(exitCode, 2);
+});
+
+test('main(): exit 3 takes priority when the apply result both stopped on the deadline AND has errors', async () => {
+  let exitCode;
+  await mod.main(['--from', '2026-09-15', '--to', '2026-09-16', '--apply'], {
+    skipDotenv: true,
+    run: async () => ({ dryRun: false, errors: 2, stoppedOnDeadline: true }),
+    exit: (code) => { exitCode = code; },
+  });
+  assert.equal(exitCode, 3);
 });
 
 // ── panelToByDate ────────────────────────────────────────────────────────────
