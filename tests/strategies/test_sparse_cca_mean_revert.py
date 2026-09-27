@@ -391,3 +391,20 @@ def test_last_row_only_print_in_thresh_dropped_column_hits_finite_guard():
     px.iloc[-1, [px.columns.get_loc(c) for c in px.columns if c != 'THIN']] = np.nan
     signals = strat.generate_signals(px, REGIME, list(px.columns))
     assert all(np.isfinite(s.entry_price) and s.entry_price > 0 for s in signals)
+
+
+def test_non_equity_columns_are_never_candidate_legs():
+    """Review 2026-09-27: indices, crypto, futures and FX pass through the live
+    universe but not the backtest's static_universe. They must never be legs."""
+    strat = SparseCCAMeanRevert()
+    px = _build_panel(n_rows=300, n_engineered=10, n_noise=50)
+    rng = np.random.default_rng(3)
+    n = len(px)
+    # strongly mean-reverting synthetic series that WOULD win the ranking if eligible
+    for col in ('^VIX', 'BTC-USD', 'ES=F', 'EURUSD=X'):
+        noise = rng.normal(0, 0.05, n)
+        px[col] = 100 * np.exp(np.cumsum(noise - 0.9 * np.roll(noise, 5)))
+    signals = strat.generate_signals(px, REGIME, list(px.columns))
+    assert len(signals) >= 1
+    assert not ({'^VIX', 'BTC-USD', 'ES=F', 'EURUSD=X'} & {s.ticker for s in signals})
+    assert {s.ticker for s in signals} <= ENGINEERED_TICKERS

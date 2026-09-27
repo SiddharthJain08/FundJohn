@@ -41,7 +41,11 @@ class SparseCCAMeanRevert(BaseStrategy):
         scale = self.position_scale(regime_state)
 
         # --- data prep ---
-        tickers = [t for t in universe if t in prices.columns]
+        # Candidate LEGS are cash equities/ETFs only (review 2026-09-27): the live
+        # universe passes through indices (^…), crypto (-USD), futures (=F) and FX
+        # (=X) that the backtest's static_universe drops — a negative-autocorrelation
+        # selector would otherwise pick VIX-family indices live and never in backtest.
+        tickers = [t for t in universe if t in prices.columns and _is_equity_ticker(t)]
         if len(tickers) < 20:
             print('[debug] signals=0', file=sys.stderr)
             return []
