@@ -1077,6 +1077,7 @@ def apply_one(conn, strategy_id: str, *,
 # ── Discord notify (best-effort, never raises) ──────────────────────────────
 def _notify_content(summary: str, newly_dormant: list, dry_run: bool,
                     bench_line: str = '', bench_diff_line: str = '',
+                    thresholds_line: str = '',
                     warn_lines: Optional[list] = None) -> str:
     """Pure assembly of the #botjohn-log post body (F1-b, fix round 1): the
     summary line, the `bench:` vector line, the `bench diff:` line, and
@@ -1087,13 +1088,21 @@ def _notify_content(summary: str, newly_dormant: list, dry_run: bool,
     of the newly-dormant list so the 1900-char Discord clip below drops the
     newly-dormant names (already counted in the summary) before it drops a
     warning. No DB, no network -- pure string-in/string-out, unit-testable
-    standalone."""
+    standalone.
+
+    thresholds_line (spec Amendment 1 §8, Task 4): the full 4-regime
+    EFFECTIVE comparator (bench[r] + excess) -- the relabeled summary copy
+    below only ever names the LOW_VOL number, so this is the only place in
+    the Discord post an operator can see what excess actually did to every
+    OTHER regime's threshold too."""
     prefix = '[DRY-RUN] ' if dry_run else ''
     lines = [prefix + summary]
     if bench_line:
         lines.append(bench_line)
     if bench_diff_line:
         lines.append(bench_diff_line)
+    if thresholds_line:
+        lines.append(thresholds_line)
     if warn_lines:
         lines.extend(warn_lines)
     if newly_dormant:
@@ -1103,6 +1112,7 @@ def _notify_content(summary: str, newly_dormant: list, dry_run: bool,
 
 def _notify_botjohn_log(summary: str, newly_dormant: list, dry_run: bool,
                         bench_line: str = '', bench_diff_line: str = '',
+                        thresholds_line: str = '',
                         warn_lines: Optional[list] = None) -> None:
     """Best-effort post to #botjohn-log. Mirrors regime_blended_sizer.py's
     _post_corr_cumsharpe_log / fold_report.py's webhook pattern: look up
@@ -1111,9 +1121,9 @@ def _notify_botjohn_log(summary: str, newly_dormant: list, dry_run: bool,
     python-urllib/* UA). NEVER raises — a Discord hiccup must not fail the
     weekly eligibility refresh or a manual CLI run.
 
-    bench_line/bench_diff_line/warn_lines (F1-b, fix round 1, all optional/
-    default-empty for back-compat with any other caller): see
-    _notify_content, which does the actual assembly."""
+    bench_line/bench_diff_line/thresholds_line/warn_lines (F1-b, fix round
+    1 + Amendment 1 §8, all optional/default-empty for back-compat with any
+    other caller): see _notify_content, which does the actual assembly."""
     try:
         url = None
         with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
@@ -1127,7 +1137,7 @@ def _notify_botjohn_log(summary: str, newly_dormant: list, dry_run: bool,
         import urllib.request as _ur
         content = _notify_content(summary, newly_dormant, dry_run,
                                   bench_line=bench_line, bench_diff_line=bench_diff_line,
-                                  warn_lines=warn_lines)
+                                  thresholds_line=thresholds_line, warn_lines=warn_lines)
         req = _ur.Request(
             url, data=json.dumps({'content': content}).encode(), method='POST',
             headers={'Content-Type': 'application/json',
@@ -1384,18 +1394,30 @@ def main() -> int:
         # machine-parsed and byte-pinned (activation_preview.js
         # SUMMARY_RE) -- it stays exactly as printed to stdout. The
         # Discord post is read by a human directly, so relabel just THIS
-        # copy to name what the number actually is (the LOW_VOL bench
-        # value) without touching `summary` itself or its stdout line.
+        # copy to decompose the single `threshold=` number into what it's
+        # actually made of. Amendment 1 §8 (Task 4): `display_threshold` is
+        # now bench+excess, not the raw bench -- the old relabel
+        # (`bench_low_vol={display_threshold}`) would have mislabeled the
+        # EFFECTIVE threshold as if it were the raw bench value the moment
+        # excess != 0, with no excess number anywhere in the post. Emits
+        # all three separately; the substring `threshold=` must still be
+        # ABSENT from the result (test_notify_gets_relabeled_summary_
+        # bench_lines_and_warns asserts this -- the stdout copy is the only
+        # place that token is pinned).
         notify_summary = summary.replace(
-            f'threshold={display_threshold}', f'bench_low_vol={display_threshold}', 1)
+            f'threshold={display_threshold}',
+            f'bench_low_vol={bench_vector["LOW_VOL"]}, excess={resolved_excess}, '
+            f'effective_low_vol={display_threshold}', 1)
         # F1-b: the post used to carry only `summary` -- a degraded (tier-2
         # pipeline_config / tier-3 DEFAULT_MIN_SHARPE) bench comparator was
         # invisible to the operator unless they also read stdout. Now
-        # carries the bench: vector line, the bench diff: line, and every
-        # WARN: line _log collected this run.
+        # carries the bench: vector line, the bench diff: line, the
+        # thresholds: line (Amendment 1 §8 -- the full 4-regime effective
+        # comparator, since the relabel above only ever names LOW_VOL), and
+        # every WARN: line _log collected this run.
         _notify_botjohn_log(notify_summary, newly_dormant, args.dry_run,
                             bench_line=bench_vector_line, bench_diff_line=bench_diff_line,
-                            warn_lines=list(_WARN_LINES))
+                            thresholds_line=thresholds_line, warn_lines=list(_WARN_LINES))
 
     # Markers: only a clean, complete, non-dry-run apply counts as "applied".
     # A run with per-strategy errors leaves the old markers so the next

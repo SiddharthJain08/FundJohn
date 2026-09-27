@@ -218,6 +218,31 @@ class TestMainNotifyAndBenchRegimeSource(unittest.TestCase):
         _args, kwargs = mock_stamp_last.call_args
         self.assertEqual(kwargs['bench_regime_source'], _BENCH_META['regime_source'])
 
+    def test_notify_relabel_decomposes_bench_excess_and_effective_threshold(self):
+        # Amendment 1 §8 (Task 4): a bug caught by advisor review -- the F2
+        # relabel used to write `bench_low_vol={display_threshold}`, but
+        # display_threshold is now bench+excess, not the raw bench. With
+        # excess=0.3 (_BENCH_VECTOR is 1.0 in every regime here) that would
+        # have posted `bench_low_vol=1.3` to Discord -- mislabeling the
+        # EFFECTIVE threshold as if it were the raw bench, with no excess
+        # number anywhere in the post. The fixed relabel must emit all
+        # three numbers separately, and must still carry NO `threshold=`
+        # substring (the stdout copy is the only place that token is
+        # pinned) and a thresholds_line kwarg (the full 4-regime companion,
+        # since this relabel only ever names LOW_VOL).
+        rc, _mock_stamp_last, mock_notify = self._run(
+            ['--all', '--dry-run', '--excess', '0.3', '--notify'])
+        self.assertEqual(rc, 0)
+        mock_notify.assert_called_once()
+        args, kwargs = mock_notify.call_args
+        notify_summary = args[0]
+        self.assertIn('bench_low_vol=1.0', notify_summary)
+        self.assertIn('excess=0.3', notify_summary)
+        self.assertIn('effective_low_vol=1.3', notify_summary)
+        self.assertNotIn('threshold=', notify_summary)
+        self.assertIn('thresholds:', kwargs['thresholds_line'])
+        self.assertIn('excess=0.3', kwargs['thresholds_line'])
+
 
 class TestMainExcessCliOverride(unittest.TestCase):
     """Amendment 1 §8 (spec docs/specs/2026-09-25-activation-bench-relative-
