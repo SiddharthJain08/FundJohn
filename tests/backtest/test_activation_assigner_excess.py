@@ -317,3 +317,16 @@ class TestStampGainsExcess(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_excess_zero_is_byte_identical_for_a_non_round_bench():
+    """Review M1: a bench with >10 decimals must compare exactly at excess 0
+    (round(b, 10) != b would have flipped s == b from eligible to ineligible)."""
+    from backtest.regime_qualification import class_thresholds
+    b = 0.53261234567891
+    rows = [{'regime_state': 'LOW_VOL', 'sharpe': b, 'trade_count': 500, 'max_dd_pct': 5.0, 'calmar': 3.0}]
+    bench = {'LOW_VOL': b, 'TRANSITIONING': b, 'HIGH_VOL': b, 'CRISIS': b}
+    for kwargs in ({}, {'excess': 0.0}):
+        elig, diag = aa._judge(rows, class_thresholds('equity'), 100, bench, {'LOW_VOL': False}, False, **kwargs)
+        assert elig['LOW_VOL'] is True, kwargs
+        assert diag['LOW_VOL']['threshold'] == b

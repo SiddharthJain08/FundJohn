@@ -780,7 +780,9 @@ def _judge(rows, gate: dict, eff_min_trades: int, bench: dict,
         # (e.g. 0.53 + 0.30 can land a few ULPs off 0.83). excess=0.0 (the
         # default) makes thr == b exactly, so every downstream comparison
         # is byte-identical to the pre-Amendment-1 bench-only rule.
-        thr = round(b + excess, 10)
+        # Review M1: with excess == 0 use b itself — round(b, 10) != b for a
+        # bench carrying more than 10 decimals, which would break byte-identity.
+        thr = b if excess == 0 else round(b + excess, 10)
         pe = prior_eligible.get(regime)
         # QUALIFIES (shared per-regime gate: >0 sharpe, class DD leg — flat
         # ceiling OR Calmar escape hatch under the hard cap (2026-07-27) —
