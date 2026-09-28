@@ -24,6 +24,10 @@ function makeStubbedFactory({ rc, stderrTail = '', durationMs = 100, throwSpawn 
   // `attempts` counts runSubprocess invocations — the signals step's bounded
   // retry calls it twice, and the lock-lost path must call it exactly once.
   const attempts    = [];
+  // `optsSeen` captures the full opts object per runSubprocess call (QD
+  // collect-wedge fix, 2026-09-28) — pins which steps request a per-step
+  // stdoutIdleMaxSec override.
+  const optsSeen    = [];
 
   require.cache[HELPERS_PATH] = {
     id: HELPERS_PATH, filename: HELPERS_PATH, loaded: true,
@@ -38,6 +42,7 @@ function makeStubbedFactory({ rc, stderrTail = '', durationMs = 100, throwSpawn 
       strictMode: (env) => env.OPENCLAW_STRICT_EXIT_CODES === '1',
       runSubprocess: async (argv, opts) => {
         attempts.push(opts && opts.step);
+        optsSeen.push(opts);
         if (throwSpawn) throw new Error('spawn explode');
         return { rc, stderrTail, durationMs, stdout: '', timedOut, lockLost, wedged };
       },
@@ -65,7 +70,7 @@ function makeStubbedFactory({ rc, stderrTail = '', durationMs = 100, throwSpawn 
   };
   delete require.cache[require.resolve(NODE_PATH)];
   const { makeStepNode } = require(NODE_PATH);
-  return { makeStepNode, traceEvents, logCalls, attempts };
+  return { makeStepNode, traceEvents, logCalls, attempts, optsSeen };
 }
 
 const BASE_STATE = {
@@ -310,4 +315,42 @@ test('wedged on "signals" (non-exempt step) aborts after EXACTLY one attempt (no
   );
   assert.equal(attempts.length, 1);
   assert.ok(!logCalls.some(([fn, args]) => fn === 'notifyFailure' && /attempt 1\/2/.test(args[0])));
+});
+
+// QD collect-wedge fix (2026-09-28): `collect` gets a widened stdout-idle
+// budget (1800s default, STEP_STDOUT_IDLE_MAX_S_COLLECT override) so the
+// earnings-calendar / insider / fundamentals per-ticker walks (throttled
+// gap-fillers whose progress collector.js can only heartbeat, not stream in
+// real time for the earnings-calendar Python dispatch) don't trip the global
+// 600s default mid-walk (2026-09-28T20:28:01Z incident, rc=125). Every other
+// step keeps the global default — i.e. runSubprocess sees `stdoutIdleMaxSec:
+// undefined`, identical to its pre-fix call shape.
+test('collect step requests the widened stdout-idle budget (1800s default)', async () => {
+  const { makeStepNode, optsSeen } = makeStubbedFactory({ rc: 0 });
+  const node = makeStepNode('collect');
+  await node(BASE_STATE);
+  assert.equal(optsSeen.length, 1);
+  assert.equal(optsSeen[0].stdoutIdleMaxSec, 1800);
+});
+
+test('collect step honors the STEP_STDOUT_IDLE_MAX_S_COLLECT override', async () => {
+  const { makeStepNode, optsSeen } = makeStubbedFactory({ rc: 0 });
+  const node = makeStepNode('collect');
+  await node({ ...BASE_STATE, env: { STEP_STDOUT_IDLE_MAX_S_COLLECT: '900' } });
+  assert.equal(optsSeen[0].stdoutIdleMaxSec, 900);
+});
+
+test('collect step falls back to 1800s on a garbage STEP_STDOUT_IDLE_MAX_S_COLLECT override', async () => {
+  const { makeStepNode, optsSeen } = makeStubbedFactory({ rc: 0 });
+  const node = makeStepNode('collect');
+  await node({ ...BASE_STATE, env: { STEP_STDOUT_IDLE_MAX_S_COLLECT: 'not-a-number' } });
+  assert.equal(optsSeen[0].stdoutIdleMaxSec, 1800);
+});
+
+test('a different step (trade) does not request a widened stdout-idle budget', async () => {
+  const { makeStepNode, optsSeen } = makeStubbedFactory({ rc: 0 });
+  const node = makeStepNode('trade');
+  await node(BASE_STATE);
+  assert.equal(optsSeen.length, 1);
+  assert.equal(optsSeen[0].stdoutIdleMaxSec, undefined);
 });

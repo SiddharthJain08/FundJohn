@@ -360,6 +360,38 @@ function tickProgress(phase, current, total, ticker, rowsWritten = 0) {
   }
 }
 
+// ── Stdout heartbeat for long per-ticker walks ───────────────────────────────
+// QD collect-wedge fix (2026-09-28): the daily-cycle stdout-idle watchdog
+// (src/agent/graphs/daily_cycle_helpers.js, default 600s) SIGTERMed the
+// `collect` step mid earnings-calendar walk (2026-09-28T20:28:01Z, rc=125,
+// 780631ms in — see logs/daily_cycle_steps_2026-09-28.log ~L418-477) because
+// that phase, and the insider/fundamentals per-ticker FMP walks, only report
+// progress via tickProgress() (Discord webhook only, see its own comment
+// above) or store.logRun() (Postgres) — never stdout. A throttled walk over
+// a multi-thousand-ticker universe can sit silent well past 600s even while
+// working correctly.
+//
+// _makeHeartbeat() is a pure, injectable ticker (no timers) so it is
+// unit-testable with a fake clock: call `.tick(i)` as the FIRST statement of
+// the loop body — these loops have many `continue` branches further down
+// that would otherwise skip a tick — and it emits via `emit` (default
+// notify(), i.e. `[collector] <label>: i/N (elapsed Ns)` on stdout) at most
+// once per `everyMs` wall-clock ms OR `everyN` ticks, whichever comes first.
+function _makeHeartbeat(label, total, { everyN = 100, everyMs = 60_000, emit = notify, now = Date.now } = {}) {
+  const start = now();
+  let lastAt  = start;
+  let lastI   = 0;
+  return {
+    tick(i) {
+      const t = now();
+      if (i - lastI < everyN && t - lastAt < everyMs) return;
+      lastAt = t;
+      lastI  = i;
+      emit(`${label}: ${i}/${total} (elapsed ${Math.round((t - start) / 1000)}s)`);
+    },
+  };
+}
+
 // Check if all tickers have full price coverage and fire _onComplete once
 async function checkCompletionStatus(tickers, fromDate, toDate) {
   if (_completionFired || !_onComplete) return;
@@ -689,13 +721,52 @@ async function runIvHistory() {
   );
 }
 
-// Forward earnings calendar via ingest_earnings_calendar.py (throttled per-ticker).
+// Forward earnings calendar via ingest_earnings_calendar.py (per-ticker walk;
+// see the deviation note below on the "1s throttle" in this label/CLI flag).
+//
+// QD collect-wedge fix (2026-09-28): unlike the JS-native walks above, this
+// phase dispatches to ingest_earnings_calendar.py through _runIngestPhase,
+// which awaits a single promisified execFile call — Node buffers the whole
+// child's stdout until it exits, so collector.js has ZERO visibility into
+// the script's real per-ticker progress while it runs. Its per-ticker loop
+// lives in get_forward_earnings_calendar() inside
+// src/ingestion/cboe_vol_indices.py, which calls `yf.Ticker(t).calendar`
+// with NO sleep at all — audit finding (task-1-report.md): the `--throttle
+// 1.0` CLI flag and yfinance_calendar()'s `throttle_s` param are dead; the
+// value is accepted but never passed to get_forward_earnings_calendar() or
+// used to sleep. So the walk's real per-ticker cost is pure Yahoo Finance
+// network latency, not a deliberate 1s throttle — reported, NOT fixed here
+// (out of this task's scope; the label above is pre-existing and unchanged).
+// Either way, on the full active universe that walk can legitimately run for
+// tens of minutes with nothing written to stdout in between — the
+// 2026-09-28T20:28:01Z incident (rc=125, killed at 603s idle, see
+// logs/daily_cycle_steps_2026-09-28.log ~L418-477) hit exactly this.
+//
+// A true `i/N` heartbeat would require instrumenting the Python script (also
+// out of this fix's scope, since it's not one of the files this task
+// targets); this wall-clock ping is the closest fix reachable from
+// collector.js alone. It cannot mask a genuine hang: the child is still
+// hard-bounded by _runIngestPhase's own execFile `timeout` below (15 min =
+// 900s), which is tighter than the collect step's new stdoutIdleMaxSec
+// (1800s, see daily_cycle_node.js) — so a truly stuck yfinance call is still
+// killed well inside that outer budget. No behaviour change to the script
+// invocation, timeout, or success/failure handling.
 async function runEarningsCalendar() {
-  return _runIngestPhase(
-    '📅', 'Earnings calendar (per-ticker, 1s throttle)',
-    ['src/ingestion/ingest_earnings_calendar.py', '--throttle', '1.0'],
-    'earnings_calendar', 15 * 60_000,
-  );
+  const startedAt = Date.now();
+  const ping = setInterval(() => {
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+    notify(`📅 Earnings calendar: still walking (per-ticker yfinance fetch; elapsed ${elapsed}s)`);
+  }, 60_000);
+  if (typeof ping.unref === 'function') ping.unref();
+  try {
+    return await _runIngestPhase(
+      '📅', 'Earnings calendar (per-ticker, 1s throttle)',
+      ['src/ingestion/ingest_earnings_calendar.py', '--throttle', '1.0'],
+      'earnings_calendar', 15 * 60_000,
+    );
+  } finally {
+    clearInterval(ping);
+  }
 }
 
 // Earnings MASTER merge: calendar rows + reported actuals → earnings.parquet
@@ -1678,8 +1749,16 @@ async function runFundamentals(tickers = null) {
   let empty = 0;
   let quotaExhausted = false;
 
+  // QD collect-wedge fix (2026-09-28): throttled at FMP_INTERVAL (default
+  // 2000ms, up to 3 more sleeps per ticker for ratios/key-metrics/balance
+  // sheet below) with only tickProgress() (Discord-only, no stdout) per
+  // ticker — a quarterly-refresh day covering thousands of stale tickers is
+  // silent-capable well past the stdout-idle default. See _makeHeartbeat()'s
+  // comment above.
+  const hb = _makeHeartbeat('💹 Fundamentals', tickers.length);
   for (let i = 0; i < tickers.length; i++) {
     const ticker = tickers[i];
+    hb.tick(i);
     if (_paused) { while (_paused) await sleep(1000); }
 
     // Stop if quota exhausted OR we've used our daily allowance this session
@@ -2025,8 +2104,14 @@ async function runInsiderTransactions(tickers = null) {
   let skipped  = scope.skippedFresh;
   let quotaExhausted = false;
 
+  // QD collect-wedge fix (2026-09-28): throttled at FMP_INTERVAL (default
+  // 2000ms) with only store.logRun()/tickProgress() (no stdout) per ticker —
+  // up to WALK_CAP (default 2000) tickers is silent-capable well past the
+  // stdout-idle default. See _makeHeartbeat()'s comment above.
+  const hb = _makeHeartbeat('📋 Insider walk', tickers.length);
   for (let i = 0; i < tickers.length; i++) {
     const ticker = tickers[i];
+    hb.tick(i);
     if (_paused) { while (_paused) await sleep(1000); }
 
     if (quotaExhausted || apiQuotaRemaining('fmp', FMP_PER_DAY) <= 0) {
@@ -2812,4 +2897,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions, _httpError, _classifyFmpError, _capScope, _inCycleOptionsEnabled, _insiderWalkScope, runInsiderStreamMerge, _fmpCallOutcome };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions, _httpError, _classifyFmpError, _capScope, _inCycleOptionsEnabled, _insiderWalkScope, runInsiderStreamMerge, _fmpCallOutcome, _makeHeartbeat };
