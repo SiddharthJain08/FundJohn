@@ -757,15 +757,18 @@ async function runIvHistory() {
 // network latency, not a deliberate 1s throttle — reported, NOT fixed here
 // (out of this task's scope; the label above is pre-existing and unchanged).
 // Either way, on the full active universe that walk can legitimately run
-// past the 600s idle default with nothing written to stdout in between — 84
-// days of logs/daily_cycle_steps_*.log show completions up to 742.0s (63/67
-// runs), well past 600s, most of which happened to survive only because a
-// scattered per-ticker `log.warning()` (stderr, on individual yfinance
-// failures — ALSO counts as liveness, see runSubprocess's own comment)
-// landed inside every 600s window by chance. The 2026-09-28T20:28:01Z
-// incident (rc=125, killed at 603s idle, see
-// logs/daily_cycle_steps_2026-09-28.log ~L418-477) is simply the day that
-// luck ran out — see task-1-report.md for the full evidence.
+// past the 600s idle default with nothing written to stdout in between: the
+// child is run through a BUFFERED execFile, so neither its stdout nor its
+// stderr reaches this process until it exits — the idle detector sees pure
+// silence for the whole phase. It never fired before 2026-09-28 only because
+// the detector itself landed on 2026-09-22 (1a815c00) and every earnings walk
+// from 09-22 to 09-25 finished in 415–435s; older logs show completions up to
+// 742.0s (63/67 runs over 84 days) that predate the detector. The
+// 2026-09-28T20:28:01Z incident (rc=125, killed at 603s idle, see
+// logs/daily_cycle_steps_2026-09-28.log ~L418-477) was the first walk to
+// cross 600s with the detector armed. NOTE: a collect rc≠0 ABORTS the chain
+// (only `sentiment` and `activation` warn through in daily_cycle_node.js);
+// a child timeout inside _runIngestPhase is the only warn-through path.
 //
 // A true `i/N` heartbeat would require instrumenting the Python script (also
 // out of this fix's scope, since it's not one of the files this task
