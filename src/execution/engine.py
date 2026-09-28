@@ -1581,6 +1581,12 @@ _REQ_CATEGORY_TO_KIND = {
 _AUX_LAZY_GATED_KINDS = ('financials', 'insider_txns', 'options',
                          'prices_30m', 'macro', 'sentiment')
 
+# F2 (fix round 1): log the "requirements.json exists but is malformed"
+# warning at most once per strategy id per process, not once per
+# _strategy_aux_needs() call (it's called once per strategy at plan time
+# AND, per F3, potentially again at run time for a drifted strategy).
+_MALFORMED_REQS_WARNED: set = set()
+
 
 def _aux_lazy_mode() -> str:
     """OPENCLAW_AUX_LAZY: '1' -> 'on' (skip kinds nobody running needs);
@@ -1793,16 +1799,27 @@ def _strategy_aux_needs(strat) -> set:
     under their exact id — see the M3 report's audit).
 
     Source of truth, in order:
-    1. <strat.id>.requirements.json required + optional — reuses
-       execution.acting_ingest_plan.load_requirements(), the SAME parser
-       acting_ingest_plan.py already uses to scope tier-1 ingest (never a
-       second requirements reader), gated on the FILE actually existing
-       (checked directly against acting_ingest_plan.IMPL_DIR — not inferred
-       from load_requirements()'s own return, since its fail-open synthetic
-       {'required': ['prices']} on a missing file is indistinguishable from
-       a real prices-only declaration). This id->path convention IS trusted
-       here because acting_ingest_plan.py already relies on it in
-       production for the same strategy population.
+    1. <strat.id>.requirements.json required + optional, gated on the FILE
+       actually existing (checked directly against
+       acting_ingest_plan.IMPL_DIR — not inferred from
+       acting_ingest_plan.load_requirements()'s own return, since its
+       fail-open synthetic {'required': ['prices']} on a missing file is
+       indistinguishable from a real prices-only declaration). This
+       id->path convention IS trusted here because acting_ingest_plan.py
+       already relies on it in production for the same strategy
+       population.
+       F2 (fix round 1): parsed HERE directly with json.loads(), NOT via
+       acting_ingest_plan.load_requirements() — that function's own
+       except-Exception fallback returns the EXACT SAME shape
+       ({'required': ['prices'], 'optional': []}) for "no file" and "file
+       exists but is unparseable/malformed", which made this function
+       unable to tell a confident prices-only declaration from a parse
+       failure and fail CLOSED (an empty needed-kinds set — the opposite
+       of "when unsure -> load") whenever a requirements.json this
+       strategy actually has failed to parse. A file that exists but is
+       unparseable JSON, has a non-dict root, or has a 'required'/
+       'optional' value that isn't a list, fails OPEN to every gated kind
+       instead, logged once per strategy id.
     2. No requirements.json for this id: fall back to a source scan —
        BUT across every class in type(strat).__mro__ (excluding
        BaseStrategy/object), not just type(strat) itself. A strategy's OWN
@@ -1821,11 +1838,30 @@ def _strategy_aux_needs(strat) -> set:
        clean False across every resolvable MRO file, with at least one
        file actually resolved, is a confident empty set.
     """
-    from execution.acting_ingest_plan import load_requirements, IMPL_DIR
+    from execution.acting_ingest_plan import IMPL_DIR
     req_path = IMPL_DIR / f'{strat.id}.requirements.json'
     if req_path.exists():
-        reqs = load_requirements(strat.id)
-        cats = set(reqs['required']) | set(reqs['optional'])
+        try:
+            _raw = json.loads(req_path.read_text())
+            if not isinstance(_raw, dict):
+                raise ValueError(
+                    f'requirements.json root is {type(_raw).__name__}, expected object')
+            _req = _raw.get('required')
+            _opt = _raw.get('optional')
+            if _req is None:
+                _req = []
+            if _opt is None:
+                _opt = []
+            if not isinstance(_req, list) or not isinstance(_opt, list):
+                raise ValueError("'required'/'optional' must be lists")
+            cats = set(_req) | set(_opt)
+        except Exception as exc:
+            if strat.id not in _MALFORMED_REQS_WARNED:
+                _MALFORMED_REQS_WARNED.add(strat.id)
+                logger.warning(
+                    '[engine] %s requirements.json exists but is malformed '
+                    '(%s) — failing open to every aux kind', strat.id, exc)
+            return set(_AUX_LAZY_GATED_KINDS)
         return {_REQ_CATEGORY_TO_KIND[c] for c in cats if c in _REQ_CATEGORY_TO_KIND}
     try:
         import inspect
@@ -1917,8 +1953,32 @@ def _resolve_aux_load_plan(strategies, regime_state):
     return (needed if mode == 'on' else None), running_ids, needed
 
 
+def _resolve_aux_load_plan_safe(strategies, regime_state):
+    """F1 (fix round 1, blocks shadow): the aux-lazy planner
+    (_resolve_aux_load_plan -> _running_strategy_ids -> is_eligible /
+    load_crypto_regime_state / _strategy_aux_needs -> requirements.json
+    parsing / an MRO source scan) is new, still-experimental machinery
+    touching the strategy registry, the regime-gate resolver, and a
+    crypto-regime file read — none of that is allowed to be able to kill
+    the signals step just because it raised. This wraps
+    _resolve_aux_load_plan so ANY exception (regardless of mode — even a
+    'shadow'-mode failure must not propagate) falls back to the exact
+    off-mode tuple (None, None, None), which makes load_aux_data (the
+    caller's next line) load every kind — i.e. this function can only ever
+    fail SAFE, never fail the run. Logs exactly ONE warning line naming the
+    exception. Extracted (mirroring _resolve_aux_load_plan's own reason for
+    being extracted) so this is unit-testable without a DB and so main()
+    stays a thin, obviously-correct call site."""
+    try:
+        return _resolve_aux_load_plan(strategies, regime_state)
+    except Exception as e:
+        logger.warning('[engine] aux plan failed (%s); loading all kinds', e)
+        return None, None, None
+
+
 def run_strategies(strategies, prices, regime, universe, aux_data,
-                   strategy_universes=None) -> dict:
+                   strategy_universes=None, aux_loaded_kinds=None,
+                   as_of=None) -> dict:
     """
     Returns: {strategy_id: [Signal, ...]}
 
@@ -1930,6 +1990,23 @@ def run_strategies(strategies, prices, regime, universe, aux_data,
     "ran fine but emitted zero signals" from "raised an exception" should read
     last_run_stats rather than checking `if signals` on the results dict (which
     cannot distinguish the two cases since both store []).
+
+    aux_loaded_kinds / as_of (F3, fix round 1 — hard drift guard, mode 'on'
+    only): aux_loaded_kinds is the SAME needed_kinds_arg main() passed to
+    load_aux_data (None in off/shadow mode — everything was already loaded,
+    so there's nothing to drift from and no check runs; the real computed
+    set in mode 'on'). is_eligible/the crypto regime are read a SECOND time
+    per strategy in the loop below, independently of the aux-lazy planner's
+    earlier read (_running_strategy_ids, called before aux loading) — a
+    strategy can therefore reach generate_signals here that the planner did
+    not predict, whose needed kinds simply weren't loaded. When
+    aux_loaded_kinds is not None, each strategy's _strategy_aux_needs() is
+    checked against it right before generate_signals; anything missing is
+    loaded late via load_aux_data(universe, as_of, needed_kinds=<missing>)
+    and merged into the shared aux_data dict (and aux_loaded_kinds is
+    widened in this function's local scope), so both the per-strategy-
+    universe slice below and every later strategy in this same loop see it
+    — one late load per missing kind per run, not per strategy.
     """
     # regime is the full dict from load_regime(); the eligibility gate takes
     # the regime-state string. Strategies still get the full dict.
@@ -1983,6 +2060,37 @@ def run_strategies(strategies, prices, regime, universe, aux_data,
             _air = getattr(strat, 'active_in_regimes', None)
             if strat_regime_str and _air is not None and strat_regime_str not in _air:
                 strat.active_in_regimes = [*_air, strat_regime_str]
+            # F3 (fix round 1, blocks mode 1 — hard drift guard): a
+            # strategy reaching this point may be one the aux-lazy planner
+            # (_running_strategy_ids, called BEFORE aux loading in main())
+            # did not predict, or whose declared needs the plan otherwise
+            # didn't cover. Only meaningful in mode 'on' (aux_loaded_kinds
+            # is None in off/shadow — nothing was skipped, nothing can have
+            # drifted). Loads the gap late rather than letting the strategy
+            # run starved.
+            if aux_loaded_kinds is not None:
+                _needs = _strategy_aux_needs(strat)
+                _missing = _needs - aux_loaded_kinds
+                if _missing:
+                    logger.warning(
+                        '[engine] aux drift: %s needed %s not in plan — loaded late',
+                        strat.id, sorted(_missing))
+                    _late = load_aux_data(universe, as_of=as_of, needed_kinds=_missing)
+                    # Merge ONLY the requested kinds, not the whole returned
+                    # dict: load_aux_data(needed_kinds=_missing) still
+                    # returns aux['sentiment']={} whenever 'sentiment' isn't
+                    # in _missing (its unconditional "always present"
+                    # invariant — see load_aux_data's docstring), and a bare
+                    # aux_data.update(_late) would clobber a sentiment (or
+                    # any other kind outside _missing) the plan already
+                    # loaded for real with that empty placeholder. A kind
+                    # absent from _late (e.g. its master file doesn't exist)
+                    # is left absent here too, matching load_aux_data's own
+                    # "skipped/unavailable -> key absent" semantics.
+                    for _k in _missing:
+                        if _k in _late:
+                            aux_data[_k] = _late[_k]
+                    aux_loaded_kinds = aux_loaded_kinds | _missing
             # SP-7 Phase C (C1): per-strategy universe slice. None (gate OFF)
             # → byte-identical legacy behavior: shared panel/universe/aux.
             if strategy_universes is not None and strat.id in strategy_universes:
@@ -2841,9 +2949,11 @@ def main():
         # M3 (signals-memory task 3, 2026-09-28): compute the aux-lazy plan
         # BEFORE aux loading, using the strategies/regime already resolved
         # above — see _resolve_aux_load_plan for the mode semantics
-        # (off/shadow/on).
+        # (off/shadow/on). F1 (fix round 1, blocks shadow): resolved via the
+        # _safe wrapper, which can only ever fail SAFE (fall back to loading
+        # everything) — see its own docstring.
         _aux_needed_kinds, _aux_running_ids, _aux_needed = \
-            _resolve_aux_load_plan(strategies, regime_state)
+            _resolve_aux_load_plan_safe(strategies, regime_state)
 
         prices   = load_prices(universe)
         aux_data = load_aux_data(universe, as_of=run_date,
@@ -2863,7 +2973,8 @@ def main():
             except Exception as _e:
                 logger.warning(f'last_price inject failed: {_e}')
         strategy_results = run_strategies(strategies, prices, regime, universe,
-                                          aux_data, strategy_universes=strategy_universes)
+                                          aux_data, strategy_universes=strategy_universes,
+                                          aux_loaded_kinds=_aux_needed_kinds, as_of=run_date)
 
         # M3: plan-vs-run drift check (shadow/on only — _aux_running_ids is
         # None in 'off' mode, meaning no plan was computed). is_eligible

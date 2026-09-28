@@ -19,6 +19,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -739,3 +740,305 @@ def test_needed_kinds_none_is_backward_compatible_default(wired):
     aux = engine.load_aux_data(['AAPL'], as_of='2026-06-02')
     for kind in engine._AUX_LAZY_GATED_KINDS:
         assert wired[kind]
+
+
+# ═════════════════════════════════════════════════════════════
+# Fix round 1 (task-3-fix1-brief.md), F1: _resolve_aux_load_plan_safe —
+# the planner must never be able to kill the signals step. Blocks shadow.
+# ═════════════════════════════════════════════════════════════
+
+def test_resolve_aux_load_plan_safe_passthrough_on_success(tmp_path, monkeypatch):
+    """No exception -> identical return to the raw _resolve_aux_load_plan."""
+    monkeypatch.setenv('OPENCLAW_AUX_LAZY', '1')
+    monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
+    monkeypatch.setattr(engine, 'instrument_class_for', lambda sid: 'equity')
+    monkeypatch.setattr(engine, 'is_eligible', lambda sid, rs: True)
+    monkeypatch.setattr(engine, '_exit_hook_enabled', lambda: False)
+    _write_requirements(tmp_path, 'S1', required=['prices', 'macro'])
+    result = engine._resolve_aux_load_plan_safe([_FakeStrat('S1')], 'LOW_VOL')
+    assert result == ({'macro'}, {'S1'}, {'macro'})
+
+
+def test_resolve_aux_load_plan_safe_falls_open_on_exception(monkeypatch, caplog):
+    """F1: the planner raising (registry / regime-gate / crypto-regime-file
+    trouble, anywhere inside _resolve_aux_load_plan) must fall back to the
+    exact off-mode tuple (None, None, None) — never propagate — with
+    exactly ONE warning line naming the exception. Tested under 'shadow'
+    (the mode F1 explicitly blocks: a shadow-mode failure must not be able
+    to kill the signals step either)."""
+    monkeypatch.setenv('OPENCLAW_AUX_LAZY', 'shadow')
+
+    def _boom(strategies, regime_state):
+        raise RuntimeError('registry unreachable')
+    monkeypatch.setattr(engine, '_running_strategy_ids', _boom)
+    with caplog.at_level(logging.WARNING):
+        result = engine._resolve_aux_load_plan_safe([_FakeStrat('S1')], 'LOW_VOL')
+    assert result == (None, None, None)
+    warnings = [r.message for r in caplog.records if 'aux plan failed' in r.message]
+    assert len(warnings) == 1
+    assert 'registry unreachable' in warnings[0]
+    assert 'loading all kinds' in warnings[0]
+
+
+def test_resolve_aux_load_plan_safe_fallback_feeds_load_aux_data_everything(
+        wired, monkeypatch):
+    """The fallback's needed_kinds_arg (None) must actually make
+    load_aux_data load every kind — proving the fail-open is load-bearing,
+    not just a return-value shape."""
+    monkeypatch.setenv('OPENCLAW_AUX_LAZY', '1')
+
+    def _boom(strategies, regime_state):
+        raise RuntimeError('boom')
+    monkeypatch.setattr(engine, '_running_strategy_ids', _boom)
+    needed_kinds_arg, running_ids, needed = engine._resolve_aux_load_plan_safe(
+        [_FakeStrat('S1')], 'LOW_VOL')
+    assert needed_kinds_arg is None and running_ids is None and needed is None
+    engine.load_aux_data(['AAPL'], as_of='2026-06-02', needed_kinds=needed_kinds_arg)
+    for kind in engine._AUX_LAZY_GATED_KINDS:
+        assert wired[kind], f'{kind} loader was not called after the planner fallback'
+
+
+def test_main_calls_the_safe_wrapper():
+    """Static pin: main() cannot be exercised directly (needs a live DB;
+    'never run the engine' is a hard rule for this fix round), so this
+    pins the one line that makes F1 load-bearing — main() must call
+    _resolve_aux_load_plan_safe, not the raw _resolve_aux_load_plan,
+    otherwise the wrapper is dead code and an exception there still kills
+    the signals step exactly as before this fix."""
+    import inspect
+    src = inspect.getsource(engine.main)
+    assert '_resolve_aux_load_plan_safe(' in src
+    assert 'strategy_results = run_strategies(' in src
+    assert 'aux_loaded_kinds=_aux_needed_kinds' in src
+
+
+# ═════════════════════════════════════════════════════════════
+# Fix round 1, F2: _strategy_aux_needs — a requirements.json that EXISTS
+# but is malformed/unparseable/non-list must fail OPEN to every gated
+# kind, not silently swallow through acting_ingest_plan.load_requirements'
+# own prices-only fallback (which made "no file" and "file exists but is
+# garbage" indistinguishable, and the OLD code read that fallback as a
+# confident prices-only declaration -> an empty needed-kinds set -> fail
+# CLOSED). Blocks mode 1.
+# ═════════════════════════════════════════════════════════════
+
+def test_needs_malformed_json_fails_open(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(engine, '_MALFORMED_REQS_WARNED', set())
+    monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
+    (tmp_path / 'S_bad.requirements.json').write_text('{not valid json')
+    with caplog.at_level(logging.WARNING):
+        needs = engine._strategy_aux_needs(_FakeStrat('S_bad'))
+    assert needs == set(engine._AUX_LAZY_GATED_KINDS)
+    assert any('malformed' in r.message and 'S_bad' in r.message for r in caplog.records)
+
+
+def test_needs_non_dict_root_fails_open(tmp_path, monkeypatch):
+    """Valid JSON, but the root isn't an object (e.g. a bare list) —
+    load_requirements()'s own `data.get(...)` would have raised
+    AttributeError, caught by its broad except, and silently returned the
+    SAME prices-only shape as a missing file. Must fail open here instead."""
+    monkeypatch.setattr(engine, '_MALFORMED_REQS_WARNED', set())
+    monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
+    (tmp_path / 'S_list.requirements.json').write_text(json.dumps(['prices', 'macro']))
+    assert engine._strategy_aux_needs(_FakeStrat('S_list')) == set(engine._AUX_LAZY_GATED_KINDS)
+
+
+def test_needs_required_non_list_fails_open(tmp_path, monkeypatch):
+    """The exact silent-corruption bug this closes: the OLD
+    load_requirements()-based path did `list(reqs['required'])` with no
+    type check, so a 'required': 'prices' (a bare string, not a list)
+    would have silently become ['p','r','i','c','e','s'] — no exception,
+    no fail-open, just garbage categories. Must fail open here instead."""
+    monkeypatch.setattr(engine, '_MALFORMED_REQS_WARNED', set())
+    monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
+    (tmp_path / 'S_str.requirements.json').write_text(
+        json.dumps({'strategy_id': 'S_str', 'required': 'prices', 'optional': []}))
+    assert engine._strategy_aux_needs(_FakeStrat('S_str')) == set(engine._AUX_LAZY_GATED_KINDS)
+
+
+def test_needs_optional_non_list_fails_open(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, '_MALFORMED_REQS_WARNED', set())
+    monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
+    (tmp_path / 'S_str2.requirements.json').write_text(
+        json.dumps({'strategy_id': 'S_str2', 'required': ['prices'], 'optional': 'macro'}))
+    assert engine._strategy_aux_needs(_FakeStrat('S_str2')) == set(engine._AUX_LAZY_GATED_KINDS)
+
+
+def test_needs_malformed_requirements_logs_once_per_strategy(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(engine, '_MALFORMED_REQS_WARNED', set())
+    monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
+    (tmp_path / 'S_bad2.requirements.json').write_text('{not valid json')
+    with caplog.at_level(logging.WARNING):
+        engine._strategy_aux_needs(_FakeStrat('S_bad2'))
+        engine._strategy_aux_needs(_FakeStrat('S_bad2'))
+    warnings = [r for r in caplog.records
+               if 'malformed' in r.message and 'S_bad2' in r.message]
+    assert len(warnings) == 1, 'expected exactly one warning across two calls'
+
+
+def test_needs_valid_file_unaffected_by_f2(tmp_path, monkeypatch):
+    """Sanity: F2 only changes the malformed branch — a well-formed file
+    still returns exactly its declared (mapped) kinds (brief: "valid file
+    ⇒ exactly its kinds"), matching test_needs_from_requirements_file."""
+    monkeypatch.setattr(engine, '_MALFORMED_REQS_WARNED', set())
+    monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
+    _write_requirements(tmp_path, 'S_ok', required=['prices', 'options_eod'], optional=['macro'])
+    assert engine._strategy_aux_needs(_FakeStrat('S_ok')) == {'options', 'macro'}
+
+
+# ═════════════════════════════════════════════════════════════
+# Fix round 1, F3: run_strategies' hard drift guard — a strategy
+# ineligible at PLAN time (_resolve_aux_load_plan_safe, before aux
+# loading) and eligible at RUN time (run_strategies' own second,
+# independent is_eligible read) must still receive its declared aux kinds,
+# loaded late, and emit the same signals an eager run would. Blocks mode 1.
+# ═════════════════════════════════════════════════════════════
+
+class _AuxDerivedSignalStrat(_FakeStrat):
+    """Emits an actual Signal-shaped object carrying the aux value it
+    read, so a test can compare EMITTED SIGNALS (not just the raw aux
+    dict) between an eager run and a drifted/late-loaded run — the brief's
+    literal F3 ask ('emits the same signals as eager')."""
+
+    def generate_signals(self, prices, regime, universe, aux_data):
+        fin = (aux_data or {}).get('financials') or {}
+        gm = fin.get('AAPL', {}).get('gross_margin')
+        if gm is None:
+            return []
+        return [SimpleNamespace(direction='FLAT', entry_price=0.0, stop_loss=0.0,
+                                target_1=0.0, signal_params={'gross_margin': gm})]
+
+
+def test_drift_guard_loads_missing_kind_late_and_matches_eager_signals(
+        wired, tmp_path, monkeypatch, caplog):
+    """Brief F3 test: a strategy ineligible at plan time and eligible at
+    run time gets its kinds and emits the same signals as eager."""
+    monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
+    _write_requirements(tmp_path, 'S_drift', required=['prices', 'financials'])
+    monkeypatch.setattr(engine, 'instrument_class_for', lambda sid: 'equity')
+    monkeypatch.setattr(engine, '_exit_hook_enabled', lambda: False)
+    monkeypatch.delenv('OPENCLAW_EQUITY_TRADING_CALENDAR', raising=False)
+
+    prices_panel = pd.DataFrame({'AAPL': [100.0, 101.0]},
+                                index=pd.to_datetime(['2026-06-01', '2026-06-02']))
+    strategy_universes = {'S_drift': ['AAPL']}
+
+    # Eager: OPENCLAW_AUX_LAZY unset, always eligible — the reference signal.
+    monkeypatch.delenv('OPENCLAW_AUX_LAZY', raising=False)
+    monkeypatch.setattr(engine, 'is_eligible', lambda sid, rs: True)
+    strat_eager = _AuxDerivedSignalStrat('S_drift')
+    aux_eager = engine.load_aux_data(['AAPL'], as_of='2026-06-02', needed_kinds=None)
+    results_eager = engine.run_strategies(
+        [strat_eager], prices_panel, {'state': 'LOW_VOL'}, ['AAPL'], aux_eager,
+        strategy_universes=strategy_universes)
+    assert results_eager['S_drift'], 'eager run produced no signal to compare against'
+    eager_gm = results_eager['S_drift'][0].signal_params['gross_margin']
+
+    # Lazy + drift: OPENCLAW_AUX_LAZY=1, ineligible at PLAN time, eligible
+    # at RUN time (the aux-lazy planner's prediction vs. run_strategies'
+    # own second read of is_eligible diverging mid-cycle).
+    monkeypatch.setenv('OPENCLAW_AUX_LAZY', '1')
+    phase = {'v': 'plan'}
+
+    def _is_eligible(sid, rs):
+        return phase['v'] == 'run'
+    monkeypatch.setattr(engine, 'is_eligible', _is_eligible)
+
+    strat_lazy = _AuxDerivedSignalStrat('S_drift')
+    needed_kinds_arg, running_ids, needed = engine._resolve_aux_load_plan_safe(
+        [strat_lazy], 'LOW_VOL')
+    assert running_ids == set(), 'S_drift must be predicted NOT running at plan time'
+    assert needed == set()
+    aux_lazy = engine.load_aux_data(['AAPL'], as_of='2026-06-02', needed_kinds=needed_kinds_arg)
+    assert 'financials' not in aux_lazy, 'the plan must not have loaded financials'
+
+    phase['v'] = 'run'
+    with caplog.at_level(logging.WARNING):
+        results_lazy = engine.run_strategies(
+            [strat_lazy], prices_panel, {'state': 'LOW_VOL'}, ['AAPL'], aux_lazy,
+            strategy_universes=strategy_universes,
+            aux_loaded_kinds=needed_kinds_arg, as_of='2026-06-02')
+
+    assert results_lazy['S_drift'], 'drifted strategy produced no signal — ran starved'
+    lazy_gm = results_lazy['S_drift'][0].signal_params['gross_margin']
+    assert lazy_gm == eager_gm, 'drifted-late-load signal diverged from the eager reference'
+    assert wired['financials'], 'financials loader was never called for the late load'
+
+    drift_msgs = [r.message for r in caplog.records if 'aux drift' in r.message]
+    assert drift_msgs, 'expected an "aux drift" warning'
+    assert 'S_drift' in drift_msgs[0] and 'financials' in drift_msgs[0]
+
+
+def test_drift_guard_merge_preserves_already_loaded_kinds(
+        wired, tmp_path, monkeypatch):
+    """Regression for a bug caught in advisor pre-review before this
+    landed: load_aux_data(needed_kinds=<missing>) ALWAYS returns
+    aux['sentiment']={} whenever 'sentiment' isn't in <missing> (its
+    unconditional "always present" invariant) — an early draft merged the
+    late-load result with a bare aux_data.update(_late), which would
+    silently clobber a sentiment value the plan already loaded FOR REAL
+    with that empty placeholder, for every strategy processed after the
+    drifted one. S_drift (drifts, needs financials) runs BEFORE S_sent
+    (no drift, needs sentiment) in this test's strategy order, so S_sent's
+    turn comes strictly after S_drift's late-load merge — this only
+    passes if the merge is scoped to just the kinds it actually fetched."""
+    monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
+    _write_requirements(tmp_path, 'S_drift', required=['prices', 'financials'])
+    _write_requirements(tmp_path, 'S_sent', required=['prices', 'sentiment'])
+    monkeypatch.setattr(engine, 'instrument_class_for', lambda sid: 'equity')
+    monkeypatch.setattr(engine, '_exit_hook_enabled', lambda: False)
+    monkeypatch.delenv('OPENCLAW_EQUITY_TRADING_CALENDAR', raising=False)
+    monkeypatch.setenv('OPENCLAW_AUX_LAZY', '1')
+
+    phase = {'v': 'plan'}
+
+    def _is_eligible(sid, rs):
+        if sid == 'S_drift':
+            return phase['v'] == 'run'
+        return True   # S_sent always eligible — no drift for it
+    monkeypatch.setattr(engine, 'is_eligible', _is_eligible)
+
+    strategies = [_RecordingStrat('S_drift'), _RecordingStrat('S_sent')]
+    needed_kinds_arg, running_ids, needed = engine._resolve_aux_load_plan_safe(
+        strategies, 'LOW_VOL')
+    assert running_ids == {'S_sent'}
+    assert needed == {'sentiment'}
+    aux = engine.load_aux_data(['AAPL'], as_of='2026-06-02', needed_kinds=needed_kinds_arg)
+    assert aux['sentiment'] == {'AAPL': {'news_count_24h': 3}}, 'sentiment must be loaded for real'
+    assert 'financials' not in aux
+
+    prices_panel = pd.DataFrame({'AAPL': [100.0, 101.0]},
+                                index=pd.to_datetime(['2026-06-01', '2026-06-02']))
+    strategy_universes = {s.id: ['AAPL'] for s in strategies}
+
+    phase['v'] = 'run'
+    engine.run_strategies(
+        strategies, prices_panel, {'state': 'LOW_VOL'}, ['AAPL'], aux,
+        strategy_universes=strategy_universes,
+        aux_loaded_kinds=needed_kinds_arg, as_of='2026-06-02')
+
+    s_drift, s_sent = strategies
+    assert s_drift.received_aux.get('financials', {}).get('AAPL') is not None, (
+        'S_drift did not receive its late-loaded financials')
+    assert s_sent.received_aux['sentiment'] == {'AAPL': {'news_count_24h': 3}}, (
+        "S_sent's real sentiment was clobbered by S_drift's late-load merge")
+
+
+def test_drift_guard_inert_in_shadow_mode(tmp_path, monkeypatch):
+    """aux_loaded_kinds is None in off/shadow mode (nothing was actually
+    skipped, so nothing can have drifted) — the drift guard must not fire
+    even for a strategy the planner didn't predict, and run_strategies
+    must not require aux_loaded_kinds/as_of to be passed at all (backward
+    compatible default for every pre-F3 call site)."""
+    monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
+    _write_requirements(tmp_path, 'S1', required=['prices', 'financials'])
+    monkeypatch.setattr(engine, 'instrument_class_for', lambda sid: 'equity')
+    monkeypatch.setattr(engine, 'is_eligible', lambda sid, rs: True)
+    monkeypatch.setattr(engine, '_exit_hook_enabled', lambda: False)
+    prices_panel = pd.DataFrame({'AAPL': [100.0]}, index=pd.to_datetime(['2026-06-01']))
+    strat = _RecordingStrat('S1')
+    # No aux_loaded_kinds/as_of passed — must not raise, must not attempt
+    # any late load (there is no universe/as_of context to do it with).
+    engine.run_strategies(
+        [strat], prices_panel, {'state': 'LOW_VOL'}, ['AAPL'], {'sentiment': {}})
+    assert strat.received_aux == {'sentiment': {}}
