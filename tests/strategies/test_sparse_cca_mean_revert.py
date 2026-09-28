@@ -395,16 +395,27 @@ def test_last_row_only_print_in_thresh_dropped_column_hits_finite_guard():
 
 def test_non_equity_columns_are_never_candidate_legs():
     """Review 2026-09-27: indices, crypto, futures and FX pass through the live
-    universe but not the backtest's static_universe. They must never be legs."""
+    universe but not the backtest's static_universe. They must never be legs.
+    The planted columns are PURE period-2 alternations (no final-day jump), so
+    their lag-5 autocorrelation is ~-1.0 — strictly more negative than every
+    engineered leg (~-0.8) — and the guard below proves they would win the
+    ranking if non-equity columns were allowed."""
     strat = SparseCCAMeanRevert()
     px = _build_panel(n_rows=300, n_engineered=10, n_noise=50)
-    rng = np.random.default_rng(3)
     n = len(px)
-    # strongly mean-reverting synthetic series that WOULD win the ranking if eligible
-    for col in ('^VIX', 'BTC-USD', 'ES=F', 'EURUSD=X'):
-        noise = rng.normal(0, 0.05, n)
-        px[col] = 100 * np.exp(np.cumsum(noise - 0.9 * np.roll(noise, 5)))
+    planted = ['^VIX', 'BTC-USD', 'ES=F', 'EURUSD=X']
+    for j, col in enumerate(planted):
+        amp = 0.02 + 0.001 * j
+        rets = np.array([0.0] + [amp if (k % 2 == 0) else -amp for k in range(1, n)])
+        px[col] = 100.0 * np.cumprod(1 + rets)
+    # Guard: with non-equity columns allowed, the planted columns outrank the
+    # engineered legs in the strategy's own selection statistic (lag-5
+    # autocorrelation of the last LOOKBACK returns) — i.e. the test bites.
+    r = px.pct_change().iloc[1:].tail(strat.LOOKBACK)
+    ac = {c: float(r[c].autocorr(lag=strat.LAG)) for c in px.columns}
+    top_k = sorted(ac, key=lambda c: ac[c])[:strat.K_ASSETS]
+    assert set(planted) <= set(top_k), (top_k, {c: round(ac[c], 3) for c in planted})
     signals = strat.generate_signals(px, REGIME, list(px.columns))
     assert len(signals) >= 1
-    assert not ({'^VIX', 'BTC-USD', 'ES=F', 'EURUSD=X'} & {s.ticker for s in signals})
+    assert not (set(planted) & {s.ticker for s in signals})
     assert {s.ticker for s in signals} <= ENGINEERED_TICKERS
