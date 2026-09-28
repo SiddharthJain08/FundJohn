@@ -32,6 +32,28 @@ function _pythonpath(existing) {
   return parts.join(path.delimiter);
 }
 
+// M2 (signals-memory task 2, 2026-09-28): env overrides derived purely from
+// (step, reason) — kept separate from `state.env` (which `runDailyCycleGraph`
+// hardcodes to `{}` and never populates from `reason`, daily-cycle.js:240) so
+// this stays a pure, directly-testable mapping instead of new graph-state
+// plumbing. Currently just the one flag: OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS
+// skips the ~200s/~0.8GB v2 shadow options build inside engine.py's `signals`
+// step (src/execution/engine.py:_apply_options_surface) ONLY on the 15:00 ET
+// same-day-compute dispatch (cron-schedule.js:587, the only call site that
+// passes reason='sameday-compute' — verified via grep). Every other `signals`
+// dispatch — the intraday-HMM regime-redeploy runs (reason starts with
+// 'INTRADAY_HMM_'; see redeploy_pipeline.py) included — is untouched, so they
+// keep producing the shadow line the options-surface flip gate's G2 check
+// reads (task-2-report.md: under OPENCLAW_SAMEDAY_EXEC=1 these redeploys are
+// the only producer of that line, since cron-schedule.js registers no
+// scheduled 10:00 ET run in this mode).
+function stepEnvOverrides(step, reason) {
+  if (step === 'signals' && reason === 'sameday-compute') {
+    return { OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS: '1' };
+  }
+  return {};
+}
+
 function makeStepNode(STEP, scriptName) {
   // scriptName is optional — defaults to STEP for backward compat with simple cases
   // (signals/handoff/trade/etc. where step name == script base name). For mapped
@@ -50,7 +72,7 @@ function makeStepNode(STEP, scriptName) {
     traceBus.push({ runId, node: STEP, status: 'start', ts: startedAt });
     await pipelineLog.feedStart(STEP, state.runDate, state.reason);
 
-    const env = { ...process.env, ...(state.env || {}) };
+    const env = { ...process.env, ...(state.env || {}), ...stepEnvOverrides(STEP, state.reason) };
     // Inject PYTHONPATH so Python steps can `from strategies.X import ...` etc.
     env.PYTHONPATH = _pythonpath(env.PYTHONPATH);
     const { argv, timeoutSec } = resolveScript(SCRIPT, state.runDate, env);
@@ -243,4 +265,4 @@ function makeStepNode(STEP, scriptName) {
   };
 }
 
-module.exports = { makeStepNode };
+module.exports = { makeStepNode, stepEnvOverrides };
