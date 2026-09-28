@@ -55,8 +55,31 @@ function makeStepNode(STEP, scriptName) {
     env.PYTHONPATH = _pythonpath(env.PYTHONPATH);
     const { argv, timeoutSec } = resolveScript(SCRIPT, state.runDate, env);
 
+    // QD collect-wedge fix (2026-09-28): `collect`'s earnings-calendar and
+    // insider/fundamentals per-ticker walks are throttled gap-fillers that
+    // can go silent past the global stdout-idle budget (stdoutIdleMaxSec()
+    // in daily_cycle_helpers.js, default 600s) even with the collector.js
+    // heartbeats (see collector.js's _makeHeartbeat) capping REAL silence at
+    // ~60s — the 2026-09-28T20:28:01Z incident (rc=125, killed at 603s idle,
+    // 780631ms into the step; see logs/daily_cycle_steps_2026-09-28.log
+    // ~L418-477) hit mid earnings-calendar walk, a phase whose progress is
+    // invisible to collector.js entirely (see runEarningsCalendar's own
+    // comment). Give `collect` a wider idle budget as a second line of
+    // defense. Every other step is left undefined here and keeps the global
+    // default, same as before this fix — same per-step-override shape as the
+    // sentiment/activation exemption below (`STEP === '<name>'`). The
+    // wall-clock budget (timeoutSec, resolve_script.js) is unchanged.
+    // Kill switch / override: STEP_STDOUT_IDLE_MAX_S_COLLECT (falls back to
+    // 1800 on anything non-numeric or <= 0, same discipline as
+    // stdoutIdleMaxSec()'s own STEP_STDOUT_IDLE_MAX_S parsing).
+    let stepIdleMaxSec;
+    if (STEP === 'collect') {
+      const v = parseInt(env.STEP_STDOUT_IDLE_MAX_S_COLLECT, 10);
+      stepIdleMaxSec = Number.isFinite(v) && v > 0 ? v : 1800;
+    }
+
     const runOnce = async (attempt) => {
-      const res = await runSubprocess(argv, { timeoutSec, env, step: STEP });
+      const res = await runSubprocess(argv, { timeoutSec, env, step: STEP, stdoutIdleMaxSec: stepIdleMaxSec });
 
       // Persist the step's stdout AND stderr tails on EVERY completion (success
       // included). rc=0 zero-order days were un-diagnosable twice (2026-06-02/03):
