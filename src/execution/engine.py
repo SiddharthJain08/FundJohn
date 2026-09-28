@@ -1599,29 +1599,36 @@ def _aux_lazy_mode() -> str:
 
 def _strategy_run_decision(strat, strat_regime_str) -> tuple:
     """Hoisted run predicate (brief constraint 1): the SINGLE source of
-    truth for "will `strat` run this cycle", reused verbatim by
-    run_strategies' per-strategy loop below AND by the aux-lazy planner
+    truth for "will `strat` run under `strat_regime_str`", reused verbatim
+    by run_strategies' per-strategy loop below AND by the aux-lazy planner
     (`_running_strategy_ids`) — the brief is explicit: "do not invent a
     second one".
 
-    `strat_regime_str` is the regime this strategy is judged against — the
-    crypto regime's state string for a crypto strategy (None if no crypto
-    regime file exists yet), else the equity regime string. Callers resolve
-    it themselves (instrument_class_for + load_crypto_regime_state, lazily)
-    before calling this, exactly as run_strategies already did pre-M3 — that
-    resolution doesn't change is_eligible/calendar_edge, so it stays outside
-    this function rather than duplicating a lazy-crypto-regime cache here.
+    Deliberately does NOT special-case a falsy/unknown strat_regime_str:
+    pre-M3, the equity path called `is_eligible(strat.id, equity_regime_str)`
+    unconditionally, with no guard, and is_eligible itself already handles
+    an unrecognized value (returns False, with its own logged warning, for
+    anything not in ALL_REGIMES) — falling through from there to the
+    calendar_edge check exactly as today. An earlier version of this
+    function short-circuited on a falsy strat_regime_str before ever
+    calling is_eligible, which would have silently SKIPPED a calendar-edge
+    equity strategy that old code still ran through (is_eligible(None) ->
+    False -> calendar_edge check still runs) — caught in review before this
+    landed; see the M3 report. `strat_regime_str` is the regime this
+    strategy is judged against — the crypto regime's state string for a
+    crypto strategy, else the equity regime string. The ONE case this
+    function does not cover is crypto's "no crypto regime file exists yet":
+    that already short-circuits at the CALL SITE before is_eligible is ever
+    invoked (run_strategies, unchanged; mirrored in _running_strategy_ids),
+    exactly as pre-M3 — not duplicated here.
 
     Returns (will_run, via_calendar_edge_run_through):
-      - strat_regime_str falsy: (False, False) — no regime to judge against.
       - is_eligible(strat.id, strat_regime_str) True: (True, False) — the
         ordinary path.
       - is_eligible False but strat.calendar_edge: (True, True) — the
-        window IS the signal; runs through a non-qualifying regime.
+        window IS the signal; runs through a non-qualifying/unknown regime.
       - neither: (False, False).
     """
-    if not strat_regime_str:
-        return False, False
     if is_eligible(strat.id, strat_regime_str):
         return True, False
     if getattr(strat, 'calendar_edge', False):
@@ -1656,6 +1663,30 @@ def _running_strategy_ids(strategies, equity_regime_str) -> set:
        tiny (2 strategies fleet-wide as of 2026-09-28: S_beta_spy,
        S_coint_pairs_sector_v2 — CLAUDE.md), so the conservative
        always-include costs nothing measurable.
+
+    KNOWN GAP (documented, not fixed — see the M3 report): `strategies` is
+    the APPROVED list (load_approved_strategies). update_pnl's own
+    `_strategy_for` also loads a strategy ON DEMAND (not from `strategies`)
+    for any OPEN signal row whose strategy_id is no longer approved (e.g.
+    PARKED — X1/S_coint_pairs_sector_v2 was PARKED 2026-08-28 per CLAUDE.md
+    while still able to hold open positions), and still calls should_exit()
+    with the same shared aux_data if exit_hook=True. Such a strategy is
+    INVISIBLE to this function. Verified 2026-09-28: neither currently-known
+    exit_hook strategy (S_beta_spy, S_coint_pairs_sector_v2) reads aux_data
+    anywhere in should_exit — both grep/AST-clean — so this gap is inert
+    today. It would matter only for a FUTURE exit_hook strategy that both
+    reads aux_data AND gets de-approved while still holding positions;
+    closing it fully needs the same open-positions DB query this docstring
+    already declines to duplicate.
+
+    A related, DELIBERATELY UNCLOSED gap: `is_eligible` (and, for a crypto
+    strategy, the crypto regime file) is read AGAIN, independently, inside
+    run_strategies itself minutes later — if the regime or eligibility
+    resolver's answer changes between this planning call and the actual
+    run (a mid-cycle regime flip, a resolver row updated concurrently), a
+    strategy could run without its kind having been loaded. main() checks
+    for this after run_strategies (see the aux-plan-drift WARNING) rather
+    than trying to make the two calls atomic.
     """
     _crypto_regime = None
     running: set = set()
@@ -1669,6 +1700,15 @@ def _running_strategy_ids(strategies, equity_regime_str) -> set:
             if _crypto_regime is None:
                 _crypto_regime = load_crypto_regime_state()
             strat_regime_str = _crypto_regime.get('state')
+            if not strat_regime_str:
+                # Mirrors run_strategies' own crypto guard exactly: that
+                # function logs+skips BEFORE ever calling is_eligible, so
+                # _strategy_run_decision is never invoked with a falsy
+                # crypto regime string there either — kept here rather than
+                # folded into _strategy_run_decision so the EQUITY path
+                # never gets an extra "falsy regime -> not running" special
+                # case it never had (see that function's docstring).
+                continue
         else:
             strat_regime_str = equity_regime_str
         will_run, _ = _strategy_run_decision(strat, strat_regime_str)
@@ -1677,14 +1717,80 @@ def _running_strategy_ids(strategies, equity_regime_str) -> set:
     return running
 
 
+def _aux_data_alias_read(filepath: str) -> bool:
+    """Supplement to factor_prescreen._module_reads_aux_data (brief
+    constraint 2's named source-scan tool). That function's own docstring
+    names its blind spot: "under-matches a strategy that renames the
+    parameter... before subscripting/.get-ing it". Found live 2026-09-28:
+    strategies.cohort_base.CohortBaseStrategy.generate_signals — the base
+    class of S_HV14_otm_skew_factor_cohort2026, S_HV15_iv_term_structure_
+    cohort2026, S_TR04_zarattini_intraday_spy, S_TR06_baltussen_eod_reversal
+    (none of which have a requirements.json under their exact manifest id —
+    see the M3 report) — does exactly `aux = aux_data or {}` then
+    `aux.get('macro')` / `aux.get('options')` / `aux.get('prices_30m')` /
+    `aux.get('vol_indices')` several lines later. _module_reads_aux_data
+    alone scans that file and reports False (no inline
+    aux_data[...]/aux_data.get(...)), which is a fail-CLOSED wrong answer
+    for THIS task even though it's an accepted tradeoff for
+    factor_prescreen's own, lower-stakes use (a missed screen, not a
+    starved live strategy).
+
+    Finds every `<name> = aux_data`, `<name> = aux_data or {...}`, or
+    `<name> = aux_data if ... else {...}` assignment (module-wide, matching
+    _module_reads_aux_data's own whole-module ast.walk() rather than a
+    single function scope), then checks whether any such <name> is later
+    subscripted or `.get()`-called anywhere in the module. A same-named
+    unrelated local in a different function would over-match — the safe
+    direction, per the same over/under-match tradeoff
+    _module_reads_aux_data's own docstring accepts.
+    """
+    import ast
+    try:
+        tree = ast.parse(Path(filepath).read_text())
+    except (FileNotFoundError, SyntaxError, OSError):
+        return False
+
+    def _is_aux_data_name(node):
+        return isinstance(node, ast.Name) and node.id == 'aux_data'
+
+    def _unwraps_to_aux_data(node):
+        if _is_aux_data_name(node):
+            return True
+        if isinstance(node, ast.BoolOp) and any(_is_aux_data_name(v) for v in node.values):
+            return True
+        if isinstance(node, ast.IfExp) and (_is_aux_data_name(node.body) or _is_aux_data_name(node.orelse)):
+            return True
+        return False
+
+    aliases: set = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _unwraps_to_aux_data(node.value):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    aliases.add(tgt.id)
+        elif (isinstance(node, ast.AnnAssign) and node.value is not None
+              and _unwraps_to_aux_data(node.value) and isinstance(node.target, ast.Name)):
+            aliases.add(node.target.id)
+    if not aliases:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id in aliases:
+            return True
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'get' and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in aliases):
+            return True
+    return False
+
+
 def _strategy_aux_needs(strat) -> set:
     """Which of _AUX_LAZY_GATED_KINDS `strat` needs (brief constraint 2).
 
     Takes the strategy INSTANCE, not just its id — the fallback path (2)
-    needs the class' actual source file, and a strategy's declared `id`
+    needs the class' actual source file(s), and a strategy's declared `id`
     does not reliably map to its implementation file's name (confirmed
-    2026-09-28: of 167 files under src/strategies/implementations/, 27 have
-    a filename that doesn't match any requirements.json stem).
+    2026-09-28: 19/149 manifest strategy ids have no requirements.json
+    under their exact id — see the M3 report's audit).
 
     Source of truth, in order:
     1. <strat.id>.requirements.json required + optional — reuses
@@ -1697,16 +1803,23 @@ def _strategy_aux_needs(strat) -> set:
        a real prices-only declaration). This id->path convention IS trusted
        here because acting_ingest_plan.py already relies on it in
        production for the same strategy population.
-    2. No requirements.json for this id: fall back to
-       backtest.factor_prescreen._module_reads_aux_data(), a whole-module
-       AST scan that can only answer "does this strategy read aux_data AT
-       ALL", not which kind — run against inspect.getsourcefile(type(strat))
-       (the class' OWN file, resolved via Python's import machinery, not a
-       second id->filename guess). True -> "unsure which kind" (brief:
-       "when unsure ⇒ load") -> every gated kind. False -> the module never
-       touches aux_data -> no kind needed. No resolvable source file (a
-       dynamically built class, e.g. in a test) or any scan error is
-       likewise "unsure" -> fails open to every gated kind.
+    2. No requirements.json for this id: fall back to a source scan —
+       BUT across every class in type(strat).__mro__ (excluding
+       BaseStrategy/object), not just type(strat) itself. A strategy's OWN
+       generate_signals/should_exit is sometimes on a shared base class
+       (strategies.cohort_base.CohortBaseStrategy is the live example —
+       see _aux_data_alias_read's docstring); scanning only the leaf class
+       would silently miss that class' aux_data usage and return a
+       confident-but-wrong empty set. Per class file: True from EITHER
+       backtest.factor_prescreen._module_reads_aux_data() (the brief's
+       named tool — the inline `aux_data[...]`/`aux_data.get(...)` idiom)
+       OR _aux_data_alias_read() (the rename idiom that tool misses) ->
+       "unsure which kind" (brief: "when unsure ⇒ load") -> every gated
+       kind. No class in the MRO has a resolvable source file at all, or
+       every resolvable file scans False on both checks, or any scan
+       raises -> also unsure -> fails open to every gated kind. Only a
+       clean False across every resolvable MRO file, with at least one
+       file actually resolved, is a confident empty set.
     """
     from execution.acting_ingest_plan import load_requirements, IMPL_DIR
     req_path = IMPL_DIR / f'{strat.id}.requirements.json'
@@ -1717,11 +1830,22 @@ def _strategy_aux_needs(strat) -> set:
     try:
         import inspect
         from backtest.factor_prescreen import _module_reads_aux_data
-        src_path = inspect.getsourcefile(type(strat))
-        if not src_path:
+        from strategies.base import BaseStrategy
+        src_files: list = []
+        for cls in type(strat).__mro__:
+            if cls in (object, BaseStrategy):
+                continue
+            try:
+                p = inspect.getsourcefile(cls)
+            except TypeError:
+                p = None
+            if p and p not in src_files:
+                src_files.append(p)
+        if not src_files:
             return set(_AUX_LAZY_GATED_KINDS)
-        if _module_reads_aux_data(src_path):
-            return set(_AUX_LAZY_GATED_KINDS)
+        for p in src_files:
+            if _module_reads_aux_data(p) or _aux_data_alias_read(p):
+                return set(_AUX_LAZY_GATED_KINDS)
         return set()
     except Exception:
         return set(_AUX_LAZY_GATED_KINDS)
@@ -1745,6 +1869,28 @@ def _log_aux_plan(running_ids: set, needed: set) -> None:
         '[engine] aux plan: run=%d strategies; load={%s} skip={%s} '
         '(reason: no running strategy declares them)',
         len(running_ids), ','.join(load), ','.join(skip))
+
+
+def _log_aux_plan_drift(strategy_results: dict, running_ids: set | None) -> set:
+    """Post-run_strategies check: did any strategy actually run that the
+    aux-lazy planner (_running_strategy_ids, called before aux loading)
+    didn't predict? is_eligible and the crypto regime file are each read a
+    SECOND time, independently, inside run_strategies — a regime flip or a
+    resolver row changing in between could let a strategy run whose kind(s)
+    were never loaded. Returns the drift set (empty when running_ids is
+    None — 'off' mode, no plan was computed — or when nothing diverged) and
+    logs a WARNING naming the drifted strategies when non-empty, so a
+    shadow day surfaces this even though nothing was actually skipped."""
+    if running_ids is None:
+        return set()
+    drift = set(strategy_results) - running_ids
+    if drift:
+        logger.warning(
+            '[engine] aux plan drift: %d strategies ran that the aux-lazy '
+            'planner did not predict (regime/eligibility changed between '
+            'planning and run_strategies) — their aux needs may not have '
+            'been loaded: %s', len(drift), sorted(drift))
+    return drift
 
 
 def _resolve_aux_load_plan(strategies, regime_state):
@@ -2718,6 +2864,16 @@ def main():
                 logger.warning(f'last_price inject failed: {_e}')
         strategy_results = run_strategies(strategies, prices, regime, universe,
                                           aux_data, strategy_universes=strategy_universes)
+
+        # M3: plan-vs-run drift check (shadow/on only — _aux_running_ids is
+        # None in 'off' mode, meaning no plan was computed). is_eligible
+        # (and, for a crypto strategy, crypto_regime_latest.json) is read
+        # AGAIN inside run_strategies, independently, whatever time later —
+        # a regime flip or a resolver row changing between the two reads
+        # could let a strategy run that the planner didn't predict, and
+        # whose kind(s) therefore weren't loaded. This can't be prevented
+        # without making planning and running atomic; it CAN be made loud.
+        _log_aux_plan_drift(strategy_results, _aux_running_ids)
 
         if dry_run:
             # Everything above (regime, universe resolution, panel load,

@@ -43,6 +43,22 @@ class _FakeStrat:
         self.exit_hook = exit_hook
 
 
+class _RecordingStrat(_FakeStrat):
+    """Runs through run_strategies' real eligibility + aux-slicing path and
+    RECORDS exactly the aux_data dict it received in generate_signals — so a
+    test can compare what an eager vs. a lazy run actually hands a
+    strategy (the brief's literal constraint-5 ask), not just a property of
+    load_aux_data's internal `_need()` branching in isolation."""
+
+    def __init__(self, sid):
+        super().__init__(sid)
+        self.received_aux = None
+
+    def generate_signals(self, prices, regime, universe, aux_data):
+        self.received_aux = aux_data
+        return []
+
+
 def _write_requirements(impl_dir, strat_id, required, optional=None):
     (impl_dir / f'{strat_id}.requirements.json').write_text(json.dumps({
         'strategy_id': strat_id, 'required': required, 'optional': optional or [],
@@ -73,12 +89,31 @@ def test_run_decision_ineligible_calendar_edge_runs_through(monkeypatch):
     assert engine._strategy_run_decision(s, 'TRANSITIONING') == (True, True)
 
 
-def test_run_decision_no_regime_string_never_calls_is_eligible(monkeypatch):
+def test_run_decision_falsy_regime_still_calls_is_eligible(monkeypatch):
+    """Regression for a bug caught in review before this landed: an earlier
+    draft short-circuited on a falsy strat_regime_str BEFORE calling
+    is_eligible, which would have silently skipped a calendar-edge equity
+    strategy that OLD run_strategies code still ran through (old code called
+    is_eligible(id, equity_regime_str) unconditionally for the equity path,
+    with no falsy guard; is_eligible itself returns False for anything not
+    in ALL_REGIMES, then the calendar_edge check still runs). The fixed
+    predicate must pass strat_regime_str straight through, unconditionally."""
     calls = []
-    monkeypatch.setattr(engine, 'is_eligible', lambda sid, rs: calls.append(1) or True)
-    s = _FakeStrat('S1')
+    monkeypatch.setattr(engine, 'is_eligible', lambda sid, rs: calls.append(rs) or False)
+    s = _FakeStrat('S1', calendar_edge=False)
     assert engine._strategy_run_decision(s, None) == (False, False)
-    assert calls == []
+    assert calls == [None]
+
+
+def test_run_decision_falsy_regime_calendar_edge_still_runs_through(monkeypatch):
+    """The equity-path half of the same regression: a calendar-edge
+    strategy with an unknown/falsy regime string still runs through, since
+    is_eligible(..., None) legitimately returns False (not a short-circuit)
+    and the calendar_edge fallback then applies exactly as for any other
+    ineligible regime."""
+    monkeypatch.setattr(engine, 'is_eligible', lambda sid, rs: False)
+    s = _FakeStrat('S1', calendar_edge=True)
+    assert engine._strategy_run_decision(s, None) == (True, True)
 
 
 # ═════════════════════════════════════════════════════════════
@@ -213,6 +248,111 @@ def test_needs_scan_exception_fails_open(tmp_path, monkeypatch):
     assert engine._strategy_aux_needs(_FakeStrat('S_boom')) == set(engine._AUX_LAZY_GATED_KINDS)
 
 
+# ── _aux_data_alias_read + MRO scan — the CohortBaseStrategy gap ──
+#
+# Found live 2026-09-28: strategies.cohort_base.CohortBaseStrategy.
+# generate_signals does `aux = aux_data or {}` then `aux.get('macro')` /
+# `aux.get('options')` several lines later — _module_reads_aux_data alone
+# (which only catches the INLINE aux_data[...] / aux_data.get(...) idiom)
+# scans that file and reports False, and a leaf-class-only MRO scan misses
+# it entirely, since S_HV14_otm_skew_factor_cohort2026, S_HV15_iv_term_
+# structure_cohort2026, S_TR04_zarattini_intraday_spy, S_TR06_baltussen_
+# eod_reversal all inherit it and have no requirements.json under their
+# exact manifest id.
+
+def _load_module(tmp_path, name, source):
+    """Write `source` to tmp_path/{name}.py and import it as a real module
+    (inspect.getsourcefile needs a real file backing __module__)."""
+    import importlib.util
+    path = tmp_path / f'{name}.py'
+    path.write_text(source)
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_aux_data_alias_read_detects_rename_pattern(tmp_path):
+    src = (
+        "def generate_signals(prices, regime, universe, aux_data=None):\n"
+        "    aux = aux_data or {}\n"
+        "    macro = aux.get('macro')\n"
+        "    return macro\n"
+    )
+    mod = _load_module(tmp_path, 'cohort_like', src)
+    assert engine._aux_data_alias_read(mod.__file__) is True
+
+
+def test_aux_data_alias_read_does_not_overmatch_bare_parameter(tmp_path):
+    """A strategy that merely ACCEPTS aux_data (never assigns or reads it)
+    must not be flagged — matches _module_reads_aux_data's own "accepting
+    the parameter is not aux-dependence" rule."""
+    src = (
+        "def generate_signals(prices, regime, universe, aux_data=None):\n"
+        "    return []\n"
+    )
+    mod = _load_module(tmp_path, 'plain_strat', src)
+    assert engine._aux_data_alias_read(mod.__file__) is False
+
+
+def test_aux_data_alias_read_ignores_unrelated_variable_named_aux(tmp_path):
+    """`aux = {}` (not derived from aux_data at all) must not match."""
+    src = (
+        "def generate_signals(prices, regime, universe, aux_data=None):\n"
+        "    aux = {}\n"
+        "    return aux.get('macro')\n"
+    )
+    mod = _load_module(tmp_path, 'unrelated_aux_name', src)
+    assert engine._aux_data_alias_read(mod.__file__) is False
+
+
+def test_strategy_aux_needs_scans_base_class_not_just_leaf(tmp_path, monkeypatch):
+    """The actual bug: a strategy's OWN file never touches aux_data, but a
+    BASE class in its MRO does (via the alias-rename pattern) — scanning
+    only type(strat) would wrongly return set() (fail-closed); scanning the
+    whole MRO with both _module_reads_aux_data and _aux_data_alias_read
+    correctly fails open."""
+    monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
+    base_mod = _load_module(tmp_path, 'fake_cohort_base', (
+        "class FakeCohortBase:\n"
+        "    def generate_signals(self, prices, regime, universe, aux_data=None):\n"
+        "        aux = aux_data or {}\n"
+        "        return aux.get('options')\n"
+    ))
+    leaf_mod = _load_module(tmp_path, 'fake_cohort_leaf', (
+        "def generate_signals_leaf_only_helper():\n"
+        "    return 1\n"  # this file itself never mentions aux_data at all
+    ))
+    Leaf = type('Leaf', (base_mod.FakeCohortBase,), {'id': 'S_fake_cohort_leaf'})
+    Leaf.__module__ = leaf_mod.__name__
+    import sys as _sys
+    _sys.modules[leaf_mod.__name__] = leaf_mod    # inspect needs it findable
+    _sys.modules[base_mod.__name__] = base_mod
+    strat = Leaf()
+    assert engine._strategy_aux_needs(strat) == set(engine._AUX_LAZY_GATED_KINDS)
+
+
+def test_strategy_aux_needs_confident_empty_requires_every_mro_file_resolved(tmp_path, monkeypatch):
+    """A clean confident-empty result: every class in the MRO resolves to a
+    real file, and NONE of them read aux_data by either detector."""
+    monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
+    base_mod = _load_module(tmp_path, 'clean_base', (
+        "class CleanBase:\n"
+        "    def generate_signals(self, prices, regime, universe, aux_data=None):\n"
+        "        return []\n"
+    ))
+    # type()'s default __module__ is the CALLING frame's module (this test
+    # file, which legitimately mentions aux_data all over the place in
+    # OTHER tests) — pin it to the clean, isolated fixture module instead
+    # so inspect.getsourcefile(Leaf) resolves there, not to this file.
+    import sys as _sys
+    _sys.modules[base_mod.__name__] = base_mod
+    Leaf = type('Leaf', (base_mod.CleanBase,), {'id': 'S_clean_leaf',
+                                                '__module__': base_mod.__name__})
+    strat = Leaf()
+    assert engine._strategy_aux_needs(strat) == set()
+
+
 def test_needed_aux_kinds_unions_only_running_strategies(tmp_path, monkeypatch):
     monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
     _write_requirements(tmp_path, 'S_a', required=['prices', 'financials'])
@@ -240,6 +380,39 @@ def test_log_aux_plan_skip_set_transitioning_no_options_consumer(tmp_path, monke
     assert 'run=2 strategies' in msg
     assert 'load={insider_txns,macro}' in msg
     assert 'skip={financials,options,prices_30m,sentiment}' in msg
+
+
+# ═════════════════════════════════════════════════════════════
+# _log_aux_plan_drift — plan-vs-run divergence (is_eligible / the crypto
+# regime file are read again, independently, inside run_strategies)
+# ═════════════════════════════════════════════════════════════
+
+def test_plan_drift_off_mode_never_flags(caplog):
+    """running_ids=None (brief kill-switch / 'off' mode: no plan was
+    computed) must never produce a drift warning — there is nothing to
+    compare against."""
+    with caplog.at_level(logging.WARNING):
+        drift = engine._log_aux_plan_drift({'S1': [], 'S2': []}, None)
+    assert drift == set()
+    assert not any('aux plan drift' in r.message for r in caplog.records)
+
+
+def test_plan_drift_no_divergence_silent(caplog):
+    with caplog.at_level(logging.WARNING):
+        drift = engine._log_aux_plan_drift({'S1': [], 'S2': []}, {'S1', 'S2'})
+    assert drift == set()
+    assert not any('aux plan drift' in r.message for r in caplog.records)
+
+
+def test_plan_drift_flags_unpredicted_strategy(caplog):
+    """A strategy ran (appears in strategy_results) that the planner did
+    NOT include in the run set — e.g. a regime flip between planning and
+    run_strategies made it newly eligible."""
+    with caplog.at_level(logging.WARNING):
+        drift = engine._log_aux_plan_drift({'S1': [], 'S2': [], 'S3': []}, {'S1', 'S2'})
+    assert drift == {'S3'}
+    msg = next(r.message for r in caplog.records if 'aux plan drift' in r.message)
+    assert "['S3']" in msg
 
 
 # ═════════════════════════════════════════════════════════════
@@ -289,6 +462,25 @@ def test_resolve_aux_load_plan_shadow_computes_and_logs_but_passes_none(
     assert running_ids == {'S1'}
     assert needed == {'macro'}
     assert any('aux plan' in r.message for r in caplog.records)
+
+
+def test_shadow_mode_end_to_end_all_six_loaders_called(wired, tmp_path, monkeypatch):
+    """Brief test 5, end to end: even when the plan says only one kind is
+    needed, shadow mode's needed_kinds_arg=None must still make
+    load_aux_data call every one of the six loaders — nothing is actually
+    skipped."""
+    monkeypatch.setenv('OPENCLAW_AUX_LAZY', 'shadow')
+    monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
+    monkeypatch.setattr(engine, 'instrument_class_for', lambda sid: 'equity')
+    monkeypatch.setattr(engine, 'is_eligible', lambda sid, rs: True)
+    monkeypatch.setattr(engine, '_exit_hook_enabled', lambda: False)
+    _write_requirements(tmp_path, 'S1', required=['prices', 'macro'])  # only macro declared
+    needed_kinds_arg, running_ids, needed = engine._resolve_aux_load_plan(
+        [_FakeStrat('S1')], 'LOW_VOL')
+    assert needed == {'macro'}                 # the plan itself is narrow
+    engine.load_aux_data(['AAPL'], as_of='2026-06-02', needed_kinds=needed_kinds_arg)
+    for kind in engine._AUX_LAZY_GATED_KINDS:
+        assert wired[kind], f'{kind} loader was not called under shadow mode'
 
 
 def test_resolve_aux_load_plan_on_gates_for_real(tmp_path, monkeypatch, caplog):
@@ -407,15 +599,89 @@ def _deep_equal(a, b) -> bool:
     return a == b
 
 
-def test_lazy_needing_everything_is_byte_identical_to_eager(wired):
-    """Brief test 1: eager vs lazy identical per running strategy — proven
-    here at the full aux-dict level (a stronger, sufficient condition: if
-    the whole dicts match, every per-strategy _slice_aux() subset does
-    too)."""
+def test_load_aux_data_deterministic_when_needed_kinds_is_everything(wired):
+    """Sanity check on the `_need()` wrapper itself, NOT the brief's
+    constraint-5 proof: needed_kinds=ALL takes the exact same `True` branch
+    of `_need()` as needed_kinds=None, so this only shows load_aux_data is
+    deterministic given identical inputs — it can't, by construction,
+    distinguish a working gate from a gate that does nothing. The REAL
+    proof is test_lazy_end_to_end_byte_identical_per_running_strategy
+    below, which uses a genuinely NARROWER needed_kinds per run."""
     eager = engine.load_aux_data(['AAPL'], as_of='2026-06-02', needed_kinds=None)
     lazy_all = engine.load_aux_data(['AAPL'], as_of='2026-06-02',
                                     needed_kinds=set(engine._AUX_LAZY_GATED_KINDS))
     assert _deep_equal(eager, lazy_all)
+
+
+def test_lazy_end_to_end_byte_identical_per_running_strategy(
+        wired, tmp_path, monkeypatch):
+    """Brief test 1, end to end (constraint 5's literal ask): three
+    strategies with DIFFERENT declared requirements, run through the real
+    _resolve_aux_load_plan -> load_aux_data -> run_strategies path twice —
+    once eager (OPENCLAW_AUX_LAZY unset) and once under OPENCLAW_AUX_LAZY=1
+    — and compare what EACH strategy actually received in generate_signals,
+    restricted to the kinds it declares (a strategy that never reads a kind
+    per its own requirements.json is not expected to see identical values
+    for a kind it doesn't consult — only the kinds it actually looks at
+    matter for "byte-identical to what this strategy is handed"). Also
+    exercises strategy_universes (_slice_aux on the path — SP-7 is ON in
+    production) and the calendar step, matching the real run_strategies
+    call shape."""
+    monkeypatch.setattr(acting_ingest_plan, 'IMPL_DIR', tmp_path)
+    _write_requirements(tmp_path, 'S_fin', required=['prices', 'financials'])
+    _write_requirements(tmp_path, 'S_mac', required=['prices', 'macro'])
+    _write_requirements(tmp_path, 'S_opt', required=['prices', 'options_eod'])
+    strategies = [_RecordingStrat('S_fin'), _RecordingStrat('S_mac'), _RecordingStrat('S_opt')]
+
+    monkeypatch.setattr(engine, 'instrument_class_for', lambda sid: 'equity')
+    monkeypatch.setattr(engine, 'is_eligible', lambda sid, rs: True)
+    monkeypatch.setattr(engine, '_exit_hook_enabled', lambda: False)
+    monkeypatch.delenv('OPENCLAW_EQUITY_TRADING_CALENDAR', raising=False)
+
+    prices_panel = pd.DataFrame({'AAPL': [100.0, 101.0]},
+                                index=pd.to_datetime(['2026-06-01', '2026-06-02']))
+    strategy_universes = {s.id: ['AAPL'] for s in strategies}
+
+    # Eager: OPENCLAW_AUX_LAZY unset -> _resolve_aux_load_plan returns
+    # needed_kinds_arg=None -> load_aux_data loads everything.
+    monkeypatch.delenv('OPENCLAW_AUX_LAZY', raising=False)
+    needed_kinds_arg, _, _ = engine._resolve_aux_load_plan(strategies, 'LOW_VOL')
+    assert needed_kinds_arg is None
+    aux_eager = engine.load_aux_data(['AAPL'], as_of='2026-06-02', needed_kinds=needed_kinds_arg)
+    engine.run_strategies(strategies, prices_panel, {'state': 'LOW_VOL'}, ['AAPL'],
+                          aux_eager, strategy_universes=strategy_universes)
+    received_eager = {s.id: s.received_aux for s in strategies}
+    for s in strategies:
+        s.received_aux = None
+
+    # Lazy: OPENCLAW_AUX_LAZY=1 -> a real, narrower needed_kinds.
+    monkeypatch.setenv('OPENCLAW_AUX_LAZY', '1')
+    needed_kinds_arg, running_ids, needed = engine._resolve_aux_load_plan(strategies, 'LOW_VOL')
+    assert running_ids == {'S_fin', 'S_mac', 'S_opt'}
+    assert needed == {'financials', 'macro', 'options'}   # NOT insider_txns/prices_30m/sentiment
+    aux_lazy = engine.load_aux_data(['AAPL'], as_of='2026-06-02', needed_kinds=needed_kinds_arg)
+    engine.run_strategies(strategies, prices_panel, {'state': 'LOW_VOL'}, ['AAPL'],
+                          aux_lazy, strategy_universes=strategy_universes)
+    received_lazy = {s.id: s.received_aux for s in strategies}
+
+    for strat in strategies:
+        declared = engine._strategy_aux_needs(strat)   # {'financials'} / {'macro'} / {'options'}
+        for kind in declared:
+            ea = received_eager[strat.id].get(kind)
+            la = received_lazy[strat.id].get(kind)
+            assert _deep_equal(ea, la), (
+                f'{strat.id}: kind {kind!r} diverged between eager and lazy — '
+                f'eager={ea!r} lazy={la!r}')
+
+    # Skipped kinds (nobody declares insider_txns/prices_30m; sentiment
+    # kept its "always {}" invariant) are truly absent from the shared aux
+    # dict in lazy mode, for every strategy — since load_aux_data builds
+    # ONE dict per run, not one per strategy.
+    assert 'insider_txns' not in aux_lazy
+    assert 'prices_30m' not in aux_lazy
+    assert aux_lazy['sentiment'] == {}
+    assert 'insider_txns' in aux_eager
+    assert 'prices_30m' in aux_eager
 
 
 @pytest.mark.parametrize('skip_kind', sorted(engine._AUX_LAZY_GATED_KINDS))
