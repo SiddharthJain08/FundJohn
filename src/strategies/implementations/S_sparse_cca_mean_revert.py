@@ -4,6 +4,11 @@ import numpy as np
 import pandas as pd
 from typing import List
 from strategies.base import BaseStrategy, Signal, REGIME_POSITION_SCALE, REGIME_ATR_SCALE
+try:
+    from lib.price_panel import is_equity_ticker as _is_equity_ticker
+except Exception:  # pragma: no cover — lib not importable ⇒ treat every column as equity
+    def _is_equity_ticker(t):
+        return True
 
 __all__ = ['SparseCCAMeanRevert']
 
@@ -23,6 +28,7 @@ class SparseCCAMeanRevert(BaseStrategy):
     Z_ENTRY     = 1.5
     Z_EXIT      = 0.25
     SIZE_PER    = 0.03   # 3% per leg asset × 10 = 30% max total
+    MAX_MISSING_ROWS = 5  # completeness tolerance per leg over the price window (see below)
 
     def generate_signals(self, prices: pd.DataFrame, regime: dict, universe: List[str], aux_data: dict = None) -> List[Signal]:
         if prices is None or prices.empty:
@@ -35,18 +41,39 @@ class SparseCCAMeanRevert(BaseStrategy):
         scale = self.position_scale(regime_state)
 
         # --- data prep ---
-        tickers = [t for t in universe if t in prices.columns]
+        # Candidate LEGS are cash equities/ETFs only (review 2026-09-27): the live
+        # universe passes through indices (^…), crypto (-USD), futures (=F) and FX
+        # (=X) that the backtest's static_universe drops — a negative-autocorrelation
+        # selector would otherwise pick VIX-family indices live and never in backtest.
+        tickers = [t for t in universe if t in prices.columns and _is_equity_ticker(t)]
         if len(tickers) < 20:
             print('[debug] signals=0', file=sys.stderr)
             return []
 
         min_rows = self.LOOKBACK + self.LAG + 20
-        px = prices[tickers].dropna(axis=1, thresh=min_rows).tail(min_rows + 10)
+        # Rows are EQUITY sessions: keep a row only if some equity column has a
+        # print, so weekend rows contributed by 7-day tickers (…-USD) never make
+        # every equity column look incomplete and the window is min_rows+10
+        # equity sessions. The engine applies the same calendar upstream under
+        # OPENCLAW_EQUITY_TRADING_CALENDAR=1 (no-op here in that case); this
+        # makes the strategy correct without relying on it (review 2026-09-25).
+        px_all = prices[tickers]
+        _eq_cols = [c for c in px_all.columns if _is_equity_ticker(c)]
+        px_all = (px_all.loc[px_all[_eq_cols].notna().any(axis=1)] if _eq_cols
+                  else px_all.dropna(how='all'))
+        px = px_all.dropna(axis=1, thresh=min_rows).tail(min_rows + 10)
         if px.shape[1] < 10 or len(px) < self.LOOKBACK + self.LAG:
             print('[debug] signals=0', file=sys.stderr)
             return []
 
-        rets = px.pct_change().dropna()
+        # Row-wise ANY-nan drop (`.dropna()`) empties the frame across a wide,
+        # sparsely-populated live universe (~5.8k tickers): one NaN anywhere
+        # in a row removes the whole row. Drop only rows that are entirely
+        # NaN (a genuinely missing session) — per-ticker gaps are handled
+        # below (autocorr loop's `s.dropna()` + `< 60` floor, the
+        # complete-price-history filter on `sparse_tickers`, and the
+        # min_count-guarded spread sum further down).
+        rets = px.pct_change().iloc[1:].dropna(how='all')
         if len(rets) < self.LOOKBACK:
             print('[debug] signals=0', file=sys.stderr)
             return []
@@ -70,9 +97,29 @@ class SparseCCAMeanRevert(BaseStrategy):
             print('[debug] signals=0', file=sys.stderr)
             return []
 
-        # Select K_ASSETS most negatively autocorrelated (most mean-reverting)
+        # Select K_ASSETS most negatively autocorrelated (most mean-reverting),
+        # restricted to legs that pass the completeness rule below (first and
+        # last row valid, at most MAX_MISSING_ROWS interior misses).
+        px_live = px.dropna(how='all')   # rows already on the equity calendar (see above)
+        # Completeness is a TOLERANCE, not zero-NaN (review 2026-09-25): a
+        # data-layer hole such as the 2026-09-15/16 collect miss (~5k tickers
+        # with no row for two sessions) would otherwise exclude nearly the whole
+        # universe from selection for as long as those dates sit inside the
+        # window (~14 months) — a silent, non-random selection bias. A leg
+        # qualifies when its FIRST row (the spread's normalisation base) and
+        # its LAST row (today's tradeable price) are valid and it has at most
+        # MAX_MISSING_ROWS interior misses; a missing day becomes a NaN spread
+        # day via min_count below and is skipped by the rolling mean/std.
+        # Never forward-fill: stale prints would flatten the spread and
+        # understate roll_std.
         sorted_tickers = sorted(autocorrs, key=lambda t: autocorrs[t])
-        sparse_tickers = sorted_tickers[:self.K_ASSETS]
+        complete_tickers = [t for t in sorted_tickers
+                            if pd.notna(px_live[t].iloc[0]) and pd.notna(px_live[t].iloc[-1])
+                            and int(px_live[t].isna().sum()) <= self.MAX_MISSING_ROWS]
+        if len(complete_tickers) < 10:
+            print('[debug] signals=0', file=sys.stderr)
+            return []
+        sparse_tickers = complete_tickers[:self.K_ASSETS]
 
         # Rank-based weights: proportional to -autocorr, normalized by abs-sum
         raw = np.array([-autocorrs[t] for t in sparse_tickers])
@@ -83,12 +130,26 @@ class SparseCCAMeanRevert(BaseStrategy):
         weights = {t: float(raw[i] / abs_sum) for i, t in enumerate(sparse_tickers)}
 
         # --- compute portfolio spread z-score ---
-        px_sparse = px[sparse_tickers].copy()
+        px_sparse = px_live[sparse_tickers].copy()
         # Normalize each price to base 1 at start of window
-        base = px_sparse.iloc[0].replace(0, np.nan)
+        base = px_sparse.iloc[0].replace(0, np.nan)   # first row is valid by selection above
         px_norm = px_sparse.div(base)
         w_series = pd.Series(weights)
-        spread = px_norm.mul(w_series).sum(axis=1)
+        # Defense in depth: the complete-tickers selection above should make
+        # every cell here non-NaN by construction, but DataFrame.sum(axis=1)
+        # defaults to skipna=True, which would silently treat any NaN cell
+        # that slips through as a zero contribution instead of propagating
+        # NaN — silently understating (or, if every leg were missing that
+        # day, zeroing out) the portfolio spread rather than flagging the
+        # day as unusable. min_count=K forces any such row to be NaN
+        # instead of a fabricated partial (or zero) sum; roll.mean()/
+        # roll.std() then skip NaN days (pandas default skipna=True)
+        # rather than being poisoned by a fabricated value, and the
+        # explicit isnan guards below stop a NaN from ever reaching the
+        # Z_ENTRY compare silently (NaN comparisons are always False in
+        # Python, so an unguarded NaN z would fall through the elif/else
+        # exactly like a real no-signal day).
+        spread = px_norm.mul(w_series).sum(axis=1, min_count=len(sparse_tickers))
 
         if len(spread) < self.LOOKBACK:
             print('[debug] signals=0', file=sys.stderr)
@@ -97,11 +158,15 @@ class SparseCCAMeanRevert(BaseStrategy):
         roll = spread.tail(self.LOOKBACK)
         roll_mean = float(roll.mean())
         roll_std  = float(roll.std())
-        if roll_std < 1e-8:
+        if np.isnan(roll_mean) or np.isnan(roll_std) or roll_std < 1e-8:
             print('[debug] signals=0', file=sys.stderr)
             return []
 
-        z = float((float(spread.iloc[-1]) - roll_mean) / roll_std)
+        last_spread = float(spread.iloc[-1])
+        if np.isnan(last_spread):
+            print('[debug] signals=0', file=sys.stderr)
+            return []
+        z = float((last_spread - roll_mean) / roll_std)
 
         # --- threshold check ---
         if z < -self.Z_ENTRY:
@@ -121,8 +186,11 @@ class SparseCCAMeanRevert(BaseStrategy):
             w = weights.get(ticker, 0.0)
             if abs(w) < 0.005:
                 continue
-            current_price = float(today_px.get(ticker, 0.0))
-            if current_price <= 0:
+            current_price = float(today_px.get(ticker, np.nan))
+            # Review 2026-09-25: a trailing all-NaN panel row survives the
+            # completeness check (it is dropped from px_live) but `today_px`
+            # reads it — float('nan') <= 0 is False, so NaN entries leaked.
+            if not np.isfinite(current_price) or current_price <= 0:
                 continue
 
             # LONG portfolio: buy positive-weight assets, sell negative-weight

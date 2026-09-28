@@ -1344,6 +1344,30 @@ def _default_fill_model() -> str:
     return os.environ.get('OPENCLAW_BT_FILL_MODEL', 'same_close')
 
 
+def _universe_filter_ref_tier(strategy_id: str, *, manifest_path) -> Optional[str]:
+    """Sparse-CCA liquidity gate (2026-09-25-sparse-cca-zero-signals, task 2):
+    manifest metadata.universe_filter_ref ('module.path:predicate_name') ->
+    just the predicate NAME (e.g. 'tier_liquid') -- the identical string the
+    LIVE engine already derives from the SAME manifest field (see
+    execution.live_universe._predicate_name / _manifest_universe_refs, and
+    strategies.universe_resolver.UniverseResolver._load_predicate, which
+    reads this exact metadata path). This is the ONLY thing this helper does
+    -- it does not touch the frozen membership artifact or validate the tier
+    is present there; the caller (_bounded_resolver) does that. Returns None
+    when the field is absent, malformed (no ':'), or the manifest can't be
+    read -- callers must treat that exactly like "no ref" (no behavior
+    change), never raise."""
+    try:
+        entry = (json.loads(manifest_path.read_text()).get('strategies', {})
+                 .get(strategy_id) or {})
+        ref = (entry.get('metadata') or {}).get('universe_filter_ref')
+    except Exception:
+        return None
+    if not ref or ':' not in ref:
+        return None
+    return ref.rsplit(':', 1)[1]
+
+
 def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None,
                       cap_override: Optional[str] = None):
     """Universe ladder campaign W6: when the manifest sets
@@ -1353,9 +1377,46 @@ def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None,
     full-universe sim cannot complete on this box (S_ivol: per-bar subsets of
     the 12,536-col panel OOM the 8GB host), the bounded run IS the shrink
     baseline — start at tier_liquid, then shrink down the ladder. Returns
-    None when no cap is set (byte-identical legacy behavior)."""
+    None when no cap is set (byte-identical legacy behavior).
+
+    Sparse-CCA liquidity gate (2026-09-25-sparse-cca-zero-signals, task 2;
+    reviewer ruling: the liquidity gate belongs in the UNIVERSE layer,
+    applied IDENTICALLY in the live engine and the backtest): when neither
+    an explicit cap_override NOR a manifest backtest_universe_cap is set,
+    and OPENCLAW_BT_UNIVERSE_FILTER_REF=1, fall back to the tier/predicate
+    NAME the strategy's manifest.metadata.universe_filter_ref already drives
+    in the LIVE engine (execution.live_universe.build_strategy_universes /
+    strategies.universe_resolver.UniverseResolver._load_predicate) — same
+    manifest field, same string, so a strategy's backtested basket and its
+    live basket are defined by the identical predicate instead of the
+    backtest silently running on every column in the loaded panel (the
+    parity gap the reviewer flagged for S_sparse_cca_mean_revert: its
+    manifest already carries universe_filter_ref=tier_liquid, but this
+    function used to consult ONLY backtest_universe_cap, which was never set
+    for it).
+
+    This fallback is OPT-IN and default OFF (flag unset/'0') on purpose:
+    103 live strategies carry a universe_filter_ref today (63 tier_liquid,
+    18 tier_r3000, 11 tier_r1000, 9 sp500, 2 no_otc per a 2026-09-27 manifest
+    count) but only 8 carry an explicit backtest_universe_cap — turning this
+    fallback on unconditionally would silently re-epoch the backtest universe
+    of the other ~95 the next time the nightly fleet re-gate runs, which is
+    exactly the "shared flag ... silently re-epoch all N strategies mid-fleet"
+    failure mode this same module already calls out for OPENCLAW_BT_EVENT_GATE
+    above. Gating it behind its own flag keeps EVERY strategy's backtest
+    byte-identical to before this fallback existed until an operator
+    deliberately widens it fleet-wide; the controller's one-off re-backtest of
+    S_sparse_cca_mean_revert itself does not even need the flag — the
+    pre-existing --universe-cap CLI override (cap_override above) already
+    bounds a single named strategy without touching this fallback at all.
+
+    Only the NEW fallback path is fail-open on an unknown/missing tier
+    (logs + returns None, unbounded static universe) — the pre-existing
+    cap_override / backtest_universe_cap path is untouched and still raises
+    on a genuinely misconfigured explicit cap, exactly as before."""
     manifest_path = Path(manifest_path or ROOT / 'src' / 'strategies' / 'manifest.json')
     data_dir = Path(data_dir or ROOT / 'data')
+    cap_is_explicit = True
     if cap_override:
         # Explicit cap from the caller (--universe-cap): wins over the manifest
         # and needs no manifest entry — this is how a NEW candidate's FIRST
@@ -1370,6 +1431,9 @@ def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None,
             cap = (entry.get('metadata') or {}).get('backtest_universe_cap')
         except Exception:
             return None
+        if not cap and os.environ.get('OPENCLAW_BT_UNIVERSE_FILTER_REF') == '1':
+            cap = _universe_filter_ref_tier(strategy_id, manifest_path=manifest_path)
+            cap_is_explicit = False
     if not cap:
         return None
     arts = (sorted(data_dir.glob('universe_tier_membership_shrink-*.parquet'))
@@ -1379,8 +1443,18 @@ def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None,
              'membership artifact exists — falling back to the static universe')
         return None
     from backtest.precomputed_resolver import PrecomputedResolver
-    _log(f'universe cap: {strategy_id} bounded to {cap} via {arts[-1].name}')
-    return PrecomputedResolver(arts[-1], cap)
+    if cap_is_explicit:
+        _log(f'universe cap: {strategy_id} bounded to {cap} via {arts[-1].name}')
+        return PrecomputedResolver(arts[-1], cap)
+    try:
+        resolver = PrecomputedResolver(arts[-1], cap)
+    except ValueError as e:
+        _log(f'WARNING universe_filter_ref fallback tier {cap!r} for {strategy_id} '
+             f'not found in {arts[-1].name} ({e}) — falling back to the static universe')
+        return None
+    _log(f'universe cap: {strategy_id} bounded to {cap} via {arts[-1].name} '
+         f'(fallback from manifest universe_filter_ref)')
+    return resolver
 
 
 def _manifest_backtest_tickers(strategy_id: str, *, manifest_path=None):
