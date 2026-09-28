@@ -206,6 +206,34 @@ actions on 2026-09-12 16:14 UTC with these rulings:
 - Tests: synthetic NAV paths trip each rule; regime does not exempt;
   benchmark positions never in the flatten list; re-arm token semantics.
 
+### C1 — Amendment 2 (operator-ruled 2026-09-28 22:3x UTC): drawdown on CUMULATIVE ALPHA P&L, not `equity − sleeve_value`
+**Defect (observed 2026-09-28):** `alpha_nav = equity − sleeve_value` equals alpha market value PLUS cash, so every dollar the
+beta budget moves into the SPY sleeve leaves it permanently. Friday→Monday: equity 95.5k→95.4k (−0.1 %), sleeve 81.0k→86.6k,
+`alpha_nav` 14.4k→9.0k ⇒ shadow dd −0.46 against a peak set before the beta flip — the rule measured the allocation, not
+performance; enforcement would have flattened 32 positions. The daily-loss rule (3 % of NAV) is unaffected and stays.
+
+**New definition.**
+```
+alpha_unrealized_t = Σ over non-benchmark broker positions of unrealized $ (qty × (current_price − avg_entry_price), sign by side)
+alpha_realized_t   = Σ realized $ of non-benchmark closes since EPOCH, FIFO per ticker over `broker_fills`, seeded by the
+                     epoch snapshot of open non-benchmark lots (qty, avg_entry_price) taken on the first run under this rule
+alpha_pnl_t        = alpha_realized_t + alpha_unrealized_t
+hwm_t              = max(hwm_{t-1}, alpha_pnl_t)           # persisted in account_breaker_state (peak_alpha_pnl)
+dd_t               = (alpha_pnl_t − hwm_t) / equity_t        # NAV-denominated; BREACH when dd_t ≤ −0.10
+```
+- EPOCH = the first tick under this rule (persist `alpha_epoch_at` + the snapshot rows in a new additive table
+  `account_breaker_alpha_epoch(ticker, qty, avg_entry_price, taken_at)`); operator re-arm resets `hwm` to the current
+  `alpha_pnl` (unchanged semantics) and NEVER moves the epoch.
+- Benchmark tickers (registry `benchmark_sleeve`) are excluded from both legs; their own P&L is not alpha. Cash, deposits,
+  withdrawals and sleeve rebalances do not move `alpha_pnl`.
+- Fills missing from `broker_fills` (pre-155 history, unmatched sells): the sell is matched against the epoch snapshot lot,
+  else logged `[account_breaker] unmatched fill …` and counted with cost = the fill price (zero realized) — fail-open,
+  never a raise; a counter in the shadow line.
+- Shadow line carries BOTH measures for the transition: `alpha_pnl=… hwm=… dd_pnl=… | legacy alpha_nav=… dd_nav=…`; the
+  legacy measure is removed after two clean shadow days under the new rule and an operator ack.
+- The per-position breaker (C2) is unchanged. Denominator = broker equity (not the alpha slice) so a fixed dollar loss reads
+  the same after any allocation shift, consistent with the daily-loss rule.
+
 ### C2 Per-position circuit breaker: no regime exemption (ruling R2)
 - `src/execution/position_circuit_breaker.py` header + `:8-9`: remove the
   "skips HIGH_VOL/CRISIS (independent mode)" branch so the 2 %-of-NAV
