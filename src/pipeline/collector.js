@@ -392,6 +392,25 @@ function _makeHeartbeat(label, total, { everyN = 100, everyMs = 60_000, emit = n
   };
 }
 
+// ── Wall-clock ping for an awaited call with no observable progress ─────────
+// QD collect-wedge fix (2026-09-28): companion to _makeHeartbeat() for phases
+// like runEarningsCalendar() below, which await a single buffered subprocess
+// call with no per-item index to tick — there is nothing to count, only wall
+// time to report. Wraps `fn()` (a zero-arg function returning a Promise) with
+// a periodic `emit` every `everyMs`, guaranteed cleared whether `fn` resolves
+// or rejects. `setIntervalFn`/`clearIntervalFn`/`now`/`emit` are injectable so
+// this is unit-testable without real timers.
+function _withPhasePing(label, fn, { everyMs = 60_000, emit = notify, now = Date.now,
+                                      setIntervalFn = setInterval, clearIntervalFn = clearInterval } = {}) {
+  const startedAt = now();
+  const ping = setIntervalFn(() => {
+    const elapsed = Math.round((now() - startedAt) / 1000);
+    emit(`${label}: still walking (elapsed ${elapsed}s)`);
+  }, everyMs);
+  if (ping && typeof ping.unref === 'function') ping.unref();
+  return fn().finally(() => clearIntervalFn(ping));
+}
+
 // Check if all tickers have full price coverage and fire _onComplete once
 async function checkCompletionStatus(tickers, fromDate, toDate) {
   if (_completionFired || !_onComplete) return;
@@ -737,10 +756,16 @@ async function runIvHistory() {
 // used to sleep. So the walk's real per-ticker cost is pure Yahoo Finance
 // network latency, not a deliberate 1s throttle — reported, NOT fixed here
 // (out of this task's scope; the label above is pre-existing and unchanged).
-// Either way, on the full active universe that walk can legitimately run for
-// tens of minutes with nothing written to stdout in between — the
-// 2026-09-28T20:28:01Z incident (rc=125, killed at 603s idle, see
-// logs/daily_cycle_steps_2026-09-28.log ~L418-477) hit exactly this.
+// Either way, on the full active universe that walk can legitimately run
+// past the 600s idle default with nothing written to stdout in between — 84
+// days of logs/daily_cycle_steps_*.log show completions up to 742.0s (63/67
+// runs), well past 600s, most of which happened to survive only because a
+// scattered per-ticker `log.warning()` (stderr, on individual yfinance
+// failures — ALSO counts as liveness, see runSubprocess's own comment)
+// landed inside every 600s window by chance. The 2026-09-28T20:28:01Z
+// incident (rc=125, killed at 603s idle, see
+// logs/daily_cycle_steps_2026-09-28.log ~L418-477) is simply the day that
+// luck ran out — see task-1-report.md for the full evidence.
 //
 // A true `i/N` heartbeat would require instrumenting the Python script (also
 // out of this fix's scope, since it's not one of the files this task
@@ -752,21 +777,11 @@ async function runIvHistory() {
 // killed well inside that outer budget. No behaviour change to the script
 // invocation, timeout, or success/failure handling.
 async function runEarningsCalendar() {
-  const startedAt = Date.now();
-  const ping = setInterval(() => {
-    const elapsed = Math.round((Date.now() - startedAt) / 1000);
-    notify(`📅 Earnings calendar: still walking (per-ticker yfinance fetch; elapsed ${elapsed}s)`);
-  }, 60_000);
-  if (typeof ping.unref === 'function') ping.unref();
-  try {
-    return await _runIngestPhase(
-      '📅', 'Earnings calendar (per-ticker, 1s throttle)',
-      ['src/ingestion/ingest_earnings_calendar.py', '--throttle', '1.0'],
-      'earnings_calendar', 15 * 60_000,
-    );
-  } finally {
-    clearInterval(ping);
-  }
+  return _withPhasePing('📅 Earnings calendar (per-ticker yfinance fetch)', () => _runIngestPhase(
+    '📅', 'Earnings calendar (per-ticker, 1s throttle)',
+    ['src/ingestion/ingest_earnings_calendar.py', '--throttle', '1.0'],
+    'earnings_calendar', 15 * 60_000,
+  ));
 }
 
 // Earnings MASTER merge: calendar rows + reported actuals → earnings.parquet
@@ -2897,4 +2912,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions, _httpError, _classifyFmpError, _capScope, _inCycleOptionsEnabled, _insiderWalkScope, runInsiderStreamMerge, _fmpCallOutcome, _makeHeartbeat };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions, _httpError, _classifyFmpError, _capScope, _inCycleOptionsEnabled, _insiderWalkScope, runInsiderStreamMerge, _fmpCallOutcome, _makeHeartbeat, _withPhasePing };
