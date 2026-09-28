@@ -354,3 +354,67 @@ test('a different step (trade) does not request a widened stdout-idle budget', a
   assert.equal(optsSeen.length, 1);
   assert.equal(optsSeen[0].stdoutIdleMaxSec, undefined);
 });
+
+// M2 (signals-memory task 2, 2026-09-28): OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS
+// must be set ONLY for the `signals` step on the 15:00 ET same-day-compute
+// dispatch (reason='sameday-compute', the exact string cron-schedule.js:587
+// passes) — never for any other step, and never for any other reason,
+// including the intraday-HMM regime-redeploy `signals` runs that are the
+// options-surface flip gate's other shadow-line producer (task-2-report.md).
+const { stepEnvOverrides } = require(NODE_PATH);
+
+test('stepEnvOverrides: signals + sameday-compute -> skip flag set', () => {
+  assert.deepEqual(stepEnvOverrides('signals', 'sameday-compute'),
+                    { OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS: '1' });
+});
+
+test('stepEnvOverrides: signals + any other reason -> no overrides', () => {
+  assert.deepEqual(stepEnvOverrides('signals', 'scheduled'), {});
+  assert.deepEqual(stepEnvOverrides('signals', 'INTRADAY_HMM_LOW_VOL_TRANSITIONING'), {});
+  assert.deepEqual(stepEnvOverrides('signals', undefined), {});
+});
+
+test('stepEnvOverrides: sameday-compute + any other step -> no overrides', () => {
+  assert.deepEqual(stepEnvOverrides('trade', 'sameday-compute'), {});
+  assert.deepEqual(stepEnvOverrides('handoff', 'sameday-compute'), {});
+  assert.deepEqual(stepEnvOverrides('activation', 'sameday-compute'), {});
+});
+
+test('signals step at reason=sameday-compute: subprocess env carries the skip flag', async () => {
+  const { makeStepNode, optsSeen } = makeStubbedFactory({ rc: 0 });
+  const node = makeStepNode('signals', 'engine');
+  await node({ ...BASE_STATE, reason: 'sameday-compute', env: {} });
+  assert.equal(optsSeen.length, 1);
+  assert.equal(optsSeen[0].env.OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS, '1');
+});
+
+test('signals step at the scheduled (base-cycle) reason: subprocess env has no skip flag', async () => {
+  const { makeStepNode, optsSeen } = makeStubbedFactory({ rc: 0 });
+  const node = makeStepNode('signals', 'engine');
+  await node({ ...BASE_STATE, reason: 'scheduled', env: {} });
+  assert.equal(optsSeen[0].env.OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS, undefined);
+});
+
+test('signals step at an intraday-HMM regime-redeploy reason: subprocess env has no skip flag', async () => {
+  const { makeStepNode, optsSeen } = makeStubbedFactory({ rc: 0 });
+  const node = makeStepNode('signals', 'engine');
+  await node({ ...BASE_STATE, reason: 'INTRADAY_HMM_LOW_VOL_TRANSITIONING', env: {} });
+  assert.equal(optsSeen[0].env.OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS, undefined);
+});
+
+test('a different step (trade) at reason=sameday-compute: subprocess env has no skip flag', async () => {
+  const { makeStepNode, optsSeen } = makeStubbedFactory({ rc: 0 });
+  const node = makeStepNode('trade');
+  await node({ ...BASE_STATE, reason: 'sameday-compute', env: {} });
+  assert.equal(optsSeen[0].env.OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS, undefined);
+});
+
+test('bounded signals retry (rc=124 timeout) carries the skip flag on both attempts', async () => {
+  const { makeStepNode, optsSeen } = makeStubbedFactory({ rc: 124, timedOut: true, stderrTail: 'timed out' });
+  const node = makeStepNode('signals', 'engine');
+  await assert.rejects(() => node({ ...BASE_STATE, reason: 'sameday-compute', env: {} }),
+                        (err) => err.rc === 124);
+  assert.equal(optsSeen.length, 2);
+  assert.equal(optsSeen[0].env.OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS, '1');
+  assert.equal(optsSeen[1].env.OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS, '1');
+});

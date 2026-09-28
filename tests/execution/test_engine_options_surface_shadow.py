@@ -171,6 +171,66 @@ def test_shadow_summary_failure_does_not_drop_options(monkeypatch, caplog):
     assert any('shadow summary failed' in r.message for r in caplog.records)
 
 
+# ── M2 (signals-memory task 2, 2026-09-28): skip the shadow build on the
+# 15:00 ET same-day-compute run only ──
+def test_skip_shadow_options_env_unset_still_builds(monkeypatch, tmp_path):
+    """Default (env unset) is byte-identical to pre-M2 behaviour: the v2
+    build still runs and the shadow line still lands."""
+    from execution import engine, options_aux_v2 as v2
+    old = {'SPY': {'iv30': 0.4, 'iv_rank': 50.0}}
+    calls = []
+    monkeypatch.setattr(v2, 'build', lambda *a, **k: calls.append(1) or {'SPY': {'iv30': 0.1}})
+    monkeypatch.delenv('OPENCLAW_OPTIONS_SURFACE', raising=False)
+    monkeypatch.delenv('OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS', raising=False)
+    monkeypatch.setenv('OPENCLAW_SHADOW_LOG_DIR', str(tmp_path))
+    out = engine._apply_options_surface(old, None, [], None, None, None)
+    assert calls == [1]
+    assert out is old  # flag off -> legacy dict still served
+    assert (tmp_path / 'options_surface_shadow.log').exists()
+
+
+def test_skip_shadow_options_env_skips_build_when_v2_not_enabled(monkeypatch, caplog, tmp_path):
+    """The brief's core case: env=1 and v2 OFF (shadow-only) -> build is
+    never called, the one-line log fires, no shadow line is written, and the
+    legacy dict is served (identical to what flag-off would have served
+    anyway, since v2 isn't being served either way this run)."""
+    from execution import engine, options_aux_v2 as v2
+    old = {'SPY': {'iv30': 0.4, 'iv_rank': 50.0}}
+    calls = []
+    monkeypatch.setattr(v2, 'build', lambda *a, **k: calls.append(1) or {'SPY': {'iv30': 0.1}})
+    monkeypatch.delenv('OPENCLAW_OPTIONS_SURFACE', raising=False)
+    monkeypatch.setenv('OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS', '1')
+    monkeypatch.setenv('OPENCLAW_SHADOW_LOG_DIR', str(tmp_path))
+    with caplog.at_level(logging.INFO):
+        out = engine._apply_options_surface(old, None, [], None, None, None)
+    assert calls == []
+    assert out is old
+    assert any('[engine] shadow options build skipped (same-day compute)' in r.message
+               for r in caplog.records)
+    # No build ran, so no shadow_summary/shadow_log.record call either.
+    assert not (tmp_path / 'options_surface_shadow.log').exists()
+
+
+def test_skip_shadow_options_env_ignored_once_v2_is_enabled(monkeypatch, caplog, tmp_path):
+    """Safety exemption (the one deliberate deviation from the brief's literal
+    text): once OPENCLAW_OPTIONS_SURFACE=1 makes v2 load-bearing, the skip env
+    must NOT silently serve the stale legacy dict on the 15:00 slot — the
+    build still runs and `new` is still what's served."""
+    from execution import engine, options_aux_v2 as v2
+    old = {'SPY': {'iv30': 0.4, 'iv_rank': 50.0}}
+    new = {'SPY': {'iv30': 0.1, 'iv_rank': 40.0}}
+    calls = []
+    monkeypatch.setattr(v2, 'build', lambda *a, **k: calls.append(1) or new)
+    monkeypatch.setenv('OPENCLAW_OPTIONS_SURFACE', '1')
+    monkeypatch.setenv('OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS', '1')
+    monkeypatch.setenv('OPENCLAW_SHADOW_LOG_DIR', str(tmp_path))
+    with caplog.at_level(logging.INFO):
+        out = engine._apply_options_surface(old, None, [], None, None, None)
+    assert calls == [1]
+    assert out is new
+    assert not any('shadow options build skipped' in r.message for r in caplog.records)
+
+
 # ── Final fix wave 2026-09-05, F2: the v2 IMPORT is inside the guard ──
 def test_import_failure_serves_legacy_dict(monkeypatch, caplog):
     """A module-level failure in options_aux_v2 (bad dependency, half-applied

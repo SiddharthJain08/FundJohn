@@ -505,6 +505,30 @@ def _apply_options_surface(old: dict, opts, universe, today, master_dir, px_wind
     try:
         from execution import options_aux_v2 as _v2
         from lib import shadow_log
+        # M2 (signals-memory task 2, 2026-09-28): the shadow build costs
+        # ~200s / ~0.8GB inside load_aux_data (task-1-report.md), and the
+        # 15:00 ET same-day-compute run is where the 2-core/8GB box lacks
+        # headroom (all three recent OOM kills landed in this window). Skip
+        # it there — the build only feeds this shadow diagnostic while v2 is
+        # OFF, so the legacy dict served to strategies is unaffected. Set
+        # ONLY by the 15:00 ET cron path (src/agent/graphs/daily_cycle_node.js,
+        # reason == 'sameday-compute'); unset everywhere else, including the
+        # intraday-HMM regime-redeploy `signals` runs (reason ==
+        # 'INTRADAY_HMM_*') that are today's main producer of the shadow line
+        # the options-surface flip gate's G2 check reads (task-2-report.md:
+        # under OPENCLAW_SAMEDAY_EXEC=1 there is no scheduled 10:00 ET run —
+        # cron-schedule.js only registers it when sameDayExec is off).
+        # `and not _v2.enabled()` is a deliberate exemption beyond the literal
+        # ask: once OPENCLAW_OPTIONS_SURFACE=1 makes v2 load-bearing (`new`
+        # below is what gets served), skipping the build would silently keep
+        # serving the stale legacy dict on the live 15:00 slot instead of a
+        # shadow-only diagnostic — a real signals change, not a cost cut. The
+        # mitigation self-disarms the moment v2 goes live; no follow-up
+        # task needed.
+        if (os.environ.get('OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS', '0') == '1'
+                and not _v2.enabled()):
+            logger.info('[engine] shadow options build skipped (same-day compute)')
+            return old
         new = _v2.build(opts, universe, today, master_dir, px_window, earnings)
     except Exception as exc:  # noqa: BLE001 — the v2 path must never take the legacy path down
         logger.warning('[options_surface] v2 build failed (%s); serving legacy dict', exc)
