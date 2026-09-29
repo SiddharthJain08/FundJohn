@@ -3,5 +3,7 @@
   "required": [
     "prices"
   ],
-  "optional": []
+  "optional": [
+    "financials"
+  ]
 }

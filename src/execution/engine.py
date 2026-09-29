@@ -915,7 +915,7 @@ def _sentiment_slice(universe: list, as_of=None) -> dict:
         return {}
 
 
-def load_aux_data(universe: list, as_of=None) -> dict:
+def load_aux_data(universe: list, as_of=None, needed_kinds: set | None = None) -> dict:
     """Load financials + insider from master Parquets; convert to dict formats the strategies expect.
 
     as_of anchors every date-relative aux computation (options DTE / iv_rank
@@ -923,11 +923,33 @@ def load_aux_data(universe: list, as_of=None) -> dict:
     these used wall-clock today, so a --date re-run on a later calendar day
     produced DIFFERENT aux → different signals (the engine's half of the
     backtest≡live reproducibility contract). None → today (the daily case,
-    behaviour unchanged)."""
+    behaviour unchanged).
+
+    needed_kinds: M3 lazy-aux gate (signals-memory task 3, 2026-09-28).
+    None (default) → load every kind, byte-identical to pre-M3 behaviour —
+    every existing caller of this function (tests that pass only
+    universe/as_of, exactly the pre-M3 signature) gets exactly what it got
+    before this parameter existed. A set → only kinds present in the set
+    are loaded; every other
+    kind in _AUX_LAZY_GATED_KINDS is skipped entirely: its master file is
+    never opened, and for 'sentiment' its Postgres query is never issued.
+    Skipped kinds are left ABSENT from the returned dict (`aux.get(kind)`
+    is None) — the SAME shape strategies already see today whenever a
+    master file happens to be missing on disk, so no new "key present but
+    forced empty" state is introduced. 'sentiment' is the one exception:
+    it is UNCONDITIONALLY present today (never gated on file existence), so
+    a skip sets it to {} rather than leaving it absent, preserving that
+    existing "always present" invariant. Only main() (via
+    OPENCLAW_AUX_LAZY=1) ever passes a real set; OPENCLAW_AUX_LAZY=shadow
+    computes the same plan but calls this with needed_kinds=None so nothing
+    is actually skipped."""
     aux = {}
     master_dir = ROOT / 'data' / 'master'
     _as_of_ts = (pd.Timestamp(as_of).normalize() if as_of is not None
                  else pd.Timestamp.today().normalize())
+
+    def _need(kind: str) -> bool:
+        return needed_kinds is None or kind in needed_kinds
 
     # Financials: {ticker: {gross_margin, net_margin, ev_ebitda, pe_ratio, ...}}
     # Also provides camelCase aliases for S10_quality_value (FMP field name convention):
@@ -937,7 +959,7 @@ def load_aux_data(universe: list, as_of=None) -> dict:
     fin_path = master_dir / 'financials.parquet'
     # NOT gated on fin_path.exists(): a present overlay must still be served if
     # the master is missing, or a fresh clone would silently discard tier-1.
-    if fin_path.exists() or _intraday_overlay_exists('financials'):
+    if _need('financials') and (fin_path.exists() or _intraday_overlay_exists('financials')):
         try:
             fin = (pd.read_parquet(fin_path) if fin_path.exists()
                    else pd.DataFrame(columns=['ticker', 'date']))
@@ -1002,7 +1024,7 @@ def load_aux_data(universe: list, as_of=None) -> dict:
 
     # Insider transactions: {ticker: [{transactionDate, transactionType, reportingName, value, shares}]}
     insider_path = master_dir / 'insider.parquet'
-    if insider_path.exists() or _intraday_overlay_exists('insider'):
+    if _need('insider_txns') and (insider_path.exists() or _intraday_overlay_exists('insider')):
         try:
             ins = (pd.read_parquet(insider_path) if insider_path.exists()
                    else pd.DataFrame(columns=['ticker', 'date']))
@@ -1036,7 +1058,13 @@ def load_aux_data(universe: list, as_of=None) -> dict:
     # Picks nearest future expiry per ticker; sums call+put OI per strike.
     # iv_rank = percentile of current ATM IV vs trailing 30-day history of that ticker's ATM IV.
     opts_path = master_dir / 'options_eod.parquet'
-    if opts_path.exists():
+    # M3: this gate also covers the nested earnings-calendar read (used only
+    # to enrich opts_dict[ticker]['earnings_dte']) and the last_price read
+    # below (engine.py:1313-1323 pre-M2/M3 numbering) — both live entirely
+    # inside this try block, so gating here makes last_price execute only
+    # when the options kind is loaded, per the M3 brief's constraint 3,
+    # with no separate condition needed.
+    if _need('options') and opts_path.exists():
         try:
             today = _as_of_ts
             # Pre-compute HV20 per ticker from master prices (options_eod has no hv20 column)
@@ -1363,7 +1391,7 @@ def load_aux_data(universe: list, as_of=None) -> dict:
     # 30-min intraday bars: full DataFrame (date, datetime, ticker, o/h/l/c/v/vwap)
     # Used by S-TR-04 (Zarattini) and future intraday strategies.
     bars_30m_path = master_dir / 'prices_30m.parquet'
-    if bars_30m_path.exists():
+    if _need('prices_30m') and bars_30m_path.exists():
         try:
             bars_30m = pd.read_parquet(bars_30m_path)
             if not bars_30m.empty:
@@ -1375,7 +1403,7 @@ def load_aux_data(universe: list, as_of=None) -> dict:
     # Macro time series: {series_name: pd.Series(date_index → value)}
     # Provides VIX, VVIX, VIX3M, etc. for regime-aware strategies (S-TR-01 etc.)
     macro_path = master_dir / 'macro.parquet'
-    if macro_path.exists():
+    if _need('macro') and macro_path.exists():
         try:
             mac = pd.read_parquet(macro_path)
             if not mac.empty and {'date', 'series', 'value'}.issubset(mac.columns):
@@ -1395,8 +1423,17 @@ def load_aux_data(universe: list, as_of=None) -> dict:
     # Sentiment: {ticker: {news_count_24h, news_mean_score, news_finbert_pos/neu/neg}}
     # Read from ticker_sentiment_daily.alpaca_news_* (live Alpaca-news FinBERT scores),
     # remapped to the news_* keys S_news_sentiment_long_short expects — backtest parity.
-    aux['sentiment'] = _sentiment_slice(universe, as_of=_as_of_ts.date())
-    logger.info(f"Sentiment loaded: {len(aux['sentiment'])} tickers")
+    if _need('sentiment'):
+        aux['sentiment'] = _sentiment_slice(universe, as_of=_as_of_ts.date())
+        logger.info(f"Sentiment loaded: {len(aux['sentiment'])} tickers")
+    else:
+        # Unlike the other gated kinds, aux['sentiment'] is unconditional
+        # (never gated on file existence) in the eager path, so it is
+        # ALWAYS present today. A skip preserves that invariant with {}
+        # rather than leaving the key absent — and, unlike the other kinds,
+        # skipping this one avoids a live Postgres round-trip
+        # (_sentiment_slice opens its own connection via get_db()).
+        aux['sentiment'] = {}
 
     return aux
 
@@ -1505,8 +1542,443 @@ def _stamp_cadence_reset_on_flip(cur, regime) -> None:
                    prev or '(no prior signals)', regime['state'])
 
 
+# ──────────────────────────────────────────────────────────
+# 3.5. LAZY AUX LOADING (signals-memory task 3, 2026-09-28)
+# ──────────────────────────────────────────────────────────
+# See .superpowers/sdd/2026-09-28-signals-memory/task-3-brief.md. Goal: load
+# each aux_data kind only when a strategy that will RUN this cycle needs it.
+# Default OFF (OPENCLAW_AUX_LAZY unset/'0'): byte-identical to before this
+# section existed. 'shadow': compute + log the plan, still load everything.
+# '1': skip kinds nobody running declares.
+
+# requirements.json category name -> load_aux_data() dict key ("kind").
+# Only categories with an independent, skippable load block in
+# load_aux_data get an entry — see _AUX_LAZY_GATED_KINDS below for why
+# 'earnings' (a real requirements.json category:
+# S_reversal_momentum_transition_earnings, s_price_earnings_momentum_drift)
+# is deliberately absent.
+_REQ_CATEGORY_TO_KIND = {
+    'options_eod': 'options',
+    'insider':     'insider_txns',
+    'financials':  'financials',
+    'macro':       'macro',
+    'prices_30m':  'prices_30m',
+    'sentiment':   'sentiment',
+}
+
+# The kinds load_aux_data can actually skip (grep-confirmed against
+# load_aux_data's own `aux[...] =` assignments). Deliberately excludes:
+#   - 'prices' — loaded by load_prices(), not load_aux_data.
+#   - 'earnings' — declared by 2 requirements.json files, but
+#     load_aux_data NEVER sets aux['earnings'] (grep-confirmed: its only
+#     earnings.parquet read feeds `earnings_dte` INTO aux['options'], nested
+#     inside the options gate). Both declaring strategies read
+#     aux_data.get('earnings'), which is already None in every live run
+#     today — gating a load that doesn't exist would change nothing they
+#     receive, so 'earnings' need contributes no gate here.
+#   - 'vol_indices' / 'iv_history' / 'realized_vol' — backtest-only
+#     categories (strategies.aux_data_loader), no live engine.py loader.
+_AUX_LAZY_GATED_KINDS = ('financials', 'insider_txns', 'options',
+                         'prices_30m', 'macro', 'sentiment')
+
+# F2 (fix round 1): log the "requirements.json exists but is malformed"
+# warning at most once per strategy id per process, not once per
+# _strategy_aux_needs() call (it's called once per strategy at plan time
+# AND, per F3, potentially again at run time for a drifted strategy).
+_MALFORMED_REQS_WARNED: set = set()
+
+
+def _aux_lazy_mode() -> str:
+    """OPENCLAW_AUX_LAZY: '1' -> 'on' (skip kinds nobody running needs);
+    'shadow' -> 'shadow' (compute + log the plan, still load everything);
+    anything else (unset, '0', or any other value) -> 'off' (no plan
+    computed, no new log line — literally the pre-M3 code path). Default
+    OFF per brief constraint 4: the controller flips this to '1' in .env
+    only after one clean shadow day."""
+    v = os.environ.get('OPENCLAW_AUX_LAZY', '0').strip().lower()
+    if v == '1':
+        return 'on'
+    if v == 'shadow':
+        return 'shadow'
+    return 'off'
+
+
+def _strategy_run_decision(strat, strat_regime_str) -> tuple:
+    """Hoisted run predicate (brief constraint 1): the SINGLE source of
+    truth for "will `strat` run under `strat_regime_str`", reused verbatim
+    by run_strategies' per-strategy loop below AND by the aux-lazy planner
+    (`_running_strategy_ids`) — the brief is explicit: "do not invent a
+    second one".
+
+    Deliberately does NOT special-case a falsy/unknown strat_regime_str:
+    pre-M3, the equity path called `is_eligible(strat.id, equity_regime_str)`
+    unconditionally, with no guard, and is_eligible itself already handles
+    an unrecognized value (returns False, with its own logged warning, for
+    anything not in ALL_REGIMES) — falling through from there to the
+    calendar_edge check exactly as today. An earlier version of this
+    function short-circuited on a falsy strat_regime_str before ever
+    calling is_eligible, which would have silently SKIPPED a calendar-edge
+    equity strategy that old code still ran through (is_eligible(None) ->
+    False -> calendar_edge check still runs) — caught in review before this
+    landed; see the M3 report. `strat_regime_str` is the regime this
+    strategy is judged against — the crypto regime's state string for a
+    crypto strategy, else the equity regime string. The ONE case this
+    function does not cover is crypto's "no crypto regime file exists yet":
+    that already short-circuits at the CALL SITE before is_eligible is ever
+    invoked (run_strategies, unchanged; mirrored in _running_strategy_ids),
+    exactly as pre-M3 — not duplicated here.
+
+    Returns (will_run, via_calendar_edge_run_through):
+      - is_eligible(strat.id, strat_regime_str) True: (True, False) — the
+        ordinary path.
+      - is_eligible False but strat.calendar_edge: (True, True) — the
+        window IS the signal; runs through a non-qualifying/unknown regime.
+      - neither: (False, False).
+    """
+    if is_eligible(strat.id, strat_regime_str):
+        return True, False
+    if getattr(strat, 'calendar_edge', False):
+        return True, True
+    return False, False
+
+
+def _running_strategy_ids(strategies, equity_regime_str) -> set:
+    """The set of strategy ids that WILL RUN this cycle (brief constraint
+    1), computed BEFORE aux loading so the aux-lazy planner can decide what
+    to load. Two components:
+
+    1. `_strategy_run_decision` per strategy, resolving the crypto regime
+       lazily (instrument_class_for + load_crypto_regime_state, cached once
+       per call to this function) — mirrors run_strategies' own
+       `_crypto_regime = None` lazy cache exactly.
+    2. Every `exit_hook=True` strategy, UNCONDITIONALLY, but ONLY when
+       `_exit_hook_enabled()` is true (the same gate update_pnl itself
+       checks before ever calling should_exit — OPENCLAW_EXIT_HOOK_LIVE=1
+       and not an intraday-redeploy fragment). update_pnl (called later in
+       main(), after run_strategies) hands the SAME aux_data dict to
+       `strat.should_exit(position, prices, regime, aux_data)` for every
+       OPEN position's strategy — regardless of today's regime eligibility;
+       a position opened while eligible must still be evaluated for exit
+       after the regime moves on ("Exit hooks / regime_exit and any
+       always-on sleeve count as running" — brief constraint 1). Whether it
+       currently HOLDS an open position is deliberately not checked here:
+       that would need its own DB query duplicating update_pnl's open-
+       positions SELECT — exactly the "second predicate" constraint 1 warns
+       against — so this fails open and always includes every exit-hook
+       strategy while the mechanism is live. The exit-hook population is
+       tiny (2 strategies fleet-wide as of 2026-09-28: S_beta_spy,
+       S_coint_pairs_sector_v2 — CLAUDE.md), so the conservative
+       always-include costs nothing measurable.
+
+    KNOWN GAP (documented, not fixed — see the M3 report): `strategies` is
+    the APPROVED list (load_approved_strategies). update_pnl's own
+    `_strategy_for` also loads a strategy ON DEMAND (not from `strategies`)
+    for any OPEN signal row whose strategy_id is no longer approved (e.g.
+    PARKED — X1/S_coint_pairs_sector_v2 was PARKED 2026-08-28 per CLAUDE.md
+    while still able to hold open positions), and still calls should_exit()
+    with the same shared aux_data if exit_hook=True. Such a strategy is
+    INVISIBLE to this function. Verified 2026-09-28: neither currently-known
+    exit_hook strategy (S_beta_spy, S_coint_pairs_sector_v2) reads aux_data
+    anywhere in should_exit — both grep/AST-clean — so this gap is inert
+    today. It would matter only for a FUTURE exit_hook strategy that both
+    reads aux_data AND gets de-approved while still holding positions;
+    closing it fully needs the same open-positions DB query this docstring
+    already declines to duplicate.
+
+    A related, DELIBERATELY UNCLOSED gap: `is_eligible` (and, for a crypto
+    strategy, the crypto regime file) is read AGAIN, independently, inside
+    run_strategies itself minutes later — if the regime or eligibility
+    resolver's answer changes between this planning call and the actual
+    run (a mid-cycle regime flip, a resolver row updated concurrently), a
+    strategy could run without its kind having been loaded. main() checks
+    for this after run_strategies (see the aux-plan-drift WARNING) rather
+    than trying to make the two calls atomic.
+    """
+    _crypto_regime = None
+    running: set = set()
+    _hook_on = _exit_hook_enabled()
+    for strat in strategies:
+        if _hook_on and getattr(strat, 'exit_hook', False):
+            running.add(strat.id)
+            continue
+        ic = instrument_class_for(strat.id)
+        if ic == 'crypto':
+            if _crypto_regime is None:
+                _crypto_regime = load_crypto_regime_state()
+            strat_regime_str = _crypto_regime.get('state')
+            if not strat_regime_str:
+                # Mirrors run_strategies' own crypto guard exactly: that
+                # function logs+skips BEFORE ever calling is_eligible, so
+                # _strategy_run_decision is never invoked with a falsy
+                # crypto regime string there either — kept here rather than
+                # folded into _strategy_run_decision so the EQUITY path
+                # never gets an extra "falsy regime -> not running" special
+                # case it never had (see that function's docstring).
+                continue
+        else:
+            strat_regime_str = equity_regime_str
+        will_run, _ = _strategy_run_decision(strat, strat_regime_str)
+        if will_run:
+            running.add(strat.id)
+    return running
+
+
+def _aux_data_alias_read(filepath: str) -> bool:
+    """Supplement to factor_prescreen._module_reads_aux_data (brief
+    constraint 2's named source-scan tool). That function's own docstring
+    names its blind spot: "under-matches a strategy that renames the
+    parameter... before subscripting/.get-ing it". Found live 2026-09-28:
+    strategies.cohort_base.CohortBaseStrategy.generate_signals — the base
+    class of S_HV14_otm_skew_factor_cohort2026, S_HV15_iv_term_structure_
+    cohort2026, S_TR04_zarattini_intraday_spy, S_TR06_baltussen_eod_reversal
+    (none of which have a requirements.json under their exact manifest id —
+    see the M3 report) — does exactly `aux = aux_data or {}` then
+    `aux.get('macro')` / `aux.get('options')` / `aux.get('prices_30m')` /
+    `aux.get('vol_indices')` several lines later. _module_reads_aux_data
+    alone scans that file and reports False (no inline
+    aux_data[...]/aux_data.get(...)), which is a fail-CLOSED wrong answer
+    for THIS task even though it's an accepted tradeoff for
+    factor_prescreen's own, lower-stakes use (a missed screen, not a
+    starved live strategy).
+
+    Finds every `<name> = aux_data`, `<name> = aux_data or {...}`, or
+    `<name> = aux_data if ... else {...}` assignment (module-wide, matching
+    _module_reads_aux_data's own whole-module ast.walk() rather than a
+    single function scope), then checks whether any such <name> is later
+    subscripted or `.get()`-called anywhere in the module. A same-named
+    unrelated local in a different function would over-match — the safe
+    direction, per the same over/under-match tradeoff
+    _module_reads_aux_data's own docstring accepts.
+    """
+    import ast
+    try:
+        tree = ast.parse(Path(filepath).read_text())
+    except (FileNotFoundError, SyntaxError, OSError):
+        return False
+
+    def _is_aux_data_name(node):
+        return isinstance(node, ast.Name) and node.id == 'aux_data'
+
+    def _unwraps_to_aux_data(node):
+        if _is_aux_data_name(node):
+            return True
+        if isinstance(node, ast.BoolOp) and any(_is_aux_data_name(v) for v in node.values):
+            return True
+        if isinstance(node, ast.IfExp) and (_is_aux_data_name(node.body) or _is_aux_data_name(node.orelse)):
+            return True
+        return False
+
+    aliases: set = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _unwraps_to_aux_data(node.value):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    aliases.add(tgt.id)
+        elif (isinstance(node, ast.AnnAssign) and node.value is not None
+              and _unwraps_to_aux_data(node.value) and isinstance(node.target, ast.Name)):
+            aliases.add(node.target.id)
+    if not aliases:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id in aliases:
+            return True
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'get' and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in aliases):
+            return True
+    return False
+
+
+def _strategy_aux_needs(strat) -> set:
+    """Which of _AUX_LAZY_GATED_KINDS `strat` needs (brief constraint 2).
+
+    Takes the strategy INSTANCE, not just its id — the fallback path (2)
+    needs the class' actual source file(s), and a strategy's declared `id`
+    does not reliably map to its implementation file's name (confirmed
+    2026-09-28: 19/149 manifest strategy ids have no requirements.json
+    under their exact id — see the M3 report's audit).
+
+    Source of truth, in order:
+    1. <strat.id>.requirements.json required + optional, gated on the FILE
+       actually existing (checked directly against
+       acting_ingest_plan.IMPL_DIR — not inferred from
+       acting_ingest_plan.load_requirements()'s own return, since its
+       fail-open synthetic {'required': ['prices']} on a missing file is
+       indistinguishable from a real prices-only declaration). This
+       id->path convention IS trusted here because acting_ingest_plan.py
+       already relies on it in production for the same strategy
+       population.
+       F2 (fix round 1): parsed HERE directly with json.loads(), NOT via
+       acting_ingest_plan.load_requirements() — that function's own
+       except-Exception fallback returns the EXACT SAME shape
+       ({'required': ['prices'], 'optional': []}) for "no file" and "file
+       exists but is unparseable/malformed", which made this function
+       unable to tell a confident prices-only declaration from a parse
+       failure and fail CLOSED (an empty needed-kinds set — the opposite
+       of "when unsure -> load") whenever a requirements.json this
+       strategy actually has failed to parse. A file that exists but is
+       unparseable JSON, has a non-dict root, or has a 'required'/
+       'optional' value that isn't a list, fails OPEN to every gated kind
+       instead, logged once per strategy id.
+    2. No requirements.json for this id: fall back to a source scan —
+       BUT across every class in type(strat).__mro__ (excluding
+       BaseStrategy/object), not just type(strat) itself. A strategy's OWN
+       generate_signals/should_exit is sometimes on a shared base class
+       (strategies.cohort_base.CohortBaseStrategy is the live example —
+       see _aux_data_alias_read's docstring); scanning only the leaf class
+       would silently miss that class' aux_data usage and return a
+       confident-but-wrong empty set. Per class file: True from EITHER
+       backtest.factor_prescreen._module_reads_aux_data() (the brief's
+       named tool — the inline `aux_data[...]`/`aux_data.get(...)` idiom)
+       OR _aux_data_alias_read() (the rename idiom that tool misses) ->
+       "unsure which kind" (brief: "when unsure ⇒ load") -> every gated
+       kind. No class in the MRO has a resolvable source file at all, or
+       every resolvable file scans False on both checks, or any scan
+       raises -> also unsure -> fails open to every gated kind. Only a
+       clean False across every resolvable MRO file, with at least one
+       file actually resolved, is a confident empty set.
+    """
+    from execution.acting_ingest_plan import IMPL_DIR
+    req_path = IMPL_DIR / f'{strat.id}.requirements.json'
+    if req_path.exists():
+        try:
+            _raw = json.loads(req_path.read_text())
+            if not isinstance(_raw, dict):
+                raise ValueError(
+                    f'requirements.json root is {type(_raw).__name__}, expected object')
+            _req = _raw.get('required')
+            _opt = _raw.get('optional')
+            if _req is None:
+                _req = []
+            if _opt is None:
+                _opt = []
+            if not isinstance(_req, list) or not isinstance(_opt, list):
+                raise ValueError("'required'/'optional' must be lists")
+            cats = set(_req) | set(_opt)
+        except Exception as exc:
+            if strat.id not in _MALFORMED_REQS_WARNED:
+                _MALFORMED_REQS_WARNED.add(strat.id)
+                logger.warning(
+                    '[engine] %s requirements.json exists but is malformed '
+                    '(%s) — failing open to every aux kind', strat.id, exc)
+            return set(_AUX_LAZY_GATED_KINDS)
+        return {_REQ_CATEGORY_TO_KIND[c] for c in cats if c in _REQ_CATEGORY_TO_KIND}
+    try:
+        import inspect
+        from backtest.factor_prescreen import _module_reads_aux_data
+        from strategies.base import BaseStrategy
+        src_files: list = []
+        for cls in type(strat).__mro__:
+            if cls in (object, BaseStrategy):
+                continue
+            try:
+                p = inspect.getsourcefile(cls)
+            except TypeError:
+                p = None
+            if p and p not in src_files:
+                src_files.append(p)
+        if not src_files:
+            return set(_AUX_LAZY_GATED_KINDS)
+        for p in src_files:
+            if _module_reads_aux_data(p) or _aux_data_alias_read(p):
+                return set(_AUX_LAZY_GATED_KINDS)
+        return set()
+    except Exception:
+        return set(_AUX_LAZY_GATED_KINDS)
+
+
+def _needed_aux_kinds(strategies, running_ids: set) -> set:
+    """Union of _strategy_aux_needs() over every strategy in running_ids."""
+    needed: set = set()
+    for strat in strategies:
+        if strat.id not in running_ids:
+            continue
+        needed |= _strategy_aux_needs(strat)
+    return needed
+
+
+def _log_aux_plan(running_ids: set, needed: set) -> None:
+    """The brief's required one-line summary (constraint 2)."""
+    load = sorted(needed & set(_AUX_LAZY_GATED_KINDS))
+    skip = sorted(set(_AUX_LAZY_GATED_KINDS) - needed)
+    logger.info(
+        '[engine] aux plan: run=%d strategies; load={%s} skip={%s} '
+        '(reason: no running strategy declares them)',
+        len(running_ids), ','.join(load), ','.join(skip))
+
+
+def _log_aux_plan_drift(strategy_results: dict, running_ids: set | None) -> set:
+    """Post-run_strategies check: did any strategy actually run that the
+    aux-lazy planner (_running_strategy_ids, called before aux loading)
+    didn't predict? is_eligible and the crypto regime file are each read a
+    SECOND time, independently, inside run_strategies — a regime flip or a
+    resolver row changing in between could let a strategy run whose kind(s)
+    were never loaded. Returns the drift set (empty when running_ids is
+    None — 'off' mode, no plan was computed — or when nothing diverged) and
+    logs a WARNING naming the drifted strategies when non-empty, so a
+    shadow day surfaces this even though nothing was actually skipped."""
+    if running_ids is None:
+        return set()
+    drift = set(strategy_results) - running_ids
+    if drift:
+        logger.warning(
+            '[engine] aux plan drift: %d strategies ran that the aux-lazy '
+            'planner did not predict (regime/eligibility changed between '
+            'planning and run_strategies) — their aux needs may not have '
+            'been loaded: %s', len(drift), sorted(drift))
+    return drift
+
+
+def _resolve_aux_load_plan(strategies, regime_state):
+    """main()'s M3 wiring, extracted so the mode dispatch (off/shadow/on) is
+    unit-testable without a DB and so main() itself stays a thin, obviously-
+    correct call site. Returns (needed_kinds_arg, running_ids, needed):
+
+      - needed_kinds_arg: what to pass to load_aux_data(needed_kinds=...).
+        None in 'off' and 'shadow' modes (nothing is actually skipped); the
+        real computed set in 'on' mode.
+      - running_ids, needed: the computed plan, or (None, None) in 'off'
+        mode — 'off' must cost nothing (brief constraint 4's kill switch),
+        not even computing the run set, let alone logging it.
+
+    'shadow' and 'on' both compute the SAME plan and log the SAME line
+    (brief constraint 4: shadow "logs the plan and loads all" — the only
+    difference from 'on' is what gets passed to load_aux_data)."""
+    mode = _aux_lazy_mode()
+    if mode == 'off':
+        return None, None, None
+    running_ids = _running_strategy_ids(strategies, regime_state)
+    needed = _needed_aux_kinds(strategies, running_ids)
+    _log_aux_plan(running_ids, needed)
+    return (needed if mode == 'on' else None), running_ids, needed
+
+
+def _resolve_aux_load_plan_safe(strategies, regime_state):
+    """F1 (fix round 1, blocks shadow): the aux-lazy planner
+    (_resolve_aux_load_plan -> _running_strategy_ids -> is_eligible /
+    load_crypto_regime_state / _strategy_aux_needs -> requirements.json
+    parsing / an MRO source scan) is new, still-experimental machinery
+    touching the strategy registry, the regime-gate resolver, and a
+    crypto-regime file read — none of that is allowed to be able to kill
+    the signals step just because it raised. This wraps
+    _resolve_aux_load_plan so ANY exception (regardless of mode — even a
+    'shadow'-mode failure must not propagate) falls back to the exact
+    off-mode tuple (None, None, None), which makes load_aux_data (the
+    caller's next line) load every kind — i.e. this function can only ever
+    fail SAFE, never fail the run. Logs exactly ONE warning line naming the
+    exception. Extracted (mirroring _resolve_aux_load_plan's own reason for
+    being extracted) so this is unit-testable without a DB and so main()
+    stays a thin, obviously-correct call site."""
+    try:
+        return _resolve_aux_load_plan(strategies, regime_state)
+    except Exception as e:
+        logger.warning('[engine] aux plan failed (%s); loading all kinds', e)
+        return None, None, None
+
+
 def run_strategies(strategies, prices, regime, universe, aux_data,
-                   strategy_universes=None) -> dict:
+                   strategy_universes=None, aux_loaded_kinds=None,
+                   as_of=None) -> dict:
     """
     Returns: {strategy_id: [Signal, ...]}
 
@@ -1518,6 +1990,23 @@ def run_strategies(strategies, prices, regime, universe, aux_data,
     "ran fine but emitted zero signals" from "raised an exception" should read
     last_run_stats rather than checking `if signals` on the results dict (which
     cannot distinguish the two cases since both store []).
+
+    aux_loaded_kinds / as_of (F3, fix round 1 — hard drift guard, mode 'on'
+    only): aux_loaded_kinds is the SAME needed_kinds_arg main() passed to
+    load_aux_data (None in off/shadow mode — everything was already loaded,
+    so there's nothing to drift from and no check runs; the real computed
+    set in mode 'on'). is_eligible/the crypto regime are read a SECOND time
+    per strategy in the loop below, independently of the aux-lazy planner's
+    earlier read (_running_strategy_ids, called before aux loading) — a
+    strategy can therefore reach generate_signals here that the planner did
+    not predict, whose needed kinds simply weren't loaded. When
+    aux_loaded_kinds is not None, each strategy's _strategy_aux_needs() is
+    checked against it right before generate_signals; anything missing is
+    loaded late via load_aux_data(universe, as_of, needed_kinds=<missing>)
+    and merged into the shared aux_data dict (and aux_loaded_kinds is
+    widened in this function's local scope), so both the per-strategy-
+    universe slice below and every later strategy in this same loop see it
+    — one late load per missing kind per run, not per strategy.
     """
     # regime is the full dict from load_regime(); the eligibility gate takes
     # the regime-state string. Strategies still get the full dict.
@@ -1540,21 +2029,24 @@ def run_strategies(strategies, prices, regime, universe, aux_data,
             else:
                 strat_regime = regime
                 strat_regime_str = equity_regime_str
-            if not is_eligible(strat.id, strat_regime_str):
-                if getattr(strat, 'calendar_edge', False):
-                    # Calendar-edge run-through (operator directive 2026-08-13):
-                    # the window IS the signal, so record it whenever the window
-                    # opens even in a non-qualifying regime. The sizer's
-                    # _REGIME_SCOPE_CLAUSE holds the mint dormant until the next
-                    # qualifying regime within its cadence window — it cannot
-                    # size in this regime.
-                    logger.info('[engine] %s regime %s not eligible — calendar-edge: '
-                                'recording window-open signals anyway (dormant until '
-                                'a qualifying regime within cadence)',
-                                strat.id, strat_regime_str)
-                else:
-                    logger.info('[engine] %s skipped — regime %s not eligible (strategy_regime_params)', strat.id, strat_regime_str)
-                    continue
+            # M3: hoisted into _strategy_run_decision so the aux-lazy planner
+            # (_running_strategy_ids, called before aux loading in main())
+            # shares this EXACT predicate rather than a second copy of it.
+            _run_ok, _via_calendar_edge = _strategy_run_decision(strat, strat_regime_str)
+            if not _run_ok:
+                logger.info('[engine] %s skipped — regime %s not eligible (strategy_regime_params)', strat.id, strat_regime_str)
+                continue
+            if _via_calendar_edge:
+                # Calendar-edge run-through (operator directive 2026-08-13):
+                # the window IS the signal, so record it whenever the window
+                # opens even in a non-qualifying regime. The sizer's
+                # _REGIME_SCOPE_CLAUSE holds the mint dormant until the next
+                # qualifying regime within its cadence window — it cannot
+                # size in this regime.
+                logger.info('[engine] %s regime %s not eligible — calendar-edge: '
+                            'recording window-open signals anyway (dormant until '
+                            'a qualifying regime within cadence)',
+                            strat.id, strat_regime_str)
             # Eligibility is decided SOLELY by the DB gate above — the activation
             # slider derived from backtest performance (strategy_regime_params).
             # The strategy's own should_run(active_in_regimes) is a stale SECOND
@@ -1568,6 +2060,37 @@ def run_strategies(strategies, prices, regime, universe, aux_data,
             _air = getattr(strat, 'active_in_regimes', None)
             if strat_regime_str and _air is not None and strat_regime_str not in _air:
                 strat.active_in_regimes = [*_air, strat_regime_str]
+            # F3 (fix round 1, blocks mode 1 — hard drift guard): a
+            # strategy reaching this point may be one the aux-lazy planner
+            # (_running_strategy_ids, called BEFORE aux loading in main())
+            # did not predict, or whose declared needs the plan otherwise
+            # didn't cover. Only meaningful in mode 'on' (aux_loaded_kinds
+            # is None in off/shadow — nothing was skipped, nothing can have
+            # drifted). Loads the gap late rather than letting the strategy
+            # run starved.
+            if aux_loaded_kinds is not None:
+                _needs = _strategy_aux_needs(strat)
+                _missing = _needs - aux_loaded_kinds
+                if _missing:
+                    logger.warning(
+                        '[engine] aux drift: %s needed %s not in plan — loaded late',
+                        strat.id, sorted(_missing))
+                    _late = load_aux_data(universe, as_of=as_of, needed_kinds=_missing)
+                    # Merge ONLY the requested kinds, not the whole returned
+                    # dict: load_aux_data(needed_kinds=_missing) still
+                    # returns aux['sentiment']={} whenever 'sentiment' isn't
+                    # in _missing (its unconditional "always present"
+                    # invariant — see load_aux_data's docstring), and a bare
+                    # aux_data.update(_late) would clobber a sentiment (or
+                    # any other kind outside _missing) the plan already
+                    # loaded for real with that empty placeholder. A kind
+                    # absent from _late (e.g. its master file doesn't exist)
+                    # is left absent here too, matching load_aux_data's own
+                    # "skipped/unavailable -> key absent" semantics.
+                    for _k in _missing:
+                        if _k in _late:
+                            aux_data[_k] = _late[_k]
+                    aux_loaded_kinds = aux_loaded_kinds | _missing
             # SP-7 Phase C (C1): per-strategy universe slice. None (gate OFF)
             # → byte-identical legacy behavior: shared panel/universe/aux.
             if strategy_universes is not None and strat.id in strategy_universes:
@@ -2422,8 +2945,19 @@ def main():
                 strategy_universes = None
 
         # 3. Load data
+
+        # M3 (signals-memory task 3, 2026-09-28): compute the aux-lazy plan
+        # BEFORE aux loading, using the strategies/regime already resolved
+        # above — see _resolve_aux_load_plan for the mode semantics
+        # (off/shadow/on). F1 (fix round 1, blocks shadow): resolved via the
+        # _safe wrapper, which can only ever fail SAFE (fall back to loading
+        # everything) — see its own docstring.
+        _aux_needed_kinds, _aux_running_ids, _aux_needed = \
+            _resolve_aux_load_plan_safe(strategies, regime_state)
+
         prices   = load_prices(universe)
-        aux_data = load_aux_data(universe, as_of=run_date)
+        aux_data = load_aux_data(universe, as_of=run_date,
+                                 needed_kinds=_aux_needed_kinds)
 
         if prices.empty:
             logger.warning("Prices DataFrame empty — signals will be minimal")
@@ -2439,7 +2973,18 @@ def main():
             except Exception as _e:
                 logger.warning(f'last_price inject failed: {_e}')
         strategy_results = run_strategies(strategies, prices, regime, universe,
-                                          aux_data, strategy_universes=strategy_universes)
+                                          aux_data, strategy_universes=strategy_universes,
+                                          aux_loaded_kinds=_aux_needed_kinds, as_of=run_date)
+
+        # M3: plan-vs-run drift check (shadow/on only — _aux_running_ids is
+        # None in 'off' mode, meaning no plan was computed). is_eligible
+        # (and, for a crypto strategy, crypto_regime_latest.json) is read
+        # AGAIN inside run_strategies, independently, whatever time later —
+        # a regime flip or a resolver row changing between the two reads
+        # could let a strategy run that the planner didn't predict, and
+        # whose kind(s) therefore weren't loaded. This can't be prevented
+        # without making planning and running atomic; it CAN be made loud.
+        _log_aux_plan_drift(strategy_results, _aux_running_ids)
 
         if dry_run:
             # Everything above (regime, universe resolution, panel load,
