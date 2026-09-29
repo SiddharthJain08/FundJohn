@@ -491,6 +491,24 @@ def _inject_intraday_options(opts, today, universe):
         return opts
 
 
+def _last_price_from_window(px_window):
+    """Latest valid close per ticker from the long-format HV20 price window
+    (columns ticker/date/close). Returns None when the window is unavailable;
+    sorts by date within ticker so an unordered frame still yields the true
+    latest close; NaN closes are ignored (falls back to the previous valid).
+    M1 (2026-09-29): replaces a full unfiltered prices.parquet read."""
+    if px_window is None or len(px_window) == 0:
+        return None
+    cols = set(getattr(px_window, 'columns', []))
+    if not {'ticker', 'date', 'close'} <= cols:
+        return None
+    px = px_window.dropna(subset=['close'])
+    if px.empty:
+        return {}
+    px = px.sort_values(['ticker', 'date'])
+    return px.groupby('ticker')['close'].last().to_dict()
+
+
 def _apply_options_surface(old: dict, opts, universe, today, master_dir, px_window, earnings=None) -> dict:
     """OPENCLAW_OPTIONS_SURFACE=1 → serve the v2 dict; else serve the legacy
     dict and log the shadow comparison (spec 2026-09-04 A.7).
@@ -1362,15 +1380,23 @@ def load_aux_data(universe: list, as_of=None, needed_kinds: set | None = None) -
                     'hv20_history':           hv20_history,
                 }
 
-            # Inject last_price from prices.parquet (long-format, always available)
+            # Inject last_price from the price window ALREADY IN MEMORY (M1,
+            # 2026-09-29). The previous code re-read the whole long-format
+            # prices.parquet (~19.4M rows incl. an object-dtype ticker column —
+            # a multi-GB transient) and took groupby('ticker').last() on a
+            # file that is NOT date-ordered, i.e. an arbitrary row per ticker.
+            # That read sat exactly where the 15:00 ET signals step was OOM-
+            # killed on 09-24/09-28/09-29. The HV20 window above is bounded,
+            # date-sorted per ticker, and its last valid close IS the latest
+            # close — better semantics for zero extra memory.
             try:
-                _px_path = master_dir / 'prices.parquet'
-                if _px_path.exists():
-                    import pandas as _pd2
-                    _px = _pd2.read_parquet(_px_path, columns=['ticker','close'])
-                    _lp = _px.groupby('ticker')['close'].last().to_dict()
+                _lp = _last_price_from_window(_px_window)
+                if _lp is None:
+                    logger.warning('last_price: price window unavailable — skipped (fail-open)')
+                else:
                     for _tk, _od in opts_dict.items():
                         _od['last_price'] = _lp.get(_tk)
+                    logger.info(f'last_price: derived from the in-memory price window for {len(_lp)} tickers (no full master read)')
             except Exception as _lpe:
                 logger.warning(f'last_price load failed: {_lpe}')
             aux['options'] = _apply_options_surface(opts_dict, opts, universe, today, master_dir,
@@ -1477,10 +1503,10 @@ def _slice_aux(aux_data: dict, universe_set: set) -> dict:
     panel makes identical-universe ⇒ identical-signals airtight even for
     strategies that iterate aux keys instead of the universe param.
 
-    NOTE (latent no-op, do NOT fix here): the last_price inject at engine.py
-    ~line 1546-1552 calls prices.groupby('ticker') on the WIDE pivoted frame
-    (no ticker column) → its except swallows it → the inject is already a
-    silent no-op live. _slice_aux neither worsens nor masks this."""
+    NOTE: the options last_price inject is derived from the in-memory
+    long-format HV20 price window (`_last_price_from_window`, M1 2026-09-29);
+    an earlier note here called it a latent no-op — that described a since-
+    replaced version. _slice_aux neither worsens nor masks it."""
     out = dict(aux_data)
     for k in _TICKER_KEYED_AUX:
         v = aux_data.get(k)
