@@ -116,7 +116,8 @@ def alpha_nav(equity: float, positions: dict, bench_tickers) -> tuple[float, flo
     return float(equity) - bench_mv, bench_mv
 
 
-def evaluate(alpha: float, peak, equity: float, opening_equity) -> dict:
+def evaluate(alpha: float, peak, equity: float, opening_equity,
+             dd_override=None) -> dict:
     """Pure rule evaluation. Returns
     {'peak', 'dd', 'daily', 'rule', 'breach'}.
 
@@ -126,7 +127,11 @@ def evaluate(alpha: float, peak, equity: float, opening_equity) -> dict:
     rather than inventing a denominator."""
     alpha = float(alpha)
     peak = alpha if peak is None else max(float(peak), alpha)
-    dd = (alpha / peak - 1.0) if peak > 0 else 0.0
+    dd_nav = (alpha / peak - 1.0) if peak > 0 else 0.0
+    # C1 amendment 2: when the caller supplies the cumulative-alpha-P&L
+    # drawdown, THAT drives the drawdown rule; the NAV-based measure is kept
+    # only as 'dd_nav' for the transition log line.
+    dd = dd_nav if dd_override is None else float(dd_override)
 
     daily = None
     if opening_equity not in (None, 0) and float(opening_equity) > 0:
@@ -138,9 +143,107 @@ def evaluate(alpha: float, peak, equity: float, opening_equity) -> dict:
     if daily is not None and daily <= DAILY_LIMIT + _EPS:
         rules.append('daily_loss')
 
-    return {'peak': peak, 'dd': dd, 'daily': daily,
+    return {'peak': peak, 'dd': dd, 'dd_nav': dd_nav, 'daily': daily,
             'rule': '+'.join(rules) if rules else 'none',
             'breach': bool(rules)}
+
+
+# ── cumulative alpha P&L (C1 amendment 2) ───────────────────────────────────
+
+def _f(x, default=None):
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return default
+    return v if v == v else default    # NaN -> default
+
+
+def alpha_pnl(equity, positions, bench_tickers, fills_since_epoch, epoch_lots) -> dict:
+    """Cumulative alpha P&L = realized (FIFO over fills since the epoch,
+    seeded by the epoch lots) + unrealized (open non-benchmark positions).
+
+    positions: {symbol: {'qty','side','avg_entry_price','current_price',
+    'market_value', ...}} (regime_liquidator._load_broker_positions shape).
+    fills_since_epoch: iterable of dicts {ticker, side, qty, price, filled_at,
+    activity_id} (any order; sorted here by filled_at then activity_id).
+    epoch_lots: iterable of dicts {ticker, qty, avg_entry_price, side}.
+
+    Benchmark tickers are excluded from BOTH legs. Fail-open: an unparseable
+    row is skipped and counted; a sell with no open long lot to match is
+    counted in 'unmatched' with cost = fill price (zero realized) and never
+    raises. `equity` is accepted for signature symmetry with alpha_nav and is
+    not used (the caller normalizes by it).
+    Returns {alpha_pnl, realized, unrealized, unmatched, unpriced, n_positions}."""
+    from collections import deque
+    bench = {str(t).strip().upper() for t in (bench_tickers or ())}
+
+    unrealized, n_pos, unpriced = 0.0, 0, 0
+    for sym, p in (positions or {}).items():
+        if str(sym).strip().upper() in bench:
+            continue
+        p = p or {}
+        qty = _f(p.get('qty'), 0.0)
+        if not qty:
+            continue
+        n_pos += 1
+        avg, cur_px = _f(p.get('avg_entry_price')), _f(p.get('current_price'))
+        sign = -1.0 if str(p.get('side') or '').lower() == 'short' else 1.0
+        if avg is not None and cur_px is not None:
+            unrealized += abs(qty) * (cur_px - avg) * sign
+        elif _f(p.get('unrealized_pl')) is not None:
+            unrealized += _f(p.get('unrealized_pl'))
+        else:
+            unpriced += 1
+            logger.warning('[account_breaker] unpriced position %s (no avg/current price)', sym)
+
+    # lots per ticker: deque of [signed_qty, price]; + = long, - = short
+    lots: dict = {}
+    for l in (epoch_lots or ()):
+        t = str(l.get('ticker') or '').strip().upper()
+        q, px = _f(l.get('qty')), _f(l.get('avg_entry_price'))
+        if not t or t in bench or not q or px is None:
+            continue
+        signed = -abs(q) if str(l.get('side') or '').lower() == 'short' else abs(q)
+        lots.setdefault(t, deque()).append([signed, px])
+
+    def _key(f):
+        return (str(f.get('filled_at') or ''), str(f.get('activity_id') or ''))
+
+    realized, unmatched = 0.0, 0
+    for f in sorted(list(fills_since_epoch or ()), key=_key):
+        t = str(f.get('ticker') or '').strip().upper()
+        q, px = _f(f.get('qty')), _f(f.get('price'))
+        side = str(f.get('side') or '').lower()
+        if not t or t in bench or not q or q <= 0 or px is None or side not in ('buy', 'sell'):
+            continue
+        dq = lots.setdefault(t, deque())
+        rem = q
+        if side == 'sell':
+            while rem > 1e-12 and dq and dq[0][0] > 0:
+                m = min(rem, dq[0][0])
+                realized += m * (px - dq[0][1])
+                dq[0][0] -= m
+                rem -= m
+                if dq[0][0] <= 1e-12:
+                    dq.popleft()
+            if rem > 1e-9:
+                unmatched += 1
+                logger.warning('[account_breaker] unmatched fill %s sell qty=%s @%s '
+                               '(no open lot; counted, zero realized)', t, rem, px)
+        else:
+            while rem > 1e-12 and dq and dq[0][0] < 0:
+                m = min(rem, -dq[0][0])
+                realized += m * (dq[0][1] - px)
+                dq[0][0] += m
+                rem -= m
+                if dq[0][0] >= -1e-12:
+                    dq.popleft()
+            if rem > 1e-12:
+                dq.append([rem, px])
+
+    return {'alpha_pnl': realized + unrealized, 'realized': realized,
+            'unrealized': unrealized, 'unmatched': unmatched,
+            'unpriced': unpriced, 'n_positions': n_pos}
 
 
 # ── state layer (C1b) ────────────────────────────────────────────────────────
@@ -219,7 +322,7 @@ def load_state(cur) -> dict:
 
 
 def save_state(cur, *, halted, reason, breached_at, peak, dd, daily,
-               pending_flatten, flatten_attempts=None) -> bool:
+               pending_flatten, flatten_attempts=None, peak_alpha_pnl=None) -> bool:
     """Persist the singleton latch. Returns True iff the write actually
     landed (supplement item 2) — every caller in run_once() must check this,
     because a failed write here (e.g. migration 157 not yet applied) is
@@ -246,7 +349,86 @@ def save_state(cur, *, halted, reason, breached_at, peak, dd, daily,
         )
 
     ok, _ = _savepoint_guarded(cur, 'sp_ab_save_state', _write, on_error_level=logging.ERROR)
+    if ok and peak_alpha_pnl is not None:
+        save_peak_alpha_pnl(cur, peak_alpha_pnl)
     return ok
+
+
+def save_peak_alpha_pnl(cur, peak) -> bool:
+    """Persist the alpha-P&L high-water mark (migration 160). Its own savepoint
+    so a missing column never rolls back the latch write that precedes it."""
+    def _write():
+        cur.execute('UPDATE account_breaker_state SET peak_alpha_pnl = %s WHERE id = 1',
+                    (float(peak),))
+    ok, _ = _savepoint_guarded(cur, 'sp_ab_save_peak_pnl', _write,
+                               on_error_level=logging.ERROR)
+    return ok
+
+
+def load_alpha_state(cur):
+    """(peak_alpha_pnl | None, alpha_epoch_at | None), or None when the read
+    failed / migration 160 is not applied / no state row (caller falls back to
+    the legacy NAV drawdown for that tick). fetchall() only, so the caller's
+    fetchone() sequencing is never disturbed."""
+    def _read():
+        cur.execute('SELECT peak_alpha_pnl, alpha_epoch_at FROM account_breaker_state '
+                    'WHERE id = 1')
+        return cur.fetchall()
+    ok, rows = _savepoint_guarded(cur, 'sp_ab_load_alpha_state', _read)
+    if not ok or not rows:
+        return None
+    peak, epoch_at = rows[0]
+    return (None if peak is None else float(peak)), epoch_at
+
+
+def take_alpha_epoch(cur, positions, bench_tickers) -> bool:
+    """Snapshot the open non-benchmark lots and stamp alpha_epoch_at, in ONE
+    savepoint (all-or-nothing). Called only when alpha_epoch_at IS NULL; the
+    UPDATE is additionally guarded `AND alpha_epoch_at IS NULL` so the epoch can
+    never move. Returns True iff it landed."""
+    bench = {str(t).strip().upper() for t in (bench_tickers or ())}
+    rows = []
+    for sym, p in (positions or {}).items():
+        if str(sym).strip().upper() in bench:
+            continue
+        p = p or {}
+        qty, avg = _f(p.get('qty'), 0.0), _f(p.get('avg_entry_price'))
+        if not qty or avg is None:
+            continue
+        side = 'short' if str(p.get('side') or '').lower() == 'short' else 'long'
+        rows.append((str(sym).strip().upper(), abs(qty), avg, side))
+
+    def _write():
+        cur.execute('UPDATE account_breaker_state SET alpha_epoch_at = NOW() '
+                    'WHERE id = 1 AND alpha_epoch_at IS NULL')
+        if getattr(cur, 'rowcount', 1) == 0:
+            raise RuntimeError('epoch already set or no state row')
+        for r in rows:
+            cur.execute('INSERT INTO account_breaker_alpha_epoch '
+                        '(ticker, qty, avg_entry_price, side, taken_at) '
+                        'VALUES (%s, %s, %s, %s, NOW())', r)
+
+    ok, _ = _savepoint_guarded(cur, 'sp_ab_alpha_epoch', _write,
+                               on_error_level=logging.ERROR)
+    return ok
+
+
+def load_alpha_inputs(cur, epoch_at):
+    """(epoch_lots, fills_since_epoch) as lists of dicts, or None on failure."""
+    def _read():
+        cur.execute('SELECT ticker, qty, avg_entry_price, side '
+                    'FROM account_breaker_alpha_epoch')
+        lots = [{'ticker': r[0], 'qty': r[1], 'avg_entry_price': r[2], 'side': r[3]}
+                for r in (cur.fetchall() or [])]
+        cur.execute('SELECT ticker, side, qty, price, filled_at, activity_id '
+                    'FROM broker_fills WHERE filled_at >= %s '
+                    'ORDER BY filled_at, activity_id', (epoch_at,))
+        fills = [{'ticker': r[0], 'side': r[1], 'qty': r[2], 'price': r[3],
+                  'filled_at': r[4], 'activity_id': r[5]}
+                 for r in (cur.fetchall() or [])]
+        return lots, fills
+    ok, res = _savepoint_guarded(cur, 'sp_ab_alpha_inputs', _read)
+    return res if ok else None
 
 
 def load_flatten_attempts(cur) -> int:
@@ -337,7 +519,7 @@ def rearm_requested(state: dict) -> bool:
     return token in _iso_variants(state.get('breached_at'))
 
 
-def clear_halt(cur, alpha: float) -> bool:
+def clear_halt(cur, alpha: float, alpha_pnl_now=None) -> bool:
     """Operator re-arm: drop the latch and reset the rolling peak to the
     current alpha NAV, so the next drawdown is measured from here. Also
     resets flatten_attempts to 0 — a fresh arm should not inherit a stale
@@ -361,11 +543,17 @@ def clear_halt(cur, alpha: float) -> bool:
         )
 
     ok, _ = _savepoint_guarded(cur, 'sp_ab_clear_halt', _write, on_error_level=logging.ERROR)
+    if ok and alpha_pnl_now is not None:
+        # C1 amendment 2: the alpha-P&L high-water mark resets to the current
+        # alpha_pnl (mirror of the peak_alpha_nav reset). The EPOCH is never
+        # touched. Own savepoint: a missing migration-160 column must not undo
+        # the re-arm above.
+        save_peak_alpha_pnl(cur, alpha_pnl_now)
     return ok
 
 
 def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
-                open_src, halted, flatten=None) -> str:
+                open_src, halted, flatten=None, pnl=None) -> str:
     """The operator greps `[account_breaker] shadow` / `[account_breaker] armed`.
     Emitted on EVERY tick — a missing line means the process died, which is why
     rule=none exists. Do not reorder or rename existing tokens; `flatten_partial`
@@ -391,6 +579,20 @@ def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
                  f"flatten_fail={int(flatten['fail'])} "
                  f"pending={int(bool(flatten['pending']))} "
                  f"flatten_partial={int(flatten.get('partial', 0))}")
+    # C1 amendment 2 — APPENDED (existing tokens above untouched).
+    if pnl is not None:
+        def _m(v):
+            return 'n/a' if v is None else f"{float(v):.2f}"
+        dd_pnl = pnl.get('dd_pnl')
+        dd_nav = st.get('dd_nav')
+        line += (f" | alpha_pnl={_m(pnl.get('alpha_pnl'))} "
+                 f"realized={_m(pnl.get('realized'))} "
+                 f"unrealized={_m(pnl.get('unrealized'))} "
+                 f"hwm={_m(pnl.get('hwm'))} "
+                 f"dd_pnl={'n/a' if dd_pnl is None else f'{float(dd_pnl):.4f}'} "
+                 f"unmatched={int(pnl.get('unmatched', 0))}"
+                 f" | legacy alpha_nav={float(alpha):.2f} "
+                 f"dd_nav={'n/a' if dd_nav is None else f'{float(dd_nav):.4f}'}")
     return line
 
 
@@ -835,6 +1037,46 @@ def _flatten_escalation_msg(attempts: int, flat: dict) -> str:
     )
 
 
+def compute_alpha_pnl_tick(cur, conn, equity, positions, bench):
+    """One tick of the C1-amendment-2 measure. Returns
+    {alpha_pnl, realized, unrealized, unmatched, hwm, dd_pnl, ...} or None when
+    it cannot be computed this tick (migration 160 missing, a read failed, the
+    epoch snapshot did not land) — the caller then falls back to the legacy NAV
+    drawdown for that tick, fail-open, logged. On the first tick with
+    alpha_epoch_at IS NULL the epoch snapshot is written once, in one
+    savepoint, and committed immediately."""
+    a_state = load_alpha_state(cur)
+    if a_state is None:
+        logger.warning('[account_breaker] alpha P&L state unreadable (migration 160 '
+                       'applied?); legacy NAV drawdown this tick')
+        return None
+    peak_pnl, epoch_at = a_state
+    if epoch_at is None:
+        if not take_alpha_epoch(cur, positions, bench) or not _commit(conn):
+            logger.error('[account_breaker] alpha epoch snapshot did not land; '
+                         'legacy NAV drawdown this tick')
+            return None
+        a_state = load_alpha_state(cur)
+        if a_state is None or a_state[1] is None:
+            logger.error('[account_breaker] alpha epoch not readable after snapshot; '
+                         'legacy NAV drawdown this tick')
+            return None
+        peak_pnl, epoch_at = a_state
+        logger.info('[account_breaker] alpha epoch taken at %s', epoch_at)
+    inputs = load_alpha_inputs(cur, epoch_at)
+    if inputs is None:
+        logger.warning('[account_breaker] alpha P&L inputs unreadable; legacy NAV '
+                       'drawdown this tick')
+        return None
+    lots, fills = inputs
+    res = alpha_pnl(equity, positions, bench, fills, lots)
+    a = res['alpha_pnl']
+    hwm = a if peak_pnl is None else max(peak_pnl, a)
+    res['hwm'] = hwm
+    res['dd_pnl'] = (a - hwm) / float(equity)
+    return res
+
+
 def run_once(session_date=None) -> int:
     """One 5-minute evaluation. 0 = evaluated, 1 = soft failure (no
     evaluation this tick, retried in 5 minutes), 2 = misconfiguration.
@@ -934,9 +1176,11 @@ def run_once(session_date=None) -> int:
         alpha, bench_mv = alpha_nav(equity, positions, bench)
 
         state = load_state(cur)
+        pnl = compute_alpha_pnl_tick(cur, conn, equity, positions, bench)
 
         if rearm_requested(state):
-            rearmed = clear_halt(cur, alpha)
+            rearmed = clear_halt(cur, alpha,
+                                 alpha_pnl_now=None if pnl is None else pnl['alpha_pnl'])
             # fix round 1 item 3: `_commit` is now gated on `rearmed` too —
             # a failed clear_halt already rolled back to its own savepoint
             # (nothing to commit), and on a raising/failing commit AFTER a
@@ -949,6 +1193,8 @@ def run_once(session_date=None) -> int:
                 state = {'halted': False, 'reason': None, 'breached_at': None,
                          'peak': alpha, 'dd': None, 'daily': None,
                          'pending_flatten': False}
+                if pnl is not None:
+                    pnl['hwm'], pnl['dd_pnl'] = pnl['alpha_pnl'], 0.0
             else:
                 logger.error('[account_breaker] re-arm failed to persist '
                              '(clear_halt=%s); halt latch left in place, '
@@ -986,19 +1232,22 @@ def run_once(session_date=None) -> int:
                          bench_mv, sorted(bench))
             logger.info(format_line(mode, equity=equity, bench_mv=bench_mv,
                                     alpha=alpha, st=st, open_equity=open_eq,
-                                    open_src=open_src, halted=True, flatten=flat))
+                                    open_src=open_src, halted=True, flatten=flat,
+                                    pnl=pnl))
 
             if flat is not None and prior_attempts < FLATTEN_ESCALATE_AFTER <= attempts:
                 _post('trade-reports', _flatten_escalation_msg(attempts, flat))
             return 0
 
-        st = evaluate(alpha, state['peak'], equity, open_eq)
+        st = evaluate(alpha, state['peak'], equity, open_eq,
+                      dd_override=None if pnl is None else pnl['dd_pnl'])
+        peak_pnl_w = None if pnl is None else pnl['hwm']
 
         if not st['breach']:
             flat = None
             if not save_state(cur, halted=False, reason=None, breached_at=None,
                               peak=st['peak'], dd=st['dd'], daily=st['daily'],
-                              pending_flatten=False):
+                              pending_flatten=False, peak_alpha_pnl=peak_pnl_w):
                 logger.error('[account_breaker] clean-tick state write '
                              'failed; will retry next tick')
             _commit(conn)
@@ -1013,7 +1262,7 @@ def run_once(session_date=None) -> int:
                                  journal=False)
             if not save_state(cur, halted=False, reason=None, breached_at=None,
                               peak=st['peak'], dd=st['dd'], daily=st['daily'],
-                              pending_flatten=False):
+                              pending_flatten=False, peak_alpha_pnl=peak_pnl_w):
                 logger.error('[account_breaker] shadow-tick state write '
                              'failed; will retry next tick')
             _commit(conn)
@@ -1024,7 +1273,7 @@ def run_once(session_date=None) -> int:
             persisted = save_state(cur, halted=True, reason=st['rule'],
                                    breached_at=breached_at, peak=st['peak'],
                                    dd=st['dd'], daily=st['daily'],
-                                   pending_flatten=True)
+                                   pending_flatten=True, peak_alpha_pnl=peak_pnl_w)
             committed = _commit(conn)
             if not persisted or not committed:
                 logger.error('[account_breaker] failed to persist the halt '
@@ -1064,8 +1313,11 @@ def run_once(session_date=None) -> int:
             _post('trade-reports',
                   ':rotating_light: **Account breaker HALTED** '
                   f"rule={st['rule']}\n"
-                  f"• alpha NAV ${alpha:,.0f} vs peak ${st['peak']:,.0f} "
-                  f"(dd {st['dd'] * 100:.2f}%, limit {DD_LIMIT * 100:.0f}%)\n"
+                  + (f"• alpha P&L ${pnl['alpha_pnl']:,.0f} vs hwm ${pnl['hwm']:,.0f} "
+                     f"(dd {st['dd'] * 100:.2f}% of NAV, limit {DD_LIMIT * 100:.0f}%)\n"
+                     if pnl is not None else
+                     f"• alpha NAV ${alpha:,.0f} vs peak ${st['peak']:,.0f} "
+                     f"(dd {st['dd'] * 100:.2f}%, limit {DD_LIMIT * 100:.0f}%)\n") +
                   f"• equity ${equity:,.0f} vs session open ${open_eq:,.0f} "
                   f"(daily {daily_txt}, limit {DAILY_LIMIT * 100:.0f}%)\n"
                   f"• flattened {flat['ok']}/{attempted} alpha positions "
@@ -1090,7 +1342,8 @@ def run_once(session_date=None) -> int:
         logger.info(format_line(mode, equity=equity, bench_mv=bench_mv,
                                 alpha=alpha, st=st, open_equity=open_eq,
                                 open_src=open_src,
-                                halted=bool(live and st['breach']), flatten=flat))
+                                halted=bool(live and st['breach']), flatten=flat,
+                                pnl=pnl))
         return 0
     except Exception as e:  # noqa: BLE001 — fix round 1 item 3: a crash
         # anywhere in this tick, including psycopg2.connect itself (now

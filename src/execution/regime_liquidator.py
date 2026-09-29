@@ -228,7 +228,11 @@ def _load_broker_positions() -> dict:
         except (TypeError, ValueError):
             qty = 0.0
         out[sym] = {'qty': qty, 'side': p.get('side'),
-                    'market_value': p.get('market_value')}
+                    'market_value': p.get('market_value'),
+                    # additive (account breaker alpha P&L, C1 amendment 2)
+                    'avg_entry_price': p.get('avg_entry_price'),
+                    'current_price': p.get('current_price'),
+                    'unrealized_pl': p.get('unrealized_pl')}
     return out
 
 
