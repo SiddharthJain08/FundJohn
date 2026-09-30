@@ -491,6 +491,28 @@ def _inject_intraday_options(opts, today, universe):
         return opts
 
 
+def _aux_shadow_sink(kind: str, msg: str) -> None:
+    """Durable copy of the M1/M3 diagnostics (signals-memory task 4, 2026-09-30).
+    The daily-cycle step log keeps only a 4,000-char stderr tail, which drops
+    the early-run aux plan / drift / last_price lines; append them (IN ADDITION
+    to the logger line, in every OPENCLAW_AUX_LAZY mode) to logs/aux_plan_shadow.log
+    via lib.shadow_log (honours OPENCLAW_SHADOW_LOG_DIR). Line format:
+    '<ts> [aux_shadow] kind=<plan|drift|late_drift|last_price> date=<UTC run date>
+    reason=<compute|other> mode=<off|shadow|1> | <message>'. Fail-open: a sink
+    failure warns and never touches the run."""
+    try:
+        from lib import shadow_log
+        reason = ('compute' if os.environ.get('OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS', '0') == '1'
+                  else 'other')
+        mode = {'on': '1'}.get(_aux_lazy_mode(), _aux_lazy_mode())
+        shadow_log.record(
+            'aux_plan_shadow',
+            f'[aux_shadow] kind={kind} date={datetime.now(timezone.utc).date().isoformat()} '
+            f'reason={reason} mode={mode} | {msg}')
+    except Exception as exc:  # noqa: BLE001 — diagnostics must never cost the run
+        logger.warning('[engine] aux shadow sink failed (%s)', exc)
+
+
 def _last_price_from_window(px_window):
     """Latest valid close per ticker from the long-format HV20 price window
     (columns ticker/date/close). Returns None when the window is unavailable;
@@ -1392,13 +1414,17 @@ def load_aux_data(universe: list, as_of=None, needed_kinds: set | None = None) -
             try:
                 _lp = _last_price_from_window(_px_window)
                 if _lp is None:
-                    logger.warning('last_price: price window unavailable — skipped (fail-open)')
+                    _lp_msg = 'last_price: price window unavailable — skipped (fail-open)'
+                    logger.warning(_lp_msg)
                 else:
                     for _tk, _od in opts_dict.items():
                         _od['last_price'] = _lp.get(_tk)
-                    logger.info(f'last_price: derived from the in-memory price window for {len(_lp)} tickers (no full master read)')
+                    _lp_msg = f'last_price: derived from the in-memory price window for {len(_lp)} tickers (no full master read)'
+                    logger.info(_lp_msg)
+                _aux_shadow_sink('last_price', _lp_msg)
             except Exception as _lpe:
                 logger.warning(f'last_price load failed: {_lpe}')
+                _aux_shadow_sink('last_price', f'last_price load failed: {_lpe}')
             aux['options'] = _apply_options_surface(opts_dict, opts, universe, today, master_dir,
                                                     _px_window, _upcoming_earnings)
             logger.info(f"Options loaded: {len(opts_dict)} tickers")
@@ -1927,10 +1953,11 @@ def _log_aux_plan(running_ids: set, needed: set) -> None:
     """The brief's required one-line summary (constraint 2)."""
     load = sorted(needed & set(_AUX_LAZY_GATED_KINDS))
     skip = sorted(set(_AUX_LAZY_GATED_KINDS) - needed)
-    logger.info(
-        '[engine] aux plan: run=%d strategies; load={%s} skip={%s} '
-        '(reason: no running strategy declares them)',
-        len(running_ids), ','.join(load), ','.join(skip))
+    _fmt = ('[engine] aux plan: run=%d strategies; load={%s} skip={%s} '
+            '(reason: no running strategy declares them)')
+    _args = (len(running_ids), ','.join(load), ','.join(skip))
+    logger.info(_fmt, *_args)
+    _aux_shadow_sink('plan', _fmt % _args)
 
 
 def _log_aux_plan_drift(strategy_results: dict, running_ids: set | None) -> set:
@@ -1947,11 +1974,13 @@ def _log_aux_plan_drift(strategy_results: dict, running_ids: set | None) -> set:
         return set()
     drift = set(strategy_results) - running_ids
     if drift:
-        logger.warning(
-            '[engine] aux plan drift: %d strategies ran that the aux-lazy '
-            'planner did not predict (regime/eligibility changed between '
-            'planning and run_strategies) — their aux needs may not have '
-            'been loaded: %s', len(drift), sorted(drift))
+        _fmt = ('[engine] aux plan drift: %d strategies ran that the aux-lazy '
+                'planner did not predict (regime/eligibility changed between '
+                'planning and run_strategies) — their aux needs may not have '
+                'been loaded: %s')
+        _args = (len(drift), sorted(drift))
+        logger.warning(_fmt, *_args)
+        _aux_shadow_sink('drift', _fmt % _args)
     return drift
 
 
@@ -1972,6 +2001,9 @@ def _resolve_aux_load_plan(strategies, regime_state):
     difference from 'on' is what gets passed to load_aux_data)."""
     mode = _aux_lazy_mode()
     if mode == 'off':
+        # No plan is computed (kill switch costs nothing); the sink still gets
+        # one marker line so the OFF baseline is visible (task 4).
+        _aux_shadow_sink('plan', '[engine] aux plan: not computed (mode off; all kinds load)')
         return None, None, None
     running_ids = _running_strategy_ids(strategies, regime_state)
     needed = _needed_aux_kinds(strategies, running_ids)
@@ -1999,6 +2031,7 @@ def _resolve_aux_load_plan_safe(strategies, regime_state):
         return _resolve_aux_load_plan(strategies, regime_state)
     except Exception as e:
         logger.warning('[engine] aux plan failed (%s); loading all kinds', e)
+        _aux_shadow_sink('plan', f'[engine] aux plan failed ({e}); loading all kinds')
         return None, None, None
 
 
@@ -2101,6 +2134,9 @@ def run_strategies(strategies, prices, regime, universe, aux_data,
                     logger.warning(
                         '[engine] aux drift: %s needed %s not in plan — loaded late',
                         strat.id, sorted(_missing))
+                    _aux_shadow_sink(
+                        'late_drift',
+                        f'[engine] aux drift: {strat.id} needed {sorted(_missing)} not in plan — loaded late')
                     _late = load_aux_data(universe, as_of=as_of, needed_kinds=_missing)
                     # Merge ONLY the requested kinds, not the whole returned
                     # dict: load_aux_data(needed_kinds=_missing) still

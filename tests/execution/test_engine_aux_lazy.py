@@ -33,6 +33,13 @@ from execution import acting_ingest_plan  # noqa: E402
 from backtest import factor_prescreen  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _isolate_shadow_log(monkeypatch, tmp_path):
+    """Task 4: the aux plan/drift lines are also appended to a shadow log;
+    keep every test in this file out of the real logs/ directory."""
+    monkeypatch.setenv('OPENCLAW_SHADOW_LOG_DIR', str(tmp_path / '_shadow'))
+
+
 class _FakeStrat:
     """Duck-types just enough of a strategy instance for the M3 planner:
     .id, .calendar_edge, .exit_hook. Mirrors test_engine_should_run_bypass.py's
