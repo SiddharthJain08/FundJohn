@@ -137,6 +137,7 @@ def wired(monkeypatch, tmp_path):
     """Everything run_once() touches, patched. Returns the FakeCursor."""
     monkeypatch.setenv('POSTGRES_URI', 'postgres://stub')
     monkeypatch.setenv(ab.NAV_OHLC_PATH_ENV, str(tmp_path / 'missing.json'))
+    monkeypatch.setenv(ab.FALLBACK_POST_PATH_ENV, str(tmp_path / 'fallback_post.ts'))
     monkeypatch.delenv(ab.ARM_ENV, raising=False)
     monkeypatch.delenv(ab.REARM_ENV, raising=False)
     monkeypatch.setattr(ab, '_SETTLE_S', 0)
@@ -348,13 +349,16 @@ def test_armed_breach_flattens_halts_and_posts(monkeypatch, wired, caplog):
     # Inspect the final (post-flatten) row.
     _sql, params = updates[-1]
     assert params[0] is True
-    # Deviation 3: both rules breach at this fixture's numbers (dd=-70.5%,
-    # daily=-51.2%), so the combined rule string is the correct value.
-    assert params[1] == 'drawdown+daily_loss'
+    # Deviation 3 (amended by C1 amendment 2a / F3): this fixture has no alpha-P&L
+    # tables, so the ARMED tick is a fallback tick and the drawdown rule is
+    # SKIPPED (dd_nav -70.5 % is never fed to it); only daily_loss (-51.2 %) fires.
+    assert params[1] == 'daily_loss'
     assert isinstance(params[2], datetime)
     assert len(cur.sql_matching('INSERT INTO circuit_breaker_fires')) == 1
 
-    channel, msg = wired['posts'][0]
+    # posts[0] is the once-per-30-min degraded notice; the HALTED post follows.
+    assert 'DRAWDOWN rule is' in wired['posts'][0][1]
+    channel, msg = [p for p in wired['posts'] if 'HALTED' in p[1]][0]
     assert channel == 'trade-reports'
     assert 'OPENCLAW_ACCOUNT_BREAKER_REARM=' in msg
     assert 'PROCESS-WIDE' in msg           # supplement item 10
@@ -409,8 +413,10 @@ def test_persist_failure_before_flatten_takes_no_broker_action(monkeypatch, wire
     wired['install'](cur, 100_000.0)
     assert ab.run_once(session_date=SESSION) == 1
     assert cur.sql_matching('INSERT INTO circuit_breaker_fires') == []
-    assert len(wired['posts']) == 1
-    channel, msg = wired['posts'][0]
+    # (the F3 degraded-notice post precedes it: no alpha-P&L tables in this fixture)
+    posts = [p for p in wired['posts'] if 'DRAWDOWN rule is' not in p[1]]
+    assert len(posts) == 1
+    channel, msg = posts[0]
     assert channel == 'trade-reports'
     assert 'NOT latched' in msg
     assert 'HALTED' not in msg
@@ -433,8 +439,10 @@ def test_commit_failure_before_flatten_takes_no_broker_action(monkeypatch, wired
     monkeypatch.setattr(at, '_fetch_account_state', lambda sess: {'equity': 100_000.0})
     assert ab.run_once(session_date=SESSION) == 1
     assert cur.sql_matching('INSERT INTO circuit_breaker_fires') == []
-    assert len(wired['posts']) == 1
-    channel, msg = wired['posts'][0]
+    # (the F3 degraded-notice post precedes it: no alpha-P&L tables in this fixture)
+    posts = [p for p in wired['posts'] if 'DRAWDOWN rule is' not in p[1]]
+    assert len(posts) == 1
+    channel, msg = posts[0]
     assert channel == 'trade-reports'
     assert 'NOT latched' in msg
     assert 'HALTED' not in msg

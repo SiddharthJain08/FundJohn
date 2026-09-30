@@ -74,21 +74,16 @@ def _parse_ts(value) -> str | None:
     return value
 
 
-def fetch_fills_for_date(run_date: str, *, page_size: int = 100, max_pages: int = 50):
-    """Return the list of FILL activity dicts for `run_date`.
-
-    Pages through `alpaca account activity list` until the broker returns
-    fewer rows than the page size (or `max_pages` is hit, as a safety
-    sentinel). The CLI caps page-size at 100, so a 200-fill day takes 2
-    page calls. Activities span 'fill' and 'partial_fill' types — both
-    are kept; collapsing into per-order summaries happens downstream.
-    """
+def _fetch_fill_pages(window_args, *, page_size: int = 100, max_pages: int = 50):
+    """Shared FILL-activity pager: `window_args` is the CLI window selector
+    (`['--date', d]` or `['--after', ts, '--direction', 'asc']`). Returns the
+    list of activity dicts; raises RuntimeError on a CLI/parse failure."""
     fills = []
     page_token = None
     for _ in range(max_pages):
         args = [ALPACA_CLI, 'account', 'activity', 'list',
                 '--activity-types', 'FILL',
-                '--date', run_date,
+                *window_args,
                 '--page-size', str(page_size)]
         if page_token:
             args += ['--page-token', page_token]
@@ -113,6 +108,28 @@ def fetch_fills_for_date(run_date: str, *, page_size: int = 100, max_pages: int 
         if not page_token:
             break
     return fills
+
+
+def fetch_fills_for_date(run_date: str, *, page_size: int = 100, max_pages: int = 50):
+    """Return the list of FILL activity dicts for `run_date`.
+
+    Pages through `alpaca account activity list` until the broker returns
+    fewer rows than the page size (or `max_pages` is hit, as a safety
+    sentinel). The CLI caps page-size at 100, so a 200-fill day takes 2
+    page calls. Activities span 'fill' and 'partial_fill' types — both
+    are kept; collapsing into per-order summaries happens downstream.
+    """
+    return _fetch_fill_pages(['--date', run_date], page_size=page_size,
+                             max_pages=max_pages)
+
+
+def fetch_fills_since(after: str, *, page_size: int = 100, max_pages: int = 200):
+    """FILL activities created after `after` (YYYY-MM-DDTHH:MM:SSZ), oldest
+    first, fully paginated. Used by the account breaker's alpha-P&L ledger
+    (C1 amendment 2a) so its realized leg does not depend on the reconcile
+    step having run for the day. Same client/parsing as fetch_fills_for_date."""
+    return _fetch_fill_pages(['--after', after, '--direction', 'asc'],
+                             page_size=page_size, max_pages=max_pages)
 
 
 def collapse_fills(fills):

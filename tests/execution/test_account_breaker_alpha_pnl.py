@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / 'src'))
 
 from execution import account_breaker as ab            # noqa: E402
+from execution import alpaca_reconcile as ar           # noqa: E402
+from execution import stop_reattach as sr              # noqa: E402
 from execution import alpaca_trader as at              # noqa: E402
 from execution import regime_liquidator as rl          # noqa: E402
 
@@ -25,22 +27,44 @@ def _fill(t, side, q, px, minute, aid=None):
             'activity_id': aid or f'a{minute}'}
 
 
-def _pos(qty, avg, cur, side='long', mv=None):
-    return {'qty': qty, 'side': side, 'avg_entry_price': avg, 'current_price': cur,
-            'market_value': str(mv if mv is not None else qty * cur)}
+def _pos(qty, avg, cur, side='long', mv=None, upl=None):
+    p = {'qty': qty, 'side': side, 'avg_entry_price': avg, 'current_price': cur,
+         'market_value': str(mv if mv is not None else qty * cur)}
+    if upl is not None:
+        p['unrealized_pl'] = str(upl)
+    return p
+
+
+FEED = []          # broker FILL activities the stubbed CLI returns (raw shape)
+
+
+@pytest.fixture(autouse=True)
+def _no_broker(monkeypatch):
+    """Never touch the Alpaca CLI: the since-epoch pull and the closed-order
+    enrichment are stubbed."""
+    FEED.clear()
+    monkeypatch.setattr(ar, 'fetch_fills_since', lambda after, **k: list(FEED))
+    monkeypatch.setattr(sr, 'fetch_recent_closed_orders', lambda *a, **k: (False, []))
+    monkeypatch.setattr(ab, '_LAST_ACTIVITY_ID', None)
+
+
+def _act(aid, sym, side, q, px, minute):
+    return {'id': aid, 'order_id': 'o' + aid, 'symbol': sym, 'side': side,
+            'qty': str(q), 'price': str(px),
+            'transaction_time': f'2026-09-29T14:{minute:02d}:00Z'}
 
 
 # ── pure alpha_pnl ──────────────────────────────────────────────────────────
 
-def test_fifo_buy_buy_sell():
+def test_average_cost_buy_buy_sell():
     fills = [_fill('AAPL', 'buy', 10, 100, 1), _fill('AAPL', 'buy', 10, 110, 2),
              _fill('AAPL', 'sell', 15, 120, 3)]
-    # FIFO: 10@100 -> +200, 5@110 -> +50; 5 @110 lot remains open
-    r = ab.alpha_pnl(100_000, {'AAPL': _pos(5, 110, 115)}, set(), fills, [])
-    assert r['realized'] == pytest.approx(250.0)
-    assert r['unrealized'] == pytest.approx(25.0)
+    # avg 105; sell 15 -> 15*(120-105) = 225; 5 @105 remain
+    r = ab.alpha_pnl(100_000, {'AAPL': _pos(5, 105, 115)}, set(), fills, [])
+    assert r['realized'] == pytest.approx(225.0)
+    assert r['unrealized'] == pytest.approx(50.0)
     assert r['alpha_pnl'] == pytest.approx(275.0)
-    assert r['unmatched'] == 0
+    assert r['unmatched'] == 0 and r['recon'] == 0
 
 
 def test_epoch_lot_matched_by_later_sell():
@@ -49,20 +73,21 @@ def test_epoch_lot_matched_by_later_sell():
                      [_fill('MSFT', 'sell', 10, 320, 5)], lots)
     assert r['realized'] == pytest.approx(200.0)
     assert r['unrealized'] == pytest.approx(100.0)
-    assert r['unmatched'] == 0
+    assert r['unmatched'] == 0 and r['recon'] == 0
 
 
-def test_unmatched_sell_is_fail_open_and_counted(caplog):
+def test_unknown_side_is_counted_never_dropped_silently(caplog):
     with caplog.at_level('WARNING', logger=ab.logger.name):
-        r = ab.alpha_pnl(100_000, {}, set(), [_fill('XYZ', 'sell', 7, 50, 1)], [])
+        r = ab.alpha_pnl(100_000, {}, set(), [_fill('XYZ', 'weird', 7, 50, 1)], [])
     assert r['unmatched'] == 1 and r['realized'] == 0.0
-    assert any('unmatched fill' in m for m in (x.getMessage() for x in caplog.records))
+    assert any('unknown side' in x.getMessage() for x in caplog.records)
 
 
-def test_partially_unmatched_sell_realizes_only_the_matched_part():
+def test_oversized_sell_realizes_the_long_part_and_opens_a_short():
     lots = [{'ticker': 'A', 'qty': 4, 'avg_entry_price': 10, 'side': 'long'}]
     r = ab.alpha_pnl(1, {}, set(), [_fill('A', 'sell', 10, 12, 1)], lots)
-    assert r['realized'] == pytest.approx(8.0) and r['unmatched'] == 1
+    assert r['realized'] == pytest.approx(8.0) and r['unmatched'] == 0
+    assert r['recon'] == 1                       # ledger short 6, broker flat
 
 
 def test_short_position_sign():
@@ -95,6 +120,7 @@ def test_unparseable_rows_never_raise():
     r = ab.alpha_pnl(1, {'A': {'qty': 'x'}, 'B': {'qty': 3, 'side': 'long'}}, set(),
                      [{'ticker': 'A', 'side': 'buy', 'qty': None, 'price': 'z'}], [])
     assert r['unpriced'] == 1
+    assert r['unmatched'] == 1                   # the unusable fill is counted
 
 
 def test_sleeve_rebalance_leaves_alpha_pnl_flat_while_legacy_alpha_nav_drops():
@@ -161,6 +187,16 @@ class FakeDB:
         elif f.startswith('SELECT ticker, side, qty, price'):
             self._all = [(x['ticker'], x['side'], x['qty'], x['price'], x['filled_at'],
                           x['activity_id']) for x in self.fills]
+        elif f.startswith('SELECT activity_id FROM broker_fills'):
+            have = {x['activity_id'] for x in self.fills}
+            self._all = [(i,) for i in params[0] if i in have]
+        elif f.startswith('INSERT INTO broker_fills'):
+            self.fill_inserts = getattr(self, 'fill_inserts', 0) + 1
+            if params[0] not in {x['activity_id'] for x in self.fills}:
+                self.fills.append({'ticker': params[4], 'side': params[5], 'qty': params[8],
+                                   'price': params[9], 'activity_id': params[0],
+                                   'filled_at': datetime.fromisoformat(
+                                       params[10].replace('Z', '+00:00'))})
         elif f.startswith('UPDATE account_breaker_state SET alpha_epoch_at'):
             if self.epoch_at is not None:
                 self.rowcount = 0
@@ -273,14 +309,14 @@ def test_format_line_appends_new_fields_and_keeps_existing():
     st = {'peak': 14_500.0, 'dd': -0.0123, 'dd_nav': -0.39, 'daily': -0.001,
           'rule': 'none', 'breach': False}
     pnl = {'alpha_pnl': 500.0, 'realized': 100.0, 'unrealized': 400.0, 'hwm': 800.0,
-           'dd_pnl': -0.0123, 'unmatched': 2}
+           'dd_pnl': -0.0123, 'unmatched': 2, 'recon': 3, 'excluded': 1}
     line = ab.format_line('shadow', equity=95_400.0, bench_mv=86_600.0, alpha=8_800.0, st=st,
                           open_equity=95_500.0, open_src='stored', halted=False, pnl=pnl)
     print(line)
     assert line.startswith('[account_breaker] shadow equity=95400.00 bench_mv=86600.00 '
                            'alpha_nav=8800.00 peak=14500.00 dd=-0.0123 ')
     assert ('halted=0 | alpha_pnl=500.00 realized=100.00 unrealized=400.00 hwm=800.00 '
-            'dd_pnl=-0.0123 unmatched=2 | legacy alpha_nav=8800.00 dd_nav=-0.3900') in line
+            'dd_pnl=-0.0123 unmatched=2 recon=3 excluded=1 | legacy alpha_nav=8800.00 dd_nav=-0.3900') in line
     # without pnl the line is byte-identical to the legacy format
     assert '|' not in ab.format_line('shadow', equity=1.0, bench_mv=0.0, alpha=1.0, st=st,
                                      open_equity=1.0, open_src='x', halted=False)
@@ -292,6 +328,7 @@ def test_format_line_appends_new_fields_and_keeps_existing():
 def wired(monkeypatch, tmp_path):
     monkeypatch.setenv('POSTGRES_URI', 'postgres://stub')
     monkeypatch.setenv(ab.NAV_OHLC_PATH_ENV, str(tmp_path / 'missing.json'))
+    monkeypatch.setenv(ab.FALLBACK_POST_PATH_ENV, str(tmp_path / 'fallback_post.ts'))
     monkeypatch.delenv(ab.ARM_ENV, raising=False)
     monkeypatch.delenv(ab.REARM_ENV, raising=False)
     monkeypatch.setattr(ab, '_SETTLE_S', 0)
@@ -366,3 +403,176 @@ def test_run_once_rearm_resets_hwm_and_keeps_epoch(wired, monkeypatch):
     assert ab.run_once(session_date=SESSION) == 0
     assert db.epoch_at == EPOCH and db.epoch_inserts == 0
     assert db.peak_pnl == 500.0                      # reset to the current alpha_pnl
+
+
+# ── fix round 1: F1 fill sync, F2 average cost, F3 fallback, F4 scope ───────
+
+def test_exit_fill_absent_from_broker_fills_is_fetched_and_upserted():
+    db = FakeDB(epoch_at=EPOCH,
+                lots=[{'ticker': 'AAPL', 'qty': 100, 'avg_entry_price': 100, 'side': 'long'}])
+    FEED.append(_act('x1', 'AAPL', 'sell', 100, 110, 5))
+    assert db.fills == []                              # reconcile never ran
+    res = ab.compute_alpha_pnl_tick(db, FakeConn(db), 100_000, {'MSFT': _pos(1, 10, 10)},
+                                    {'SPY'})
+    assert getattr(db, 'fill_inserts', 0) == 1 and len(db.fills) == 1
+    assert res['realized'] == pytest.approx(1_000.0)   # +$1,000 exit no longer invisible
+    assert res['unmatched'] == 0
+    assert ab._LAST_ACTIVITY_ID == 'x1'
+    # idempotent: the same feed next tick inserts nothing new into the ledger
+    res2 = ab.compute_alpha_pnl_tick(db, FakeConn(db), 100_000, {'MSFT': _pos(1, 10, 10)},
+                                     {'SPY'})
+    assert len(db.fills) == 1 and res2['realized'] == pytest.approx(1_000.0)
+
+
+def test_fill_fetch_failure_falls_back_no_partial_ledger(monkeypatch):
+    def boom(after, **k):
+        raise RuntimeError('cli down')
+    monkeypatch.setattr(ar, 'fetch_fills_since', boom)
+    db = FakeDB(epoch_at=EPOCH)
+    assert ab.compute_alpha_pnl_tick(db, FakeConn(db), 1e5, BOOK, {'SPY'}) is None
+
+
+def test_fetch_window_is_epoch_floored_utc(monkeypatch):
+    seen = []
+    monkeypatch.setattr(ar, 'fetch_fills_since', lambda after, **k: seen.append(after) or [])
+    db = FakeDB(epoch_at=EPOCH)
+    ab.compute_alpha_pnl_tick(db, FakeConn(db), 1e5, BOOK, {'SPY'})
+    assert seen == ['2026-09-29T13:30:00Z']
+
+
+def test_post_epoch_short_opened_then_covered():
+    fills = [_fill('NVDA', 'sell', 10, 50, 1), _fill('NVDA', 'buy', 10, 45, 2)]
+    r = ab.alpha_pnl(1, {}, set(), fills, [])
+    assert r['realized'] == pytest.approx(50.0)
+    assert r['unmatched'] == 0 and r['recon'] == 0
+    # ...and while it is still open the short's unrealized is signed correctly
+    r = ab.alpha_pnl(1, {'NVDA': _pos(-10, 50, 48, side='short')}, set(),
+                     [_fill('NVDA', 'sell', 10, 50, 1)], [])
+    assert r['realized'] == 0.0 and r['unrealized'] == pytest.approx(20.0) and r['recon'] == 0
+
+
+def test_long_to_short_flip():
+    fills = [_fill('A', 'buy', 10, 100, 1), _fill('A', 'sell', 15, 110, 2),
+             _fill('A', 'buy', 5, 100, 3)]
+    r = ab.alpha_pnl(1, {}, set(), fills, [])
+    # 10*(110-100) on the long; 5 short opened @110 then covered @100 -> +50
+    assert r['realized'] == pytest.approx(150.0) and r['recon'] == 0
+    r = ab.alpha_pnl(1, {'A': _pos(-5, 110, 105, side='short')}, set(), fills[:2], [])
+    assert r['realized'] == pytest.approx(100.0)
+    assert r['unrealized'] == pytest.approx(25.0) and r['recon'] == 0
+
+
+def test_sell_short_is_a_sell():
+    fills = [_fill('T', 'sell_short', 10, 200, 1), _fill('T', 'buy', 4, 190, 2)]
+    r = ab.alpha_pnl(1, {'T': _pos(-6, 200, 195, side='short')}, set(), fills, [])
+    assert r['realized'] == pytest.approx(40.0) and r['unmatched'] == 0
+    assert r['unrealized'] == pytest.approx(30.0) and r['recon'] == 0
+
+
+def test_negative_qty_with_no_side_is_a_short_sale():
+    f = _fill('T', None, -10, 200, 1)
+    r = ab.alpha_pnl(1, {'T': _pos(-10, 200, 190, side='short')}, set(), [f], [])
+    assert r['unmatched'] == 0 and r['recon'] == 0
+    assert r['unrealized'] == pytest.approx(100.0)
+    # positive qty with no side is genuinely unknown -> counted
+    assert ab.alpha_pnl(1, {}, set(), [_fill('T', '', 10, 200, 1)], [])['unmatched'] == 1
+
+
+def test_scaled_in_partial_sell_under_average_cost_is_phantom_free():
+    fills = [_fill('AAPL', 'buy', 10, 100, 1), _fill('AAPL', 'buy', 10, 120, 2),
+             _fill('AAPL', 'sell', 10, 110, 3)]
+    # broker avg 110 -> sell at 110 realizes exactly 0 (FIFO would book +100)
+    for pos in (_pos(10, 110, 115), _pos(10, 110, 115, upl=50)):
+        r = ab.alpha_pnl(1, {'AAPL': pos}, set(), fills, [])
+        assert r['realized'] == pytest.approx(0.0)
+        assert r['unrealized'] == pytest.approx(50.0)     # broker's, or qty*(cur-avg)
+        assert r['recon'] == 0
+
+
+def test_broker_unrealized_pl_is_preferred_when_present():
+    r = ab.alpha_pnl(1, {'A': _pos(10, 100, 105, upl=37.5)}, set(), [], [])
+    assert r['unrealized'] == pytest.approx(37.5)
+
+
+def test_crypto_key_normalisation_and_scope_exclusion():
+    assert ab._pos_key('BTC/USD') == ab._pos_key('btcusd') == 'BTCUSD'
+    fills = [_fill('BTC/USD', 'buy', 1, 60_000, 1), _fill('AAPL', 'buy', 5, 100, 2)]
+    book = {'BTCUSD': _pos(1, 60_000, 61_000), 'AAPL': _pos(5, 100, 101)}
+    r = ab.alpha_pnl(1, book, set(), fills, [])
+    assert r['excluded'] == 1 and r['n_positions'] == 1     # BTC never leaks either leg
+    assert r['alpha_pnl'] == pytest.approx(5.0) and r['recon'] == 0
+
+
+def test_option_legs_excluded_from_both_legs_and_counted():
+    occ = 'AAPL260918C00200000'
+    fills = [_fill(occ, 'buy', 1, 5.0, 1), _fill(occ, 'sell', 1, 6.0, 2)]
+    r = ab.alpha_pnl(1, {occ: _pos(1, 5.0, 6.0, upl=100)}, set(), fills, [])
+    assert r['excluded'] == 1 and r['alpha_pnl'] == 0.0 and r['n_positions'] == 0
+
+
+def test_recon_counts_qty_mismatches_incl_closed_positions_with_ledger_qty():
+    lots = [{'ticker': 'AAPL', 'qty': 100, 'avg_entry_price': 100, 'side': 'long'},
+            {'ticker': 'MSFT', 'qty': 10, 'avg_entry_price': 300, 'side': 'long'},
+            {'ticker': 'OK', 'qty': 5, 'avg_entry_price': 10, 'side': 'long'}]
+    book = {'AAPL': _pos(90, 100, 101), 'OK': _pos(5, 10, 10)}    # MSFT closed at broker
+    r = ab.alpha_pnl(1, book, set(), [], lots)
+    assert r['recon'] == 2
+    line = ab.format_line('shadow', equity=1.0, bench_mv=0.0, alpha=1.0,
+                          st={'peak': 1.0, 'dd': 0.0, 'dd_nav': 0.0, 'daily': None,
+                              'rule': 'none', 'breach': False},
+                          open_equity=1.0, open_src='x', halted=False,
+                          pnl=dict(r, hwm=0.0, dd_pnl=0.0))
+    assert 'recon=2' in line
+
+
+def test_losing_tick_of_the_epoch_race_falls_back_and_never_writes_a_second_epoch():
+    class Race(FakeDB):
+        def execute(self, sql, params=None):
+            f = ' '.join(sql.split())
+            if f.startswith('UPDATE account_breaker_state SET alpha_epoch_at'):
+                self.calls.append((f, params))
+                self.rowcount = 0                 # the other tick already stamped it
+                return
+            super().execute(sql, params)
+    db = Race()
+    conn = FakeConn(db)
+    assert ab.compute_alpha_pnl_tick(db, conn, 1e5, BOOK, {'SPY'}) is None
+    assert db.epoch_inserts == 0 and db.lots == [] and conn.committed == 0
+
+
+def test_evaluate_skip_drawdown_ignores_dd_nav_but_daily_still_fires():
+    st = ab.evaluate(8_800, 14_500, 95_400, 95_500, skip_drawdown=True)   # dd_nav -0.39
+    assert st['breach'] is False and st['rule'] == 'none' and st['dd'] == 0.0
+    st = ab.evaluate(8_800, 14_500, 90_000, 95_500, skip_drawdown=True)   # daily -5.8 %
+    assert st['rule'] == 'daily_loss'
+
+
+def test_armed_fallback_tick_skips_drawdown_and_posts_once_per_30_min(
+        wired, caplog, monkeypatch, tmp_path):
+    class Broken(FakeDB):
+        def execute(self, sql, params=None):
+            if 'alpha_epoch_at' in sql and sql.lstrip().startswith('SELECT'):
+                raise RuntimeError('column does not exist')
+            super().execute(sql, params)
+    monkeypatch.setenv(ab.ARM_ENV, '1')
+    monkeypatch.setenv(ab.FALLBACK_POST_PATH_ENV, str(tmp_path / 'fb.ts'))
+    posts = []
+    monkeypatch.setattr(rl, '_post_to_discord', lambda ch, msg: posts.append((ch, msg)) or True)
+    # legacy dd_nav = 8.8k/14.5k - 1 = -0.39 would latch + flatten if it fed the rule
+    book = {'AAPL': _pos(100, 100, 105), 'SPY': _pos(1, 1, 1, mv=86_600)}
+    for _ in range(2):
+        db = Broken(peak_nav=14_500.0, epoch_at=EPOCH)
+        conn = wired['install'](db, 95_400.0, book)
+        caplog.clear()
+        with caplog.at_level('INFO', logger=ab.logger.name):
+            assert ab.run_once(session_date=SESSION) == 0
+        line = _last_line(caplog)
+        assert 'rule=none' in line and 'breach=0' in line and 'halted=0' in line
+        assert 'dd_pnl=n/a' in line and 'dd_nav=-0.39' in line
+        assert not db.halted
+    degraded = [p for p in posts if p[0] == 'trade-reports' and 'DRAWDOWN rule is' in p[1]]
+    assert len(degraded) == 1                       # second tick throttled
+    # after 30 minutes it posts again
+    t0 = float((tmp_path / 'fb.ts').read_text())
+    assert ab.post_fallback_notice(now=t0 + 31 * 60) is True
+    assert ab.post_fallback_notice(now=t0 + 32 * 60) is False

@@ -117,7 +117,7 @@ def alpha_nav(equity: float, positions: dict, bench_tickers) -> tuple[float, flo
 
 
 def evaluate(alpha: float, peak, equity: float, opening_equity,
-             dd_override=None) -> dict:
+             dd_override=None, skip_drawdown: bool = False) -> dict:
     """Pure rule evaluation. Returns
     {'peak', 'dd', 'daily', 'rule', 'breach'}.
 
@@ -132,13 +132,18 @@ def evaluate(alpha: float, peak, equity: float, opening_equity,
     # drawdown, THAT drives the drawdown rule; the NAV-based measure is kept
     # only as 'dd_nav' for the transition log line.
     dd = dd_nav if dd_override is None else float(dd_override)
+    if skip_drawdown:
+        # C1 amendment 2a (F3): armed tick with no alpha-P&L measure — the
+        # legacy NAV drawdown is defective (sleeve rebalances), so the
+        # drawdown rule is SKIPPED (never fed dd_nav); daily-loss still runs.
+        dd = 0.0
 
     daily = None
     if opening_equity not in (None, 0) and float(opening_equity) > 0:
         daily = float(equity) / float(opening_equity) - 1.0
 
     rules = []
-    if dd <= DD_LIMIT + _EPS:
+    if not skip_drawdown and dd <= DD_LIMIT + _EPS:
         rules.append('drawdown')
     if daily is not None and daily <= DAILY_LIMIT + _EPS:
         rules.append('daily_loss')
@@ -158,92 +163,164 @@ def _f(x, default=None):
     return v if v == v else default    # NaN -> default
 
 
+def _pos_key(sym) -> str:
+    """Position key shared by both legs: upper-case, '/' stripped, so a crypto
+    fill symbol 'BTC/USD' matches the broker's position symbol 'BTCUSD'."""
+    return str(sym or '').strip().upper().replace('/', '')
+
+
+_BUY_SIDES = ('buy',)
+_SELL_SIDES = ('sell', 'sell_short')
+_QTY_EPS = 1e-9
+
+
 def alpha_pnl(equity, positions, bench_tickers, fills_since_epoch, epoch_lots) -> dict:
-    """Cumulative alpha P&L = realized (FIFO over fills since the epoch,
-    seeded by the epoch lots) + unrealized (open non-benchmark positions).
+    """Cumulative alpha P&L = realized (AVERAGE-COST ledger over fills since the
+    epoch, seeded by the epoch lots — mirrors the broker, C1 amendment 2a) +
+    unrealized (open non-benchmark equity positions).
 
     positions: {symbol: {'qty','side','avg_entry_price','current_price',
-    'market_value', ...}} (regime_liquidator._load_broker_positions shape).
-    fills_since_epoch: iterable of dicts {ticker, side, qty, price, filled_at,
-    activity_id} (any order; sorted here by filled_at then activity_id).
-    epoch_lots: iterable of dicts {ticker, qty, avg_entry_price, side}.
+    'market_value','unrealized_pl'}} (regime_liquidator._load_broker_positions
+    shape). fills_since_epoch: iterable of {ticker, side, qty, price, filled_at,
+    activity_id} (sorted here by filled_at then activity_id). epoch_lots:
+    iterable of {ticker, qty, avg_entry_price, side}.
 
-    Benchmark tickers are excluded from BOTH legs. Fail-open: an unparseable
-    row is skipped and counted; a sell with no open long lot to match is
-    counted in 'unmatched' with cost = fill price (zero realized) and never
-    raises. `equity` is accepted for signature symmetry with alpha_nav and is
-    not used (the caller normalizes by it).
-    Returns {alpha_pnl, realized, unrealized, unmatched, unpriced, n_positions}."""
-    from collections import deque
-    bench = {str(t).strip().upper() for t in (bench_tickers or ())}
+    Average cost per ticker: a buy adds at the running average; a sell realizes
+    q*(p-avg). A sell with no open long OPENS a short (avg = sell price); a
+    long->short flip's remainder opens a short at the fill price; a buy against
+    a short realizes q*(avg-p). `sell_short` == sell. An unknown side (or an
+    unparseable qty/price) is counted in `unmatched`, never dropped silently;
+    a negative qty with no side is a short sale.
+
+    Scope (F4): benchmark tickers AND non-equity symbols (`_is_equity_symbol`:
+    options, crypto pairs) are excluded from BOTH legs; the number of distinct
+    excluded keys is returned as `excluded`. Symbols are matched on `_pos_key`
+    so `BTC/USD` fills and `BTCUSD` positions land on the same (excluded) key.
+    The unrealized leg prefers the broker's `unrealized_pl`, falling back to
+    qty*(cur-avg). `recon` = tickers whose ledger qty != broker qty (including
+    closed positions with a non-zero ledger qty). Fail-open: nothing raises.
+    Returns {alpha_pnl, realized, unrealized, unmatched, unpriced, n_positions,
+    excluded, recon}."""
+    bench = {_pos_key(t) for t in (bench_tickers or ())}
+    fills = list(fills_since_epoch or ())
+    lots_in = list(epoch_lots or ())
+    positions = positions or {}
+
+    # A key is non-equity when ANY raw symbol mapping onto it fails the equity
+    # predicate (crypto 'BTC/USD' fills poison the 'BTCUSD' position too).
+    non_equity = set()
+    for sym in list(positions) + [f.get('ticker') for f in fills] + \
+            [l.get('ticker') for l in lots_in]:
+        if sym is not None and not _is_equity_symbol(sym):
+            non_equity.add(_pos_key(sym))
+    excluded_keys = set()
+
+    def _in_scope(sym) -> bool:
+        k = _pos_key(sym)
+        if not k:
+            return False
+        if k in bench:
+            return False
+        if k in non_equity:
+            excluded_keys.add(k)
+            return False
+        return True
 
     unrealized, n_pos, unpriced = 0.0, 0, 0
-    for sym, p in (positions or {}).items():
-        if str(sym).strip().upper() in bench:
+    broker_qty = {}
+    for sym, p in positions.items():
+        if not _in_scope(sym):
             continue
         p = p or {}
         qty = _f(p.get('qty'), 0.0)
         if not qty:
             continue
-        n_pos += 1
-        avg, cur_px = _f(p.get('avg_entry_price')), _f(p.get('current_price'))
         sign = -1.0 if str(p.get('side') or '').lower() == 'short' else 1.0
-        if avg is not None and cur_px is not None:
+        broker_qty[_pos_key(sym)] = sign * abs(qty)
+        n_pos += 1
+        upl = _f(p.get('unrealized_pl'))
+        avg, cur_px = _f(p.get('avg_entry_price')), _f(p.get('current_price'))
+        if upl is not None:
+            unrealized += upl
+        elif avg is not None and cur_px is not None:
             unrealized += abs(qty) * (cur_px - avg) * sign
-        elif _f(p.get('unrealized_pl')) is not None:
-            unrealized += _f(p.get('unrealized_pl'))
         else:
             unpriced += 1
             logger.warning('[account_breaker] unpriced position %s (no avg/current price)', sym)
 
-    # lots per ticker: deque of [signed_qty, price]; + = long, - = short
-    lots: dict = {}
-    for l in (epoch_lots or ()):
-        t = str(l.get('ticker') or '').strip().upper()
+    # average-cost state per key: [signed_qty, avg_price]
+    book: dict = {}
+
+    def _apply(k, dq, px) -> float:
+        """Apply signed qty `dq` at `px`; returns realized P&L."""
+        st = book.setdefault(k, [0.0, 0.0])
+        q0, a0 = st
+        realized = 0.0
+        if abs(q0) <= _QTY_EPS or (q0 > 0) == (dq > 0):
+            tot = abs(q0) + abs(dq)
+            st[1] = (abs(q0) * a0 + abs(dq) * px) / tot if tot else 0.0
+            st[0] = q0 + dq
+            return 0.0
+        closing = min(abs(dq), abs(q0))
+        realized = closing * (px - a0) * (1.0 if q0 > 0 else -1.0)
+        q1 = q0 + dq
+        if abs(q1) <= _QTY_EPS:
+            st[0], st[1] = 0.0, 0.0
+        elif (q1 > 0) == (q0 > 0):
+            st[0] = q1                       # partial close: avg unchanged
+        else:
+            st[0], st[1] = q1, px            # flipped: remainder opens at px
+        return realized
+
+    for l in lots_in:
+        k = _pos_key(l.get('ticker'))
         q, px = _f(l.get('qty')), _f(l.get('avg_entry_price'))
-        if not t or t in bench or not q or px is None:
+        if not _in_scope(l.get('ticker')) or not q or px is None:
             continue
         signed = -abs(q) if str(l.get('side') or '').lower() == 'short' else abs(q)
-        lots.setdefault(t, deque()).append([signed, px])
+        _apply(k, signed, px)
 
     def _key(f):
         return (str(f.get('filled_at') or ''), str(f.get('activity_id') or ''))
 
     realized, unmatched = 0.0, 0
-    for f in sorted(list(fills_since_epoch or ()), key=_key):
-        t = str(f.get('ticker') or '').strip().upper()
-        q, px = _f(f.get('qty')), _f(f.get('price'))
-        side = str(f.get('side') or '').lower()
-        if not t or t in bench or not q or q <= 0 or px is None or side not in ('buy', 'sell'):
+    for f in sorted(fills, key=_key):
+        if not _in_scope(f.get('ticker')):
             continue
-        dq = lots.setdefault(t, deque())
-        rem = q
-        if side == 'sell':
-            while rem > 1e-12 and dq and dq[0][0] > 0:
-                m = min(rem, dq[0][0])
-                realized += m * (px - dq[0][1])
-                dq[0][0] -= m
-                rem -= m
-                if dq[0][0] <= 1e-12:
-                    dq.popleft()
-            if rem > 1e-9:
-                unmatched += 1
-                logger.warning('[account_breaker] unmatched fill %s sell qty=%s @%s '
-                               '(no open lot; counted, zero realized)', t, rem, px)
+        k = _pos_key(f.get('ticker'))
+        q, px = _f(f.get('qty')), _f(f.get('price'))
+        side = str(f.get('side') or '').strip().lower()
+        if not q or px is None:
+            unmatched += 1
+            logger.warning('[account_breaker] unusable fill %s qty=%r price=%r '
+                           '(counted, skipped)', k, f.get('qty'), f.get('price'))
+            continue
+        if side in _BUY_SIDES:
+            dq = abs(q)
+        elif side in _SELL_SIDES:
+            dq = -abs(q)
+        elif not side and q < 0:
+            dq = q                          # negative qty, no side => short sale
         else:
-            while rem > 1e-12 and dq and dq[0][0] < 0:
-                m = min(rem, -dq[0][0])
-                realized += m * (dq[0][1] - px)
-                dq[0][0] += m
-                rem -= m
-                if dq[0][0] >= -1e-12:
-                    dq.popleft()
-            if rem > 1e-12:
-                dq.append([rem, px])
+            unmatched += 1
+            logger.warning('[account_breaker] unknown side %r on fill %s qty=%s @%s '
+                           '(counted, not applied)', f.get('side'), k, q, px)
+            continue
+        realized += _apply(k, dq, px)
+
+    recon = 0
+    for k in set(book) | set(broker_qty):
+        lq = book.get(k, [0.0, 0.0])[0]
+        bq = broker_qty.get(k, 0.0)
+        if abs(lq - bq) > 1e-4 * max(1.0, abs(bq)):
+            recon += 1
+            logger.warning('[account_breaker] recon mismatch %s ledger_qty=%.6f '
+                           'broker_qty=%.6f', k, lq, bq)
 
     return {'alpha_pnl': realized + unrealized, 'realized': realized,
             'unrealized': unrealized, 'unmatched': unmatched,
-            'unpriced': unpriced, 'n_positions': n_pos}
+            'unpriced': unpriced, 'n_positions': n_pos,
+            'excluded': len(excluded_keys), 'recon': recon}
 
 
 # ── state layer (C1b) ────────────────────────────────────────────────────────
@@ -389,8 +466,8 @@ def take_alpha_epoch(cur, positions, bench_tickers) -> bool:
     bench = {str(t).strip().upper() for t in (bench_tickers or ())}
     rows = []
     for sym, p in (positions or {}).items():
-        if str(sym).strip().upper() in bench:
-            continue
+        if str(sym).strip().upper() in bench or not _is_equity_symbol(sym):
+            continue                       # F4: same scope predicate as the flatten list
         p = p or {}
         qty, avg = _f(p.get('qty'), 0.0), _f(p.get('avg_entry_price'))
         if not qty or avg is None:
@@ -590,7 +667,9 @@ def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
                  f"unrealized={_m(pnl.get('unrealized'))} "
                  f"hwm={_m(pnl.get('hwm'))} "
                  f"dd_pnl={'n/a' if dd_pnl is None else f'{float(dd_pnl):.4f}'} "
-                 f"unmatched={int(pnl.get('unmatched', 0))}"
+                 f"unmatched={int(pnl.get('unmatched', 0))} "
+                 f"recon={int(pnl.get('recon', 0))} "
+                 f"excluded={int(pnl.get('excluded', 0))}"
                  f" | legacy alpha_nav={float(alpha):.2f} "
                  f"dd_nav={'n/a' if dd_nav is None else f'{float(dd_nav):.4f}'}")
     return line
@@ -1037,6 +1116,109 @@ def _flatten_escalation_msg(attempts: int, flat: dict) -> str:
     )
 
 
+# last FILL activity id seen by this process (in-memory only, C1 amendment 2a) —
+# logged so an operator can see the feed advance; the fetch itself is always the
+# full since-epoch window (the ledger is recomputed from scratch each tick).
+_LAST_ACTIVITY_ID = None
+
+FALLBACK_POST_PATH_ENV = 'OPENCLAW_ACCOUNT_BREAKER_FALLBACK_POST_PATH'
+FALLBACK_POST_EVERY_S = 30 * 60
+
+
+def _epoch_after_arg(epoch_at) -> str:
+    """CLI `--after` value (YYYY-MM-DDTHH:MM:SSZ, UTC, floored to the second so a
+    sub-second epoch never excludes its own second; the SQL read re-filters on
+    the exact epoch)."""
+    if isinstance(epoch_at, datetime):
+        dt = epoch_at if epoch_at.tzinfo else epoch_at.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    return str(epoch_at)
+
+
+def sync_fills_since_epoch(cur, epoch_at) -> bool:
+    """C1 amendment 2a (F1): pull FILL activities since the epoch from the broker
+    (alpaca_reconcile.fetch_fills_since — same client/parsing as the reconcile
+    step) and upsert them through alpaca_reconcile.ingest_broker_fills (same
+    writer, ON CONFLICT DO NOTHING, append-only) BEFORE the ledger is read.
+    Order-shape columns are enriched exactly as the reconcile step does, but only
+    when the pull holds activity ids not yet in broker_fills (the reconcile insert
+    is DO NOTHING, so a bare breaker-first row would leave parent_order_id NULL
+    for good). Returns False (caller falls back, fail-open) when the broker read
+    or the upsert fails."""
+    global _LAST_ACTIVITY_ID
+    from execution import alpaca_reconcile as ar
+    try:
+        fills = ar.fetch_fills_since(_epoch_after_arg(epoch_at))
+    except Exception as e:  # noqa: BLE001
+        logger.error('[account_breaker] fill fetch since epoch failed (%s: %s)',
+                     type(e).__name__, e)
+        return False
+    fills = [f for f in fills if isinstance(f, dict)]
+    if not fills:
+        return True
+    ids = [f.get('id') for f in fills if f.get('id')]
+
+    def _known():
+        cur.execute('SELECT activity_id FROM broker_fills WHERE activity_id = ANY(%s)',
+                    (ids,))
+        return {r[0] for r in (cur.fetchall() or [])}
+    ok, known = _savepoint_guarded(cur, 'sp_ab_fill_known', _known)
+    new_fills = fills if not ok else [f for f in fills if f.get('id') not in known]
+    meta = {}
+    if new_fills:
+        try:
+            from execution.stop_reattach import fetch_recent_closed_orders
+            syms = sorted({f.get('symbol') for f in new_fills if f.get('symbol')})
+            ok_meta, orders = fetch_recent_closed_orders(syms, include_unscoped=False)
+            if ok_meta:
+                meta = ar.build_order_meta(orders)
+        except Exception as e:  # noqa: BLE001
+            logger.warning('[account_breaker] closed-order enrichment failed (%s: %s); '
+                           'new fills land with NULL order-shape columns',
+                           type(e).__name__, e)
+    ok, _ = _savepoint_guarded(
+        cur, 'sp_ab_fill_ingest',
+        lambda: ar.ingest_broker_fills(cur, fills, meta),
+        on_error_level=logging.ERROR)
+    if ok:
+        prev, _LAST_ACTIVITY_ID = _LAST_ACTIVITY_ID, fills[-1].get('id')
+        logger.debug('[account_breaker] fills since epoch: %d pulled, %d new, '
+                     'last_activity_id %s -> %s', len(fills), len(new_fills),
+                     prev, _LAST_ACTIVITY_ID)
+    return ok
+
+
+def _fallback_post_path() -> Path:
+    return Path(os.environ.get(FALLBACK_POST_PATH_ENV)
+                or ROOT / 'logs' / 'account_breaker_fallback_post.ts')
+
+
+def post_fallback_notice(now=None) -> bool:
+    """F3: an ARMED tick with no alpha-P&L measure skips the drawdown rule; tell
+    #trade-reports at most once per 30 min. Cron runs are separate processes, so
+    the throttle is a tiny timestamp file (fail-open: an unreadable file posts, an
+    unwritable one still posts). Returns True iff a post was attempted."""
+    now = time.time() if now is None else now
+    path = _fallback_post_path()
+    try:
+        last = float(path.read_text().strip())
+        if 0 <= now - last < FALLBACK_POST_EVERY_S:
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    _post('trade-reports',
+          ':warning: **Account breaker degraded** — alpha P&L could not be computed '
+          'this tick (migration 160 / fill sync / ledger read); the DRAWDOWN rule is '
+          'SKIPPED while armed (daily-loss still evaluated). Repeats at most every '
+          '30 min until the measure recovers.')
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(now))
+    except Exception as e:  # noqa: BLE001
+        logger.warning('[account_breaker] fallback-post throttle write failed: %s', e)
+    return True
+
+
 def compute_alpha_pnl_tick(cur, conn, equity, positions, bench):
     """One tick of the C1-amendment-2 measure. Returns
     {alpha_pnl, realized, unrealized, unmatched, hwm, dd_pnl, ...} or None when
@@ -1063,6 +1245,10 @@ def compute_alpha_pnl_tick(cur, conn, equity, positions, bench):
             return None
         peak_pnl, epoch_at = a_state
         logger.info('[account_breaker] alpha epoch taken at %s', epoch_at)
+    if not sync_fills_since_epoch(cur, epoch_at):
+        logger.warning('[account_breaker] fill sync since epoch failed; the ledger '
+                       'would be incomplete — no alpha P&L this tick')
+        return None
     inputs = load_alpha_inputs(cur, epoch_at)
     if inputs is None:
         logger.warning('[account_breaker] alpha P&L inputs unreadable; legacy NAV '
@@ -1239,8 +1425,17 @@ def run_once(session_date=None) -> int:
                 _post('trade-reports', _flatten_escalation_msg(attempts, flat))
             return 0
 
+        skip_dd = bool(live and pnl is None)
+        if skip_dd:
+            logger.error('[account_breaker] ARMED tick without alpha P&L: drawdown '
+                         'rule skipped (daily-loss still evaluated)')
+            post_fallback_notice()
         st = evaluate(alpha, state['peak'], equity, open_eq,
-                      dd_override=None if pnl is None else pnl['dd_pnl'])
+                      dd_override=None if pnl is None else pnl['dd_pnl'],
+                      skip_drawdown=skip_dd)
+        line_pnl = pnl if not skip_dd else {
+            'alpha_pnl': None, 'realized': None, 'unrealized': None, 'hwm': None,
+            'dd_pnl': None, 'unmatched': 0}
         peak_pnl_w = None if pnl is None else pnl['hwm']
 
         if not st['breach']:
@@ -1343,7 +1538,7 @@ def run_once(session_date=None) -> int:
                                 alpha=alpha, st=st, open_equity=open_eq,
                                 open_src=open_src,
                                 halted=bool(live and st['breach']), flatten=flat,
-                                pnl=pnl))
+                                pnl=line_pnl))
         return 0
     except Exception as e:  # noqa: BLE001 — fix round 1 item 3: a crash
         # anywhere in this tick, including psycopg2.connect itself (now
