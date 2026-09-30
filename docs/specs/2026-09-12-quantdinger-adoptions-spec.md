@@ -215,8 +215,9 @@ performance; enforcement would have flattened 32 positions. The daily-loss rule 
 **New definition.**
 ```
 alpha_unrealized_t = Σ over non-benchmark broker positions of unrealized $ (qty × (current_price − avg_entry_price), sign by side)
-alpha_realized_t   = Σ realized $ of non-benchmark closes since EPOCH, FIFO per ticker over `broker_fills`, seeded by the
-                     epoch snapshot of open non-benchmark lots (qty, avg_entry_price) taken on the first run under this rule
+alpha_realized_t   = Σ realized $ of non-benchmark closes since EPOCH, AVERAGE-COST per ticker (the broker's own method, so it
+                     composes with the broker's unrealized leg) over fills the breaker pulls ITSELF from the broker since the
+                     epoch (and upserts into `broker_fills`), seeded by the epoch snapshot (qty, avg_entry_price, side)
 alpha_pnl_t        = alpha_realized_t + alpha_unrealized_t
 hwm_t              = max(hwm_{t-1}, alpha_pnl_t)           # persisted in account_breaker_state (peak_alpha_pnl)
 dd_t               = (alpha_pnl_t − hwm_t) / equity_t        # NAV-denominated; BREACH when dd_t ≤ −0.10
@@ -226,9 +227,14 @@ dd_t               = (alpha_pnl_t − hwm_t) / equity_t        # NAV-denominated
   `alpha_pnl` (unchanged semantics) and NEVER moves the epoch.
 - Benchmark tickers (registry `benchmark_sleeve`) are excluded from both legs; their own P&L is not alpha. Cash, deposits,
   withdrawals and sleeve rebalances do not move `alpha_pnl`.
-- Fills missing from `broker_fills` (pre-155 history, unmatched sells): the sell is matched against the epoch snapshot lot,
-  else logged `[account_breaker] unmatched fill …` and counted with cost = the fill price (zero realized) — fail-open,
-  never a raise; a counter in the shadow line.
+- Fills: the breaker fetches FILL activities since the epoch from the broker each tick (not the reconcile step's run-date
+  gate) and upserts them into `broker_fills` (append-only); a sell with no open long opens a SHORT lot (and a long→short
+  flip's remainder does too); `sell_short` is a sell; unknown sides are counted; unmatched remainders are counted — fail-open,
+  never a raise. The shadow line carries a per-ticker reconciliation counter (ledger qty vs broker qty). Both legs use the
+  same instrument scope as the flatten list (`_is_equity_symbol`) until options/crypto scaling is specified.
+- Armed fallback (Amendment 2a, review 2026-09-30): if `alpha_pnl` cannot be computed on a tick, the DRAWDOWN rule is SKIPPED
+  for that tick (daily-loss rule still active), the line prints `dd_pnl=n/a`, and a rate-limited loud post goes to
+  #trade-reports; the legacy `equity − sleeve` measure never feeds the rule again.
 - Shadow line carries BOTH measures for the transition: `alpha_pnl=… hwm=… dd_pnl=… | legacy alpha_nav=… dd_nav=…`; the
   legacy measure is removed after two clean shadow days under the new rule and an operator ack.
 - The per-position breaker (C2) is unchanged. Denominator = broker equity (not the alpha slice) so a fixed dollar loss reads
