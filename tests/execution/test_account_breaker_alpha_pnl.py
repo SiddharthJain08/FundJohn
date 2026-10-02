@@ -895,3 +895,77 @@ def test_halted_and_rearm_paths_never_write_peak_alpha_nav(wired, monkeypatch):
     wired['install'](db, 100_000.0, BOOK)
     ab.run_once(session_date=SESSION)
     assert db.peak_nav_writes == 0
+
+
+# ── Task 2 fix round: MAJOR-1 HWM, MINOR-2 liveness, MINOR-3 pager ──────────
+
+def _recon_db_low_peak(**kw):
+    # alpha_pnl = 90 * 5 = 450 > stored peak 100, with recon=1 (ledger 100 vs broker 90)
+    return FakeDB(peak_pnl=100.0, epoch_at=EPOCH,
+                  lots=[{'ticker': 'AAPL', 'qty': 100, 'avg_entry_price': 100, 'side': 'long'}],
+                  **kw)
+
+
+def test_recon_mismatch_never_persists_a_hwm_shadow(wired, caplog):
+    db = _recon_db_low_peak()
+    wired['install'](db, 100_000.0, _recon_book())
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        ab.run_once(session_date=SESSION)
+    assert 'recon=1' in _last_line(caplog) and 'hwm=450.00' in _last_line(caplog)  # displayed
+    assert db.sql('SET peak_alpha_pnl') == [] and db.peak_pnl == 100.0
+
+
+def test_recon_mismatch_never_persists_a_hwm_armed(wired, monkeypatch, no_flatten):
+    monkeypatch.setenv(ab.ARM_ENV, '1')
+    db = _recon_db_low_peak()
+    wired['install'](db, 100_000.0, _recon_book())
+    ab.run_once(session_date=SESSION)
+    assert db.sql('SET peak_alpha_pnl') == [] and db.peak_pnl == 100.0
+
+
+def test_clean_recon_still_persists_the_hwm(wired):
+    db = _recon_db_low_peak()
+    wired['install'](db, 100_000.0, {'AAPL': _pos(100, 100, 105), 'SPY': _pos(1, 1, 1, mv=1_000)})
+    ab.run_once(session_date=SESSION)
+    assert db.peak_pnl == 500.0
+
+
+def test_rearm_on_a_recon_mismatch_tick_does_not_reset_the_hwm(wired, monkeypatch):
+    breached = datetime(2026, 9, 29, 15, 0, tzinfo=timezone.utc)
+    monkeypatch.setenv(ab.REARM_ENV, breached.isoformat())
+    db = _recon_db_low_peak(halted=True, breached_at=breached)
+    wired['install'](db, 100_000.0, _recon_book())
+    assert ab.run_once(session_date=SESSION) == 0
+    assert db.sql('SET peak_alpha_pnl') == [] and db.peak_pnl == 100.0
+    assert db.sql('rearmed_at = NOW()')            # the re-arm itself still happened
+
+
+def test_capped_tick_without_forward_progress_logs_an_error(monkeypatch, caplog):
+    def capped(after, **k):
+        raise ar.FillPagesTruncated('cap', [_act('c1', 'AAPL', 'buy', 1, 10, 5)])
+    monkeypatch.setattr(ar, 'fetch_fills_since', capped)
+    db = FakeDB(epoch_at=EPOCH)
+    db.watermark = datetime(2026, 9, 29, 14, 12, tzinfo=timezone.utc)   # after = 14:02
+    with caplog.at_level('ERROR', logger=ab.logger.name):
+        assert ab.sync_fills_since_epoch(db, EPOCH) is False
+    assert any('NO forward progress' in r.getMessage() for r in caplog.records)
+    # a capped tick that DOES advance (new max filled_at 14:30 -> next start 14:20) is quiet
+    caplog.clear()
+    monkeypatch.setattr(ar, 'fetch_fills_since', lambda after, **k: (_ for _ in ()).throw(
+        ar.FillPagesTruncated('cap', [_act('c2', 'AAPL', 'buy', 1, 10, 30)])))
+    with caplog.at_level('ERROR', logger=ab.logger.name):
+        ab.sync_fills_since_epoch(db, EPOCH)
+    assert not any('NO forward progress' in r.getMessage() for r in caplog.records)
+
+
+def test_non_list_or_empty_body_under_raise_on_cap_is_truncation_not_eof(monkeypatch):
+    _cli(monkeypatch, [_page(100), '{"message": "rate limited"}'])
+    with pytest.raises(ar.FillPagesTruncated) as ei:
+        _REAL_FETCH_SINCE('2026-09-29T13:30:00Z', raise_on_cap=True)
+    assert len(ei.value.fills) == 100
+    _cli(monkeypatch, [_page(100), ''])
+    with pytest.raises(ar.FillPagesTruncated):
+        _REAL_FETCH_SINCE('2026-09-29T13:30:00Z', raise_on_cap=True)
+    # default path unchanged: treated as end-of-data
+    _cli(monkeypatch, [_page(100), ''])
+    assert len(_REAL_FETCH_SINCE('2026-09-29T13:30:00Z')) == 100

@@ -124,12 +124,19 @@ def _fetch_fill_pages(window_args, *, page_size: int = 100, max_pages: int = 50,
             log(f'CLI rc={proc.returncode} stderr={proc.stderr[:300]}')
             raise RuntimeError(f'alpaca activity list failed: {proc.stderr[:200]}')
         if not proc.stdout.strip():
+            if raise_on_cap and fills:
+                # MINOR-3: an empty body after page 1 is not a trustworthy end.
+                raise FillPagesTruncated('empty CLI body after page 1', fills)
             break
         try:
             page = json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
             raise RuntimeError(f'CLI returned non-JSON stdout: {exc}; head={proc.stdout[:200]}')
-        if not isinstance(page, list) or not page:
+        if not isinstance(page, list):
+            if raise_on_cap:
+                raise FillPagesTruncated('non-list CLI body', fills)
+            break
+        if not page:
             break
         fills.extend(page)
         if len(page) < page_size:

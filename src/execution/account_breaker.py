@@ -24,7 +24,8 @@ close_result_json.dry_run=true so the sizer's risk-exit cooldown
 
 Re-arm is operator-only: OPENCLAW_ACCOUNT_BREAKER_REARM=<breached_at iso> in
 .env clears exactly that halt (a stale token cannot clear a later breach) and
-resets the rolling peak to the current alpha NAV.
+resets the alpha-P&L high-water mark to the current alpha P&L (the legacy NAV
+peak no longer exists, Task 2 / P4).
 """
 from __future__ import annotations
 
@@ -52,7 +53,7 @@ REARM_ENV = 'OPENCLAW_ACCOUNT_BREAKER_REARM'
 NAV_OHLC_PATH_ENV = 'OPENCLAW_PNL_OHLC_PATH'
 DEFAULT_NAV_OHLC_PATH = ROOT / 'logs' / 'pnl_daily_ohlc.json'
 
-DD_LIMIT = -0.10        # alpha-sleeve drawdown from the rolling peak
+DD_LIMIT = -0.10        # alpha-P&L drawdown (NAV-denominated) from its high-water mark
 DAILY_LIMIT = -0.03     # total-equity loss vs the session's opening equity
 BENCH_LOOKBACK_DAYS = 30
 
@@ -644,8 +645,7 @@ def clear_halt(cur, alpha=None, alpha_pnl_now=None) -> bool:
     (the legacy NAV peak reset) is accepted but no longer written (P4). Also
     resets flatten_attempts to 0 — a fresh arm should not inherit a stale
     retry count from the halt it just cleared (a literal, not a bound
-    param, so it never disturbs the existing `params[0] == alpha` contract
-    callers already rely on). Returns True iff the write landed (supplement
+    param, so the statement carries no bound params at all). Returns True iff the write landed (supplement
     item 2); a failed write is logged as an ERROR and swallowed, same as
     save_state — run_once() checks this and lets the same operator token
     retry the re-arm on the next tick rather than silently doing nothing."""
@@ -1164,8 +1164,9 @@ def _flatten_escalation_msg(attempts: int, flat: dict) -> str:
 
 
 # last FILL activity id seen by this process (in-memory only, C1 amendment 2a) —
-# logged so an operator can see the feed advance; the fetch itself is always the
-# full since-epoch window (the ledger is recomputed from scratch each tick).
+# logged so an operator can see the feed advance. The broker fetch starts at the
+# persisted watermark (P1); the LEDGER is still recomputed each tick from the full
+# since-epoch set read from broker_fills.
 _LAST_ACTIVITY_ID = None
 
 FALLBACK_POST_PATH_ENV = 'OPENCLAW_ACCOUNT_BREAKER_FALLBACK_POST_PATH'
@@ -1317,6 +1318,16 @@ def sync_fills_since_epoch(cur, epoch_at) -> bool:
         wm = _max_filled_at(fills)
         if wm is not None:
             _save_fill_watermark(cur, wm)
+        if truncated and isinstance(after, datetime):
+            # MINOR-2 liveness: a capped tick must move the next fetch start
+            # (wm - overlap) strictly past this one, else every tick re-hits the
+            # cap from the same point and falls back forever.
+            a = after if after.tzinfo else after.replace(tzinfo=timezone.utc)
+            if wm is None or wm - FILL_WATERMARK_OVERLAP <= a:
+                logger.error('[account_breaker] fill pull capped with NO forward '
+                             'progress (watermark %s, overlap %s, fetch started at '
+                             '%s): every tick will fall back until the window '
+                             'holds fewer fills', wm, FILL_WATERMARK_OVERLAP, a)
     return ok and not truncated
 
 
@@ -1497,7 +1508,10 @@ def run_once(session_date=None) -> int:
         pnl = compute_alpha_pnl_tick(cur, conn, equity, positions, bench)
 
         if rearm_requested(state):
-            rearmed = clear_halt(cur, alpha_pnl_now=None if pnl is None else pnl['alpha_pnl'])
+            # MAJOR-1: a recon>0 ledger is distrusted (P2) — it must not reset the
+            # HWM either, exactly as on a pnl-None tick.
+            trusted = pnl is not None and not int(pnl.get('recon', 0) or 0) > 0
+            rearmed = clear_halt(cur, alpha_pnl_now=pnl['alpha_pnl'] if trusted else None)
             # fix round 1 item 3: `_commit` is now gated on `rearmed` too —
             # a failed clear_halt already rolled back to its own savepoint
             # (nothing to commit), and on a raising/failing commit AFTER a
@@ -1510,7 +1524,7 @@ def run_once(session_date=None) -> int:
                 state = {'halted': False, 'reason': None, 'breached_at': None,
                          'peak': None, 'dd': None, 'daily': None,
                          'pending_flatten': False}
-                if pnl is not None:
+                if trusted:
                     pnl['hwm'], pnl['dd_pnl'] = pnl['alpha_pnl'], 0.0
             else:
                 logger.error('[account_breaker] re-arm failed to persist '
@@ -1579,7 +1593,10 @@ def run_once(session_date=None) -> int:
             'dd_pnl': None, 'unmatched': 0,
             'recon': recon_n, 'excluded': 0 if pnl is None else pnl.get('excluded', 0),
             'excluded_by_class': {} if pnl is None else pnl.get('excluded_by_class')}
-        peak_pnl_w = None if pnl is None else pnl['hwm']
+        # MAJOR-1: never persist a HWM computed from a distrusted ledger (pnl None
+        # or recon>0), in BOTH modes — a shadow tick must not seed an inflated HWM
+        # that arming inherits. The line may still display the computed hwm.
+        peak_pnl_w = None if (pnl is None or recon_n > 0) else pnl['hwm']
 
         if not st['breach']:
             flat = None
