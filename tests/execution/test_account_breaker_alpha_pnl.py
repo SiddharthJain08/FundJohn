@@ -17,6 +17,7 @@ from execution import stop_reattach as sr              # noqa: E402
 from execution import alpaca_trader as at              # noqa: E402
 from execution import regime_liquidator as rl          # noqa: E402
 
+_REAL_FETCH_SINCE = ar.fetch_fills_since      # the autouse fixture below stubs the module attr
 SESSION = date(2026, 9, 29)
 EPOCH = datetime(2026, 9, 29, 13, 30, tzinfo=timezone.utc)
 
@@ -142,18 +143,19 @@ def test_sleeve_rebalance_leaves_alpha_pnl_flat_while_legacy_alpha_nav_drops():
 
 # ── evaluate: dd_override ───────────────────────────────────────────────────
 
-def test_dd_override_drives_the_rule_and_dd_nav_is_ignored():
-    # legacy NAV dd is -0.39 (would breach) but the override says -0.01
-    st = ab.evaluate(8_800, 14_500, 95_400, 95_500, dd_override=-0.01)
-    assert st['breach'] is False and st['rule'] == 'none'
-    assert st['dd_nav'] == pytest.approx(8_800 / 14_500 - 1)
-    st = ab.evaluate(14_500, 14_500, 95_400, 95_500, dd_override=-0.10)
+def test_dd_drives_the_rule():
+    st = ab.evaluate(-0.01, 95_400, 95_500)
+    assert st['breach'] is False and st['dd'] == -0.01
+    st = ab.evaluate(-0.10, 95_400, 95_500)
     assert st['breach'] is True and st['rule'] == 'drawdown'
 
 
-def test_evaluate_without_override_is_unchanged():
-    st = ab.evaluate(90.0, 100.0, 100.0, None)
-    assert st['dd'] == pytest.approx(-0.10) and st['rule'] == 'drawdown'
+def test_evaluate_without_a_measure_skips_the_drawdown_rule():
+    """P4: no legacy NAV fallback — dd None == skip_drawdown; daily still runs."""
+    st = ab.evaluate(None, 100.0, None)
+    assert st['dd'] == 0.0 and st['rule'] == 'none' and st['breach'] is False
+    assert 'dd_nav' not in st and 'peak' not in st
+    assert ab.evaluate(None, 90_000, 95_500)['rule'] == 'daily_loss'
 
 
 # ── DB layer: fake cursor keyed on SQL ──────────────────────────────────────
@@ -170,6 +172,8 @@ class FakeDB:
         self.calls, self._one, self._all = [], None, []
         self.rowcount = 1
         self.epoch_inserts = 0
+        self.watermark = None
+        self.peak_nav_writes = 0
 
     def execute(self, sql, params=None):
         f = ' '.join(sql.split())
@@ -178,6 +182,10 @@ class FakeDB:
         if f.startswith('SELECT halted'):
             self._one = (self.halted, 'drawdown' if self.halted else None, self.breached_at,
                          self.peak_nav, None, None, False)
+        elif f.startswith('SELECT last_synced_filled_at'):
+            self._all = [(self.watermark,)]
+        elif f.startswith('UPDATE account_breaker_state SET last_synced_filled_at'):
+            self.watermark = max(x for x in (self.watermark, params[1]) if x is not None)
         elif f.startswith('SELECT peak_alpha_pnl, alpha_epoch_at'):
             self._all = [(self.peak_pnl, self.epoch_at)]
         elif f.startswith('SELECT opening_equity'):
@@ -211,6 +219,8 @@ class FakeDB:
             self.peak_pnl = params[0]
         elif 'rearmed_at = NOW()' in f:
             self.halted = False
+        if 'peak_alpha_nav =' in f and f.startswith('UPDATE'):
+            self.peak_nav_writes += 1
 
     def fetchone(self):
         return self._one
@@ -306,17 +316,19 @@ def test_save_state_persists_peak_alpha_pnl_after_the_latch_write():
 
 
 def test_format_line_appends_new_fields_and_keeps_existing():
-    st = {'peak': 14_500.0, 'dd': -0.0123, 'dd_nav': -0.39, 'daily': -0.001,
+    st = {'peak': 14_500.0, 'dd': -0.0123, 'daily': -0.001,
           'rule': 'none', 'breach': False}
     pnl = {'alpha_pnl': 500.0, 'realized': 100.0, 'unrealized': 400.0, 'hwm': 800.0,
-           'dd_pnl': -0.0123, 'unmatched': 2, 'recon': 3, 'excluded': 1}
+           'dd_pnl': -0.0123, 'unmatched': 2, 'recon': 3, 'excluded': 1,
+           'excluded_by_class': {'crypto': 1}}
     line = ab.format_line('shadow', equity=95_400.0, bench_mv=86_600.0, alpha=8_800.0, st=st,
                           open_equity=95_500.0, open_src='stored', halted=False, pnl=pnl)
     print(line)
     assert line.startswith('[account_breaker] shadow equity=95400.00 bench_mv=86600.00 '
                            'alpha_nav=8800.00 peak=14500.00 dd=-0.0123 ')
     assert ('halted=0 | alpha_pnl=500.00 realized=100.00 unrealized=400.00 hwm=800.00 '
-            'dd_pnl=-0.0123 unmatched=2 recon=3 excluded=1 | legacy alpha_nav=8800.00 dd_nav=-0.3900') in line
+            'dd_pnl=-0.0123 unmatched=2 recon=3 excluded=crypto:1') in line
+    assert line.endswith('excluded=crypto:1') and 'legacy' not in line and 'dd_nav' not in line     # P4
     # without pnl the line is byte-identical to the legacy format
     assert '|' not in ab.format_line('shadow', equity=1.0, bench_mv=0.0, alpha=1.0, st=st,
                                      open_equity=1.0, open_src='x', halted=False)
@@ -364,7 +376,9 @@ def test_run_once_clean_tick_uses_pnl_measure_and_ignores_dd_nav(wired, caplog):
         assert ab.run_once(session_date=SESSION) == 0
     line = _last_line(caplog)
     assert 'rule=none' in line and 'breach=0' in line
-    assert 'alpha_pnl=500.00' in line and 'dd_nav=-0.39' in line and 'dd_pnl=0.0000' in line
+    assert 'alpha_pnl=500.00' in line and 'dd_pnl=0.0000' in line
+    assert 'dd_nav' not in line and 'legacy' not in line and 'excluded=0' in line   # P4
+    assert db.peak_nav_writes == 0                                  # P4: column no longer written
     assert db.peak_pnl == 500.0
 
 
@@ -518,7 +532,7 @@ def test_recon_counts_qty_mismatches_incl_closed_positions_with_ledger_qty():
     r = ab.alpha_pnl(1, book, set(), [], lots)
     assert r['recon'] == 2
     line = ab.format_line('shadow', equity=1.0, bench_mv=0.0, alpha=1.0,
-                          st={'peak': 1.0, 'dd': 0.0, 'dd_nav': 0.0, 'daily': None,
+                          st={'peak': 1.0, 'dd': 0.0, 'daily': None,
                               'rule': 'none', 'breach': False},
                           open_equity=1.0, open_src='x', halted=False,
                           pnl=dict(r, hwm=0.0, dd_pnl=0.0))
@@ -540,10 +554,10 @@ def test_losing_tick_of_the_epoch_race_falls_back_and_never_writes_a_second_epoc
     assert db.epoch_inserts == 0 and db.lots == [] and conn.committed == 0
 
 
-def test_evaluate_skip_drawdown_ignores_dd_nav_but_daily_still_fires():
-    st = ab.evaluate(8_800, 14_500, 95_400, 95_500, skip_drawdown=True)   # dd_nav -0.39
+def test_evaluate_skip_drawdown_ignores_dd_but_daily_still_fires():
+    st = ab.evaluate(-0.39, 95_400, 95_500, skip_drawdown=True)
     assert st['breach'] is False and st['rule'] == 'none' and st['dd'] == 0.0
-    st = ab.evaluate(8_800, 14_500, 90_000, 95_500, skip_drawdown=True)   # daily -5.8 %
+    st = ab.evaluate(-0.39, 90_000, 95_500, skip_drawdown=True)   # daily -5.8 %
     assert st['rule'] == 'daily_loss'
 
 
@@ -568,7 +582,7 @@ def test_armed_fallback_tick_skips_drawdown_and_posts_once_per_30_min(
             assert ab.run_once(session_date=SESSION) == 0
         line = _last_line(caplog)
         assert 'rule=none' in line and 'breach=0' in line and 'halted=0' in line
-        assert 'dd_pnl=n/a' in line and 'dd_nav=-0.39' in line
+        assert 'dd_pnl=n/a' in line and 'dd_nav' not in line
         assert not db.halted
     degraded = [p for p in posts if p[0] == 'trade-reports' and 'DRAWDOWN rule is' in p[1]]
     assert len(degraded) == 1                       # second tick throttled
@@ -576,3 +590,382 @@ def test_armed_fallback_tick_skips_drawdown_and_posts_once_per_30_min(
     t0 = float((tmp_path / 'fb.ts').read_text())
     assert ab.post_fallback_notice(now=t0 + 31 * 60) is True
     assert ab.post_fallback_notice(now=t0 + 32 * 60) is False
+
+
+# ── Task 2 / P1: persisted fill watermark + bounded pull ────────────────────
+
+WM = datetime(2026, 9, 30, 15, 0, tzinfo=timezone.utc)
+
+
+def _capture_fetch(monkeypatch, feed=()):
+    seen = []
+
+    def fake(after, **k):
+        seen.append((after, k))
+        return list(feed)
+    monkeypatch.setattr(ar, 'fetch_fills_since', fake)
+    return seen
+
+
+def test_fetch_starts_at_watermark_minus_ten_minutes(monkeypatch):
+    seen = _capture_fetch(monkeypatch)
+    db = FakeDB(epoch_at=EPOCH)
+    db.watermark = WM
+    assert ab.sync_fills_since_epoch(db, EPOCH) is True
+    assert seen[0][0] == '2026-09-30T14:50:00Z'
+
+
+def test_fetch_never_starts_before_the_epoch(monkeypatch):
+    seen = _capture_fetch(monkeypatch)
+    db = FakeDB(epoch_at=EPOCH)
+    db.watermark = EPOCH.replace(minute=35)             # wm - 10 min < epoch
+    ab.sync_fills_since_epoch(db, EPOCH)
+    assert seen[0][0] == '2026-09-29T13:30:00Z'
+    seen.clear()
+    db.watermark = None                                 # never synced
+    ab.sync_fills_since_epoch(db, EPOCH)
+    assert seen[0][0] == '2026-09-29T13:30:00Z'
+
+
+def test_fetch_is_bounded_and_opts_into_raising(monkeypatch):
+    seen = _capture_fetch(monkeypatch)
+    ab.sync_fills_since_epoch(FakeDB(epoch_at=EPOCH), EPOCH)
+    k = seen[0][1]
+    assert k['max_pages'] == ab.FILL_MAX_PAGES == 20
+    assert k['deadline_s'] == ab.FILL_BUDGET_S == 60 and k['raise_on_cap'] is True
+
+
+def test_watermark_advances_to_max_filled_at_only_after_a_successful_upsert(monkeypatch):
+    _capture_fetch(monkeypatch, [_act('w1', 'AAPL', 'buy', 1, 10, 5),
+                                 _act('w2', 'AAPL', 'sell', 1, 11, 9)])
+    db = FakeDB(epoch_at=EPOCH)
+    assert ab.sync_fills_since_epoch(db, EPOCH) is True
+    assert db.watermark == datetime(2026, 9, 29, 14, 9, tzinfo=timezone.utc)
+    # a failing upsert leaves the watermark alone and reports failure
+    class Bad(FakeDB):
+        def execute(self, sql, params=None):
+            if 'INSERT INTO broker_fills' in sql:
+                raise RuntimeError('boom')
+            super().execute(sql, params)
+    bad = Bad(epoch_at=EPOCH)
+    assert ab.sync_fills_since_epoch(bad, EPOCH) is False
+    assert bad.watermark is None
+
+
+def test_watermark_never_moves_backwards(monkeypatch):
+    _capture_fetch(monkeypatch, [_act('w1', 'AAPL', 'buy', 1, 10, 5)])
+    db = FakeDB(epoch_at=EPOCH)
+    db.watermark = WM
+    ab.sync_fills_since_epoch(db, EPOCH)
+    assert db.watermark == WM
+    assert any('GREATEST' in c[0] for c in db.sql('last_synced_filled_at'))
+
+
+def test_ledger_still_reads_the_full_since_epoch_set_from_sql(monkeypatch):
+    """The watermark narrows the BROKER fetch only: an old fill that is not in
+    the narrow pull still counts, because the ledger reads broker_fills."""
+    old = {'ticker': 'AAPL', 'side': 'buy', 'qty': 10, 'price': 100,
+           'filled_at': datetime(2026, 9, 29, 14, 1, tzinfo=timezone.utc), 'activity_id': 'old'}
+    db = FakeDB(epoch_at=EPOCH, fills=[old])
+    db.watermark = WM
+    _capture_fetch(monkeypatch, [_act('new', 'AAPL', 'sell', 10, 110, 30)])
+    res = ab.compute_alpha_pnl_tick(db, FakeConn(db), 1e5, {'MSFT': _pos(1, 10, 10)}, {'SPY'})
+    assert res['realized'] == pytest.approx(100.0)       # old buy + new sell
+    full = db.sql('FROM broker_fills WHERE filled_at >= %s')
+    assert full and full[0][1] == (EPOCH,)
+
+
+def test_page_cap_hit_returns_false_and_no_ledger(monkeypatch):
+    def capped(after, **k):
+        raise ar.FillPagesTruncated('cap', [_act('c1', 'AAPL', 'buy', 1, 10, 5)])
+    monkeypatch.setattr(ar, 'fetch_fills_since', capped)
+    db = FakeDB(epoch_at=EPOCH)
+    assert ab.sync_fills_since_epoch(db, EPOCH) is False
+    assert ab.compute_alpha_pnl_tick(db, FakeConn(db), 1e5, BOOK, {'SPY'}) is None
+    # the rows that did arrive are kept (append-only) and the watermark advanced
+    # over them, so a long first catch-up converges instead of livelocking
+    assert getattr(db, 'fill_inserts', 0) >= 1 and db.watermark is not None
+
+
+def _cli(monkeypatch, pages):
+    calls = []
+
+    class P:
+        def __init__(self, out):
+            self.returncode, self.stdout, self.stderr = 0, out, ''
+
+    def run(args, **k):
+        calls.append(k.get('timeout'))
+        return P(pages[min(len(calls) - 1, len(pages) - 1)])
+    monkeypatch.setattr(ar.subprocess, 'run', run)
+    return calls
+
+
+def _page(n, start=0):
+    import json
+    return json.dumps([{'id': f'id{start + i}'} for i in range(n)])
+
+
+def test_fetch_fill_pages_raises_on_cap_only_when_opted_in(monkeypatch):
+    calls = _cli(monkeypatch, [_page(100)])              # every page is full
+    with pytest.raises(ar.FillPagesTruncated) as ei:
+        _REAL_FETCH_SINCE('2026-09-29T13:30:00Z', max_pages=3, raise_on_cap=True)
+    assert len(calls) == 3 and len(ei.value.fills) == 300
+    # default behaviour (fetch_fills_for_date and legacy callers): silent stop
+    calls.clear()
+    assert len(ar.fetch_fills_for_date('2026-09-29', max_pages=3)) == 300
+    assert len(_REAL_FETCH_SINCE('2026-09-29T13:30:00Z', max_pages=3)) == 300
+
+
+def test_fetch_fill_pages_short_page_is_complete_not_truncated(monkeypatch):
+    _cli(monkeypatch, [_page(100), _page(7, 100)])
+    out = _REAL_FETCH_SINCE('2026-09-29T13:30:00Z', max_pages=2, raise_on_cap=True)
+    assert len(out) == 107                               # ended on a short page at the cap
+
+
+def test_fetch_fill_pages_wall_clock_budget(monkeypatch):
+    _cli(monkeypatch, [_page(100)])
+    import types
+    ticks = iter([0.0, 0.0])
+    # first two reads (deadline + page 1) are inside the budget, then 61 s elapsed
+    monkeypatch.setattr(ar, 'time', types.SimpleNamespace(
+        monotonic=lambda: next(ticks, 61.0)))
+    with pytest.raises(ar.FillPagesTruncated):
+        _REAL_FETCH_SINCE('2026-09-29T13:30:00Z', raise_on_cap=True, deadline_s=60)
+
+
+def test_migration_161_is_additive_only():
+    sql = (ROOT / 'src' / 'database' / 'migrations' /
+           '161_account_breaker_fill_watermark.sql').read_text()
+    assert 'ADD COLUMN IF NOT EXISTS last_synced_filled_at TIMESTAMPTZ' in sql
+    for bad in ('DROP ', 'DELETE ', 'TRUNCATE '):
+        assert bad not in sql.upper()
+
+
+# ── Task 2 / P2: recon > 0 on an ARMED tick == pnl is None ──────────────────
+
+@pytest.fixture
+def no_flatten(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ab, 'flatten_alpha', lambda *a, **k: calls.append(1) or {
+        'ok': 0, 'fail': 0, 'partial': 0, 'pending': False, 'aborted': False, 'tickers': []})
+    return calls
+
+
+def _recon_book():
+    # ledger (epoch lot) says 100 AAPL, broker says 90 -> recon=1
+    return {'AAPL': _pos(90, 100, 105), 'SPY': _pos(1, 1, 1, mv=1_000)}
+
+
+def _recon_db():
+    return FakeDB(peak_pnl=20_000.0, epoch_at=EPOCH,
+                  lots=[{'ticker': 'AAPL', 'qty': 100, 'avg_entry_price': 100, 'side': 'long'}])
+
+
+def test_armed_recon_mismatch_skips_drawdown_and_posts_degraded_notice(
+        wired, caplog, monkeypatch, tmp_path, no_flatten):
+    monkeypatch.setenv(ab.ARM_ENV, '1')
+    posts = []
+    monkeypatch.setattr(rl, '_post_to_discord', lambda ch, msg: posts.append((ch, msg)) or True)
+    db = _recon_db()                  # dd_pnl would be (450-20000)/1e5 = -0.1955 -> breach
+    wired['install'](db, 100_000.0, _recon_book())
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        assert ab.run_once(session_date=SESSION) == 0
+    line = _last_line(caplog)
+    assert 'rule=none' in line and 'breach=0' in line and 'halted=0' in line
+    assert 'dd_pnl=n/a' in line and 'recon=1' in line and not db.halted
+    assert no_flatten == []
+    assert any(c == 'trade-reports' and 'DRAWDOWN rule is' in m for c, m in posts)
+
+
+def test_armed_recon_mismatch_still_runs_the_daily_loss_rule(wired, caplog, monkeypatch,
+                                                             no_flatten):
+    monkeypatch.setenv(ab.ARM_ENV, '1')
+    db = _recon_db()
+    db.open_eq = 100_000.0
+    wired['install'](db, 90_000.0, _recon_book())          # daily -10 %
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        ab.run_once(session_date=SESSION)
+    assert 'rule=daily_loss' in _last_line(caplog)
+
+
+def test_shadow_recon_mismatch_still_evaluates_the_drawdown(wired, caplog):
+    db = _recon_db()
+    wired['install'](db, 100_000.0, _recon_book())
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        ab.run_once(session_date=SESSION)
+    line = _last_line(caplog)
+    assert 'rule=drawdown' in line and 'recon=1' in line and 'dd_pnl=-0.' in line
+
+
+def test_armed_clean_recon_still_fires_the_drawdown(wired, caplog, monkeypatch, no_flatten):
+    monkeypatch.setenv(ab.ARM_ENV, '1')
+    db = FakeDB(peak_pnl=20_000.0, epoch_at=EPOCH,
+                lots=[{'ticker': 'AAPL', 'qty': 100, 'avg_entry_price': 100, 'side': 'long'}])
+    wired['install'](db, 100_000.0, {'AAPL': _pos(100, 100, 105), 'SPY': _pos(1, 1, 1, mv=1_000)})
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        ab.run_once(session_date=SESSION)
+    assert 'rule=drawdown' in _last_line(caplog) and 'recon=0' in _last_line(caplog)
+
+
+# ── Task 2 / P3: asset-class scope ──────────────────────────────────────────
+
+def test_load_broker_positions_carries_asset_class(monkeypatch):
+    payload = [{'symbol': 'AAPL', 'qty': '1', 'side': 'long', 'market_value': '1',
+                'asset_class': 'us_equity'},
+               {'symbol': 'BTCUSD', 'qty': '1', 'side': 'long', 'market_value': '1',
+                'asset_class': 'crypto'}]
+    monkeypatch.setattr(rl, '_run_cli', lambda *a, **k: (True, payload, None))
+    out = rl._load_broker_positions()
+    assert out['AAPL']['asset_class'] == 'us_equity' and out['BTCUSD']['asset_class'] == 'crypto'
+
+
+def _cls(p, cls):
+    return dict(p, asset_class=cls)
+
+
+def test_non_us_equity_class_is_excluded_from_both_legs_and_counted_by_class():
+    # symbols look like plain equities: only the broker class marks them out
+    book = {'AAPL': _cls(_pos(5, 100, 101), 'us_equity'),
+            'XYZ': _cls(_pos(1, 50, 60, upl=10), 'crypto'),
+            'ABC': _cls(_pos(1, 50, 60, upl=10), 'crypto')}
+    fills = [_fill('XYZ', 'buy', 1, 50, 1), _fill('XYZ', 'sell', 1, 70, 2),
+             _fill('AAPL', 'buy', 5, 100, 3)]
+    r = ab.alpha_pnl(1, book, set(), fills, [])
+    assert r['alpha_pnl'] == pytest.approx(5.0) and r['n_positions'] == 1
+    assert r['realized'] == 0.0                         # XYZ's +20 never enters the ledger
+    assert r['excluded'] == 2 and r['excluded_by_class'] == {'crypto': 2}
+
+
+def test_us_equity_class_wins_over_symbol_shape():
+    r = ab.alpha_pnl(1, {'BRK.B': _cls(_pos(1, 10, 12, upl=2), 'us_equity')}, set(), [], [])
+    assert r['alpha_pnl'] == pytest.approx(2.0) and r['excluded'] == 0
+
+
+def test_closed_position_fill_falls_back_to_the_shape_guess():
+    fills = [_fill('ETH/USD', 'buy', 1, 100, 1), _fill('ETH/USD', 'sell', 1, 110, 2)]
+    r = ab.alpha_pnl(1, {}, set(), fills, [])
+    assert r['realized'] == 0.0 and r['excluded_by_class'] == {'crypto': 1}
+
+
+def test_excluded_token_format():
+    f = ab._excluded_token
+    assert f({'excluded': 0}) == '0' and f({'excluded': 0, 'excluded_by_class': {}}) == '0'
+    assert f({'excluded': 2, 'excluded_by_class': {'crypto': 2}}) == 'crypto:2'
+    assert f({'excluded_by_class': {'us_option': 1, 'crypto': 2}}) == 'crypto:2,us_option:1'
+
+
+def test_epoch_snapshot_excludes_non_us_equity_by_class():
+    db = FakeDB()
+    book = {'AAPL': _cls(_pos(100, 100, 105), 'us_equity'),
+            'ABC': _cls(_pos(3, 10, 11), 'crypto')}
+    assert ab.take_alpha_epoch(db, book, set()) is True
+    assert [l['ticker'] for l in db.lots] == ['AAPL']
+
+
+def test_flatten_scope_excludes_non_us_equity_by_class(monkeypatch):
+    book = {'AAPL': _cls(_pos(10, 100, 101), 'us_equity'),
+            'ABC': _cls(_pos(3, 10, 11), 'crypto')}
+    r = ab.flatten_alpha(book, set(), cur=FakeDB(), live=False, rule='drawdown',
+                         magnitude=-0.1, journal=False)
+    assert r['tickers'] == ['AAPL']
+
+
+# ── Task 2 / P4: legacy removal ─────────────────────────────────────────────
+
+def test_shadow_tick_without_alpha_pnl_skips_drawdown_no_nav_fallback(wired, caplog):
+    class Broken(FakeDB):
+        def execute(self, sql, params=None):
+            if 'alpha_epoch_at' in sql and sql.lstrip().startswith('SELECT'):
+                raise RuntimeError('column does not exist')
+            super().execute(sql, params)
+    book = {'AAPL': _pos(100, 100, 105), 'SPY': _pos(1, 1, 1, mv=86_600)}
+    wired['install'](Broken(peak_nav=14_500.0, epoch_at=EPOCH), 95_400.0, book)
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        ab.run_once(session_date=SESSION)
+    line = _last_line(caplog)
+    assert 'rule=none' in line and 'dd_pnl=n/a' in line and 'dd_nav' not in line
+
+
+def test_halted_and_rearm_paths_never_write_peak_alpha_nav(wired, monkeypatch):
+    breached = datetime(2026, 9, 29, 15, 0, tzinfo=timezone.utc)
+    monkeypatch.setenv(ab.REARM_ENV, breached.isoformat())
+    db = FakeDB(peak_pnl=20_000.0, epoch_at=EPOCH, halted=True, breached_at=breached,
+                lots=[{'ticker': 'AAPL', 'qty': 100, 'avg_entry_price': 100, 'side': 'long'}])
+    wired['install'](db, 100_000.0, BOOK)
+    ab.run_once(session_date=SESSION)
+    assert db.peak_nav_writes == 0
+
+
+# ── Task 2 fix round: MAJOR-1 HWM, MINOR-2 liveness, MINOR-3 pager ──────────
+
+def _recon_db_low_peak(**kw):
+    # alpha_pnl = 90 * 5 = 450 > stored peak 100, with recon=1 (ledger 100 vs broker 90)
+    return FakeDB(peak_pnl=100.0, epoch_at=EPOCH,
+                  lots=[{'ticker': 'AAPL', 'qty': 100, 'avg_entry_price': 100, 'side': 'long'}],
+                  **kw)
+
+
+def test_recon_mismatch_never_persists_a_hwm_shadow(wired, caplog):
+    db = _recon_db_low_peak()
+    wired['install'](db, 100_000.0, _recon_book())
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        ab.run_once(session_date=SESSION)
+    assert 'recon=1' in _last_line(caplog) and 'hwm=450.00' in _last_line(caplog)  # displayed
+    assert db.sql('SET peak_alpha_pnl') == [] and db.peak_pnl == 100.0
+
+
+def test_recon_mismatch_never_persists_a_hwm_armed(wired, monkeypatch, no_flatten):
+    monkeypatch.setenv(ab.ARM_ENV, '1')
+    db = _recon_db_low_peak()
+    wired['install'](db, 100_000.0, _recon_book())
+    ab.run_once(session_date=SESSION)
+    assert db.sql('SET peak_alpha_pnl') == [] and db.peak_pnl == 100.0
+
+
+def test_clean_recon_still_persists_the_hwm(wired):
+    db = _recon_db_low_peak()
+    wired['install'](db, 100_000.0, {'AAPL': _pos(100, 100, 105), 'SPY': _pos(1, 1, 1, mv=1_000)})
+    ab.run_once(session_date=SESSION)
+    assert db.peak_pnl == 500.0
+
+
+def test_rearm_on_a_recon_mismatch_tick_does_not_reset_the_hwm(wired, monkeypatch):
+    breached = datetime(2026, 9, 29, 15, 0, tzinfo=timezone.utc)
+    monkeypatch.setenv(ab.REARM_ENV, breached.isoformat())
+    db = _recon_db_low_peak(halted=True, breached_at=breached)
+    wired['install'](db, 100_000.0, _recon_book())
+    assert ab.run_once(session_date=SESSION) == 0
+    assert db.sql('SET peak_alpha_pnl') == [] and db.peak_pnl == 100.0
+    assert db.sql('rearmed_at = NOW()')            # the re-arm itself still happened
+
+
+def test_capped_tick_without_forward_progress_logs_an_error(monkeypatch, caplog):
+    def capped(after, **k):
+        raise ar.FillPagesTruncated('cap', [_act('c1', 'AAPL', 'buy', 1, 10, 5)])
+    monkeypatch.setattr(ar, 'fetch_fills_since', capped)
+    db = FakeDB(epoch_at=EPOCH)
+    db.watermark = datetime(2026, 9, 29, 14, 12, tzinfo=timezone.utc)   # after = 14:02
+    with caplog.at_level('ERROR', logger=ab.logger.name):
+        assert ab.sync_fills_since_epoch(db, EPOCH) is False
+    assert any('NO forward progress' in r.getMessage() for r in caplog.records)
+    # a capped tick that DOES advance (new max filled_at 14:30 -> next start 14:20) is quiet
+    caplog.clear()
+    monkeypatch.setattr(ar, 'fetch_fills_since', lambda after, **k: (_ for _ in ()).throw(
+        ar.FillPagesTruncated('cap', [_act('c2', 'AAPL', 'buy', 1, 10, 30)])))
+    with caplog.at_level('ERROR', logger=ab.logger.name):
+        ab.sync_fills_since_epoch(db, EPOCH)
+    assert not any('NO forward progress' in r.getMessage() for r in caplog.records)
+
+
+def test_non_list_or_empty_body_under_raise_on_cap_is_truncation_not_eof(monkeypatch):
+    _cli(monkeypatch, [_page(100), '{"message": "rate limited"}'])
+    with pytest.raises(ar.FillPagesTruncated) as ei:
+        _REAL_FETCH_SINCE('2026-09-29T13:30:00Z', raise_on_cap=True)
+    assert len(ei.value.fills) == 100
+    _cli(monkeypatch, [_page(100), ''])
+    with pytest.raises(ar.FillPagesTruncated):
+        _REAL_FETCH_SINCE('2026-09-29T13:30:00Z', raise_on_cap=True)
+    # default path unchanged: treated as end-of-data
+    _cli(monkeypatch, [_page(100), ''])
+    assert len(_REAL_FETCH_SINCE('2026-09-29T13:30:00Z')) == 100

@@ -74,13 +74,44 @@ def _parse_ts(value) -> str | None:
     return value
 
 
-def _fetch_fill_pages(window_args, *, page_size: int = 100, max_pages: int = 50):
+class FillPagesTruncated(RuntimeError):
+    """The pager stopped on `max_pages` or the wall-clock deadline while the
+    broker may still hold more rows. Raised ONLY when a caller opts in
+    (`raise_on_cap=True`); `.fills` carries what was fetched (oldest first) so a
+    caller can still ingest it, but it must never be treated as a complete set.
+    Breaker Task 2 / P1: a truncated list silently read as complete would
+    understate the since-epoch ledger."""
+
+    def __init__(self, msg, fills):
+        super().__init__(msg)
+        self.fills = fills
+
+
+def _fetch_fill_pages(window_args, *, page_size: int = 100, max_pages: int = 50,
+                      raise_on_cap: bool = False, deadline_s=None):
     """Shared FILL-activity pager: `window_args` is the CLI window selector
     (`['--date', d]` or `['--after', ts, '--direction', 'asc']`). Returns the
-    list of activity dicts; raises RuntimeError on a CLI/parse failure."""
+    list of activity dicts; raises RuntimeError on a CLI/parse failure.
+
+    Default (`raise_on_cap=False`, `deadline_s=None`) keeps the historical
+    behaviour used by fetch_fills_for_date: hitting `max_pages` is a silent
+    safety stop. With `raise_on_cap=True` the page cap — and `deadline_s`, a
+    wall-clock budget in seconds for the whole pull — raise FillPagesTruncated
+    instead of returning a possibly-incomplete list."""
     fills = []
     page_token = None
+    deadline = None if deadline_s is None else time.monotonic() + float(deadline_s)
     for _ in range(max_pages):
+        timeout = 60
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if raise_on_cap:
+                    raise FillPagesTruncated(
+                        f'fill pull exceeded its {deadline_s}s budget after '
+                        f'{len(fills)} rows', fills)
+                break
+            timeout = min(60, remaining)
         args = [ALPACA_CLI, 'account', 'activity', 'list',
                 '--activity-types', 'FILL',
                 *window_args,
@@ -88,17 +119,24 @@ def _fetch_fill_pages(window_args, *, page_size: int = 100, max_pages: int = 50)
         if page_token:
             args += ['--page-token', page_token]
         proc = subprocess.run(args, capture_output=True, text=True,
-                              timeout=60, check=False)
+                              timeout=timeout, check=False)
         if proc.returncode != 0:
             log(f'CLI rc={proc.returncode} stderr={proc.stderr[:300]}')
             raise RuntimeError(f'alpaca activity list failed: {proc.stderr[:200]}')
         if not proc.stdout.strip():
+            if raise_on_cap and fills:
+                # MINOR-3: an empty body after page 1 is not a trustworthy end.
+                raise FillPagesTruncated('empty CLI body after page 1', fills)
             break
         try:
             page = json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
             raise RuntimeError(f'CLI returned non-JSON stdout: {exc}; head={proc.stdout[:200]}')
-        if not isinstance(page, list) or not page:
+        if not isinstance(page, list):
+            if raise_on_cap:
+                raise FillPagesTruncated('non-list CLI body', fills)
+            break
+        if not page:
             break
         fills.extend(page)
         if len(page) < page_size:
@@ -107,6 +145,12 @@ def _fetch_fill_pages(window_args, *, page_size: int = 100, max_pages: int = 50)
         page_token = page[-1].get('id')
         if not page_token:
             break
+    else:
+        # for-else: the loop ran out of pages without a terminating break, so
+        # the last page was full and more rows may remain.
+        if raise_on_cap:
+            raise FillPagesTruncated(
+                f'fill pull hit max_pages={max_pages} ({len(fills)} rows)', fills)
     return fills
 
 
@@ -123,13 +167,16 @@ def fetch_fills_for_date(run_date: str, *, page_size: int = 100, max_pages: int 
                              max_pages=max_pages)
 
 
-def fetch_fills_since(after: str, *, page_size: int = 100, max_pages: int = 200):
+def fetch_fills_since(after: str, *, page_size: int = 100, max_pages: int = 200,
+                      raise_on_cap: bool = False, deadline_s=None):
     """FILL activities created after `after` (YYYY-MM-DDTHH:MM:SSZ), oldest
     first, fully paginated. Used by the account breaker's alpha-P&L ledger
     (C1 amendment 2a) so its realized leg does not depend on the reconcile
-    step having run for the day. Same client/parsing as fetch_fills_for_date."""
+    step having run for the day. Same client/parsing as fetch_fills_for_date.
+    `raise_on_cap` / `deadline_s`: see _fetch_fill_pages (the breaker opts in)."""
     return _fetch_fill_pages(['--after', after, '--direction', 'asc'],
-                             page_size=page_size, max_pages=max_pages)
+                             page_size=page_size, max_pages=max_pages,
+                             raise_on_cap=raise_on_cap, deadline_s=deadline_s)
 
 
 def collapse_fills(fills):

@@ -230,6 +230,7 @@ def _load_broker_positions() -> dict:
         out[sym] = {'qty': qty, 'side': p.get('side'),
                     'market_value': p.get('market_value'),
                     # additive (account breaker alpha P&L, C1 amendment 2)
+                    'asset_class': p.get('asset_class'),   # P3: breaker scope = us_equity only
                     'avg_entry_price': p.get('avg_entry_price'),
                     'current_price': p.get('current_price'),
                     'unrealized_pl': p.get('unrealized_pl')}
