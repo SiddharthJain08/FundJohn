@@ -64,7 +64,7 @@ def test_save_state_updates_the_singleton_only():
                   peak=171_200.0, dd=-0.01, daily=-0.002, pending_flatten=False)
     (sql, params), = cur.sql_matching('UPDATE account_breaker_state')
     assert 'WHERE id = 1' in sql
-    assert params[3] == 171_200.0
+    assert 'peak_alpha_nav' not in sql and 171_200.0 not in params   # P4: no longer written
 
 
 # ── opening_equity ──────────────────────────────────────────────────────────
@@ -146,12 +146,12 @@ def test_rearm_absent_token_is_false(monkeypatch):
     assert ab.rearm_requested(_halted()) is False
 
 
-def test_clear_halt_resets_the_peak_to_current_alpha_nav():
+def test_clear_halt_no_longer_writes_the_legacy_nav_peak():
     cur = FakeCursor()
     ab.clear_halt(cur, 149_100.0)
     (sql, params), = cur.sql_matching('UPDATE account_breaker_state')
     assert 'halted = FALSE' in sql and 'rearmed_at = NOW()' in sql
-    assert params[0] == 149_100.0
+    assert 'peak_alpha_nav' not in sql and not params          # P4
 
 
 # ── the grep contract ───────────────────────────────────────────────────────
@@ -244,13 +244,12 @@ def test_clear_halt_returns_true_on_success():
 def test_clear_halt_resets_flatten_attempts_to_zero_as_a_literal():
     """The re-arm must not inherit a stale retry count from the halt it just
     cleared, and MUST do so as a SQL literal (not a bound %s param) so it
-    never disturbs the existing `params[0] == alpha` contract other tests
-    already rely on."""
+    never disturbs the bound-param contract of the other writes."""
     cur = FakeCursor()
     ab.clear_halt(cur, 149_100.0)
     (sql, params), = cur.sql_matching('UPDATE account_breaker_state')
     assert 'flatten_attempts = 0' in sql
-    assert params == (149_100.0,)
+    assert not params                   # P4: no bound params at all
 
 
 # ── ON CONFLICT / Z-spelling pins (supplement item 3) ────────────────────────

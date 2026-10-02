@@ -296,7 +296,7 @@ def test_clean_tick_updates_the_peak_and_logs_rule_none(wired, caplog):
     assert ' shadow ' in line and 'rule=none' in line and 'breach=0' in line
     assert 'halted=0' in line and 'open_src=stored' in line
     (_sql, params), = cur.sql_matching('UPDATE account_breaker_state')
-    assert params[0] is False and params[3] == 160_000.0
+    assert params[0] is False and 160_000.0 not in params   # P4: NAV peak no longer written
 
 
 # ── breach, shadow ──────────────────────────────────────────────────────────
@@ -344,14 +344,14 @@ def test_armed_breach_flattens_halts_and_posts(monkeypatch, wired, caplog):
     # already carry halted=True and pending_flatten=True — proving the latch
     # lands BEFORE any broker action, not merely that two writes happened.
     _sql0, params0 = updates[0]
-    assert params0[0] is True and params0[6] is True
+    assert params0[0] is True and params0[5] is True
 
     # Inspect the final (post-flatten) row.
     _sql, params = updates[-1]
     assert params[0] is True
     # Deviation 3 (amended by C1 amendment 2a / F3): this fixture has no alpha-P&L
     # tables, so the ARMED tick is a fallback tick and the drawdown rule is
-    # SKIPPED (dd_nav -70.5 % is never fed to it); only daily_loss (-51.2 %) fires.
+    # SKIPPED (no NAV fallback exists any more, P4); only daily_loss (-51.2 %) fires.
     assert params[1] == 'daily_loss'
     assert isinstance(params[2], datetime)
     assert len(cur.sql_matching('INSERT INTO circuit_breaker_fires')) == 1
@@ -363,7 +363,7 @@ def test_armed_breach_flattens_halts_and_posts(monkeypatch, wired, caplog):
     assert 'OPENCLAW_ACCOUNT_BREAKER_REARM=' in msg
     assert 'PROCESS-WIDE' in msg           # supplement item 10
     # Fix round 1, item 1 test: the HALTED post must say the option book
-    # stays open — _is_equity_symbol/_OCC_RE exclude OCC legs from the
+    # stays open — the asset_class scope (P3) / _OCC_RE shape fallback exclude OCC legs from the
     # flatten by design, and that must not be left implicit to the operator.
     assert 'option book stays open' in msg
     assert 'OCC' in msg
@@ -381,8 +381,8 @@ def test_already_halted_retries_the_pending_flatten_only(monkeypatch, wired):
     assert ab.run_once(session_date=SESSION) == 0
     assert closed == ['AAPL']
     (_sql, params), = cur.sql_matching('UPDATE account_breaker_state')
-    assert params[0] is True and params[3] == 200_000.0     # peak NOT moved
-    assert params[6] is False                                # pending cleared
+    assert params[0] is True and 200_000.0 not in params     # P4: peak never written
+    assert params[5] is False                                # pending cleared
 
 
 def test_operator_token_rearms_then_evaluates_normally(monkeypatch, wired):
@@ -394,7 +394,8 @@ def test_operator_token_rearms_then_evaluates_normally(monkeypatch, wired):
     assert ab.run_once(session_date=SESSION) == 0
     rearm, = [c for c in cur.sql_matching('UPDATE account_breaker_state')
               if 'rearmed_at = NOW()' in c[0]]
-    assert rearm[1][0] == 159_000.0        # peak reset to the current alpha NAV
+    assert 'peak_alpha_nav' not in rearm[0]    # P4: the legacy peak reset is gone
+    assert not rearm[1]
 
 
 # ── supplement item 1: pre-flatten persistence failure ──────────────────────
@@ -482,7 +483,7 @@ def test_flatten_escalation_posts_once_after_the_configured_tick_threshold(monke
     assert 'option book stays open' in msg
     assert 'OCC' in msg
     (_sql, params), = cur.sql_matching('UPDATE account_breaker_state')
-    assert params[7] == 2              # flatten_attempts persisted as 2
+    assert params[6] == 2              # flatten_attempts persisted as 2
 
 
 def test_flatten_escalation_does_not_repost_below_threshold(monkeypatch, wired):

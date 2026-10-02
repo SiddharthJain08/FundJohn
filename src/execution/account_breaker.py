@@ -4,11 +4,13 @@
 Two rules, evaluated every 5 minutes during RTH by the SAME cron that runs
 position_circuit_breaker.py (src/engine/cron-schedule.js) — no new thread:
 
-    drawdown    alpha_nav / rolling_peak(alpha_nav) - 1   <= -0.10
+    drawdown    (alpha_pnl - hwm(alpha_pnl)) / equity     <= -0.10   (C1 amendment 2;
+                the legacy alpha_nav/rolling-peak measure was removed, Task 2 / P4)
     daily loss  (equity - opening_equity) / opening_equity <= -0.03
 
-alpha_nav = broker equity - the market value of every BENCHMARK-sleeve ticker,
-so an SPY-sleeve drawdown never trips the alpha drawdown rule; the daily rule
+alpha_nav = broker equity - the market value of every BENCHMARK-sleeve ticker.
+It is now DISPLAY-ONLY (the `alpha_nav=` / `bench_mv=` tokens of the log line);
+the drawdown rule runs on the benchmark-excluded alpha P&L, the daily rule
 deliberately measures the WHOLE book. The asymmetry is ruling R2 as written —
 do not harmonize the two.
 
@@ -32,7 +34,8 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -116,39 +119,30 @@ def alpha_nav(equity: float, positions: dict, bench_tickers) -> tuple[float, flo
     return float(equity) - bench_mv, bench_mv
 
 
-def evaluate(alpha: float, peak, equity: float, opening_equity,
-             dd_override=None, skip_drawdown: bool = False) -> dict:
-    """Pure rule evaluation. Returns
-    {'peak', 'dd', 'daily', 'rule', 'breach'}.
+def evaluate(dd, equity: float, opening_equity, skip_drawdown: bool = False) -> dict:
+    """Pure rule evaluation. Returns {'dd', 'daily', 'rule', 'breach'}.
 
-    `peak` None (first ever tick) seeds from the current alpha NAV, so the
-    breaker can never fire on its own first observation. `opening_equity`
-    None/0 disables the daily rule for that tick (reported as daily=None)
-    rather than inventing a denominator."""
-    alpha = float(alpha)
-    peak = alpha if peak is None else max(float(peak), alpha)
-    dd_nav = (alpha / peak - 1.0) if peak > 0 else 0.0
-    # C1 amendment 2: when the caller supplies the cumulative-alpha-P&L
-    # drawdown, THAT drives the drawdown rule; the NAV-based measure is kept
-    # only as 'dd_nav' for the transition log line.
-    dd = dd_nav if dd_override is None else float(dd_override)
-    if skip_drawdown:
-        # C1 amendment 2a (F3): armed tick with no alpha-P&L measure — the
-        # legacy NAV drawdown is defective (sleeve rebalances), so the
-        # drawdown rule is SKIPPED (never fed dd_nav); daily-loss still runs.
-        dd = 0.0
+    `dd` is the cumulative-alpha-P&L drawdown (C1 amendment 2, NAV-denominated;
+    pnl['dd_pnl']). Task 2 / P4 (operator ack 2026-10-02) removed the legacy
+    alpha_nav/rolling-peak measure: there is NO fallback drawdown any more. When
+    `dd` is None or `skip_drawdown` is set (the alpha ledger is unavailable, or
+    armed with recon>0 — P2) the drawdown rule is SKIPPED and daily-loss still
+    runs. `opening_equity` None/0 disables the daily rule for that tick
+    (reported as daily=None) rather than inventing a denominator."""
+    skip = skip_drawdown or dd is None
+    dd = 0.0 if skip else float(dd)
 
     daily = None
     if opening_equity not in (None, 0) and float(opening_equity) > 0:
         daily = float(equity) / float(opening_equity) - 1.0
 
     rules = []
-    if not skip_drawdown and dd <= DD_LIMIT + _EPS:
+    if not skip and dd <= DD_LIMIT + _EPS:
         rules.append('drawdown')
     if daily is not None and daily <= DAILY_LIMIT + _EPS:
         rules.append('daily_loss')
 
-    return {'peak': peak, 'dd': dd, 'dd_nav': dd_nav, 'daily': daily,
+    return {'dd': dd, 'daily': daily,
             'rule': '+'.join(rules) if rules else 'none',
             'breach': bool(rules)}
 
@@ -167,6 +161,33 @@ def _pos_key(sym) -> str:
     """Position key shared by both legs: upper-case, '/' stripped, so a crypto
     fill symbol 'BTC/USD' matches the broker's position symbol 'BTCUSD'."""
     return str(sym or '').strip().upper().replace('/', '')
+
+
+_EQUITY_CLASS = 'us_equity'
+
+
+def _symbol_class(sym) -> str:
+    """Shape-based class guess, used ONLY for a symbol the broker gave no
+    position payload for (a fill/lot of a position that is already closed — the
+    fills table carries no asset_class)."""
+    s = str(sym or '').strip().upper()
+    if '/' in s:
+        return 'crypto'
+    if _OCC_RE.match(s):
+        return 'us_option'
+    return _EQUITY_CLASS
+
+
+def _asset_class(sym, p=None) -> str:
+    """P3 (Task 2): the broker position's own `asset_class` is authoritative
+    (regime_liquidator._load_broker_positions carries it). Only when the payload
+    has none (absent/None) do we fall back to the symbol-shape guess."""
+    ac = (p or {}).get('asset_class') if isinstance(p, dict) else None
+    return str(ac).strip().lower() if ac else _symbol_class(sym)
+
+
+def _is_equity_position(sym, p=None) -> bool:
+    return bool(str(sym or '').strip()) and _asset_class(sym, p) == _EQUITY_CLASS
 
 
 _BUY_SIDES = ('buy',)
@@ -192,28 +213,41 @@ def alpha_pnl(equity, positions, bench_tickers, fills_since_epoch, epoch_lots) -
     unparseable qty/price) is counted in `unmatched`, never dropped silently;
     a negative qty with no side is a short sale.
 
-    Scope (F4): benchmark tickers AND non-equity symbols (`_is_equity_symbol`:
-    options, crypto pairs) are excluded from BOTH legs; the number of distinct
-    excluded keys is returned as `excluded`. Symbols are matched on `_pos_key`
-    so `BTC/USD` fills and `BTCUSD` positions land on the same (excluded) key.
+    Scope (F4 / P3): benchmark tickers AND anything whose broker `asset_class`
+    is not `us_equity` (options, crypto) are excluded from BOTH legs; the number
+    of distinct excluded keys is returned as `excluded` and per class as
+    `excluded_by_class`. Symbols are matched on `_pos_key` so `BTC/USD` fills
+    and `BTCUSD` positions land on the same (excluded) key; a fill/lot key with
+    no live position takes the shape-based class (see _symbol_class).
     The unrealized leg prefers the broker's `unrealized_pl`, falling back to
     qty*(cur-avg). `recon` = tickers whose ledger qty != broker qty (including
     closed positions with a non-zero ledger qty). Fail-open: nothing raises.
     Returns {alpha_pnl, realized, unrealized, unmatched, unpriced, n_positions,
-    excluded, recon}."""
+    excluded, excluded_by_class, recon}."""
     bench = {_pos_key(t) for t in (bench_tickers or ())}
     fills = list(fills_since_epoch or ())
     lots_in = list(epoch_lots or ())
     positions = positions or {}
 
-    # A key is non-equity when ANY raw symbol mapping onto it fails the equity
-    # predicate (crypto 'BTC/USD' fills poison the 'BTCUSD' position too).
-    non_equity = set()
-    for sym in list(positions) + [f.get('ticker') for f in fills] + \
-            [l.get('ticker') for l in lots_in]:
-        if sym is not None and not _is_equity_symbol(sym):
-            non_equity.add(_pos_key(sym))
-    excluded_keys = set()
+    # Class per key: a live broker position's asset_class wins; keys seen only
+    # in fills/lots (closed positions) use the shape guess. A key is non-equity
+    # when its position says so, or — absent a position — any raw symbol
+    # mapping onto it fails the shape check (crypto 'BTC/USD' fills poison
+    # 'BTCUSD').
+    class_by_key, pos_keys = {}, set()
+    for sym, p in positions.items():
+        k = _pos_key(sym)
+        if isinstance(p, dict) and p.get('asset_class'):
+            pos_keys.add(k)                 # explicit broker class: authoritative
+        class_by_key[k] = _asset_class(sym, p)
+    for sym in [f.get('ticker') for f in fills] + [l.get('ticker') for l in lots_in]:
+        k = _pos_key(sym)
+        if not k or k in pos_keys:
+            continue                        # the broker's explicit class stands
+        c = _symbol_class(sym)
+        if c != _EQUITY_CLASS or k not in class_by_key:
+            class_by_key[k] = c
+    excluded_keys = {}
 
     def _in_scope(sym) -> bool:
         k = _pos_key(sym)
@@ -221,8 +255,9 @@ def alpha_pnl(equity, positions, bench_tickers, fills_since_epoch, epoch_lots) -
             return False
         if k in bench:
             return False
-        if k in non_equity:
-            excluded_keys.add(k)
+        c = class_by_key.get(k, _EQUITY_CLASS)
+        if c != _EQUITY_CLASS:
+            excluded_keys[k] = c
             return False
         return True
 
@@ -320,7 +355,9 @@ def alpha_pnl(equity, positions, bench_tickers, fills_since_epoch, epoch_lots) -
     return {'alpha_pnl': realized + unrealized, 'realized': realized,
             'unrealized': unrealized, 'unmatched': unmatched,
             'unpriced': unpriced, 'n_positions': n_pos,
-            'excluded': len(excluded_keys), 'recon': recon}
+            'excluded': len(excluded_keys),
+            'excluded_by_class': dict(Counter(excluded_keys.values())),
+            'recon': recon}
 
 
 # ── state layer (C1b) ────────────────────────────────────────────────────────
@@ -398,8 +435,9 @@ def load_state(cur) -> dict:
             'pending_flatten': bool(pending)}
 
 
-def save_state(cur, *, halted, reason, breached_at, peak, dd, daily,
-               pending_flatten, flatten_attempts=None, peak_alpha_pnl=None) -> bool:
+def save_state(cur, *, halted, reason, breached_at, dd, daily,
+               pending_flatten, flatten_attempts=None, peak_alpha_pnl=None,
+               peak=None) -> bool:
     """Persist the singleton latch. Returns True iff the write actually
     landed (supplement item 2) — every caller in run_once() must check this,
     because a failed write here (e.g. migration 157 not yet applied) is
@@ -411,17 +449,21 @@ def save_state(cur, *, halted, reason, breached_at, peak, dd, daily,
     `flatten_attempts` (migration 158, F-5) is None by default, meaning
     "leave the consecutive-pending-tick counter untouched" — COALESCE keeps
     whatever is already stored so existing callers that never pass it (every
-    branch except the two that actually attempt a flatten) don't reset it."""
+    branch except the two that actually attempt a flatten) don't reset it.
+
+    P4 (Task 2): `peak` (the legacy NAV peak) is accepted for call-site
+    compatibility but NO LONGER WRITTEN — the peak_alpha_nav column stays in the
+    schema (append-only) and simply goes stale."""
     def _write():
         cur.execute(
             """
             UPDATE account_breaker_state
-               SET halted = %s, reason = %s, breached_at = %s, peak_alpha_nav = %s,
+               SET halted = %s, reason = %s, breached_at = %s,
                    dd = %s, daily = %s, pending_flatten = %s,
                    flatten_attempts = COALESCE(%s, flatten_attempts), updated_at = NOW()
              WHERE id = 1
             """,
-            (bool(halted), reason, breached_at, peak, dd, daily, bool(pending_flatten),
+            (bool(halted), reason, breached_at, dd, daily, bool(pending_flatten),
              flatten_attempts),
         )
 
@@ -444,8 +486,8 @@ def save_peak_alpha_pnl(cur, peak) -> bool:
 
 def load_alpha_state(cur):
     """(peak_alpha_pnl | None, alpha_epoch_at | None), or None when the read
-    failed / migration 160 is not applied / no state row (caller falls back to
-    the legacy NAV drawdown for that tick). fetchall() only, so the caller's
+    failed / migration 160 is not applied / no state row (caller skips the drawdown
+    rule for that tick). fetchall() only, so the caller's
     fetchone() sequencing is never disturbed."""
     def _read():
         cur.execute('SELECT peak_alpha_pnl, alpha_epoch_at FROM account_breaker_state '
@@ -466,8 +508,8 @@ def take_alpha_epoch(cur, positions, bench_tickers) -> bool:
     bench = {str(t).strip().upper() for t in (bench_tickers or ())}
     rows = []
     for sym, p in (positions or {}).items():
-        if str(sym).strip().upper() in bench or not _is_equity_symbol(sym):
-            continue                       # F4: same scope predicate as the flatten list
+        if str(sym).strip().upper() in bench or not _is_equity_position(sym, p):
+            continue                       # F4/P3: same scope predicate as the flatten list
         p = p or {}
         qty, avg = _f(p.get('qty'), 0.0), _f(p.get('avg_entry_price'))
         if not qty or avg is None:
@@ -596,9 +638,10 @@ def rearm_requested(state: dict) -> bool:
     return token in _iso_variants(state.get('breached_at'))
 
 
-def clear_halt(cur, alpha: float, alpha_pnl_now=None) -> bool:
-    """Operator re-arm: drop the latch and reset the rolling peak to the
-    current alpha NAV, so the next drawdown is measured from here. Also
+def clear_halt(cur, alpha=None, alpha_pnl_now=None) -> bool:
+    """Operator re-arm: drop the latch; the alpha-P&L high-water mark resets to
+    `alpha_pnl_now` (below) so the next drawdown is measured from here. `alpha`
+    (the legacy NAV peak reset) is accepted but no longer written (P4). Also
     resets flatten_attempts to 0 — a fresh arm should not inherit a stale
     retry count from the halt it just cleared (a literal, not a bound
     param, so it never disturbs the existing `params[0] == alpha` contract
@@ -611,12 +654,11 @@ def clear_halt(cur, alpha: float, alpha_pnl_now=None) -> bool:
             """
             UPDATE account_breaker_state
                SET halted = FALSE, reason = NULL, breached_at = NULL,
-                   peak_alpha_nav = %s, pending_flatten = FALSE,
+                   pending_flatten = FALSE,
                    flatten_attempts = 0,
                    rearmed_at = NOW(), updated_at = NOW()
              WHERE id = 1
             """,
-            (float(alpha),),
         )
 
     ok, _ = _savepoint_guarded(cur, 'sp_ab_clear_halt', _write, on_error_level=logging.ERROR)
@@ -627,6 +669,18 @@ def clear_halt(cur, alpha: float, alpha_pnl_now=None) -> bool:
         # the re-arm above.
         save_peak_alpha_pnl(cur, alpha_pnl_now)
     return ok
+
+
+def _excluded_token(pnl) -> str:
+    """P3: `excluded=0` when nothing was excluded, else the per-class counts,
+    sorted, comma-joined: `excluded=crypto:2` / `excluded=crypto:2,us_option:1`
+    (grep-able as excluded=(0|\\w+:\\d+(,\\w+:\\d+)*)). A pnl dict carrying only the
+    legacy integer count (no per-class map) renders as `unknown:N`."""
+    by = pnl.get('excluded_by_class')
+    if not by:
+        n = int(pnl.get('excluded', 0) or 0)
+        return f'unknown:{n}' if n else '0'
+    return ','.join(f'{c}:{int(n)}' for c, n in sorted(by.items()))
 
 
 def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
@@ -661,7 +715,6 @@ def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
         def _m(v):
             return 'n/a' if v is None else f"{float(v):.2f}"
         dd_pnl = pnl.get('dd_pnl')
-        dd_nav = st.get('dd_nav')
         line += (f" | alpha_pnl={_m(pnl.get('alpha_pnl'))} "
                  f"realized={_m(pnl.get('realized'))} "
                  f"unrealized={_m(pnl.get('unrealized'))} "
@@ -669,9 +722,7 @@ def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
                  f"dd_pnl={'n/a' if dd_pnl is None else f'{float(dd_pnl):.4f}'} "
                  f"unmatched={int(pnl.get('unmatched', 0))} "
                  f"recon={int(pnl.get('recon', 0))} "
-                 f"excluded={int(pnl.get('excluded', 0))}"
-                 f" | legacy alpha_nav={float(alpha):.2f} "
-                 f"dd_nav={'n/a' if dd_nav is None else f'{float(dd_nav):.4f}'}")
+                 f"excluded={_excluded_token(pnl)}")
     return line
 
 
@@ -688,11 +739,6 @@ _OCC_RE = re.compile(r'^[A-Z.]{1,6}\d{6}[CP]\d{8}$')
 # `time.sleep` itself, which would also silence any *other* sleep this module
 # grows later.
 _SETTLE_S = 0.5
-
-
-def _is_equity_symbol(sym) -> bool:
-    s = str(sym or '').strip().upper()
-    return bool(s) and '/' not in s and not _OCC_RE.match(s)
 
 
 def bench_tickers(cur):
@@ -915,7 +961,8 @@ def flatten_alpha(positions: dict, bench_tkrs, *, cur, live: bool, rule: str,
     touched: list = []
     qty_by_sym: dict = {}
     for sym in sorted(positions or {}):
-        if str(sym).strip().upper() in bench_norm or not _is_equity_symbol(sym):
+        if (str(sym).strip().upper() in bench_norm
+                or not _is_equity_position(sym, (positions or {}).get(sym))):
             continue
         try:
             qty = float((positions[sym] or {}).get('qty') or 0.0)
@@ -1135,27 +1182,109 @@ def _epoch_after_arg(epoch_at) -> str:
     return str(epoch_at)
 
 
+# P1 (Task 2): the breaker's broker pull is bounded — a page cap and a wall-clock
+# budget — and a pull that hits either returns False (fallback tick), never a
+# truncated ledger. 20 pages x 100 = 2000 fills per tick is far above one
+# watermark window of activity; the first sync after migration 161 (watermark
+# NULL => whole epoch) is the only pull that can approach it.
+FILL_MAX_PAGES = 20
+FILL_BUDGET_S = 60
+FILL_WATERMARK_OVERLAP = timedelta(minutes=10)
+
+
+def load_fill_watermark(cur):
+    """last_synced_filled_at (tz-aware datetime) or None — unset, migration 161
+    not applied, or the read failed (all mean: fetch from the epoch). Own
+    savepoint, fetchall() only, so no other caller's sequencing is disturbed."""
+    def _read():
+        cur.execute('SELECT last_synced_filled_at FROM account_breaker_state WHERE id = 1')
+        return cur.fetchall()
+    ok, rows = _savepoint_guarded(cur, 'sp_ab_fill_watermark', _read)
+    if not ok or not rows or rows[0][0] is None:
+        return None
+    wm = rows[0][0]
+    if isinstance(wm, datetime) and wm.tzinfo is None:
+        wm = wm.replace(tzinfo=timezone.utc)
+    return wm if isinstance(wm, datetime) else None
+
+
+def _fetch_after(epoch_at, watermark):
+    """Lower bound of the broker fetch: max(watermark - 10 min, epoch)."""
+    if isinstance(epoch_at, datetime) and isinstance(watermark, datetime):
+        if epoch_at.tzinfo is None:
+            epoch_at = epoch_at.replace(tzinfo=timezone.utc)
+        return max(watermark - FILL_WATERMARK_OVERLAP, epoch_at)
+    return epoch_at
+
+
+def _max_filled_at(fills):
+    best = None
+    for f in fills:
+        ts = f.get('transaction_time')
+        if not isinstance(ts, str):
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if best is None or dt > best:
+            best = dt
+    return best
+
+
+def _save_fill_watermark(cur, wm) -> bool:
+    """Monotone (GREATEST) so a late/overlapping pull can never move it back."""
+    def _write():
+        cur.execute('UPDATE account_breaker_state SET last_synced_filled_at = '
+                    'GREATEST(COALESCE(last_synced_filled_at, %s), %s) WHERE id = 1',
+                    (wm, wm))
+    ok, _ = _savepoint_guarded(cur, 'sp_ab_save_watermark', _write,
+                               on_error_level=logging.ERROR)
+    return ok
+
+
 def sync_fills_since_epoch(cur, epoch_at) -> bool:
-    """C1 amendment 2a (F1): pull FILL activities since the epoch from the broker
+    """C1 amendment 2a (F1): pull FILL activities from the broker
     (alpaca_reconcile.fetch_fills_since — same client/parsing as the reconcile
     step) and upsert them through alpaca_reconcile.ingest_broker_fills (same
     writer, ON CONFLICT DO NOTHING, append-only) BEFORE the ledger is read.
     Order-shape columns are enriched exactly as the reconcile step does, but only
     when the pull holds activity ids not yet in broker_fills (the reconcile insert
     is DO NOTHING, so a bare breaker-first row would leave parent_order_id NULL
-    for good). Returns False (caller falls back, fail-open) when the broker read
-    or the upsert fails."""
+    for good).
+
+    P1 (Task 2): the fetch starts at max(last_synced_filled_at - 10 min, epoch)
+    — the persisted watermark (migration 161) — not at the epoch every tick; the
+    watermark advances only after the upsert succeeded, to the max filled_at just
+    ingested. The LEDGER is unaffected: load_alpha_inputs still reads the full
+    since-epoch set from broker_fills. The pull is capped (FILL_MAX_PAGES pages,
+    FILL_BUDGET_S seconds): hitting either returns False — the caller treats it
+    as no alpha P&L this tick (fallback), never a truncated ledger. The rows that
+    DID arrive are still ingested (append-only, real fills) and the watermark
+    advanced over them, so a long first catch-up converges over a few ticks
+    instead of livelocking. Returns False (caller falls back, fail-open) when
+    the broker read or the upsert fails."""
     global _LAST_ACTIVITY_ID
     from execution import alpaca_reconcile as ar
+    after = _fetch_after(epoch_at, load_fill_watermark(cur))
+    truncated = False
     try:
-        fills = ar.fetch_fills_since(_epoch_after_arg(epoch_at))
+        fills = ar.fetch_fills_since(_epoch_after_arg(after),
+                                     max_pages=FILL_MAX_PAGES, raise_on_cap=True,
+                                     deadline_s=FILL_BUDGET_S)
+    except ar.FillPagesTruncated as e:
+        truncated, fills = True, e.fills
+        logger.error('[account_breaker] fill fetch truncated (%s); ingesting the %d '
+                     'rows that arrived, no alpha P&L this tick', e, len(fills))
     except Exception as e:  # noqa: BLE001
         logger.error('[account_breaker] fill fetch since epoch failed (%s: %s)',
                      type(e).__name__, e)
         return False
     fills = [f for f in fills if isinstance(f, dict)]
     if not fills:
-        return True
+        return not truncated
     ids = [f.get('id') for f in fills if f.get('id')]
 
     def _known():
@@ -1182,10 +1311,13 @@ def sync_fills_since_epoch(cur, epoch_at) -> bool:
         on_error_level=logging.ERROR)
     if ok:
         prev, _LAST_ACTIVITY_ID = _LAST_ACTIVITY_ID, fills[-1].get('id')
-        logger.debug('[account_breaker] fills since epoch: %d pulled, %d new, '
-                     'last_activity_id %s -> %s', len(fills), len(new_fills),
+        logger.debug('[account_breaker] fills since %s: %d pulled, %d new, '
+                     'last_activity_id %s -> %s', after, len(fills), len(new_fills),
                      prev, _LAST_ACTIVITY_ID)
-    return ok
+        wm = _max_filled_at(fills)
+        if wm is not None:
+            _save_fill_watermark(cur, wm)
+    return ok and not truncated
 
 
 def _fallback_post_path() -> Path:
@@ -1223,25 +1355,25 @@ def compute_alpha_pnl_tick(cur, conn, equity, positions, bench):
     """One tick of the C1-amendment-2 measure. Returns
     {alpha_pnl, realized, unrealized, unmatched, hwm, dd_pnl, ...} or None when
     it cannot be computed this tick (migration 160 missing, a read failed, the
-    epoch snapshot did not land) — the caller then falls back to the legacy NAV
-    drawdown for that tick, fail-open, logged. On the first tick with
+    epoch snapshot did not land) — the caller then SKIPS the drawdown rule for that
+    tick (P4: no legacy NAV fallback), fail-open, logged. On the first tick with
     alpha_epoch_at IS NULL the epoch snapshot is written once, in one
     savepoint, and committed immediately."""
     a_state = load_alpha_state(cur)
     if a_state is None:
         logger.warning('[account_breaker] alpha P&L state unreadable (migration 160 '
-                       'applied?); legacy NAV drawdown this tick')
+                       'applied?); drawdown rule skipped this tick')
         return None
     peak_pnl, epoch_at = a_state
     if epoch_at is None:
         if not take_alpha_epoch(cur, positions, bench) or not _commit(conn):
             logger.error('[account_breaker] alpha epoch snapshot did not land; '
-                         'legacy NAV drawdown this tick')
+                         'drawdown rule skipped this tick')
             return None
         a_state = load_alpha_state(cur)
         if a_state is None or a_state[1] is None:
             logger.error('[account_breaker] alpha epoch not readable after snapshot; '
-                         'legacy NAV drawdown this tick')
+                         'drawdown rule skipped this tick')
             return None
         peak_pnl, epoch_at = a_state
         logger.info('[account_breaker] alpha epoch taken at %s', epoch_at)
@@ -1251,8 +1383,8 @@ def compute_alpha_pnl_tick(cur, conn, equity, positions, bench):
         return None
     inputs = load_alpha_inputs(cur, epoch_at)
     if inputs is None:
-        logger.warning('[account_breaker] alpha P&L inputs unreadable; legacy NAV '
-                       'drawdown this tick')
+        logger.warning('[account_breaker] alpha P&L inputs unreadable; '
+                       'drawdown rule skipped this tick')
         return None
     lots, fills = inputs
     res = alpha_pnl(equity, positions, bench, fills, lots)
@@ -1365,8 +1497,7 @@ def run_once(session_date=None) -> int:
         pnl = compute_alpha_pnl_tick(cur, conn, equity, positions, bench)
 
         if rearm_requested(state):
-            rearmed = clear_halt(cur, alpha,
-                                 alpha_pnl_now=None if pnl is None else pnl['alpha_pnl'])
+            rearmed = clear_halt(cur, alpha_pnl_now=None if pnl is None else pnl['alpha_pnl'])
             # fix round 1 item 3: `_commit` is now gated on `rearmed` too —
             # a failed clear_halt already rolled back to its own savepoint
             # (nothing to commit), and on a raising/failing commit AFTER a
@@ -1374,10 +1505,10 @@ def run_once(session_date=None) -> int:
             # halted) must be kept rather than optimistically switching to
             # the un-halted default a write that never durably landed.
             if rearmed and _commit(conn):
-                logger.info('[account_breaker] re-armed by operator token; '
-                            'peak reset to %.2f', alpha)
+                logger.info('[account_breaker] re-armed by operator token; alpha-P&L '
+                            'hwm reset')
                 state = {'halted': False, 'reason': None, 'breached_at': None,
-                         'peak': alpha, 'dd': None, 'daily': None,
+                         'peak': None, 'dd': None, 'daily': None,
                          'pending_flatten': False}
                 if pnl is not None:
                     pnl['hwm'], pnl['dd_pnl'] = pnl['alpha_pnl'], 0.0
@@ -1393,7 +1524,7 @@ def run_once(session_date=None) -> int:
             # Latched. Never re-evaluate and never move the peak — only
             # retry a flatten that failed to submit or was left partially
             # open on an earlier tick.
-            st = {'peak': alpha if state['peak'] is None else state['peak'],
+            st = {'peak': None,
                   'dd': 0.0 if state['dd'] is None else state['dd'],
                   'daily': state['daily'], 'rule': state['reason'] or 'none',
                   'breach': True}
@@ -1406,7 +1537,7 @@ def run_once(session_date=None) -> int:
                                      magnitude=rule_magnitude(st['rule'], st))
                 attempts = prior_attempts + 1 if flat['pending'] else 0
                 if not save_state(cur, halted=True, reason=state['reason'],
-                                  breached_at=state['breached_at'], peak=st['peak'],
+                                  breached_at=state['breached_at'],
                                   dd=st['dd'], daily=st['daily'],
                                   pending_flatten=flat['pending'],
                                   flatten_attempts=attempts):
@@ -1425,23 +1556,35 @@ def run_once(session_date=None) -> int:
                 _post('trade-reports', _flatten_escalation_msg(attempts, flat))
             return 0
 
-        skip_dd = bool(live and pnl is None)
-        if skip_dd:
-            logger.error('[account_breaker] ARMED tick without alpha P&L: drawdown '
-                         'rule skipped (daily-loss still evaluated)')
+        # P2 (Task 2): on an ARMED tick a ledger/broker quantity mismatch
+        # (recon > 0) means the alpha P&L cannot be trusted to latch a flatten,
+        # so it is treated EXACTLY like pnl is None: drawdown rule skipped,
+        # daily-loss still runs, degraded notice posted. Shadow keeps evaluating
+        # (and logging) so the operator can watch recon before arming.
+        recon_n = 0 if pnl is None else int(pnl.get('recon', 0) or 0)
+        skip_dd = bool(pnl is None or (live and recon_n > 0))
+        if skip_dd and live:
+            logger.error('[account_breaker] ARMED tick without a trustworthy alpha '
+                         'P&L (%s): drawdown rule skipped (daily-loss still '
+                         'evaluated)',
+                         'unavailable' if pnl is None else f'recon={recon_n}')
             post_fallback_notice()
-        st = evaluate(alpha, state['peak'], equity, open_eq,
-                      dd_override=None if pnl is None else pnl['dd_pnl'],
+        # P4: no legacy NAV fallback — an unavailable ledger skips the drawdown
+        # rule in BOTH modes (shadow shows dd_pnl=n/a rather than a NAV number).
+        st = evaluate(None if pnl is None else pnl['dd_pnl'], equity, open_eq,
                       skip_drawdown=skip_dd)
+        st['peak'] = None
         line_pnl = pnl if not skip_dd else {
             'alpha_pnl': None, 'realized': None, 'unrealized': None, 'hwm': None,
-            'dd_pnl': None, 'unmatched': 0}
+            'dd_pnl': None, 'unmatched': 0,
+            'recon': recon_n, 'excluded': 0 if pnl is None else pnl.get('excluded', 0),
+            'excluded_by_class': {} if pnl is None else pnl.get('excluded_by_class')}
         peak_pnl_w = None if pnl is None else pnl['hwm']
 
         if not st['breach']:
             flat = None
             if not save_state(cur, halted=False, reason=None, breached_at=None,
-                              peak=st['peak'], dd=st['dd'], daily=st['daily'],
+                              dd=st['dd'], daily=st['daily'],
                               pending_flatten=False, peak_alpha_pnl=peak_pnl_w):
                 logger.error('[account_breaker] clean-tick state write '
                              'failed; will retry next tick')
@@ -1456,7 +1599,7 @@ def run_once(session_date=None) -> int:
                                  rule=st['rule'], magnitude=rule_magnitude(st['rule'], st),
                                  journal=False)
             if not save_state(cur, halted=False, reason=None, breached_at=None,
-                              peak=st['peak'], dd=st['dd'], daily=st['daily'],
+                              dd=st['dd'], daily=st['daily'],
                               pending_flatten=False, peak_alpha_pnl=peak_pnl_w):
                 logger.error('[account_breaker] shadow-tick state write '
                              'failed; will retry next tick')
@@ -1466,7 +1609,7 @@ def run_once(session_date=None) -> int:
             # NEW breach, ARMED — supplement item 1's critical ordering.
             breached_at = datetime.now(timezone.utc)
             persisted = save_state(cur, halted=True, reason=st['rule'],
-                                   breached_at=breached_at, peak=st['peak'],
+                                   breached_at=breached_at,
                                    dd=st['dd'], daily=st['daily'],
                                    pending_flatten=True, peak_alpha_pnl=peak_pnl_w)
             committed = _commit(conn)
@@ -1488,7 +1631,7 @@ def run_once(session_date=None) -> int:
             prior_attempts = load_flatten_attempts(cur)
             attempts = prior_attempts + 1 if flat['pending'] else 0
             if not save_state(cur, halted=True, reason=st['rule'],
-                              breached_at=breached_at, peak=st['peak'],
+                              breached_at=breached_at,
                               dd=st['dd'], daily=st['daily'],
                               pending_flatten=flat['pending'],
                               flatten_attempts=attempts):
@@ -1510,9 +1653,7 @@ def run_once(session_date=None) -> int:
                   f"rule={st['rule']}\n"
                   + (f"• alpha P&L ${pnl['alpha_pnl']:,.0f} vs hwm ${pnl['hwm']:,.0f} "
                      f"(dd {st['dd'] * 100:.2f}% of NAV, limit {DD_LIMIT * 100:.0f}%)\n"
-                     if pnl is not None else
-                     f"• alpha NAV ${alpha:,.0f} vs peak ${st['peak']:,.0f} "
-                     f"(dd {st['dd'] * 100:.2f}%, limit {DD_LIMIT * 100:.0f}%)\n") +
+                     if 'drawdown' in st['rule'] and pnl is not None else '') +
                   f"• equity ${equity:,.0f} vs session open ${open_eq:,.0f} "
                   f"(daily {daily_txt}, limit {DAILY_LIMIT * 100:.0f}%)\n"
                   f"• flattened {flat['ok']}/{attempted} alpha positions "
