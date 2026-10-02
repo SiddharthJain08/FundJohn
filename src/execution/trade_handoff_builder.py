@@ -111,9 +111,29 @@ def load_signals(uri: str, run_date: str) -> list[dict]:
     return rows
 
 
-def load_prices() -> pd.DataFrame:
+def load_prices(tickers: set[str] | None = None) -> pd.DataFrame:
+    """Load close prices, pivoted wide (date x ticker).
+
+    Filtered to `tickers` via a pyarrow predicate pushdown when given — the
+    handoff step only ever needs a handful of signal/held tickers + SPY, not
+    the whole append-only master. 2026-09-17: an unfiltered
+    `pd.read_parquet` here loaded the full ~19M-row prices.parquet (~2.2GB+
+    once pivoted date x ticker) during an intraday-redeploy handoff and the
+    process was SIGKILLed under capped_spawn's step memory cap (rc=137),
+    aborting the trade/alpaca/reconcile that would have followed — same
+    antipattern already fixed for the intraday HMM's SPY read (c7a4db87).
+    `tickers=None` keeps the old unfiltered behavior for any other caller.
+    """
     p = ROOT / 'data/master/prices.parquet'
-    df = pd.read_parquet(p)
+    if tickers:
+        import pyarrow.parquet as pq
+        table = pq.read_table(
+            str(p), columns=['ticker', 'date', 'close'],
+            filters=[('ticker', 'in', sorted(tickers))],
+        )
+        df = table.to_pandas()
+    else:
+        df = pd.read_parquet(p)
     df['date'] = pd.to_datetime(df['date'])
     df = df.sort_values(['ticker', 'date'])
     return df.pivot(index='date', columns='ticker', values='close').sort_index()
@@ -723,7 +743,9 @@ def build(run_date: str) -> dict:
     enriched: list[dict] = []
     if signals:
         try:
-            px = load_prices()
+            needed = {(s.get('ticker') or '').upper() for s in signals if s.get('ticker')}
+            needed.add('SPY')
+            px = load_prices(needed)
             spy = None
             if 'SPY' in px.columns:
                 spy = px['SPY'].pct_change().dropna()
