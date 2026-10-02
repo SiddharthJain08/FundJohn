@@ -29,10 +29,15 @@ function _runDoctor() {
     const proc = spawn('python3', [doctorPy, '--json'], {
       env: process.env, stdio: ['ignore', 'pipe', 'pipe'],
     });
+    // Full-mode doctor.py has no internal wall-clock cap: its slowest
+    // subcheck (union_universe_size resolver) alone allows 20s, and other
+    // slow checks stack on top (observed 14.7s-44.2s end to end 2026-09-15).
+    // 15s was tighter than doctor's own worst case, so the footer silently
+    // degraded to "not run (subprocess error)" on any moderately slow run.
     const timer = setTimeout(() => {
       try { proc.kill('SIGKILL'); } catch (_) {}
       resolve(null);
-    }, 15_000);
+    }, 55_000);
     proc.stdout.on('data', (c) => { stdout += c; });
     proc.stderr.on('data', (c) => { stderr += c; });
     proc.on('error', () => { clearTimeout(timer); resolve(null); });
