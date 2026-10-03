@@ -1,5 +1,5 @@
 {
-  "strategy_id": "S_ito_signature_vol_hedge",
+  "strategy_id": "S_svi_vol_surface_relative_value",
   "required": ["prices", "options_eod"],
   "optional": []
 }

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_window_dress_loser_reversal",
+  "required": ["prices"],
+  "optional": []
+}

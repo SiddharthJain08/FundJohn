@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_sector_neutral_debt_equity",
+  "required": ["prices", "financials"],
+  "optional": []
+}

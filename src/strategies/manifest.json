@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-09-26T19:22:50.312Z",
+  "updated_at": "2026-10-03T21:06:50.719Z",
   "strategies": {
     "S_leadlag_cluster_minirocket_v2": {
       "state": "live",
@@ -1878,8 +1878,8 @@
       "instrument_class": "equity"
     },
     "S_TR04_zarattini_intraday_spy": {
-      "state": "archived",
-      "state_since": "2026-04-30T23:37:01.649Z",
+      "state": "candidate",
+      "state_since": "2026-10-02T17:59:59.719948+00:00",
       "metadata": {
         "canonical_file": "str04_zarattini_intraday_spy.py",
         "class": "ZarattiniIntradaySPY",
@@ -1916,6 +1916,11 @@
             "live_drawdown_pct_trigger": 12,
             "live_drawdown_period_days": 90
           }
+        },
+        "revival_2026_09_13": {
+          "spec": "docs/specs/2026-09-12-quantdinger-adoptions-spec.md",
+          "quarantine_reason": "revived 2026-09-13; fed live via cohort_base's aux['prices_30m'] -> market_data wiring, but the backtest's own aux builder (src/strategies/aux_data_loader.py::load_aux_data) returns no prices_30m key — 0-trade backtest runs until that is wired",
+          "owed": "wire intraday 30m bars into aux_data"
         }
       },
       "history": [
@@ -1948,15 +1953,33 @@
           "to_state": "archived",
           "timestamp": "2026-04-30T23:37:01.649Z",
           "actor": "manual:operator",
-          "reason": "Requires prices_30m which is no longer collected daily; shelved for future revival when intraday tier is enabled",
+          "reason": "[CORRECTED 2026-09-13] Original reason (2026-04-30): 'Requires prices_30m which is no longer collected daily' — FALSE: data/master/prices_30m.parquet is a live master (refreshed 2026-09-11), and the live engine already feeds it in: src/execution/engine.py's load_aux_data populates aux['prices_30m'] every cycle, and CohortBaseStrategy._build_cohort_dicts (src/strategies/cohort_base.py) turns that into market_data['spy_30m_bars']/['intraday_30m_bars'], which this strategy reads — live trading is unaffected. The real blocker is the backtest only: its aux builder, src/strategies/aux_data_loader.py's load_aux_data (a distinct function of the same name), returns no 'prices_30m' key at all, so this strategy cannot be backtested until that is wired.",
           "metadata": {}
+        },
+        {
+          "from_state": "archived",
+          "to_state": "candidate",
+          "timestamp": "2026-10-02T17:59:59.719948+00:00",
+          "actor": "manual:operator",
+          "reason": "Revived 2026-09-13 (spec docs/specs/2026-09-12-quantdinger-adoptions-spec.md A4 hygiene): the stated blocker — 'prices_30m no longer collected' — is false; the master is live and refreshed 2026-09-11, and the strategy is already fed live via CohortBaseStrategy._build_cohort_dicts (src/strategies/cohort_base.py), which turns the live engine's aux['prices_30m'] (populated by src/execution/engine.py's load_aux_data) into market_data['spy_30m_bars']/['intraday_30m_bars']. Queued as a candidate so the research lane can re-gate it. Backtest-quarantined because src/strategies/aux_data_loader.py's load_aux_data — the backtest's own aux builder, a distinct function of the same name — returns no 'prices_30m' key, so a fleet slot today buys a 0-trade backtest run and no information even though live trading already works.",
+          "metadata": {
+            "revival_2026_09_13": {
+              "spec": "docs/specs/2026-09-12-quantdinger-adoptions-spec.md",
+              "quarantine_reason": "revived 2026-09-13; fed live via cohort_base's aux['prices_30m'] -> market_data wiring, but the backtest's own aux builder (src/strategies/aux_data_loader.py::load_aux_data) returns no prices_30m key — 0-trade backtest runs until that is wired",
+              "owed": "wire intraday 30m bars into aux_data"
+            }
+          }
         }
       ],
-      "instrument_class": "equity"
+      "instrument_class": "equity",
+      "backtest_quarantine": {
+        "reason": "revived 2026-09-13; fed live via cohort_base's aux['prices_30m'] -> market_data wiring, but the backtest's own aux builder (src/strategies/aux_data_loader.py::load_aux_data) returns no prices_30m key — 0-trade backtest runs until that is wired",
+        "since": "2026-09-13"
+      }
     },
     "S_TR06_baltussen_eod_reversal": {
-      "state": "archived",
-      "state_since": "2026-04-30T23:37:01.680Z",
+      "state": "candidate",
+      "state_since": "2026-10-02T17:59:59.720052+00:00",
       "metadata": {
         "canonical_file": "str06_baltussen_eod_reversal.py",
         "class": "BaltussenEODReversal",
@@ -1992,6 +2015,11 @@
             "live_drawdown_pct_trigger": 12,
             "live_drawdown_period_days": 90
           }
+        },
+        "revival_2026_09_13": {
+          "spec": "docs/specs/2026-09-12-quantdinger-adoptions-spec.md",
+          "quarantine_reason": "revived 2026-09-13; fed live via cohort_base's aux['prices_30m'] -> market_data wiring, but the backtest's own aux builder (src/strategies/aux_data_loader.py::load_aux_data) returns no prices_30m key — 0-trade backtest runs until that is wired",
+          "owed": "wire intraday 30m bars into aux_data"
         }
       },
       "history": [
@@ -2016,11 +2044,29 @@
           "to_state": "archived",
           "timestamp": "2026-04-30T23:37:01.680Z",
           "actor": "manual:operator",
-          "reason": "Requires prices_30m which is no longer collected daily; shelved for future revival when intraday tier is enabled",
+          "reason": "[CORRECTED 2026-09-13] Original reason (2026-04-30): 'Requires prices_30m which is no longer collected daily' — FALSE: data/master/prices_30m.parquet is a live master (refreshed 2026-09-11), and the live engine already feeds it in: src/execution/engine.py's load_aux_data populates aux['prices_30m'] every cycle, and CohortBaseStrategy._build_cohort_dicts (src/strategies/cohort_base.py) turns that into market_data['spy_30m_bars']/['intraday_30m_bars'], which this strategy reads — live trading is unaffected. The real blocker is the backtest only: its aux builder, src/strategies/aux_data_loader.py's load_aux_data (a distinct function of the same name), returns no 'prices_30m' key at all, so this strategy cannot be backtested until that is wired.",
           "metadata": {}
+        },
+        {
+          "from_state": "archived",
+          "to_state": "candidate",
+          "timestamp": "2026-10-02T17:59:59.720052+00:00",
+          "actor": "manual:operator",
+          "reason": "Revived 2026-09-13 (spec docs/specs/2026-09-12-quantdinger-adoptions-spec.md A4 hygiene): the stated blocker — 'prices_30m no longer collected' — is false; the master is live and refreshed 2026-09-11, and the strategy is already fed live via CohortBaseStrategy._build_cohort_dicts (src/strategies/cohort_base.py), which turns the live engine's aux['prices_30m'] (populated by src/execution/engine.py's load_aux_data) into market_data['spy_30m_bars']/['intraday_30m_bars']. Queued as a candidate so the research lane can re-gate it. Backtest-quarantined because src/strategies/aux_data_loader.py's load_aux_data — the backtest's own aux builder, a distinct function of the same name — returns no 'prices_30m' key, so a fleet slot today buys a 0-trade backtest run and no information even though live trading already works.",
+          "metadata": {
+            "revival_2026_09_13": {
+              "spec": "docs/specs/2026-09-12-quantdinger-adoptions-spec.md",
+              "quarantine_reason": "revived 2026-09-13; fed live via cohort_base's aux['prices_30m'] -> market_data wiring, but the backtest's own aux builder (src/strategies/aux_data_loader.py::load_aux_data) returns no prices_30m key — 0-trade backtest runs until that is wired",
+              "owed": "wire intraday 30m bars into aux_data"
+            }
+          }
         }
       ],
-      "instrument_class": "equity"
+      "instrument_class": "equity",
+      "backtest_quarantine": {
+        "reason": "revived 2026-09-13; fed live via cohort_base's aux['prices_30m'] -> market_data wiring, but the backtest's own aux builder (src/strategies/aux_data_loader.py::load_aux_data) returns no prices_30m key — 0-trade backtest runs until that is wired",
+        "since": "2026-09-13"
+      }
     },
     "low_volatility_us": {
       "state": "live",
@@ -2180,15 +2226,17 @@
     },
     "S_sparse_cca_mean_revert": {
       "state": "live",
-      "state_since": "2026-08-22T22:27:23.148Z",
+      "state_since": "2026-10-03T19:59:31.646Z",
       "metadata": {
         "canonical_file": "S_sparse_cca_mean_revert.py",
         "class": "SparseCCAMeanRevert",
         "description": "Sparse portfolios formed by maximizing mean reversion via sparse CCA exhibit negative autocorrelation; trade long/short on spread z-score.",
         "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
         "eligible_regimes": [
-          "LOW_VOL"
-        ]
+          "CRISIS"
+        ],
+        "backtest_universe_cap": "tier_r1000",
+        "backtest_universe_cap_note": "set 2026-10-02 by operator directive: nightly re-gates reproduce the basis of run f854d5be (--universe-cap tier_r1000, Sharpe -0.205) instead of the unbounded ~12.5k-col panel; live universe stays universe_filter_ref=tier_liquid (ledger .superpowers/sdd/2026-09-25-sparse-cca-zero-signals)"
       },
       "history": [
         {
@@ -2222,6 +2270,30 @@
             "eligible_regimes_before": null,
             "eligible_regimes_after": [
               "LOW_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-09-28T04:00:31.861486+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_weekly_cron",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-10-03T19:59:31.646Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL"
+            ],
+            "eligible_regimes_after": [
+              "CRISIS"
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
@@ -3373,13 +3445,13 @@
     },
     "S_ast_trend_following_effect_in_stocks": {
       "state": "live",
-      "state_since": "2026-08-22T22:27:22.963Z",
+      "state_since": "2026-10-03T19:58:53.201Z",
       "metadata": {
         "canonical_file": "S_ast_trend_following_effect_in_stocks.py",
         "class": "AstTrendFollowingEffectInStocks",
         "description": "Stocks hitting all-time-high closes exhibit momentum continuation; enter on ATH breakout and trail a 10-period ATR stop to ride the trend.",
         "eligible_regimes": [
-          "CRISIS"
+          "LOW_VOL"
         ],
         "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
@@ -3423,6 +3495,30 @@
             ],
             "eligible_regimes_after": [
               "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-09-28T04:00:31.898577+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_weekly_cron",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-10-03T19:58:53.201Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL"
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
@@ -3543,82 +3639,6 @@
           "timestamp": "2026-06-30T16:13:12.543Z",
           "actor": "manual:botjohn-f2",
           "reason": "W4 F2 sub-floor sign-off (operator 2026-06-30): backtest Sharpe -0.12 below 0.5 floor, no live track record",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "etp"
-    },
-    "oxf_gap_a": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:03:59.414832+00:00",
-      "metadata": {
-        "canonical_file": "oxf_gap_a.py",
-        "class": "OxfGapA",
-        "description": "Full-gap continuation in trend direction on liquid ETFs — confirmed daily-bar adaptation (oxfordstrat gap-pattern). Full gap + Donchian trend filter confirmed on signal-day OHLC; close[t+1] fill.",
-        "eligible_regimes": [
-          "CRISIS"
-        ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-07-13T12:52:59.208Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:03:59.414832+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "etp"
-    },
-    "oxf_greatest_swing_value": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:03:59.490138+00:00",
-      "metadata": {
-        "canonical_file": "oxf_greatest_swing_value.py",
-        "class": "OxfGreatestSwingValue",
-        "description": "GSV greatest-swing-value volatility breakout with trend filter on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat greatest-swing-value-trend). Buy stop at Open+GSV confirmed on signal-day OHLC; close[t+1] fill.",
-        "eligible_regimes": [
-          "CRISIS"
-        ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-07-13T12:52:59.240Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:03:59.490138+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
         }
       ],
@@ -4060,7 +4080,7 @@
     },
     "S_wti_brent_spread_mean_reversion": {
       "state": "live",
-      "state_since": "2026-07-13T12:52:59.127Z",
+      "state_since": "2026-10-03T20:01:23.062Z",
       "metadata": {
         "canonical_file": "S_wti_brent_spread_mean_reversion.py",
         "class": "WtiBrentSpreadMeanReversion",
@@ -4082,6 +4102,30 @@
               "LOW_VOL",
               "TRANSITIONING",
               "HIGH_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-09-28T04:00:31.933943+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_weekly_cron",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-10-03T20:01:23.062Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
               "CRISIS"
             ],
             "eligible_regimes_after": [
@@ -5180,49 +5224,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_btc_equity_spillover": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:03:59.932341+00:00",
-      "metadata": {
-        "canonical_file": "S_btc_equity_spillover.py",
-        "class": "BtcEquitySpillover",
-        "description": "BTC-USD trailing 10d return > +15% -> LONG top-decile 120d-BTC-correlated liquid names; < -15% -> SHORT them. Weekly, max 8 per leg.",
-        "origin": "manual_research_2026_07_12",
-        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
-        "eligible_regimes": [
-          "LOW_VOL",
-          "TRANSITIONING",
-          "CRISIS"
-        ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-07-13T03:10:08.828Z",
-          "actor": "operator:manual-research-2026-07-12",
-          "reason": "operator-approved manual research batch 2026-07-12; regime-sleeve eligible per eligibility_assigner (sharpe>=0.4, n>=20)",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "LOW_VOL",
-              "TRANSITIONING",
-              "CRISIS"
-            ]
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:03:59.932341+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S_regime_age_momentum": {
       "state": "live",
       "state_since": "2026-09-19T19:00:40.920Z",
@@ -5401,52 +5402,6 @@
       ],
       "instrument_class": "etp"
     },
-    "oxf_bull_oops": {
-      "state": "candidate",
-      "state_since": "2026-09-07T04:00:19.118353+00:00",
-      "metadata": {
-        "canonical_file": "oxf_bull_oops.py",
-        "class": "OxfBullOops",
-        "description": "Bull \"Oops!\" gap-fade reversal on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat bull-oops-pattern). Gap open below prior low then recovery through prior low confirmed on signal-day OHLC; close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000",
-        "eligible_regimes": [
-          "CRISIS"
-        ]
-      },
-      "history": [
-        {
-          "from_state": "ejected",
-          "to_state": "candidate",
-          "timestamp": "2026-07-17T12:14:51.460Z",
-          "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-07-26T00:22:34.079Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-07T04:00:19.118353+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_weekly_cron",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "etp"
-    },
     "oxf_donchian_breakout": {
       "state": "live",
       "state_since": "2026-09-19T19:03:59.565Z",
@@ -5607,52 +5562,6 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
-        }
-      ],
-      "instrument_class": "etp"
-    },
-    "oxf_hook": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:04:00.221000+00:00",
-      "metadata": {
-        "canonical_file": "oxf_hook.py",
-        "class": "OxfHook",
-        "description": "Crabel hook gap-and-narrowing-range ORB on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat pattern-hook). Hook setup on t-1, Open+Stretch pierce confirmed on signal-day t; close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
-        "eligible_regimes": [
-          "LOW_VOL"
-        ]
-      },
-      "history": [
-        {
-          "from_state": "ejected",
-          "to_state": "candidate",
-          "timestamp": "2026-07-17T12:14:51.460Z",
-          "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-08-09T00:08:47.680Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "LOW_VOL"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:04:00.221000+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5953,52 +5862,6 @@
       ],
       "instrument_class": "etp"
     },
-    "oxf_wyckoff_meanrev": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:04:00.622154+00:00",
-      "metadata": {
-        "canonical_file": "oxf_wyckoff_meanrev.py",
-        "class": "OxfWyckoffMeanrev",
-        "description": "Wyckoff trap mean-reversion on liquid ETFs — swing-pivot reclaim adaptation of the A/B/C/D pattern (oxfordstrat richard-wyckoff-mean-reversion-1). Daily-bar, close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
-        "eligible_regimes": [
-          "CRISIS"
-        ]
-      },
-      "history": [
-        {
-          "from_state": "ejected",
-          "to_state": "candidate",
-          "timestamp": "2026-07-17T12:14:51.460Z",
-          "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-08-09T00:08:47.802Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:04:00.622154+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "etp"
-    },
     "S_ast_time_series_momentum_effect": {
       "state": "live",
       "state_since": "2026-08-09T00:08:47.301Z",
@@ -6030,46 +5893,6 @@
         }
       ],
       "instrument_class": "etp"
-    },
-    "S_intramonth_momentum_cycle": {
-      "state": "candidate",
-      "state_since": "2026-09-07T04:00:19.167870+00:00",
-      "metadata": {
-        "canonical_file": "S_intramonth_momentum_cycle.py",
-        "class": "IntramontMomentumCycle",
-        "description": "Dash-for-cash calendar overlay: long momentum winners / short losers only during the 6 intramonth trading days before month-end (Basilico 2026)",
-        "eligible_regimes": [
-          "CRISIS"
-        ],
-        "universe_filter_ref": "src.strategies.universe_default:sp500"
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-07-18T19:17:15.769Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": [
-              "CRISIS"
-            ],
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-07T04:00:19.167870+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_weekly_cron",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
     },
     "S_tsmom_cross_asset_vol_scaled": {
       "state": "live",
@@ -6550,57 +6373,6 @@
       ],
       "instrument_class": "crypto"
     },
-    "S_spxw_0dte_ltr_put_ranker": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:22:15.543612+00:00",
-      "metadata": {
-        "canonical_file": "S_spxw_0dte_ltr_put_ranker.py",
-        "class": "SpxwZeroDteLtrPutRanker",
-        "description": "Ranks 8 delta-targeted SPXW 0DTE short puts (SPY chain proxy) plus a SKIP option daily via a regime/tail-risk-aware expected-value proxy; sells the argmax strike, held to expiry, or abstains.",
-        "universe_filter_ref": "src.strategies.universe_default:sp500",
-        "universe_filter_source": "fused_approval_default"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-09-05T20:37:15.935Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "options_eod: backfilled but insufficient (2026-04-08→2026-09-04; needs ≥ 2025-04-19)",
-                "prices: backfilled (2016-01-04→2026-09-04, providers polygon/alpaca/yahoo/alpha_vantage)"
-              ],
-              "missing_columns": [
-                "options_eod"
-              ],
-              "provider_route": [
-                {
-                  "provider": "alpaca",
-                  "column": "options_eod",
-                  "data_type": "options",
-                  "gap_from": "2025-04-19",
-                  "gap_to": "2026-04-08"
-                }
-              ]
-            },
-            "candidate_id": "7b38264a-ee18-406f-b4cf-e2203076ac1f"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T00:00:00Z",
-          "actor": "strategycoder",
-          "reason": "Implementation landed — 3 artifacts (impl + registry + manifest) produced; consolidated a prior duplicate-key manifest entry (stale finisher staging placeholder with no code, class name pointed at the strategy_id string instead of a real class) into this one.",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "option"
-    },
     "S_quadratic_risk_tangency_mvo": {
       "state": "staging",
       "state_since": "2026-09-05T20:37:15.935Z",
@@ -6677,13 +6449,13 @@
       ],
       "instrument_class": "equity"
     },
-    "S_ito_signature_vol_hedge": {
+    "S_model_free_iv_forecast": {
       "state": "candidate",
-      "state_since": "2026-09-12T18:52:50.971775+00:00",
+      "state_since": "2026-10-03T20:11:35.958328+00:00",
       "metadata": {
-        "canonical_file": "S_ito_signature_vol_hedge.py",
-        "class": "ItoSignatureVolHedge",
-        "description": "Signature-conditioned VRP harvesting on SPY options: sell/buy vol on IV/RV extremity, sized by discretized Ito signature path-order (cross-term) intensity; delta-hedged strangle.",
+        "canonical_file": "S_model_free_iv_forecast.py",
+        "class": "S_model_free_iv_forecast",
+        "description": "Model-free implied volatility (MFIV), extended to jump-diffusion and estimated directly from the SPX option chain, subsumes all forecasting information in Black-Scholes IV and trailing realized vol — so the spread between MFIV and subsequently realized vol (the variance risk prem",
         "universe_filter_ref": "src.strategies.universe_default:sp500",
         "universe_filter_source": "fused_approval_default"
       },
@@ -6691,15 +6463,16 @@
         {
           "from_state": null,
           "to_state": "staging",
-          "timestamp": "2026-09-05T20:37:15.935Z",
+          "timestamp": "2026-10-03T19:58:53.014Z",
           "actor": "saturday_brain_finisher",
           "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "options_eod: backfilled but insufficient (2026-04-08→2026-09-04; needs ≥ 2025-04-19)",
-                "prices: backfilled (2016-01-04→2026-09-04, providers polygon/alpaca/yahoo/alpha_vantage)"
+                "options_eod: backfilled but insufficient (2026-04-08→2026-10-01; needs ≥ 2025-05-17)",
+                "prices: backfilled (2016-01-04→2026-10-01, providers polygon/alpaca/yahoo/alpha_vantage)",
+                "realized_vol: backfilled (2016-01-04→2026-10-01, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "options_eod"
@@ -6709,118 +6482,23 @@
                   "provider": "alpaca",
                   "column": "options_eod",
                   "data_type": "options",
-                  "gap_from": "2025-04-19",
+                  "gap_from": "2025-05-17",
                   "gap_to": "2026-04-08"
                 }
               ]
             },
-            "candidate_id": "a7b1e7e0-b710-457f-af47-79404e3f97ea"
+            "candidate_id": "de6295e0-0865-4fde-8dd5-dfbd7a0f8080"
           }
         },
         {
           "from_state": "staging",
           "to_state": "candidate",
-          "timestamp": "2026-09-12T18:50:03.704231+00:00",
+          "timestamp": "2026-10-03T20:11:35.958328+00:00",
           "actor": "auto_backtest",
           "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
           "metadata": {}
         }
       ],
-      "instrument_class": "option"
-    },
-    "S_iv_spread_skew_regime_dependent": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:07:28.105980+00:00",
-      "metadata": {
-        "canonical_file": "S_iv_spread_skew_regime_dependent.py",
-        "class": "IVSpreadSkewRegimeDependent",
-        "description": "Cremers-Weinbaum IV spread + Bakshi risk-neutral skew (rn_skew_30d), cross-sectional z-score rank, LONG bottom decile / SHORT top decile, monthly rebalance, regime-partitioned",
-        "eligible_regimes": [
-          "LOW_VOL",
-          "TRANSITIONING"
-        ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
-      },
-      "history": [
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T18:54:00.482Z",
-          "actor": "strategycoder",
-          "reason": "Implementation landed — 3 artifacts (impl + registry + manifest) produced; corrected metadata.class to match the actual class name and fixed the skew field to rn_skew_30d (Bakshi risk-neutral skew) after a prior duplicate-key manifest entry pointed at the wrong class.",
-          "metadata": {}
-        },
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-09-05T20:37:15.935Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "options_eod: backfilled but insufficient (2026-04-08→2026-09-04; needs ≥ 2025-04-19)",
-                "prices: backfilled (2016-01-04→2026-09-04, providers polygon/alpaca/yahoo/alpha_vantage)"
-              ],
-              "missing_columns": [
-                "options_eod"
-              ],
-              "provider_route": [
-                {
-                  "provider": "alpaca",
-                  "column": "options_eod",
-                  "data_type": "options",
-                  "gap_from": "2025-04-19",
-                  "gap_to": "2026-04-08"
-                }
-              ]
-            },
-            "candidate_id": "b94890fa-335c-441f-9e60-1bbda5b13db1"
-          }
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-09-12T19:03:55.850Z",
-          "actor": "system:auto-promotion",
-          "reason": "auto-promotion after fused staging approval (per-regime qualification gate)",
-          "metadata": {
-            "eligible_regimes_before": [
-              "LOW_VOL",
-              "TRANSITIONING"
-            ],
-            "eligible_regimes_after": [
-              "LOW_VOL",
-              "TRANSITIONING"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:07:28.105980+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 1.17, DD 3.8%, trades 85",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_inverse_volatility_risk_parity": {
-      "state": "candidate",
-      "state_since": "2026-09-06T00:00:00Z",
-      "metadata": {
-        "canonical_file": "S_inverse_volatility_risk_parity.py",
-        "class": "InverseVolatilityRiskParity",
-        "description": "LONG-only equal-risk-contribution allocation: weight each name inversely to its 60-day realized vol, rebalanced monthly. Source: PyQuant News risk-parity walkthrough.",
-        "eligible_regimes": [
-          "LOW_VOL",
-          "TRANSITIONING"
-        ]
-      },
-      "history": [],
       "instrument_class": "equity"
     },
     "S_sector_trend_overlay": {
@@ -6859,55 +6537,6 @@
         }
       ],
       "instrument_class": "etp"
-    },
-    "S_spx_0dte_opening_range_breakout": {
-      "state": "candidate",
-      "state_since": "2026-09-12T19:07:28.143035+00:00",
-      "metadata": {
-        "canonical_file": "S_spx_0dte_opening_range_breakout.py",
-        "class": "SpxZeroDteOpeningRangeBreakout",
-        "description": "First-60-minute SPX range sets directional bias; a confirmed 10:30-noon breakout is monetized by selling a $15-wide 0DTE credit spread anchored at the range extreme, held to expiration for theta capture. Source: quantish 2025."
-      },
-      "history": [
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:07:28.143035+00:00",
-          "actor": "strategycoder",
-          "reason": "Implementation landed — 3 artifacts (impl + registry + manifest) produced; consolidated a prior duplicate-key manifest entry (stale finisher staging placeholder with no code, class name pointed at the strategy_id string instead of a real class) into this one.",
-          "metadata": {}
-        },
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-09-05T20:37:15.935Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "options_eod: backfilled but insufficient (2026-04-08→2026-09-04; needs ≥ 2025-12-27)",
-                "prices: backfilled (2016-01-04→2026-09-04, providers polygon/alpaca/yahoo/alpha_vantage)"
-              ],
-              "missing_columns": [
-                "options_eod"
-              ],
-              "provider_route": [
-                {
-                  "provider": "alpaca",
-                  "column": "options_eod",
-                  "data_type": "options",
-                  "gap_from": "2025-12-27",
-                  "gap_to": "2026-04-08"
-                }
-              ]
-            },
-            "candidate_id": "d9cde167-2208-4721-9851-239047c3211e"
-          }
-        }
-      ],
-      "instrument_class": "option"
     },
     "S_btc_kelly_powerlaw_vol_decay": {
       "state": "live",
@@ -6981,6 +6610,390 @@
         "description": "Nested-clustered min-variance with a gamma-damped Schur-complement bridge between block-diagonal NCO and full min-variance coupling (interpretation variant 1 of 2: fixed cluster count, average-linkage flat cut, closed-form gamma*, signed long/short weights)."
       },
       "history": [],
+      "instrument_class": "equity"
+    },
+    "S_low_volatility_us_gk63": {
+      "state": "candidate",
+      "state_since": "2026-10-02T17:31:45.626Z",
+      "metadata": {
+        "canonical_file": "S_low_volatility_us_gk63.py",
+        "class": "LowVolatilityUSGK63",
+        "description": "Garman-Klass range-vol variant of low_volatility_us: rank asc by mean 63-session Garman-Klass variance; LONG the lowest-variance decile, equal-weight",
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_czar_loss_btc_directional": {
+      "state": "candidate",
+      "state_since": "2026-10-03T18:22:10.311212+00:00",
+      "metadata": {
+        "canonical_file": "S_czar_loss_btc_directional.py",
+        "class": "CzarLossBtcDirectional",
+        "description": "Newton-boosted trees on BTC-USD trained against CZAR's closed-form zero-bias gradient/Hessian; LONG or SHORT above a vol-scaled threshold, else flat."
+      },
+      "history": [],
+      "instrument_class": "crypto"
+    },
+    "S_crypto_time_series_momentum": {
+      "state": "live",
+      "state_since": "2026-10-03T19:59:14.253Z",
+      "metadata": {
+        "canonical_file": "S_crypto_time_series_momentum.py",
+        "class": "CryptoTimeSeriesMomentum",
+        "description": "Sign of trailing 1-month return on BTC-USD/ETH-USD: LONG when positive, FLAT otherwise. Weekly (Friday) rebalance, inverse-vol weighted sizing (Liu & Tsyvinski 2020).",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING"
+        ]
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-10-03T19:59:14.253Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        }
+      ],
+      "instrument_class": "crypto"
+    },
+    "S_window_dress_loser_reversal": {
+      "state": "live",
+      "state_since": "2026-10-03T20:00:19.909Z",
+      "metadata": {
+        "canonical_file": "S_window_dress_loser_reversal.py",
+        "class": "WindowDressLoserReversal",
+        "description": "LONG bottom-decile YTD losers (ranked Jan1->Oct1) from late Dec through mid-Jan, betting on turn-of-year reversal once pension-fund window-dressing selling pressure lifts (Lakonishok, Shleifer, Thaler & Vishny 1991).",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "HIGH_VOL"
+        ]
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-10-03T20:00:19.909Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "HIGH_VOL"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "HIGH_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        }
+      ],
+      "instrument_class": "equity"
+    },
+    "S_micro_alpha_elastic_net": {
+      "state": "staging",
+      "state_since": "2026-10-03T19:58:53.014Z",
+      "metadata": {
+        "canonical_file": "S_micro_alpha_elastic_net.py",
+        "class": "MicroAlphaElasticNet",
+        "description": "Many individually statistically-insignificant 'micro alpha' signals, combined via nonlinear/time-varying feature transformations and regularized aggregation, jointly predict the equity risk premium even though no single signal would pass a standalone significance test."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-10-03T19:58:53.014Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-01-04→2026-10-01, providers polygon/alpaca/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2009-09-01→2026-08-02; needs ≥ 2023-04-22)",
+                "macro: reachable but not backfilled (providers yfinance+fred+nyfed)"
+              ],
+              "missing_columns": [
+                "financials",
+                "macro"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2023-04-22",
+                  "gap_to": "2009-09-01"
+                },
+                {
+                  "provider": "yfinance+fred+nyfed",
+                  "column": "macro",
+                  "data_type": "macro",
+                  "gap_from": "2023-04-22",
+                  "gap_to": "2026-10-03"
+                }
+              ]
+            },
+            "candidate_id": "7b54a0dd-c356-4752-8c7e-845384b7f459"
+          }
+        }
+      ],
+      "instrument_class": "equity"
+    },
+    "S_sector_neutral_debt_equity": {
+      "state": "candidate",
+      "state_since": "2026-10-03T20:56:40.569676+00:00",
+      "metadata": {
+        "canonical_file": "S_sector_neutral_debt_equity.py",
+        "class": "SectorNeutralDebtEquity",
+        "description": "Ranking a fundamental factor (e.g. debt-to-equity) within each sector rather than across the whole universe removes sector-concentration bias and isolates the factor's true cross-sectional signal, since factor levels differ structurally by sector (e.g. utilities run higher D/E th",
+        "universe_filter_ref": "src.strategies.universe_default:r1000",
+        "universe_filter_source": "paperhunter_inferred"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-10-03T19:58:53.014Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "financials: backfilled but insufficient (2009-09-01→2026-08-02; needs ≥ 2024-09-07)",
+                "prices: backfilled (2016-01-04→2026-10-01, providers polygon/alpaca/yahoo/alpha_vantage)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2024-09-07",
+                  "gap_to": "2009-09-01"
+                }
+              ]
+            },
+            "candidate_id": "857d2c45-3a7c-4577-831f-08c4483ec966"
+          }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-10-03T20:56:40.569676+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
+          "metadata": {}
+        }
+      ],
+      "instrument_class": "equity"
+    },
+    "S_option_sdf_equity_premium": {
+      "state": "candidate",
+      "state_since": "2026-10-03T20:41:43.563488+00:00",
+      "metadata": {
+        "canonical_file": "S_option_sdf_equity_premium.py",
+        "class": "OptionSdfEquityPremium",
+        "description": "Vol-scaled, risk-neutral-skew-adjusted SDF forecast of the forward SPY equity premium (Shiraya, Yamakami & Yamazaki 2026); extends the Martin variance bound with RN skew/tail asymmetry.",
+        "universe_filter_ref": "src.strategies.universe_default:sp500",
+        "universe_filter_source": "fused_approval_default"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-10-03T19:58:53.014Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "options_eod: backfilled but insufficient (2026-04-08→2026-10-01; needs ≥ 2025-05-17)",
+                "prices: backfilled (2016-01-04→2026-10-01, providers polygon/alpaca/yahoo/alpha_vantage)"
+              ],
+              "missing_columns": [
+                "options_eod"
+              ],
+              "provider_route": [
+                {
+                  "provider": "alpaca",
+                  "column": "options_eod",
+                  "data_type": "options",
+                  "gap_from": "2025-05-17",
+                  "gap_to": "2026-04-08"
+                }
+              ]
+            },
+            "candidate_id": "83aeb276-cc22-4018-be3c-bfa4e27cbb2e"
+          }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-10-03T20:40:57.615250+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 1.59, DD 1.2%, trades 2",
+          "metadata": {}
+        }
+      ],
+      "instrument_class": "equity"
+    },
+    "S_option_implied_tail_premium": {
+      "state": "candidate",
+      "state_since": "2026-10-03T20:26:03.994834+00:00",
+      "metadata": {
+        "canonical_file": "S_option_implied_tail_premium.py",
+        "class": "OptionImpliedTailPremium",
+        "description": "Option-implied jump-tail, risk-neutral kurtosis, and IV-curve convexity characteristics carry pricing-relevant information that survives double-selection LASSO screening against a 160-factor equity zoo, so long-short portfolios on these residual characteristics should earn a retu",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL"
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000",
+        "universe_filter_source": "paperhunter_inferred"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-10-03T19:58:53.014Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "options_eod: backfilled but insufficient (2026-04-08→2026-10-01; needs ≥ 2025-05-17)",
+                "prices: backfilled (2016-01-04→2026-10-01, providers polygon/alpaca/yahoo/alpha_vantage)"
+              ],
+              "missing_columns": [
+                "options_eod"
+              ],
+              "provider_route": [
+                {
+                  "provider": "alpaca",
+                  "column": "options_eod",
+                  "data_type": "options",
+                  "gap_from": "2025-05-17",
+                  "gap_to": "2026-04-08"
+                }
+              ]
+            },
+            "candidate_id": "7a64bc69-ae0a-4c26-a6b5-e2b050e9c155"
+          }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-10-03T20:26:03.994834+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe -3.75, DD 3.2%, trades 50",
+          "metadata": {}
+        }
+      ],
+      "instrument_class": "equity"
+    },
+    "S_svi_vol_surface_relative_value": {
+      "state": "staging",
+      "state_since": "2026-10-03T19:58:53.014Z",
+      "metadata": {
+        "canonical_file": "S_svi_vol_surface_relative_value.py",
+        "class": "SviVolSurfaceRelativeValue",
+        "description": "An arbitrage-free SVI fit of the SPX implied-vol smile gives a smooth fair-value curve per expiry; strikes whose quoted IV deviates materially from the fitted surface are mispriced relative to the rest of the smile and should mean-revert toward it as quotes re-calibrate."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-10-03T19:58:53.014Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "options_eod: backfilled but insufficient (2026-04-08→2026-10-01; needs ≥ 2026-01-24)",
+                "prices: backfilled (2016-01-04→2026-10-01, providers polygon/alpaca/yahoo/alpha_vantage)"
+              ],
+              "missing_columns": [
+                "options_eod"
+              ],
+              "provider_route": [
+                {
+                  "provider": "alpaca",
+                  "column": "options_eod",
+                  "data_type": "options",
+                  "gap_from": "2026-01-24",
+                  "gap_to": "2026-04-08"
+                }
+              ]
+            },
+            "candidate_id": "90924000-ee5f-4953-9dcb-12aacd51bd08"
+          }
+        }
+      ],
+      "instrument_class": "option"
+    },
+    "S_vol_conditional_market_timing": {
+      "state": "staging",
+      "state_since": "2026-10-03T19:58:53.014Z",
+      "metadata": {
+        "canonical_file": "S_vol_conditional_market_timing.py",
+        "class": "VolConditionalMarketTiming",
+        "description": "Recursively-estimated linear forecasts of S&P 500 return AND volatility produce a mean-variance market-timing signal that is economically profitable even after transaction costs, with return predictability concentrated in high-volatility periods."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-10-03T19:58:53.014Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-01-04→2026-10-01, providers polygon/alpaca/yahoo/alpha_vantage)",
+                "macro: reachable but not backfilled (providers yfinance+fred+nyfed)",
+                "realized_vol: backfilled (2016-01-04→2026-10-01, providers polygon/yahoo/alpha_vantage/computed)",
+                "returns: backfilled (2016-01-04→2026-10-01, providers polygon/yahoo/alpha_vantage/computed)",
+                "log_returns: backfilled (2016-01-04→2026-10-01, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "macro"
+              ],
+              "provider_route": [
+                {
+                  "provider": "yfinance+fred+nyfed",
+                  "column": "macro",
+                  "data_type": "macro",
+                  "gap_from": "2024-09-07",
+                  "gap_to": "2026-10-03"
+                }
+              ]
+            },
+            "candidate_id": "bcf0f8e9-829c-446a-9c50-d84f85493195"
+          }
+        }
+      ],
       "instrument_class": "equity"
     }
   },

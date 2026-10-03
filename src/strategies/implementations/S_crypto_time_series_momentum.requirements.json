@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_crypto_time_series_momentum",
+  "required": ["prices"],
+  "optional": []
+}

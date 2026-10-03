@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_micro_alpha_elastic_net",
+  "required": ["prices"],
+  "optional": ["financials", "macro"]
+}

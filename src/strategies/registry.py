@@ -123,6 +123,14 @@ _IMPL_MAP = {
     'S_industry_momentum_moskowitz':    ('strategies.implementations.S_industry_momentum_moskowitz',    'IndustryMomentumMoskowitz'),
     'S_vp_macd_index_sensitivity':      ('strategies.implementations.S_vp_macd_index_sensitivity',      'VPMACDIndexSensitivity'),
     'S_crisp_signal_aware_hrp':         ('strategies.implementations.S_crisp_signal_aware_hrp',         'CrispSignalAwareHRP'),
+    'S_czar_loss_btc_directional':      ('strategies.implementations.S_czar_loss_btc_directional',      'CzarLossBtcDirectional'),
+    'S_sector_neutral_debt_equity':      ('strategies.implementations.S_sector_neutral_debt_equity',      'SectorNeutralDebtEquity'),
+    'S_crypto_time_series_momentum':    ('strategies.implementations.S_crypto_time_series_momentum',    'CryptoTimeSeriesMomentum'),
+    'S_window_dress_loser_reversal':    ('strategies.implementations.S_window_dress_loser_reversal',    'WindowDressLoserReversal'),
+    'S_random_coefficient_beta_instability': ('strategies.implementations.S_random_coefficient_beta_instability', 'RandomCoefficientBetaInstability'),
+    'S_micro_alpha_elastic_net':         ('strategies.implementations.S_micro_alpha_elastic_net',         'MicroAlphaElasticNet'),
+    'S_option_implied_tail_premium':    ('strategies.implementations.S_option_implied_tail_premium',    'OptionImpliedTailPremium'),
+    'S_september_seasonal_weakness':    ('strategies.implementations.S_september_seasonal_weakness',    'SeptemberSeasonalWeakness'),
     'momentum_12_1':                    ('strategies.implementations.momentum_12_1',                    'Momentum12_1'),
     'S_intl_momentum_attention_regime': ('strategies.implementations.S_intl_momentum_attention_regime', 'IntlMomentumAttentionRegime'),
     'S_constrained_gmv_vcv_dynamics':   ('strategies.implementations.S_constrained_gmv_vcv_dynamics',   'ConstrainedGMVVCVDynamics'),
@@ -198,6 +206,8 @@ _IMPL_MAP = {
     'S_growth_defensive_smooth_score_timing': ('strategies.implementations.s_growth_defensive_smooth_score_timing', 'S_growth_defensive_smooth_score_timing'),
     # Chen, Tang, Yao & Zhou 2021: PLS composite investor attention index times SPY
     'S_investor_attention_market_timing': ('strategies.implementations.S_investor_attention_market_timing', 'InvestorAttentionMarketTiming'),
+    # Marquering & Verbeek 2004: recursive OLS return+vol forecasts -> mean-variance weight on SPY
+    'S_vol_conditional_market_timing': ('strategies.implementations.S_vol_conditional_market_timing', 'VolConditionalMarketTiming'),
     # Frazzini & Pedersen 2014: Betting Against Beta — long low-beta decile, short high-beta decile
     'S_ast_betting_against_beta_factor_in_stocks': ('strategies.implementations.S_ast_betting_against_beta_factor_in_stocks', 'BettingAgainstBetaFactorInStocks'),
     # Quantpedia: Asset Class Trend Following — 210-day SMA filter across 5-ETF basket
@@ -208,6 +218,8 @@ _IMPL_MAP = {
     'S_ast_value_and_momentum_factors_across_asset_classes': ('strategies.implementations.S_ast_value_and_momentum_factors_across_asset_classes', 'AstValueAndMomentumFactorsAcrossAssetClasses'),
     # QuantPedia: Turn of the Month — long SPY last day of month, exit 3rd day of new month
     'S_ast_turn_of_the_month_in_equity_indexes': ('strategies.implementations.S_ast_turn_of_the_month_in_equity_indexes', 'AstTurnOfTheMonthInEquityIndexes'),
+    # Stock Trader's Almanac: Midterm October Seasonality — long DIA literal Oct calendar month in midterm-election years, LOW_VOL/TRANSITIONING only
+    'S_midterm_october_seasonality': ('strategies.implementations.S_midterm_october_seasonality', 'MidtermOctoberSeasonalityLiteral'),
     # Quantpedia: Trend Following Effect in Stocks — ATH-breakout + ATR(10) trailing stop
     'S_ast_trend_following_effect_in_stocks': ('strategies.implementations.S_ast_trend_following_effect_in_stocks', 'AstTrendFollowingEffectInStocks'),
     # Quantpedia: Short-Term Reversal in Stocks — weekly long/short cross-sectional reversal
@@ -410,8 +422,16 @@ _IMPL_MAP = {
     'S_quadratic_risk_tangency_mvo': ('strategies.implementations.S_quadratic_risk_tangency_mvo', 'QuadraticRiskTangencyMVO'),
     # Guo/Wang/Zhang 2026: Ito signature-conditioned VRP harvesting on SPY options, delta-hedged strangle, sized by path-order signature term
     'S_ito_signature_vol_hedge': ('strategies.implementations.S_ito_signature_vol_hedge', 'ItoSignatureVolHedge'),
+    # Jiang/Tian 2005 (RFS): model-free implied variance (MFIV) minus trailing realized vol on SPY options, delta-hedged straddle
+    'S_model_free_iv_forecast': ('strategies.implementations.S_model_free_iv_forecast', 'ModelFreeIvForecast'),
+    # Shiraya/Yamakami/Yamazaki 2026: volatility-scaled SDF from SPY options (RN skew/tail-adjusted Martin bound) forecasts the forward SPY equity premium, LONG/SHORT
+    'S_option_sdf_equity_premium': ('strategies.implementations.S_option_sdf_equity_premium', 'OptionSdfEquityPremium'),
     # Li/Wang 2026: Cremers-Weinbaum IV spread + Bakshi et al. skew proxy, cross-sectional rank, regime-partitioned
     'S_iv_spread_skew_regime_dependent': ('strategies.implementations.S_iv_spread_skew_regime_dependent', 'IVSpreadSkewRegimeDependent'),
+    # Walter/Zimmer/Ulrich 2026: option-implied jump-tail/kurtosis/convexity proxies orthogonalized vs momentum+vol via OLS, cross-sectional LONG/SHORT decile, monthly rebalance
+    'S_option_implied_tail_premium': ('strategies.implementations.S_option_implied_tail_premium', 'OptionImpliedTailPremium'),
+    # Gatheral/Jacquier 2013: arbitrage-free SVI wing-vs-ATM surface_premium mean reversion on SPY options, delta-hedged strangle, skew secondary conviction
+    'S_svi_vol_surface_relative_value': ('strategies.implementations.S_svi_vol_surface_relative_value', 'SviVolSurfaceRelativeValue'),
     # quantish 2025: SPX first-60-min opening range sets bias; confirmed 10:30-noon breakout -> sell $15-wide 0DTE credit spread at the range extreme, SPY chain proxy
     'S_spx_0dte_opening_range_breakout': ('strategies.implementations.S_spx_0dte_opening_range_breakout', 'SpxZeroDteOpeningRangeBreakout'),
     # Wysocki 2026: LTR proxy ranking 8 delta-targeted SPXW 0DTE short puts + SKIP via a regime/tail-risk-aware expected-value score, SPY chain proxy

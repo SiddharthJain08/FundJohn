@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_model_free_iv_forecast",
+  "required": ["prices", "options_eod"],
+  "optional": []
+}

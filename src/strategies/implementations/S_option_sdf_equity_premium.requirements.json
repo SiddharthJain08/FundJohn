@@ -1,5 +1,5 @@
 {
-  "strategy_id": "S_iv_spread_skew_regime_dependent",
+  "strategy_id": "S_option_sdf_equity_premium",
   "required": ["prices", "options_eod"],
   "optional": []
 }

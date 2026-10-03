@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_spx_0dte_opening_range_breakout",
-  "required": ["prices", "prices_30m", "options_eod"],
-  "optional": []
-}

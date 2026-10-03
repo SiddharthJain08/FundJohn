@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_september_seasonal_weakness",
+  "required": ["prices"],
+  "optional": []
+}

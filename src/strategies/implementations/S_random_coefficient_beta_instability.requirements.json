@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_random_coefficient_beta_instability",
+  "required": ["prices"],
+  "optional": []
+}

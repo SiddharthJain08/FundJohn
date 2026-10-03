@@ -1,0 +1,8 @@
+{
+  "strategy_id": "S_option_implied_tail_premium",
+  "required": [
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}
