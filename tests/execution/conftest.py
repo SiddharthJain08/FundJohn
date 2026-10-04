@@ -173,3 +173,17 @@ def _capped_spawn_hermetic(monkeypatch):
         f'caught (a real 64M scope created on the production box). '
         f'calls={systemd_calls!r}'
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_corporate_action_lookup(request, monkeypatch):
+    """Breaker Task 4: account_breaker's auto-rebase calls
+    alpaca_reconcile.fetch_activities_since (a REAL `alpaca account activity
+    list` subprocess) whenever a quiet ticker mismatches — which the older
+    breaker tests' hand-built books do on purpose. Stub it to "no activities" so
+    no test under tests/execution/ can reach the broker CLI. SKIPPED for the
+    files that exercise the real function / their own stubs."""
+    if request.path.name in ('test_alpaca_reconcile.py', 'test_account_breaker_rebase.py'):
+        return
+    ar = importlib.import_module("execution.alpaca_reconcile")
+    monkeypatch.setattr(ar, 'fetch_activities_since', lambda *a, **k: [])
