@@ -108,3 +108,39 @@ deactivate  : sharpe[r] <  threshold[r] − ACTIVATION_HYSTERESIS (0.10)   # ban
   produce 0 activated / 0 deactivated (pin with the live dry-run before merge).
 - Preview endpoint (`POST /api/activation/dry-run`) accepts an optional `excess` override so the operator can preview a
   higher excess before saving it (read-only; never persists).
+
+## 9. Amendment 2 — the PROMOTION gate is bench-aware (operator-ruled 2026-10-04 21:18 UTC: "yes, make the promotion gate bench-aware")
+
+**Problem.** The candidate→live qualification gate (`src/lib/promotion_service.js`, policy 2026-07-13 v2) promotes on
+per-regime `sharpe > 0` + sleeve DD ceiling + ≥100 trades, while activation (§1, §8) requires
+`sharpe[r] ≥ bench[r] + excess`. A strategy in the gap is promoted "live" by `system:sunday-auto-approval`, activated in
+no regime by the finale `activation_assigner --all`, and auto-demoted by the Monday 04:00Z weights run — every week
+(`S_sparse_cca_mean_revert`: demoted 08-15, promoted 08-22, demoted 09-28, promoted 10-03 19:59Z on CRISIS Sharpe 0.827 vs
+bench 1.575). No trading impact (`strategy_regime_params` governs sizing) but it pollutes lifecycle history, misreports
+live counts and spends a promotion on a strategy that cannot trade. This supersedes, for the promotion gate only, the
+2026-08-29 D1 ruling that SPY's regime Sharpe "sizes, never gates"; activation has gated on it since 2026-09-26.
+
+**Rule.** A regime sleeve QUALIFIES for promotion iff it passes the three existing per-sleeve class gates AND
+`sharpe[r] ≥ bench[r] + excess` — the activation ENTRY threshold (no hysteresis band: the −0.10 band is deactivate-only,
+so a regime that qualifies here is always activatable by the assigner whether or not a prior eligibility row exists).
+Promotion therefore implies ≥ 1 activatable regime.
+
+- `bench` = `pipeline_config.strategy_activation_bench_sharpe` (the vector the assigner stamps on every apply — tier 2 of
+  §2; the JS gate reads config only and never re-derives from the sleeve run). `excess` =
+  `pipeline_config.strategy_activation_excess_sharpe`, clamped with the existing `clampExcessValue` (default 0).
+- Fail-safe (mirrors §2 tier 3, never fail-open to 0): bench row missing / malformed / a regime absent or non-finite ⇒
+  that regime's bench is `0.5` and a WARN is logged once per evaluation. A DB error reading the config ⇒ same fallback.
+- Applies to BOTH gate paths: the automatic path (`computeQualifyingRegimes`, no regimes named) and the operator path
+  with named `eligible_regimes` (`evaluatePromotionGate`); `force` remains the only override. New failed-gate kind
+  `bench` (per-sleeve) / `bench:<REGIME>` (named path); the per-regime diag gains `bench` and `threshold`.
+- Exempt: benchmark-sleeve strategies (`benchmark_sleeve: true`, i.e. `S_beta_spy`) — never judged against themselves.
+- Crypto and option classes use the same SPY vector (operator ruling 2026-09-25 §5; a BTC benchmark is future work, §7).
+- Kill switch `OPENCLAW_PROMOTION_BENCH_GATE=0` restores policy v2 exactly (default: ON).
+- Only candidate→live is judged; currently-live strategies are not re-evaluated by this gate (activation + auto-demote
+  already handle them).
+- `lifecycle.py`'s python mirror judges caller-supplied totals only — comments updated, no behaviour change.
+
+**Impact preview (read-only, 2026-10-04 21:2x UTC).** 8 non-quarantined candidates: promotable under v2 = 0, under this
+amendment = 0 (bench CRISIS 1.575 / HIGH_VOL 0.5326 / LOW_VOL 0.9457 / TRANSITIONING 0.4409, excess 0). The amendment
+changes nothing this week except that `S_sparse_cca_mean_revert`, once auto-demoted on Mon 10-05, is no longer
+re-promoted on the next Sunday pass.
