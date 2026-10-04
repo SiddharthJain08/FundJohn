@@ -25,6 +25,13 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'src'))
 
 LADDER_TIERS = ('sp500', 'tier_r1000', 'tier_r3000', 'tier_liquid')
+# Universe security type, Phase 1: composed tiers (existing tier AND common_stock).
+# Kept OUT of LADDER_TIERS on purpose — the ladder/shrink consumers iterate
+# LADDER_TIERS and must see exactly the tiers they always did; stocks_* are
+# extra rows in the same artifact, read only by PrecomputedResolver(tier=...).
+STOCK_TIERS = ('stocks_sp500', 'stocks_r1000', 'stocks_r3000', 'stocks_liquid')
+ALL_TIERS = LADDER_TIERS + STOCK_TIERS
+PROFILE_CACHE = ROOT / 'data' / '.cache' / 'fmp_profile.json'
 
 from src.strategies.coverage_index import CoverageIndex, MIN_BARS  # noqa: E402
 
@@ -39,10 +46,36 @@ def snapshot_dates(start: date, end: date) -> list[date]:
     return out
 
 
+def build_security_type_overlay(db_types: dict, profiles: dict) -> dict:
+    """The latest-known security type per symbol, applied to EVERY snapshot
+    date (static attribute; spec 2026-10-04 §1 "History").
+
+    db_types:  {symbol: latest non-NULL ticker_metadata_snapshots.security_type}
+    profiles:  the vendor profile cache (data/.cache/fmp_profile.json).
+
+    FALLBACK (documented): until the first daily snapshot written after
+    migration 163 has run, the DB column is NULL everywhere, so a symbol with
+    no DB value takes security_type_from_profile(profile). The DB value wins
+    when both exist. Symbols in neither stay unknown (None) — common_stock then
+    admits them only if in_sp500."""
+    from src.strategies.universe_meta import security_types_from_profiles
+    overlay = security_types_from_profiles(profiles)
+    overlay.update({k: v for k, v in (db_types or {}).items() if v})
+    return overlay
+
+
+def load_profile_cache(path) -> dict:
+    try:
+        data = json.loads(Path(path).read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def tiers_for_rows(rows, as_of: date, coverage) -> dict[str, list[str]]:
     from src.strategies import universe_default as ud
-    preds = {t: getattr(ud, t) for t in LADDER_TIERS}
-    out = {t: [] for t in LADDER_TIERS}
+    preds = {t: getattr(ud, t) for t in ALL_TIERS}
+    out = {t: [] for t in ALL_TIERS}
     for row in rows:
         meta = row.metadata
         if not coverage.has_floor(meta.symbol, as_of):
@@ -62,6 +95,9 @@ def main() -> int:
     ap.add_argument('--start', required=True)
     ap.add_argument('--end', required=True)
     ap.add_argument('--out-dir', default='data')
+    ap.add_argument('--profile-cache', default=str(PROFILE_CACHE),
+                    help='vendor profile cache; fallback security-type source '
+                         'for symbols whose DB security_type is still NULL')
     args = ap.parse_args()
 
     import pandas as pd
@@ -71,11 +107,16 @@ def main() -> int:
     cov = CoverageIndex.from_parquet()
     dates = snapshot_dates(date.fromisoformat(args.start),
                            date.fromisoformat(args.end))
-    records, n_series, diags = [], {t: {} for t in LADDER_TIERS}, []
+    from src.strategies.universe_meta import overlay_security_types
+    overlay = build_security_type_overlay(db.fetch_latest_security_types(),
+                                          load_profile_cache(args.profile_cache))
+    print(f'[membership] security-type overlay: {len(overlay)} symbols '
+          f'(db + profile-cache fallback)')
+    records, n_series, diags = [], {t: {} for t in ALL_TIERS}, []
     for snap in dates:
-        rows = db.fetch_metadata_as_of(snap)
+        rows = overlay_security_types(db.fetch_metadata_as_of(snap), overlay)
         members = tiers_for_rows(rows, snap, cov)
-        for t in LADDER_TIERS:
+        for t in ALL_TIERS:
             records.append({'run_id': args.run_id, 'tier': t,
                             'snapshot_date': snap.isoformat(),
                             'symbols': members[t]})
@@ -87,7 +128,7 @@ def main() -> int:
                       'sp500_not_in_r1000_raw': sp_not_r1,
                       'n_rows': len(rows)})
         print(f'[membership] {snap} ' +
-              ' '.join(f'{t}={len(members[t])}' for t in LADDER_TIERS))
+              ' '.join(f'{t}={len(members[t])}' for t in ALL_TIERS))
 
     out = Path(args.out_dir) / f'universe_tier_membership_{args.run_id}.parquet'
     pd.DataFrame(records).to_parquet(out, index=False)
