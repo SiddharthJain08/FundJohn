@@ -32,6 +32,26 @@ Diagnostic: `.superpowers/sdd/2026-10-04-universe-security-type/diagnostic.md`; 
   ETF/fund tickers + live filter + activation — the evidence for Phase 2.
 - Existing tiers and every strategy's universe are byte-identical after Phase 1 (pin with a resolver parity test).
 
+### Phase 1 — AS BUILT (2026-10-04; opus review NEEDS FIXES → CLEAN; where this differs from the text above, THIS governs)
+- `security_type` values: `etf`, `fund`, `spac` (industry "Shell Companies"), `deriv` (warrants / units / rights by name),
+  `pref` (preferreds, notes, debentures, coupon-bearing lines by name), `cef` (closed-end funds and BDCs: industry "Asset
+  Management*" with fund / lending / capital-corp naming), `adr`, `stock`; NULL = unknown. Precedence in that order. Over the
+  2026-10-03 profile cache: etf 5,727 · stock 5,339 · adr 684 · spac 686 · unknown 651 · fund 369 · pref 105 · deriv 91 · cef 50.
+  `common_stock` = `stock` or `adr`, or unknown AND `in_sp500`. BDCs stay excluded (pass-through investment companies).
+- Migration 163 also adds a partial index for the latest-type lookup. The live resolver's type overlay is fail-open (a failed
+  lookup yields no types and never changes an existing universe).
+- The four `stocks_*` names are valid `universe_filter_ref` / `backtest_universe_cap` values but appear in no auto-adoption path
+  (the recommender's candidate lists are hard-coded) and not in the PaperHunter mint menu.
+- **Owed before Phase 2 (runbook):** (1) SECONDARY LINES listed under the parent's plain name (NTRSO, TPGXL, MGRB…) are still
+  typed `stock` — add a cache-wide `secondary_line` post-pass (same `cik` AND identical name AND parent symbol + 1–2 trailing
+  letters from the preferred/warrant/unit/note suffix set, typed `stock` only, excluding real class shares such as GOOGL) plus a
+  manual deny-list; reviewer hit list: 226 symbols, 63 at ≥ $1B. (2) SURVIVORSHIP: symbols delisted before migration 163 have no
+  type and are excluded from `stocks_*` unless `in_sp500`, biasing stock-tier backtests upward — quantify from the first rebuilt
+  membership artifact and rule on unknown symbols before any strategy opts in. (3) Live vs artifact: until the first post-163
+  metadata write (weekday 13:30Z unit) the live resolver sees no types while the artifact builder falls back to the profile cache.
+- Operator step after merge: rebuild the tier membership artifact (`scripts/build_tier_membership.py`) via a transient unit with
+  `EnvironmentFile=` (never source `.env`), outside the compute windows.
+
 ## 2. Phase 2 — opt stock-factor strategies into `stocks_*` (operator script, manifest lock, dry-run default)
 `scripts/apply_stock_universe_optin.py` rewrites `metadata.universe_filter_ref` tier → the matching `stocks_*` tier for an explicit,
 reviewed list (and records the prior value in `metadata.universe_filter_ref_prior`). Initial recommended list = strategies that are

@@ -103,3 +103,56 @@ def test_selection_counters_separate_fresh_from_limit_cut():
     universe = ['A', 'B', 'C', 'D']                                               # B,C,D missing
     c = mod.selection_counters(universe, cache, now, max_age_days=30, limit=2)
     assert c == {'universe': 4, 'stale': 3, 'to_fetch': 2, 'skipped_fresh': 1, 'deferred_by_limit': 1}
+
+
+# ── dotted-symbol hyphen-alias retry (universe security type, Phase 1) ──────
+
+def test_fetch_alias_retries_hyphen_form_for_dotted_symbol():
+    calls = []
+
+    def fake(sym, key):
+        calls.append(sym)
+        return {'symbol': 'BRK-B', 'isEtf': False} if sym == 'BRK-B' else None
+
+    raw = mod.fetch_profile_with_alias('BRK.B', 'k', fetch=fake)
+    assert calls == ['BRK.B', 'BRK-B'] and raw['isEtf'] is False
+
+
+def test_fetch_alias_no_retry_when_first_hits_or_undotted():
+    calls = []
+
+    def fake(sym, key):
+        calls.append(sym)
+        return None
+
+    assert mod.fetch_profile_with_alias('AAPL', 'k', fetch=fake) is None
+    assert calls == ['AAPL']                       # undotted: one fetch, unchanged
+    calls.clear()
+    hit = lambda s, k: calls.append(s) or {'symbol': s}
+    mod.fetch_profile_with_alias('BF.B', 'k', fetch=hit)
+    assert calls == ['BF.B']                        # first try wins; no second call
+
+
+def test_dotted_tombstone_marked_and_old_ones_retried():
+    now = NOW
+    both_miss = mod.normalize_profile(None, now, 'BRK.B')
+    assert both_miss['_empty'] and both_miss['_alias_tried']
+    assert '_alias_tried' not in mod.normalize_profile(None, now, 'ZZZZ')   # undotted unchanged
+    assert mod.normalize_profile(None, now) == {'_fetched_at': now.isoformat(), '_empty': True}
+    old = _entry(1, _empty=True)                    # fresh tombstone, written pre-change
+    assert mod.needs_refresh(old, NOW, 30, 'BRK.B')                 # retried now
+    assert not mod.needs_refresh(old, NOW, 30, 'ZZZZ')              # undotted still honoured
+    assert not mod.needs_refresh(old, NOW, 30)                      # no symbol -> legacy behaviour
+    assert not mod.needs_refresh(_entry(1, _empty=True, _alias_tried=True), NOW, 30, 'BRK.B')
+    assert mod.select_symbols(['BRK.B', 'ZZZZ'], {'BRK.B': old, 'ZZZZ': old}, NOW, 30, None) == ['BRK.B']
+
+
+def test_alias_retry_is_paced():
+    slept = []
+    mod.fetch_profile_with_alias('BRK.B', 'k', fetch=lambda s, k: None,
+                                 sleep_s=0.2, sleeper=slept.append)
+    assert slept == [0.2]
+    slept.clear()
+    mod.fetch_profile_with_alias('AAPL', 'k', fetch=lambda s, k: None,
+                                 sleep_s=0.2, sleeper=slept.append)
+    assert slept == []

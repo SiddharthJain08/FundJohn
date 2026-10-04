@@ -83,10 +83,24 @@ def _parse_ts(s) -> Optional[datetime]:
         return None
 
 
-def needs_refresh(entry: Optional[dict], now: datetime, max_age_days: int) -> bool:
+def dotted_tombstone_needs_alias_retry(symbol: Optional[str], entry) -> bool:
+    """A tombstone for a dotted broker symbol (``BRK.B``) written before the
+    hyphen-alias retry existed (no ``_alias_tried`` marker) must be re-tried
+    on the next run — the vendor spells class shares ``BRK-B``."""
+    return bool(symbol and '.' in symbol and isinstance(entry, dict)
+                and entry.get('_empty') and not entry.get('_alias_tried'))
+
+
+def needs_refresh(entry: Optional[dict], now: datetime, max_age_days: int,
+                  symbol: Optional[str] = None) -> bool:
     """Missing, unstamped (legacy), or older than max_age_days -> refetch.
-    Tombstones (``_empty``) age out the same way."""
+    Tombstones (``_empty``) age out the same way — except a dotted-symbol
+    tombstone that never had the hyphen form tried (see
+    dotted_tombstone_needs_alias_retry), which is due immediately when
+    ``symbol`` is supplied. No change for undotted symbols."""
     if not isinstance(entry, dict):
+        return True
+    if dotted_tombstone_needs_alias_retry(symbol, entry):
         return True
     ts = _parse_ts(entry.get('_fetched_at'))
     if ts is None:
@@ -111,7 +125,7 @@ def select_symbols(universe: list[str], cache: dict, now: datetime,
                    max_age_days: int, limit: Optional[int]) -> list[str]:
     """Symbols to fetch this run: missing first (alphabetical), then the
     stalest by _fetched_at; fresh entries skipped; optional cap."""
-    due = [s for s in universe if needs_refresh(cache.get(s), now, max_age_days)]
+    due = [s for s in universe if needs_refresh(cache.get(s), now, max_age_days, s)]
 
     def _key(s: str):
         e = cache.get(s)
@@ -124,13 +138,17 @@ def select_symbols(universe: list[str], cache: dict, now: datetime,
     return due
 
 
-def normalize_profile(raw: Optional[dict], now: datetime) -> dict:
+def normalize_profile(raw: Optional[dict], now: datetime, symbol: Optional[str] = None) -> dict:
     """Trim a /stable/profile row to KEEP_FIELDS, alias marketCap -> mktCap
     (the writer's field name from the v3 era), stamp _fetched_at.
-    None/empty -> tombstone."""
+    None/empty -> tombstone (a dotted ``symbol`` tombstone also carries
+    ``_alias_tried`` so it is not re-tried before it ages out)."""
     stamp = now.isoformat()
     if not raw:
-        return {'_fetched_at': stamp, '_empty': True}
+        tomb = {'_fetched_at': stamp, '_empty': True}
+        if symbol and '.' in symbol:
+            tomb['_alias_tried'] = True
+        return tomb
     out = {k: raw.get(k) for k in KEEP_FIELDS if k in raw}
     out['mktCap'] = raw.get('marketCap')
     out['_fetched_at'] = stamp
@@ -200,6 +218,23 @@ def fetch_profile(symbol: str, api_key: str) -> Optional[dict]:
     return None  # unreachable
 
 
+def fetch_profile_with_alias(symbol: str, api_key: str, fetch=None,
+                             sleep_s: float = 0.0, sleeper=None) -> Optional[dict]:
+    """fetch_profile, but a dotted broker symbol (``BRK.B``) that FMP has no
+    profile for is retried once in the vendor's hyphen form (``BRK-B``) before
+    the caller writes a tombstone. The cache key stays the broker symbol.
+    Undotted symbols: exactly one fetch, as before. The alias retry is a second
+    request for the same symbol, so it sleeps ``sleep_s`` first (the same
+    pacing as between symbols; 300 req/min). ``fetch`` / ``sleeper`` are
+    injectable for tests (default: fetch_profile / time.sleep)."""
+    fetch = fetch or fetch_profile
+    raw = fetch(symbol, api_key)
+    if not raw and '.' in symbol:
+        (sleeper or time.sleep)(sleep_s)
+        raw = fetch(symbol.replace('.', '-'), api_key)
+    return raw
+
+
 # ── universe ─────────────────────────────────────────────────────────────────
 
 def _universe(args) -> list[str]:
@@ -249,7 +284,7 @@ def main(argv=None) -> int:
     try:
         for i, sym in enumerate(todo, 1):
             try:
-                raw = fetch_profile(sym, api_key)
+                raw = fetch_profile_with_alias(sym, api_key, sleep_s=args.sleep)
             except FMPAuthError:
                 raise
             except Exception as e:  # noqa: BLE001 — one bad symbol must not end the sweep
@@ -257,7 +292,7 @@ def main(argv=None) -> int:
                 sys.stderr.write(f'[fmp_profile] {sym}: {e}\n')
                 time.sleep(args.sleep)
                 continue
-            cache[sym] = normalize_profile(raw, datetime.now(timezone.utc))
+            cache[sym] = normalize_profile(raw, datetime.now(timezone.utc), sym)
             if raw:
                 fetched += 1
             else:

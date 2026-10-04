@@ -9,7 +9,8 @@ class _FakeCursor:
         "shortable", "fractionable", "easy_to_borrow", "market_cap", "adv_usd_20d",
         "sector", "industry", "options_eligible", "in_sp500", "in_r1000", "in_r3000",
         "listed_date", "delisted_date")]
-    def execute(self, sql, params): pass
+    def execute(self, sql, params=None): pass
+    def fetchone(self): return None   # security_type column 'absent' -> overlay {} (pre-163 path)
     def fetchall(self):
         return [(date(2026, 6, 1), "AAPL", "us_equity", "NASDAQ", "active", True,
                  True, True, True, 3.5e12, 1.8e10, "IT", "CE",

@@ -9851,7 +9851,9 @@ function _freshBadge(r) {
 // means every backtest metric on the row is that tier's shrunk number, not
 // the full-universe run's.
 const _UNI_LABELS = { sp500: 'SP500', tier_r1000: 'R1000',
-                      tier_r3000: 'R3000', tier_liquid: 'LIQUID' };
+                      tier_r3000: 'R3000', tier_liquid: 'LIQUID',
+                      stocks_sp500: 'SP500 stocks', stocks_r1000: 'R1000 stocks',
+                      stocks_r3000: 'R3000 stocks', stocks_liquid: 'LIQUID stocks' };
 function _universeBadge(r) {
   const t = r.universe_tier;
   if (!t) return '';
