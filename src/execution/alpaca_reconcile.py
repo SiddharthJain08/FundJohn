@@ -190,7 +190,7 @@ def fetch_activities_since(after: str, activity_types, *, page_size: int = 100,
     """NON-FILL account activities (corporate actions / transfers) created after
     `after` (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ), oldest first. `activity_types`
     is an iterable (or an already comma-joined string) of Alpaca activity-type
-    codes; the CLI takes them comma-separated (`--activity-types SSP,SC,...`).
+    codes; the CLI takes them comma-separated (`--activity-types SPLIT,SC,...`).
     Same pager, page-cap and wall-clock mechanism as fetch_fills_since — but
     opted INTO raise_on_cap by default: a truncated list must never be read as
     complete (Breaker Task 4, spec C1 Amendment 2b; any failure there means "no

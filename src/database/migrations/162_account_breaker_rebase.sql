@@ -25,5 +25,7 @@ CREATE TABLE IF NOT EXISTS account_breaker_recon_watch (
   first_seen_at TIMESTAMPTZ NOT NULL,
   last_seen_at  TIMESTAMPTZ NOT NULL,
   notified_at   TIMESTAMPTZ,
-  cleared_at    TIMESTAMPTZ
+  cleared_at    TIMESTAMPTZ,
+  ledger_qty    NUMERIC,                  -- the (ledger, broker) quantity pair last seen;
+  broker_qty    NUMERIC                   -- a changed pair restarts the episode (lagged fill)
 );

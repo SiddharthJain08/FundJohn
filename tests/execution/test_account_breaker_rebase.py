@@ -21,6 +21,7 @@ from execution import regime_liquidator as rl          # noqa: E402
 
 _REAL_FETCH_ACTIVITIES = ar.fetch_activities_since     # the autouse fixture stubs the module attr
 _REAL_FETCH_SINCE = ar.fetch_fills_since
+ESC = timedelta(seconds=ab.REBASE_ESCALATE_S)
 UTC = timezone.utc
 EPOCH = datetime(2026, 9, 29, 13, 30, tzinfo=UTC)
 NOW = datetime(2026, 10, 5, 15, 0, tzinfo=UTC)         # a Monday, 11:00 ET
@@ -46,9 +47,11 @@ def _fill(t, side, q, px, when, aid):
             'activity_id': aid}
 
 
-def _ssp(aid, sym, day='2026-10-05', **kw):
-    return {'id': aid, 'activity_type': 'SSP', 'symbol': sym, 'date': day,
-            'qty': '80', 'net_amount': '0', **kw}
+def _split(aid, sym, day='2026-10-05', **kw):
+    """A SPLIT activity; carries NO qty unless the test passes qty=... (an absent
+    quantity is allowed for the auto types once the pair is stable)."""
+    return {'id': aid, 'activity_type': 'SPLIT', 'symbol': sym, 'date': day,
+            'net_amount': '0', **kw}
 
 
 @pytest.fixture(autouse=True)
@@ -84,7 +87,7 @@ class FakeDB:
         self.rows = [dict(r) for r in lots]
         self.fills = list(fills)
         self.missing_162 = missing_162
-        self.watch = {}                 # ticker -> [first, last, notified, cleared]
+        self.watch = {}                 # ticker -> [first, last, notified, cleared, ledger_qty, broker_qty]
         self.calls, self._all = [], []
         self.rebase_inserts = 0
         self.rowcount = 1
@@ -126,8 +129,9 @@ class FakeDB:
                 raise RuntimeError('relation "account_breaker_recon_watch" does not exist')
             self._all = [(t, *v) for t, v in self.watch.items()]
         elif f.startswith('INSERT INTO account_breaker_recon_watch'):
-            t, first, last, notified, cleared = params
-            self.watch[t] = [first, last, notified, cleared]
+            self.watch_writes = getattr(self, 'watch_writes', 0) + 1
+            t, first, last, notified, cleared, lq, bq = params
+            self.watch[t] = [first, last, notified, cleared, lq, bq]
 
     def fetchone(self):
         return self._all[0] if self._all else None
@@ -161,8 +165,17 @@ class FakeConn:
         pass
 
 
-def _tick(db, positions, conn=None, equity=100_000.0, bench=('SPY',)):
-    return ab.compute_alpha_pnl_tick(db, conn or FakeConn(db), equity, positions, set(bench))
+def _tick(db, positions, conn=None, equity=100_000.0, bench=('SPY',), t0=None):
+    return ab.compute_alpha_pnl_tick(db, conn or FakeConn(db), equity, positions,
+                                     set(bench), positions_at=t0)
+
+
+def _two(db, book, env, gap=300, **kw):
+    """Tick at the current clock (episode starts), advance `gap` s, tick again.
+    Returns (first, second)."""
+    r1 = _tick(db, book, **kw)
+    env['now'] = env['now'] + timedelta(seconds=gap)
+    return r1, _tick(db, book, **kw)
 
 
 # Split scenario: epoch lot 100 AAPL @100; sold 20 @110 on 09-30 (realized +200);
@@ -188,7 +201,6 @@ def test_acc1_no_rebase_rows_leaves_the_ledger_byte_identical():
     for k in ('alpha_pnl', 'realized', 'unrealized', 'unmatched', 'recon', 'excluded'):
         assert a[k] == b[k]
     assert a['recon'] == 0 and a['realized'] == pytest.approx(200.0)
-    # nothing mismatched => no activity lookup, no rebase, rebased=0
     db = FakeDB(lots=tagged, fills=fills)
     res = _tick(db, {'AAPL': _pos(85, 100.0, 105, upl=425), 'SPY': _pos(1, 1, 1)})
     assert res['rebased'] == 0 and res['recon'] == 0 and db.rebase_inserts == 0
@@ -198,13 +210,15 @@ def test_acc1_no_rebase_rows_leaves_the_ledger_byte_identical():
 
 def test_acc2_split_auto_rebase_recon_zero_alpha_continuous_hwm_untouched(env):
     db = _split_db()
-    before = _tick(db, SPLIT_BOOK)                       # no SPLIT activity yet
+    env['acts'] = [_split('act1', 'AAPL', qty='80')]
+    before = _tick(db, SPLIT_BOOK)                       # tick 1: episode starts
     assert before['recon'] == 1 and before['rebased'] == 0
     assert before['alpha_pnl'] == pytest.approx(1_000.0)
-    assert db.rebase_inserts == 0
-    env['acts'] = [_ssp('act1', 'AAPL')]
+    assert db.rebase_inserts == 0 and env['calls'] == []  # pair not yet stable: no lookup
+    env['now'] = NOW + timedelta(seconds=300)
+    t0 = NOW + timedelta(seconds=299)
     conn = FakeConn(db)
-    after = _tick(db, SPLIT_BOOK, conn)
+    after = _tick(db, SPLIT_BOOK, conn, t0=t0)           # tick 2: stable, explained
     assert after['rebased'] == 1 and after['recon'] == 0
     assert round(after['alpha_pnl'], 2) == round(before['alpha_pnl'], 2) == 1_000.00
     assert after['realized'] == pytest.approx(200.0)    # carried, not re-earned
@@ -213,77 +227,98 @@ def test_acc2_split_auto_rebase_recon_zero_alpha_continuous_hwm_untouched(env):
     assert (row['ticker'], row['qty'], row['avg_entry_price'], row['side']) == \
         ('AAPL', 160.0, 50.0, 'long')
     assert row['realized_carry'] == pytest.approx(200.0)
-    assert row['reason'] == 'auto:SSP' and row['activity_ref'] == 'act1'
-    assert row['taken_at'] == NOW and conn.committed == 1
-    # the epoch is never moved and the HWM never written by a rebase
+    assert row['reason'] == 'auto:SPLIT' and row['activity_ref'] == 'act1'
+    assert row['taken_at'] == t0 and conn.committed == 1       # t0 = positions snapshot time
     assert not db.sql('alpha_epoch_at =') and not db.sql('SET peak_alpha_pnl')
     assert not db.sql('UPDATE account_breaker_state')
-    # the next tick reads the rebase row from the DB: still reconciled, no new lookup
     n_calls = len(env['calls'])
     again = _tick(db, SPLIT_BOOK)
     assert again['recon'] == 0 and again['rebased'] == 0 and len(env['calls']) == n_calls
     assert again['alpha_pnl'] == pytest.approx(1_000.0)
+    assert db.watch['AAPL'][3] is not None                # episode cleared, row kept
 
 
-def test_acc2_activity_lookup_argument_and_single_fetch(env):
+def test_acc2_two_tickers_one_lookup_argv_is_the_union_and_after_derives_from_first_seen(env):
     db = FakeDB(lots=[_epoch_row('AAPL', 100, 100), _epoch_row('MSFT', 10, 300)], fills=[])
-    env['acts'] = [_ssp('a1', 'AAPL'), _ssp('a2', 'MSFT')]
+    env['now'] = NOW + timedelta(days=10)                 # first_seen far from the epoch
+    env['acts'] = [_split('a1', 'AAPL', day='2026-10-15'), _split('a2', 'MSFT', day='2026-10-15')]
     book = {'AAPL': _pos(200, 50, 55, upl=1_000), 'MSFT': _pos(30, 100, 110, upl=300),
             'SPY': _pos(1, 1, 1)}
-    res = _tick(db, book)
+    _r1, res = _two(db, book, env)
     assert res['rebased'] == 2 and res['recon'] == 0
     assert len(env['calls']) == 1                         # ONE lookup for both tickers
     after, types, kw = env['calls'][0]
-    assert after == '2026-09-28' and types == ab.REBASE_ACTIVITY_TYPES      # day before the epoch (ET)
+    assert after == '2026-10-12'                          # ET date(first_seen - 3d), not the epoch
+    assert types == ab.REBASE_AUTO_ACTIVITY_TYPES + ab.REBASE_OPERATOR_ACTIVITY_TYPES
     assert kw['raise_on_cap'] is True and kw['max_pages'] == ab.REBASE_ACTIVITY_MAX_PAGES
     assert kw['deadline_s'] == ab.REBASE_ACTIVITY_BUDGET_S
+
+
+def test_activity_type_lists_are_the_live_verified_ones():
+    assert ab.REBASE_AUTO_ACTIVITY_TYPES == ('SPLIT', 'SPIN', 'SC', 'NC', 'MA', 'REORG')
+    assert ab.REBASE_OPERATOR_ACTIVITY_TYPES == ('OPASN', 'OPEXC', 'JNLS', 'ACATS')
+    assert 'OPEXP' not in ab.REBASE_ACTIVITY_TYPES                 # expiry never moves shares
+    assert {'SSP', 'SSO', 'OPXRC'}.isdisjoint(ab.REBASE_ACTIVITY_TYPES)   # HTTP 400 live
 
 
 # ── acceptance 3: symbol change ─────────────────────────────────────────────
 
 def test_acc3_symbol_change_old_key_to_zero_new_key_to_broker_lot(env):
-    # OLDT: 60 @20 at the epoch, sold 10 @25 (+50) => ledger 50, then renamed.
     db = FakeDB(lots=[_epoch_row('OLDT', 60, 20)],
                 fills=[_fill('OLDT', 'sell', 10, 25, datetime(2026, 9, 30, 14, 0, tzinfo=UTC), 'g1')])
     book = {'NEWT': _pos(50, 20, 22, upl=100), 'SPY': _pos(1, 1, 1)}
-    pre = _tick(db, book)
-    assert pre['recon'] == 2                              # OLDT ledger 50 vs 0, NEWT 0 vs 50
-    assert pre['alpha_pnl'] == pytest.approx(150.0)
-    env['acts'] = [{'id': 'sc1', 'activity_type': 'SC', 'symbol': 'NEWT', 'date': '2026-10-05',
-                    'description': 'SYMBOL CHANGE OLDT TO NEWT'}]
-    res = _tick(db, book)
+    env['acts'] = [{'id': 'sc1', 'activity_type': 'SC', 'symbol': 'NEWT', 'old_symbol': 'OLDT',
+                    'qty': '50', 'date': '2026-10-05'}]
+    pre, res = _two(db, book, env)
+    assert pre['recon'] == 2 and pre['alpha_pnl'] == pytest.approx(150.0)
     assert res['rebased'] == 2 and res['recon'] == 0
     assert round(res['alpha_pnl'], 2) == 150.00
     rows = {r['ticker']: r for r in db.rebases()}
     assert (rows['OLDT']['qty'], rows['OLDT']['avg_entry_price'], rows['OLDT']['side']) == (0.0, None, None)
-    assert rows['OLDT']['realized_carry'] == pytest.approx(50.0)     # old key's realized kept
+    assert rows['OLDT']['realized_carry'] == pytest.approx(50.0)
     assert (rows['NEWT']['qty'], rows['NEWT']['avg_entry_price']) == (50.0, 20.0)
-    assert rows['NEWT']['realized_carry'] == 0.0
-    assert rows['OLDT']['reason'] == 'auto:SC'
+    assert rows['NEWT']['realized_carry'] == 0.0 and rows['OLDT']['reason'] == 'auto:SC'
 
 
-def test_activity_matching_is_conservative():
-    m = ab._activity_matches
-    assert m({'activity_type': 'SSP', 'symbol': 'AAPL'}, 'AAPL')
-    assert not m({'activity_type': 'SSP', 'symbol': 'MSFT'}, 'AAPL')
-    assert not m({'activity_type': 'DIV', 'symbol': 'AAPL'}, 'AAPL')            # not in the list
-    assert m({'activity_type': 'OPASN', 'symbol': 'AAPL261016C00100000'}, 'AAPL')
-    assert not m({'activity_type': 'SSP', 'symbol': 'AAPL261016C00100000'}, 'AAPL')
-    assert m({'activity_type': 'MA', 'symbol': 'XYZ', 'description': 'MERGER OLDT INTO XYZ'}, 'OLDT')
-    assert not m({'activity_type': 'SSP', 'description': 'OLDT'}, 'OLDT')       # description: SC-like types only
-    assert not m({'activity_type': 'MA', 'symbol': 'XYZ', 'description': 'MERGER OLDTX'}, 'OLDT')
-    assert not m({'activity_type': 'MA', 'symbol': 'XYZ', 'description': 'MERGER ON ABC'}, 'ON')  # <3 chars
+def test_activity_classification_is_conservative():
+    c = ab._classify_activity
+    assert c({'activity_type': 'SPLIT', 'symbol': 'AAPL'}, 'AAPL') == ('structured', 'symbol')
+    assert c({'activity_type': 'SPLIT', 'symbol': 'MSFT'}, 'AAPL') is None
+    assert c({'activity_type': 'DIV', 'symbol': 'AAPL'}, 'AAPL') is None
+    assert c({'activity_type': 'SSP', 'symbol': 'AAPL'}, 'AAPL') is None          # not a real code
+    assert c({'activity_type': 'OPASN', 'symbol': 'AAPL261016C00100000'}, 'AAPL') == ('structured', 'occ')
+    assert c({'activity_type': 'SPLIT', 'symbol': 'AAPL261016C00100000'}, 'AAPL') is None
+    assert c({'activity_type': 'SC', 'symbol': 'N', 'old_symbol': 'OLDT'}, 'OLDT') == ('structured', 'related_old')
+    assert c({'activity_type': 'SC', 'symbol': 'N', 'new_symbol': 'NEWT'}, 'NEWT') == ('structured', 'related_new')
+    assert c({'activity_type': 'MA', 'symbol': 'XYZ', 'description': 'MERGER OLDT INTO XYZ'}, 'OLDT') \
+        == ('description', 'description')
+    assert c({'activity_type': 'SPLIT', 'description': 'OLDT'}, 'OLDT') is None     # SC-like types only
+    assert c({'activity_type': 'MA', 'symbol': 'XYZ', 'description': 'MERGER OLDTX'}, 'OLDT') is None
+    assert c({'activity_type': 'MA', 'symbol': 'XYZ', 'description': 'MERGER ON ABC'}, 'ON') is None
+
+
+def test_quantity_consistency_rule():
+    q = ab._quantity_consistent
+    assert q({'qty': '80'}, 'symbol', 'SPLIT', 80, 160)              # == delta
+    assert q({'qty': '160'}, 'symbol', 'SPLIT', 80, 160)             # == resulting position
+    assert not q({'qty': '1000'}, 'symbol', 'SPLIT', 80, 160)
+    assert not q({'qty': '-80'}, 'symbol', 'SPLIT', 80, 160)         # sign flip only for SC-like
+    assert q({'qty': '-80'}, 'symbol', 'MA', 80, 160)
+    assert q({}, 'symbol', 'SPLIT', 80, 160) and q({'qty': 'x'}, 'symbol', 'SPLIT', 80, 160)
+    assert q({'qty': '0'}, 'symbol', 'SPLIT', 80, 160)               # absent => allowed
+    assert q({'qty': '999'}, 'related_new', 'SC', 0, 50)             # other symbol's qty: not tested
+    assert q({'qty': '999'}, 'related_old', 'SC', 50, 0)
+    assert not q({}, 'related_old', 'SC', 50, 10)                    # old key must be gone
 
 
 def test_one_activity_never_explains_a_later_mismatch_on_the_same_ticker(env):
     db = _split_db()
-    env['acts'] = [_ssp('act1', 'AAPL')]
-    _tick(db, SPLIT_BOOK)
+    env['acts'] = [_split('act1', 'AAPL')]
+    _two(db, SPLIT_BOOK, env)
     assert db.rebase_inserts == 1
-    # a missing fill later: qty drifts. act1 is already this ticker's activity_ref.
     drift = {'AAPL': _pos(170, 50, 55, upl=850), 'SPY': _pos(1, 1, 1)}
-    env['now'] = NOW + timedelta(hours=1)
-    res = _tick(db, drift)
+    env['now'] += timedelta(hours=1)
+    _r, res = _two(db, drift, env)
     assert res['rebased'] == 0 and res['recon'] == 1 and db.rebase_inserts == 1
 
 
@@ -293,65 +328,150 @@ def test_acc4_unexplained_mismatch_notice_after_window_and_operator_command_repa
     db = _split_db()
     res = _tick(db, SPLIT_BOOK)
     assert res['rebased'] == 0 and res['recon'] == 1 and db.rebase_inserts == 0
-    assert db.watch['AAPL'] == [NOW, NOW, None, None]
+    assert db.watch['AAPL'] == [NOW, NOW, None, None, 80.0, 160.0]
     assert env['posts'] == []
-    # still inside the escalation window
     env['now'] = NOW + timedelta(seconds=ab.REBASE_ESCALATE_S - 60)
     _tick(db, SPLIT_BOOK)
     assert env['posts'] == [] and db.watch['AAPL'][0] == NOW         # first_seen kept
     assert db.watch['AAPL'][1] == env['now']                         # last_seen advanced
-    # window elapsed: exactly ONE notice naming the ticker, both qtys, the command
     env['now'] = NOW + timedelta(seconds=ab.REBASE_ESCALATE_S + 1)
     conn = FakeConn(db)
     _tick(db, SPLIT_BOOK, conn)
     (ch, msg), = env['posts']
     assert ch == 'trade-reports' and 'AAPL' in msg
     assert 'ledger 80' in msg and 'broker 160' in msg
+    assert 'No auto-rebasable corporate-action activity explains it' in msg
     assert 'account_breaker.py --rebase AAPL' in msg and '--apply' in msg
-    assert db.watch['AAPL'][2] == env['now'] and conn.committed == 1  # notified_at durable first
-    # throttled by notified_at, not the fallback file
+    assert db.watch['AAPL'][2] == env['now'] and conn.committed == 1
     env['now'] += timedelta(minutes=5)
     _tick(db, SPLIT_BOOK)
     assert len(env['posts']) == 1
     env['now'] += timedelta(seconds=ab.REBASE_ESCALATE_S)
     _tick(db, SPLIT_BOOK)
     assert len(env['posts']) == 2
-    # operator repairs it
     out = []
-    conn = FakeConn(db)
-    rc = ab.rebase_cli(db, conn, SPLIT_BOOK, {'SPY'}, ['AAPL'], 'confirmed split', True,
+    rc = ab.rebase_cli(db, FakeConn(db), SPLIT_BOOK, {'SPY'}, ['AAPL'], 'confirmed split', True,
                        now=env['now'], out=out.append)
     assert rc == 0 and db.rebase_inserts == 1
+    assert any('watch episode first seen' in o and 'age' in o for o in out)
     assert db.rebases()[0]['reason'] == 'operator:confirmed split'
     env['now'] += timedelta(minutes=5)
     res = _tick(db, SPLIT_BOOK)
     assert res['recon'] == 0 and res['alpha_pnl'] == pytest.approx(1_000.0)
     assert db.watch['AAPL'][3] == env['now']                         # cleared, row kept
-    # a later mismatch is a NEW episode: first_seen reset, notified/cleared reset
     env['now'] += timedelta(hours=2)
     _tick(db, {'AAPL': _pos(170, 50, 55, upl=850), 'SPY': _pos(1, 1, 1)})
-    assert db.watch['AAPL'] == [env['now'], env['now'], None, None]
+    assert db.watch['AAPL'] == [env['now'], env['now'], None, None, 160.0, 170.0]
 
 
-# ── acceptance 5: fill-quiet window ─────────────────────────────────────────
+# ── MAJOR-1: lagged fills / stable pair ─────────────────────────────────────
 
-def test_acc5_mismatch_inside_the_fill_quiet_window_is_not_rebased(env):
-    recent = _fill('AAPL', 'sell', 1, 110, NOW - timedelta(seconds=ab.REBASE_FILL_QUIET_S - 20), 'r1')
-    db = FakeDB(lots=[_epoch_row('AAPL', 100, 100)], fills=[SOLD, recent])
-    env['acts'] = [_ssp('act1', 'AAPL')]
-    res = _tick(db, {'AAPL': _pos(160, 50, 55, upl=800), 'SPY': _pos(1, 1, 1)})
-    assert res['rebased'] == 0 and res['recon'] == 1 and db.rebase_inserts == 0
-    assert env['calls'] == []                      # no lookup when nothing is eligible
-    # just past the window it IS eligible
-    env['now'] = NOW + timedelta(seconds=60)
-    res = _tick(db, {'AAPL': _pos(160, 50, 55, upl=800), 'SPY': _pos(1, 1, 1)})
-    assert res['rebased'] == 1 and len(env['calls']) == 1
+def test_lagged_closing_fill_not_yet_ingested_blocks_the_first_tick_then_restarts(env):
+    db = _split_db()
+    env['acts'] = [_split('act1', 'AAPL')]
+    r1 = _tick(db, SPLIT_BOOK)                           # pair (80, 160) first seen
+    assert r1['rebased'] == 0 and env['calls'] == []
+    # the lagged fill (filled long ago, ingested only now) lands: ledger 80 -> 60
+    db.fills.append(_fill('AAPL', 'sell', 20, 110, NOW - timedelta(minutes=10), 'lag1'))
+    env['now'] = NOW + timedelta(seconds=300)
+    r2 = _tick(db, SPLIT_BOOK)
+    assert r2['rebased'] == 0 and db.rebase_inserts == 0 and env['calls'] == []
+    assert db.watch['AAPL'][0] == env['now'] and db.watch['AAPL'][4] == 60.0   # episode restarted
+    env['now'] += timedelta(seconds=300)
+    r3 = _tick(db, SPLIT_BOOK)                           # stable pair, explained
+    assert r3['rebased'] == 1 and r3['recon'] == 0
+
+
+def test_fill_landing_between_two_ticks_changes_the_pair_and_restarts(env):
+    db = _split_db()
+    env['acts'] = [_split('act1', 'AAPL')]
+    _tick(db, SPLIT_BOOK)
+    first = db.watch['AAPL'][0]
+    db.fills.append(_fill('AAPL', 'buy', 5, 100, NOW + timedelta(seconds=10), 'mid'))
+    env['now'] = NOW + timedelta(seconds=400)
+    res = _tick(db, SPLIT_BOOK)
+    assert res['rebased'] == 0 and db.watch['AAPL'][0] == env['now'] != first
+    assert db.watch['AAPL'][2] is None                        # notified_at reset
+
+
+def test_acc5_mismatch_inside_the_ingested_fill_quiet_window_is_not_rebased(env):
+    db = _split_db()
+    env['acts'] = [_split('act1', 'AAPL')]
+    _tick(db, SPLIT_BOOK)                                 # episode starts at NOW
+    # a net-zero pair of fills 20 s before the next tick: pair unchanged, window not quiet
+    t = NOW + timedelta(seconds=280)
+    db.fills += [_fill('AAPL', 'buy', 1, 100, t, 'n1'), _fill('AAPL', 'sell', 1, 100, t, 'n2')]
+    env['now'] = NOW + timedelta(seconds=300)
+    res = _tick(db, SPLIT_BOOK)
+    assert res['rebased'] == 0 and res['recon'] == 1 and env['calls'] == []
+    env['now'] = NOW + timedelta(seconds=420)
+    assert _tick(db, SPLIT_BOOK)['rebased'] == 1 and len(env['calls']) == 1
 
 
 def test_activity_lookup_not_issued_when_nothing_is_mismatched(env):
     db = FakeDB(lots=[_epoch_row('AAPL', 80, 100)], fills=[])
     res = _tick(db, {'AAPL': _pos(80, 100, 105, upl=400), 'SPY': _pos(1, 1, 1)})
     assert res['recon'] == 0 and env['calls'] == []
+
+
+# ── MAJOR-2: how loosely an activity may explain ────────────────────────────
+
+def test_old_activity_before_first_seen_minus_3_days_does_not_explain(env):
+    db = _split_db()
+    env['acts'] = [_split('old1', 'AAPL', day='2026-09-20')]
+    _r, res = _two(db, SPLIT_BOOK, env)
+    assert len(env['calls']) == 1 and res['rebased'] == 0 and res['recon'] == 1
+
+
+def test_description_only_match_never_auto_rebases_but_is_named_in_the_notice(env):
+    db = FakeDB(lots=[_epoch_row('ALL', 10, 50)], fills=[])
+    book = {'ALL': _pos(20, 25, 26, upl=20), 'SPY': _pos(1, 1, 1)}
+    env['acts'] = [{'id': 'm1', 'activity_type': 'MA', 'symbol': 'XYZ', 'date': '2026-10-05',
+                    'description': 'MERGER OF BALL CORP INTO XYZ - ALL SHARES CONVERTED'}]
+    _tick(db, book)
+    env['now'] = NOW + ESC + timedelta(seconds=1)
+    res = _tick(db, book)
+    assert res['rebased'] == 0 and db.rebase_inserts == 0
+    (_ch, msg), = env['posts']
+    assert 'ALL' in msg and 'possible cause MA 2026-10-05 (description mention only)' in msg
+
+
+def test_quantity_inconsistent_split_is_not_explained(env):
+    db = _split_db()
+    env['acts'] = [_split('act1', 'AAPL', qty='1000')]
+    _tick(db, SPLIT_BOOK)
+    env['now'] = NOW + ESC + timedelta(seconds=1)
+    res = _tick(db, SPLIT_BOOK)
+    assert res['rebased'] == 0 and res['recon'] == 1
+    assert 'SPLIT 2026-10-05 (quantity inconsistent)' in env['posts'][0][1]
+
+
+def test_operator_types_never_auto_rebase_and_are_named_in_the_notice(env):
+    db = FakeDB(lots=[_epoch_row('AAPL', 100, 100), _epoch_row('MSFT', 10, 300)], fills=[])
+    book = {'AAPL': _pos(0, 100, 105), 'MSFT': _pos(30, 100, 110, upl=300), 'SPY': _pos(1, 1, 1)}
+    env['acts'] = [{'id': 'o1', 'activity_type': 'OPASN', 'symbol': 'AAPL261016C00100000',
+                    'date': '2026-10-05'},
+                   {'id': 'j1', 'activity_type': 'JNLS', 'symbol': 'MSFT', 'date': '2026-10-05',
+                    'qty': '20'}]
+    _tick(db, book)
+    env['now'] = NOW + ESC + timedelta(seconds=1)
+    res = _tick(db, book)
+    assert res['rebased'] == 0 and db.rebase_inserts == 0 and res['recon'] == 2
+    (_ch, msg), = env['posts']
+    assert 'AAPL: possible cause OPASN 2026-10-05' in msg
+    assert 'MSFT: possible cause JNLS 2026-10-05' in msg
+
+
+def test_lookup_failure_notice_says_the_lookup_is_failing(env):
+    db = _split_db()
+    env['raise'] = RuntimeError('alpaca activity list failed: HTTP 400 invalid activity type')
+    _tick(db, SPLIT_BOOK)
+    env['now'] = NOW + ESC + timedelta(seconds=1)
+    res = _tick(db, SPLIT_BOOK)
+    assert res['rebased'] == 0
+    (_ch, msg), = env['posts']
+    assert 'activity lookup is failing (' in msg and 'HTTP 400' in msg
+    assert 'No auto-rebasable' not in msg
 
 
 # ── acceptance 6: lookup failure / cap / timeout => no rebase, no crash ─────
@@ -361,12 +481,13 @@ def test_activity_lookup_not_issued_when_nothing_is_mismatched(env):
                                  TimeoutError('deadline')])
 def test_acc6_lookup_failure_cap_or_timeout_means_no_rebase_no_crash(env, exc):
     db = _split_db()
-    env['acts'] = [_ssp('act1', 'AAPL')]
+    env['acts'] = [_split('act1', 'AAPL')]
     env['raise'] = exc
-    res = _tick(db, SPLIT_BOOK)
+    _r, res = _two(db, SPLIT_BOOK, env)
     assert res is not None and res['rebased'] == 0 and res['recon'] == 1
     assert db.rebase_inserts == 0
     env['raise'] = None                                  # retried on the next tick
+    env['now'] += timedelta(seconds=300)
     assert _tick(db, SPLIT_BOOK)['rebased'] == 1
 
 
@@ -387,11 +508,10 @@ def test_acc6_real_pager_cap_and_argv(monkeypatch):
         _REAL_FETCH_ACTIVITIES('2026-10-04', ab.REBASE_ACTIVITY_TYPES, page_size=2, max_pages=3)
     a = seen[0]
     assert a[1:4] == ['account', 'activity', 'list']
-    assert a[a.index('--activity-types') + 1] == 'SSP,SSO,SC,NC,MA,REORG,OPASN,OPXRC,OPEXP,JNLS,ACATS'
+    assert a[a.index('--activity-types') + 1] == 'SPLIT,SPIN,SC,NC,MA,REORG,OPASN,OPEXC,JNLS,ACATS'
     assert a[a.index('--after') + 1] == '2026-10-04' and a[a.index('--direction') + 1] == 'asc'
     assert a[a.index('--page-size') + 1] == '2' and '--page-token' not in a
     assert '--page-token' in seen[1]
-    # existing FILL callers are byte-identical
     seen.clear()
     monkeypatch.setattr(ar.subprocess, 'run',
                         lambda args, **k: seen.append(args) or Proc('[]'))
@@ -400,30 +520,31 @@ def test_acc6_real_pager_cap_and_argv(monkeypatch):
     assert [a[a.index('--activity-types') + 1] for a in seen] == ['FILL', 'FILL']
 
 
-def test_fetch_rebase_activities_returns_none_on_failure_and_drops_fills(env):
+def test_fetch_rebase_activities_returns_reason_on_failure_and_drops_fills(env):
     env['raise'] = RuntimeError('boom')
-    assert ab.fetch_rebase_activities(EPOCH) is None
+    assert ab.fetch_rebase_activities(EPOCH) == (None, 'boom')
+    env['raise'] = ar.FillPagesTruncated('cap', [])
+    assert ab.fetch_rebase_activities(EPOCH) == (None, 'page cap / budget hit')
     env['raise'] = None
-    env['acts'] = [{'id': 'f', 'activity_type': 'FILL'}, _ssp('s', 'AAPL'), 'junk']
-    assert [a['id'] for a in ab.fetch_rebase_activities(EPOCH)] == ['s']
+    env['acts'] = [{'id': 'f', 'activity_type': 'FILL'}, _split('s', 'AAPL'), 'junk']
+    acts, err = ab.fetch_rebase_activities(EPOCH)
+    assert err is None and [a['id'] for a in acts] == ['s']
 
 
 # ── acceptance 7: rebase after the position is closed ───────────────────────
 
 def test_acc7_rebase_after_the_position_is_closed(env):
-    # ledger AAPL 80 (after the +200 sale); broker holds none (assignment delivered
-    # the shares away, no FILL). An OPASN on an AAPL contract explains it.
+    # ledger AAPL 80; the broker holds none (cash acquisition, no FILL).
     db = _split_db()
     book = {'MSFT': _pos(5, 10, 11, upl=5), 'SPY': _pos(1, 1, 1)}
-    pre = _tick(db, book)
+    env['acts'] = [{'id': 'ma1', 'activity_type': 'MA', 'symbol': 'AAPL', 'qty': '-80',
+                    'date': '2026-10-05'}]
+    pre, res = _two(db, book, env)
     assert pre['recon'] == 2 and pre['alpha_pnl'] == pytest.approx(205.0)   # AAPL + MSFT (no lot row)
-    env['acts'] = [{'id': 'as1', 'activity_type': 'OPASN',
-                    'symbol': 'AAPL261016C00100000', 'date': '2026-10-05'}]
-    res = _tick(db, book)
     assert res['rebased'] == 1 and res['recon'] == 1      # MSFT has no lot row: still flagged
     (row,) = db.rebases()
     assert (row['ticker'], row['qty'], row['avg_entry_price'], row['side']) == ('AAPL', 0.0, None, None)
-    assert row['realized_carry'] == pytest.approx(200.0) and row['reason'] == 'auto:OPASN'
+    assert row['realized_carry'] == pytest.approx(200.0) and row['reason'] == 'auto:MA'
     assert round(res['alpha_pnl'], 2) == round(pre['alpha_pnl'], 2)
     assert 'AAPL' not in res['mismatch']
 
@@ -443,9 +564,8 @@ def test_acc8_migration_162_is_strictly_additive():
     assert 'CREATE TABLE IF NOT EXISTS account_breaker_recon_watch' in norm
     for col in ('ticker TEXT PRIMARY KEY', 'first_seen_at TIMESTAMPTZ NOT NULL',
                 'last_seen_at TIMESTAMPTZ NOT NULL', 'notified_at TIMESTAMPTZ',
-                'cleared_at TIMESTAMPTZ'):
+                'cleared_at TIMESTAMPTZ', 'ledger_qty NUMERIC,', 'broker_qty NUMERIC'):
         assert col in norm
-    # every statement is an ALTER ... ADD COLUMN IF NOT EXISTS or CREATE ... IF NOT EXISTS
     stmts = [s.strip() for s in code.split(';') if s.strip()]
     assert all(s.startswith(('ALTER TABLE account_breaker_alpha_epoch', 'CREATE TABLE IF NOT EXISTS'))
                for s in stmts)
@@ -457,57 +577,53 @@ def test_per_ticker_cutoff_ignores_earlier_fills_but_not_another_tickers_same_ti
     t = datetime(2026, 10, 5, 14, 30, tzinfo=UTC)
     rows = [_epoch_row('AAPL', 100, 100), _epoch_row('MSFT', 0, None),
             {'kind': 'rebase', 'ticker': 'AAPL', 'qty': 10, 'avg_entry_price': 50.0,
-             'side': 'long', 'taken_at': t, 'realized_carry': 5.0, 'reason': 'auto:SSP',
+             'side': 'long', 'taken_at': t, 'realized_carry': 5.0, 'reason': 'auto:SPLIT',
              'activity_ref': 'a'}]
-    fills = [_fill('AAPL', 'buy', 5, 40, t - timedelta(minutes=1), 'x1'),    # before the rebase: ignored
-             _fill('AAPL', 'buy', 7, 41, t, 'x2'),                           # same instant: ignored (strict >)
-             _fill('MSFT', 'buy', 3, 10, t, 'x3'),                           # other ticker, same instant: applies
-             _fill('AAPL', 'sell', 4, 60, t + timedelta(minutes=1), 'x4')]   # after: applies
+    fills = [_fill('AAPL', 'buy', 5, 40, t - timedelta(minutes=1), 'x1'),
+             _fill('AAPL', 'buy', 7, 41, t, 'x2'),
+             _fill('MSFT', 'buy', 3, 10, t, 'x3'),
+             _fill('AAPL', 'sell', 4, 60, t + timedelta(minutes=1), 'x4')]
     book = {'AAPL': _pos(6, 50, 60, upl=60), 'MSFT': _pos(3, 10, 10, upl=0)}
     r = ab.alpha_pnl(1, book, set(), fills, rows)
     assert r['recon'] == 0 and r['mismatch'] == {}
-    assert r['realized_by_key']['AAPL'] == pytest.approx(5.0 + 40.0)   # carry + 4*(60-50)
+    assert r['realized_by_key']['AAPL'] == pytest.approx(5.0 + 40.0)
     assert r['realized'] == pytest.approx(45.0) and r['unmatched'] == 0
-    # the epoch row of a rebased key is NOT applied on top of its rebase row
     assert ab.alpha_pnl(1, {'AAPL': _pos(110, 100, 100)}, set(), [], rows)['recon'] == 1
 
 
 def test_two_successive_rebases_carry_realized_correctly(env):
     db = _split_db()
-    env['acts'] = [_ssp('act1', 'AAPL')]
-    r1 = _tick(db, SPLIT_BOOK)
+    env['acts'] = [_split('act1', 'AAPL')]
+    _r, r1 = _two(db, SPLIT_BOOK, env)
     assert r1['rebased'] == 1 and db.rebases()[0]['realized_carry'] == pytest.approx(200.0)
-    # a day later: sell 10 @70 against avg 50 (+200), then a 3-for-1 split of the remaining 150
     env['now'] = NOW + timedelta(days=1)
     db.fills.append(_fill('AAPL', 'sell', 10, 70, NOW + timedelta(hours=1), 'f9'))
-    env['acts'] = [_ssp('act1', 'AAPL'), _ssp('act2', 'AAPL', day='2026-10-06')]
+    env['acts'] = [_split('act1', 'AAPL'), _split('act2', 'AAPL', day='2026-10-06')]
     book = {'AAPL': _pos(450, 50 / 3, 25, upl=450 * (25 - 50 / 3)), 'SPY': _pos(1, 1, 1)}
     pre = ab.alpha_pnl(0, book, {'SPY'}, db.fills, [r for r in db.rows])
     assert pre['recon'] == 1
-    r2 = _tick(db, book)
+    _r, r2 = _two(db, book, env)
     assert r2['rebased'] == 1 and r2['recon'] == 0
     row2 = db.rebases()[1]
-    assert row2['realized_carry'] == pytest.approx(400.0)     # 200 carried + 200 since
-    assert row2['activity_ref'] == 'act2'                     # act1 already spent
+    assert row2['realized_carry'] == pytest.approx(400.0)
+    assert row2['activity_ref'] == 'act2'
     assert round(r2['alpha_pnl'], 2) == round(pre['alpha_pnl'], 2)
     assert r2['realized'] == pytest.approx(400.0)
 
 
 # ── missing migration 162 => behave exactly as today ────────────────────────
 
-def test_missing_migration_162_degrades_to_todays_behaviour(env, caplog):
+def test_missing_migration_162_skips_the_repair_entirely(env):
     db = _split_db(missing_162=True)
-    env['acts'] = [_ssp('act1', 'AAPL')]
-    res = _tick(db, SPLIT_BOOK)
-    assert res is not None
-    assert res['rebased'] == 0 and res['recon'] == 1          # the write failed: not counted
+    env['acts'] = [_split('act1', 'AAPL')]
+    r1, res = _two(db, SPLIT_BOOK, env)
+    assert res is not None and res['rebased'] == 0 and res['recon'] == 1
     assert res['alpha_pnl'] == pytest.approx(1_000.0)
-    assert db.rebase_inserts == 0
-    # reads fall back to the legacy lots
+    assert db.rebase_inserts == 0 and env['calls'] == []        # no activity fetch
+    assert not db.sql('account_breaker_recon_watch') and db.watch == {}   # no watch read/write
     lots, fills = ab.load_alpha_inputs(db, EPOCH)
     assert lots == [{'ticker': 'AAPL', 'qty': 100, 'avg_entry_price': 100, 'side': 'long'}]
-    # ...but a legacy table that already holds >1 row per ticker (rebase exists,
-    # columns unreadable) must NOT be double-counted
+    assert ab.load_alpha_inputs(db, EPOCH).has_162 is False
     db2 = FakeDB(lots=[_epoch_row('AAPL', 100, 100), _epoch_row('AAPL', 160, 50)],
                  missing_162=True)
     assert ab.load_alpha_inputs(db2, EPOCH) is None
@@ -530,17 +646,18 @@ def test_cli_dry_run_writes_nothing_and_prints_both_quantities_and_pnl(env):
     assert not db.sql('alpha_epoch_at =') and not db.sql('SET peak_alpha_pnl')
 
 
-def test_cli_apply_writes_exactly_one_row_per_ticker(env):
+def test_cli_apply_writes_exactly_one_row_per_ticker_taken_at_t0(env):
     db = FakeDB(lots=[_epoch_row('AAPL', 100, 100), _epoch_row('MSFT', 10, 300)], fills=[])
     book = {'AAPL': _pos(200, 50, 55, upl=1_000), 'MSFT': _pos(30, 100, 110, upl=300),
             'SPY': _pos(1, 1, 1)}
     conn = FakeConn(db)
-    out = []
+    t0 = NOW - timedelta(seconds=7)
     rc = ab.rebase_cli(db, conn, book, {'SPY'}, ['AAPL', 'MSFT'], 'two splits', True,
-                       now=NOW, out=out.append)
+                       now=NOW, positions_at=t0, out=lambda s: None)
     assert rc == 0 and db.rebase_inserts == 2 and conn.committed == 1
     assert {r['ticker'] for r in db.rebases()} == {'AAPL', 'MSFT'}
-    assert all(r['reason'] == 'operator:two splits' and r['kind'] == 'rebase' for r in db.rebases())
+    assert all(r['reason'] == 'operator:two splits' and r['kind'] == 'rebase'
+               and r['taken_at'] == t0 for r in db.rebases())
     assert db.epoch_at == EPOCH and db.peak_pnl == 1_500.0
 
 
@@ -606,7 +723,7 @@ def test_rebased_token_in_format_line():
 
 
 @pytest.mark.parametrize('armed', [False, True])
-def test_run_once_rebases_in_both_modes_and_armed_drawdown_is_not_skipped(
+def test_run_once_rebases_in_both_modes_threads_t0_and_armed_drawdown_is_not_skipped(
         env, monkeypatch, tmp_path, caplog, armed):
     monkeypatch.setenv('POSTGRES_URI', 'postgres://stub')
     monkeypatch.setenv(ab.NAV_OHLC_PATH_ENV, str(tmp_path / 'missing.json'))
@@ -628,7 +745,11 @@ def test_run_once_rebases_in_both_modes_and_armed_drawdown_is_not_skipped(
     monkeypatch.setattr(ab, 'save_state', lambda *a, **k: True)
     db = _split_db(peak_pnl=1_000.0)
     monkeypatch.setattr(ab.psycopg2, 'connect', lambda *_a, **_k: FakeConn(db))
-    env['acts'] = [_ssp('act1', 'AAPL')]
+    env['acts'] = [_split('act1', 'AAPL')]
+    assert ab.run_once(session_date=SESSION) == 0          # tick 1: episode starts
+    assert db.rebase_inserts == 0
+    env['now'] = NOW + timedelta(seconds=300)
+    caplog.clear()
     with caplog.at_level('INFO', logger=ab.logger.name):
         assert ab.run_once(session_date=SESSION) == 0
     line = [m for m in (r.getMessage() for r in caplog.records)
@@ -636,13 +757,14 @@ def test_run_once_rebases_in_both_modes_and_armed_drawdown_is_not_skipped(
     assert line.startswith('[account_breaker] armed' if armed else '[account_breaker] shadow')
     assert 'rebased=1' in line and 'recon=0' in line
     assert 'alpha_pnl=1000.00' in line and 'dd_pnl=0.0000' in line     # not skipped, even armed
-    assert db.rebase_inserts == 1
+    (row,) = db.rebases()
+    assert row['taken_at'] == env['now']                   # t0 captured in run_once (frozen clock)
 
 
 def test_repair_failure_never_raises_out_of_the_tick(env, monkeypatch):
     db = _split_db()
-    env['acts'] = [_ssp('act1', 'AAPL')]
-    monkeypatch.setattr(ab, 'find_explaining_activity',
+    env['acts'] = [_split('act1', 'AAPL')]
+    monkeypatch.setattr(ab, 'evaluate_activities',
                         lambda *a, **k: (_ for _ in ()).throw(ValueError('bug')))
-    res = _tick(db, SPLIT_BOOK)
+    _r, res = _two(db, SPLIT_BOOK, env)
     assert res is not None and res['rebased'] == 0 and res['recon'] == 1
