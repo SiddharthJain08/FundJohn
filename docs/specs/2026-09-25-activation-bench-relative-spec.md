@@ -109,7 +109,7 @@ deactivate  : sharpe[r] <  threshold[r] − ACTIVATION_HYSTERESIS (0.10)   # ban
 - Preview endpoint (`POST /api/activation/dry-run`) accepts an optional `excess` override so the operator can preview a
   higher excess before saving it (read-only; never persists).
 
-## 9. Amendment 2 — the PROMOTION gate is bench-aware (operator-ruled 2026-10-04 21:18 UTC: "yes, make the promotion gate bench-aware")
+## 9. Amendment 2 — the PROMOTION gate is bench-aware (operator-ruled 2026-10-04 21:18 UTC: "yes, make the promotion gate bench-aware") — **APPLIED 2026-10-04** (branch `promo-bench`; opus review NEEDS FIXES → re-review CLEAN)
 
 **Problem.** The candidate→live qualification gate (`src/lib/promotion_service.js`, policy 2026-07-13 v2) promotes on
 per-regime `sharpe > 0` + sleeve DD ceiling + ≥100 trades, while activation (§1, §8) requires
@@ -127,7 +127,14 @@ Promotion therefore implies ≥ 1 activatable regime.
 
 - `bench` = `pipeline_config.strategy_activation_bench_sharpe` (the vector the assigner stamps on every apply — tier 2 of
   §2; the JS gate reads config only and never re-derives from the sleeve run). `excess` =
-  `pipeline_config.strategy_activation_excess_sharpe`, clamped with the existing `clampExcessValue` (default 0).
+  `pipeline_config.strategy_activation_excess_sharpe`, parsed exactly like the assigner's `get_activation_excess`
+  (finite float; missing / unparseable / non-finite ⇒ 0; no step snapping, no bounds — review ruling 2026-10-04: the
+  dashboard clamp `clampExcessValue` snaps to 0.05 and would make the gate looser than activation for a hand-written row).
+- Sleeve source = the assigner's (`_load_rows`): the CHOSEN `universe_shrink_metrics` sleeves of the run when they exist,
+  else `strategy_backtest_regimes` — so the gate and activation judge the same numbers after a universe shrink.
+- A primary run with no per-regime sleeves can never be activated, so with the gate on the legacy total-window fallback
+  refuses (`no_backtest` when the sleeve lookup failed, `no_qualifying_regime` when it is empty) instead of promoting on
+  totals.
 - Fail-safe (mirrors §2 tier 3, never fail-open to 0): bench row missing / malformed / a regime absent or non-finite ⇒
   that regime's bench is `0.5` and a WARN is logged once per evaluation. A DB error reading the config ⇒ same fallback.
 - Applies to BOTH gate paths: the automatic path (`computeQualifyingRegimes`, no regimes named) and the operator path
@@ -144,3 +151,7 @@ Promotion therefore implies ≥ 1 activatable regime.
 amendment = 0 (bench CRISIS 1.575 / HIGH_VOL 0.5326 / LOW_VOL 0.9457 / TRANSITIONING 0.4409, excess 0). The amendment
 changes nothing this week except that `S_sparse_cca_mean_revert`, once auto-demoted on Mon 10-05, is no longer
 re-promoted on the next Sunday pass.
+
+**Known residuals (accepted).** Tier-1 (sleeve run) vs tier-2 (config) bench drift above the 0.10 band between a sleeve
+re-backtest and the next clean `--all` apply; an activation `strategy_activation_min_trades` set above the gate's 100;
+hand-written excess rows in non-decimal notations (`0x10`, `1_000`) parse differently in JS and Python.
