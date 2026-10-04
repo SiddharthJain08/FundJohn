@@ -40,7 +40,7 @@ def test_default_filter_unknown(unknown_pink):
     assert DEFAULT_UNIVERSE_FILTER(unknown_pink, date(2026, 1, 1)) is False
 
 def test_candidate_set_count():
-    assert len(CANDIDATE_PREDICATES) == 16
+    assert len(CANDIDATE_PREDICATES) == 20  # 12 legacy + 4 SP-7 ladder + 4 stocks_*
 
 def test_each_candidate_callable(aapl):
     for name, fn in CANDIDATE_PREDICATES.items():

@@ -63,4 +63,4 @@ def test_candidate_predicates_registered():
     for name in ('liquid_tradable', 'tier_r1000', 'tier_r3000', 'tier_liquid'):
         assert name in ud.CANDIDATE_PREDICATES
     # legacy 12 untouched
-    assert len(ud.CANDIDATE_PREDICATES) == 16
+    assert len(ud.CANDIDATE_PREDICATES) == 20  # + 4 stocks_* (security type Phase 1)

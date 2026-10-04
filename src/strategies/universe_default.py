@@ -77,6 +77,40 @@ def tier_r3000(meta: TickerMetadata, as_of) -> bool:
 def tier_liquid(meta: TickerMetadata, as_of) -> bool:
     return tier_r3000(meta, as_of) or liquid_tradable(meta, as_of)
 
+# --- Universe security type, Phase 1 (spec 2026-10-04) ---
+# Pure additions: no existing predicate above is touched, so every existing
+# strategy's universe is unchanged. Opt-in only (a later operator step points
+# a strategy's universe_filter_ref / backtest_universe_cap at a stocks_* tier).
+
+def common_stock(meta: TickerMetadata, as_of) -> bool:
+    """Operating-company shares: security_type 'stock' or 'adr'. Unknown
+    (None) is EXCLUDED unless index membership vouches for it (BRK.B-style
+    names whose vendor profile is missing but are S&P 500 members)."""
+    st = meta.security_type
+    if st is None:
+        return bool(meta.in_sp500)
+    return st in ("stock", "adr")
+
+def stocks_sp500(meta: TickerMetadata, as_of) -> bool:
+    return sp500(meta, as_of) and common_stock(meta, as_of)
+
+def stocks_r1000(meta: TickerMetadata, as_of) -> bool:
+    return tier_r1000(meta, as_of) and common_stock(meta, as_of)
+
+def stocks_r3000(meta: TickerMetadata, as_of) -> bool:
+    return tier_r3000(meta, as_of) and common_stock(meta, as_of)
+
+def stocks_liquid(meta: TickerMetadata, as_of) -> bool:
+    return tier_liquid(meta, as_of) and common_stock(meta, as_of)
+
+# stocks_X tier -> the base tier it filters (stocks_X is a subset of X).
+STOCK_TIER_BASE = {
+    "stocks_sp500": "sp500",
+    "stocks_r1000": "tier_r1000",
+    "stocks_r3000": "tier_r3000",
+    "stocks_liquid": "tier_liquid",
+}
+
 CANDIDATE_PREDICATES = {
     "sp500": sp500,
     "r1000": r1000,
@@ -94,6 +128,10 @@ CANDIDATE_PREDICATES = {
     "tier_r1000": tier_r1000,
     "tier_r3000": tier_r3000,
     "tier_liquid": tier_liquid,
+    "stocks_sp500": stocks_sp500,
+    "stocks_r1000": stocks_r1000,
+    "stocks_r3000": stocks_r3000,
+    "stocks_liquid": stocks_liquid,
 }
 
 # SP-7 Phase B: ladder tiers are ADOPTION-ONLY predicates (universe ladder +
@@ -102,4 +140,5 @@ CANDIDATE_PREDICATES = {
 # mint menu should exclude this set.
 LADDER_TIER_PREDICATES = frozenset({
     "liquid_tradable", "tier_r1000", "tier_r3000", "tier_liquid",
+    "stocks_sp500", "stocks_r1000", "stocks_r3000", "stocks_liquid",
 })

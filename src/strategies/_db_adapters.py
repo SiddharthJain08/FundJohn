@@ -4,7 +4,20 @@ import psycopg2
 import pandas as pd
 from datetime import date
 
-from src.strategies.universe_meta import TickerMetadata
+from src.strategies.universe_meta import TickerMetadata, overlay_security_types
+
+# History rule (spec 2026-10-04 §1): security type is static, so the LATEST
+# non-NULL value per symbol applies to every snapshot date.
+LATEST_SECURITY_TYPE_SQL = """
+    SELECT DISTINCT ON (symbol) symbol, security_type
+    FROM ticker_metadata_snapshots
+    WHERE security_type IS NOT NULL
+    ORDER BY symbol, snapshot_date DESC
+"""
+_HAS_SECURITY_TYPE_COL_SQL = """
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'ticker_metadata_snapshots' AND column_name = 'security_type'
+"""
 
 
 class PostgresMetadataDB:
@@ -18,6 +31,35 @@ class PostgresMetadataDB:
         # (e.g. build_tier_membership ~60 monthly snapshots ×5k symbols) do
         # not accumulate snapshots on the 8GB no-swap box.
         self._memo: dict = {}
+        self._security_types: dict | None = None
+
+    def fetch_latest_security_types(self, conn=None) -> dict:
+        """{symbol: latest non-NULL security_type}. Memoized per instance.
+        Returns {} (with a warning) when migration 163 has not been applied,
+        so the resolver keeps working on a pre-163 database — every existing
+        predicate ignores security_type; only stocks_* tiers read it."""
+        if self._security_types is None:
+            conn = conn if conn is not None else self._conn
+            if conn is not None:
+                self._security_types = self._fetch_security_types(conn)
+            else:
+                with psycopg2.connect(self._dsn) as c:
+                    self._security_types = self._fetch_security_types(c)
+        return self._security_types
+
+    @staticmethod
+    def _fetch_security_types(c) -> dict:
+        with c.cursor() as cur:
+            cur.execute(_HAS_SECURITY_TYPE_COL_SQL)
+            if cur.fetchone() is None:
+                import logging
+                logging.getLogger(__name__).warning(
+                    'ticker_metadata_snapshots.security_type missing (migration 163 '
+                    'not applied) — security types unknown; stocks_* tiers fall back '
+                    'to in_sp500 only')
+                return {}
+            cur.execute(LATEST_SECURITY_TYPE_SQL)
+            return {sym: st for sym, st in cur.fetchall()}
 
     def fetch_metadata_as_of(self, as_of):
         if as_of in self._memo:
@@ -27,6 +69,10 @@ class PostgresMetadataDB:
         else:
             with psycopg2.connect(self._dsn) as c:
                 rows = self._fetch(c, as_of)
+                # same connection: still exactly one connect per new as_of
+                self.fetch_latest_security_types(c)   # memoizes on first use
+        # Static-attribute overlay (latest known type on every as_of).
+        rows = overlay_security_types(rows, self.fetch_latest_security_types())
         # Single-slot memo: the live path uses one as_of per process (full
         # 67→1 collapse); batch callers iterate distinct as_of values once
         # each, so retaining history is pure memory cost on the 8GB box.
