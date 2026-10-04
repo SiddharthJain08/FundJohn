@@ -930,14 +930,90 @@ def test_clean_recon_still_persists_the_hwm(wired):
     assert db.peak_pnl == 500.0
 
 
-def test_rearm_on_a_recon_mismatch_tick_does_not_reset_the_hwm(wired, monkeypatch):
-    breached = datetime(2026, 9, 29, 15, 0, tzinfo=timezone.utc)
-    monkeypatch.setenv(ab.REARM_ENV, breached.isoformat())
-    db = _recon_db_low_peak(halted=True, breached_at=breached)
-    wired['install'](db, 100_000.0, _recon_book())
-    assert ab.run_once(session_date=SESSION) == 0
+BREACHED = datetime(2026, 9, 29, 15, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def notices(monkeypatch):
+    got = []
+    monkeypatch.setattr(ab, 'post_fallback_notice',
+                        lambda now=None, detail=None: got.append(detail) or True)
+    return got
+
+
+def _deferred_assertions(db, caplog, notices):
+    assert db.sql('rearmed_at = NOW()') == []             # clear_halt never issued
     assert db.sql('SET peak_alpha_pnl') == [] and db.peak_pnl == 100.0
-    assert db.sql('rearmed_at = NOW()')            # the re-arm itself still happened
+    assert db.halted is True and db.breached_at == BREACHED
+    msgs = [r for r in caplog.records if r.levelname == 'WARNING'
+            and 're-arm DEFERRED' in r.getMessage()]
+    assert len(msgs) == 1
+    assert 'latch kept, retrying next tick on the same token' in msgs[0].getMessage()
+    assert len(notices) == 1 and 'DEFERRED' in notices[0]
+    assert 'OPENCLAW_ACCOUNT_BREAKER' in notices[0]
+
+
+@pytest.mark.parametrize('armed', [False, True])
+def test_rearm_on_a_recon_mismatch_tick_is_deferred(wired, monkeypatch, caplog,
+                                                    notices, no_flatten, armed):
+    monkeypatch.setenv(ab.REARM_ENV, BREACHED.isoformat())
+    if armed:
+        monkeypatch.setenv(ab.ARM_ENV, '1')
+    db = _recon_db_low_peak(halted=True, breached_at=BREACHED)
+    wired['install'](db, 100_000.0, _recon_book())
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        assert ab.run_once(session_date=SESSION) == 0
+    _deferred_assertions(db, caplog, notices)
+    assert 'recon=1' in [r.getMessage() for r in caplog.records
+                         if 're-arm DEFERRED' in r.getMessage()][0]
+    assert 'halted=1' in _last_line(caplog)               # a normal latched tick
+
+
+@pytest.mark.parametrize('armed', [False, True])
+def test_rearm_on_a_pnl_unavailable_tick_is_deferred(wired, monkeypatch, caplog,
+                                                     notices, no_flatten, armed):
+    monkeypatch.setenv(ab.REARM_ENV, BREACHED.isoformat())
+    if armed:
+        monkeypatch.setenv(ab.ARM_ENV, '1')
+    monkeypatch.setattr(ab, 'compute_alpha_pnl_tick', lambda *a, **k: None)
+    db = _recon_db_low_peak(halted=True, breached_at=BREACHED)
+    wired['install'](db, 100_000.0, BOOK)
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        assert ab.run_once(session_date=SESSION) == 0
+    _deferred_assertions(db, caplog, notices)
+    assert 'pnl unavailable' in [r.getMessage() for r in caplog.records
+                                 if 're-arm DEFERRED' in r.getMessage()][0]
+    assert 'halted=1' in _last_line(caplog)
+
+
+def test_rearm_on_a_trusted_tick_resets_the_hwm_and_says_so(wired, monkeypatch, caplog):
+    monkeypatch.setenv(ab.REARM_ENV, BREACHED.isoformat())
+    db = _recon_db_low_peak(halted=True, breached_at=BREACHED)
+    wired['install'](db, 100_000.0,
+                     {'AAPL': _pos(100, 100, 105), 'SPY': _pos(1, 1, 1, mv=1_000)})
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        assert ab.run_once(session_date=SESSION) == 0
+    assert db.sql('rearmed_at = NOW()') and db.halted is False
+    assert db.peak_pnl == 500.0                           # HWM reset to alpha_pnl
+    assert any('alpha-P&L hwm reset to 500.00' in r.getMessage() for r in caplog.records)
+    assert not any('DEFERRED' in r.getMessage() for r in caplog.records)
+    assert 'dd_pnl=0.0000' in _last_line(caplog)
+
+
+def test_deferred_tick_then_trusted_tick_rearms_on_the_second(wired, monkeypatch,
+                                                              caplog, notices, no_flatten):
+    monkeypatch.setenv(ab.REARM_ENV, BREACHED.isoformat())
+    db = _recon_db_low_peak(halted=True, breached_at=BREACHED)
+    wired['install'](db, 100_000.0, _recon_book())          # tick 1: recon=1
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        ab.run_once(session_date=SESSION)
+    assert db.halted is True and db.sql('rearmed_at = NOW()') == [] and db.peak_pnl == 100.0
+    wired['install'](db, 100_000.0,                          # tick 2: clean ledger
+                     {'AAPL': _pos(100, 100, 105), 'SPY': _pos(1, 1, 1, mv=1_000)})
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        ab.run_once(session_date=SESSION)
+    assert db.halted is False and len(db.sql('rearmed_at = NOW()')) == 1
+    assert db.peak_pnl == 500.0                             # reset from the trusted tick
 
 
 def test_capped_tick_without_forward_progress_logs_an_error(monkeypatch, caplog):

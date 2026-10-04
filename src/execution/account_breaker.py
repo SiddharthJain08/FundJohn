@@ -25,7 +25,12 @@ close_result_json.dry_run=true so the sizer's risk-exit cooldown
 Re-arm is operator-only: OPENCLAW_ACCOUNT_BREAKER_REARM=<breached_at iso> in
 .env clears exactly that halt (a stale token cannot clear a later breach) and
 resets the alpha-P&L high-water mark to the current alpha P&L (the legacy NAV
-peak no longer exists, Task 2 / P4).
+peak no longer exists, Task 2 / P4). The re-arm and the HWM reset are ATOMIC:
+on a tick whose alpha ledger is distrusted (pnl unavailable, or recon > 0) the
+re-arm is DEFERRED — the latch and all state stay untouched, a WARNING is logged,
+the degraded notice is posted, and the same token is retried next tick. If the
+ledger is permanently unavailable, unset OPENCLAW_ACCOUNT_BREAKER (shadow) to
+stop the breaker acting until it is repaired.
 """
 from __future__ import annotations
 
@@ -640,8 +645,12 @@ def rearm_requested(state: dict) -> bool:
 
 
 def clear_halt(cur, alpha=None, alpha_pnl_now=None) -> bool:
-    """Operator re-arm: drop the latch; the alpha-P&L high-water mark resets to
-    `alpha_pnl_now` (below) so the next drawdown is measured from here. `alpha`
+    """Operator re-arm: drop the latch and reset the alpha-P&L high-water mark to
+    `alpha_pnl_now` so the next drawdown is measured from here. run_once only
+    calls this with a TRUSTED `alpha_pnl_now` (a distrusted ledger defers the
+    re-arm instead); called without one, the latch drops but the high-water mark
+    keeps its pre-halt value, which the first trusted tick would measure the
+    drawdown from — never do that on the breaker path. `alpha`
     (the legacy NAV peak reset) is accepted but no longer written (P4). Also
     resets flatten_attempts to 0 — a fresh arm should not inherit a stale
     retry count from the halt it just cleared (a literal, not a bound
@@ -1336,11 +1345,12 @@ def _fallback_post_path() -> Path:
                 or ROOT / 'logs' / 'account_breaker_fallback_post.ts')
 
 
-def post_fallback_notice(now=None) -> bool:
+def post_fallback_notice(now=None, detail=None) -> bool:
     """F3: an ARMED tick with no alpha-P&L measure skips the drawdown rule; tell
     #trade-reports at most once per 30 min. Cron runs are separate processes, so
     the throttle is a tiny timestamp file (fail-open: an unreadable file posts, an
-    unwritable one still posts). Returns True iff a post was attempted."""
+    unwritable one still posts). `detail` is appended to the message (the deferred
+    re-arm uses it). Returns True iff a post was attempted."""
     now = time.time() if now is None else now
     path = _fallback_post_path()
     try:
@@ -1353,7 +1363,8 @@ def post_fallback_notice(now=None) -> bool:
           ':warning: **Account breaker degraded** — alpha P&L could not be computed '
           'this tick (migration 160 / fill sync / ledger read); the DRAWDOWN rule is '
           'SKIPPED while armed (daily-loss still evaluated). Repeats at most every '
-          '30 min until the measure recovers.')
+          '30 min until the measure recovers.'
+          + (f' {detail}' if detail else ''))
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(str(now))
@@ -1508,29 +1519,42 @@ def run_once(session_date=None) -> int:
         pnl = compute_alpha_pnl_tick(cur, conn, equity, positions, bench)
 
         if rearm_requested(state):
-            # MAJOR-1: a recon>0 ledger is distrusted (P2) — it must not reset the
-            # HWM either, exactly as on a pnl-None tick.
+            # MAJOR-1: a recon>0 ledger is distrusted (P2). The re-arm must be
+            # ATOMIC with an HWM reset from a TRUSTED ledger, so a distrusted
+            # tick DEFERS it: no clear_halt, latch and state untouched, the tick
+            # proceeds as a normal latched tick and the same token retries.
             trusted = pnl is not None and not int(pnl.get('recon', 0) or 0) > 0
-            rearmed = clear_halt(cur, alpha_pnl_now=pnl['alpha_pnl'] if trusted else None)
-            # fix round 1 item 3: `_commit` is now gated on `rearmed` too —
-            # a failed clear_halt already rolled back to its own savepoint
-            # (nothing to commit), and on a raising/failing commit AFTER a
-            # successful clear_halt write, the pre-clear `state` (still
-            # halted) must be kept rather than optimistically switching to
-            # the un-halted default a write that never durably landed.
-            if rearmed and _commit(conn):
-                logger.info('[account_breaker] re-armed by operator token; alpha-P&L '
-                            'hwm reset')
-                state = {'halted': False, 'reason': None, 'breached_at': None,
-                         'peak': None, 'dd': None, 'daily': None,
-                         'pending_flatten': False}
-                if trusted:
-                    pnl['hwm'], pnl['dd_pnl'] = pnl['alpha_pnl'], 0.0
+            if not trusted:
+                why = ('pnl unavailable' if pnl is None
+                       else f"recon={int(pnl.get('recon', 0) or 0)}")
+                logger.warning('[account_breaker] re-arm DEFERRED: alpha ledger '
+                               'untrusted (%s); latch kept, retrying next tick on '
+                               'the same token', why)
+                post_fallback_notice(
+                    detail=f'Operator re-arm DEFERRED ({why}): halt latch kept, '
+                           'retrying each tick on the same token. If the ledger is '
+                           'permanently unavailable, unset OPENCLAW_ACCOUNT_BREAKER '
+                           '(shadow).')
             else:
-                logger.error('[account_breaker] re-arm failed to persist '
-                             '(clear_halt=%s); halt latch left in place, '
-                             'will retry next tick on the same operator '
-                             'token', rearmed)
+                rearmed = clear_halt(cur, alpha_pnl_now=pnl['alpha_pnl'])
+                # fix round 1 item 3: `_commit` is gated on `rearmed` too — a
+                # failed clear_halt already rolled back to its own savepoint
+                # (nothing to commit), and on a raising/failing commit AFTER a
+                # successful clear_halt write, the pre-clear `state` (still
+                # halted) must be kept rather than optimistically switching to
+                # the un-halted default a write that never durably landed.
+                if rearmed and _commit(conn):
+                    logger.info('[account_breaker] re-armed by operator token; '
+                                'alpha-P&L hwm reset to %.2f', pnl['alpha_pnl'])
+                    state = {'halted': False, 'reason': None, 'breached_at': None,
+                             'peak': None, 'dd': None, 'daily': None,
+                             'pending_flatten': False}
+                    pnl['hwm'], pnl['dd_pnl'] = pnl['alpha_pnl'], 0.0
+                else:
+                    logger.error('[account_breaker] re-arm failed to persist '
+                                 '(clear_halt=%s); halt latch left in place, '
+                                 'will retry next tick on the same operator '
+                                 'token', rearmed)
 
         open_eq, open_src = opening_equity(cur, session, equity)
 
@@ -1685,7 +1709,9 @@ def run_once(session_date=None) -> int:
                   '• OPENCLAW_ACCOUNT_BREAKER is read by BOTH the breaker '
                   "cron and the sizer's trade step (supplement item 10) — "
                   'flip it PROCESS-WIDE in .env and restart user-scope '
-                  'johnbot, never as a per-unit Environment= drop-in')
+                  'johnbot, never as a per-unit Environment= drop-in\n'
+                  '• if the alpha ledger is permanently unavailable (re-arm stays '
+                  'DEFERRED), unset OPENCLAW_ACCOUNT_BREAKER to drop to shadow')
 
             if prior_attempts < FLATTEN_ESCALATE_AFTER <= attempts:
                 _post('trade-reports', _flatten_escalation_msg(attempts, flat))
