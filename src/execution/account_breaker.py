@@ -25,7 +25,11 @@ close_result_json.dry_run=true so the sizer's risk-exit cooldown
 Re-arm is operator-only: OPENCLAW_ACCOUNT_BREAKER_REARM=<breached_at iso> in
 .env clears exactly that halt (a stale token cannot clear a later breach) and
 resets the alpha-P&L high-water mark to the current alpha P&L (the legacy NAV
-peak no longer exists, Task 2 / P4).
+peak no longer exists, Task 2 / P4). A token ALWAYS re-arms, and the latch drop
+is atomic (one UPDATE) with the high-water mark: on a trusted tick the HWM is the
+current alpha P&L; on a distrusted tick (pnl unavailable, or recon > 0) it is
+CLEARED (NULL) and re-seeds from the first trusted tick — never left at its
+pre-halt value, which would re-latch immediately.
 """
 from __future__ import annotations
 
@@ -640,34 +644,43 @@ def rearm_requested(state: dict) -> bool:
 
 
 def clear_halt(cur, alpha=None, alpha_pnl_now=None) -> bool:
-    """Operator re-arm: drop the latch; the alpha-P&L high-water mark resets to
-    `alpha_pnl_now` (below) so the next drawdown is measured from here. `alpha`
-    (the legacy NAV peak reset) is accepted but no longer written (P4). Also
-    resets flatten_attempts to 0 — a fresh arm should not inherit a stale
-    retry count from the halt it just cleared (a literal, not a bound
-    param, so the statement carries no bound params at all). Returns True iff the write landed (supplement
-    item 2); a failed write is logged as an ERROR and swallowed, same as
-    save_state — run_once() checks this and lets the same operator token
-    retry the re-arm on the next tick rather than silently doing nothing."""
+    """Operator re-arm, ONE UPDATE: drop the latch AND set the alpha-P&L
+    high-water mark — to `alpha_pnl_now` when the caller has a trusted current
+    alpha P&L, else to SQL NULL (cleared; it re-seeds from the first trusted
+    tick). Either way the HWM is never left at its pre-halt value. `alpha` (the
+    legacy NAV peak reset) is accepted and ignored. Also resets flatten_attempts
+    to 0 — a fresh arm should not inherit a stale retry count (a literal). The
+    NULL case binds no params. Returns True iff the write landed; a failed write
+    is logged as an ERROR and swallowed, and run_once() then keeps the latch and
+    retries on the same operator token next tick."""
     def _write():
-        cur.execute(
-            """
-            UPDATE account_breaker_state
-               SET halted = FALSE, reason = NULL, breached_at = NULL,
-                   pending_flatten = FALSE,
-                   flatten_attempts = 0,
-                   rearmed_at = NOW(), updated_at = NOW()
-             WHERE id = 1
-            """,
-        )
+        if alpha_pnl_now is None:
+            cur.execute(
+                """
+                UPDATE account_breaker_state
+                   SET halted = FALSE, reason = NULL, breached_at = NULL,
+                       pending_flatten = FALSE,
+                       flatten_attempts = 0,
+                       peak_alpha_pnl = NULL,
+                       rearmed_at = NOW(), updated_at = NOW()
+                 WHERE id = 1
+                """,
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE account_breaker_state
+                   SET halted = FALSE, reason = NULL, breached_at = NULL,
+                       pending_flatten = FALSE,
+                       flatten_attempts = 0,
+                       peak_alpha_pnl = %s,
+                       rearmed_at = NOW(), updated_at = NOW()
+                 WHERE id = 1
+                """,
+                (float(alpha_pnl_now),),
+            )
 
     ok, _ = _savepoint_guarded(cur, 'sp_ab_clear_halt', _write, on_error_level=logging.ERROR)
-    if ok and alpha_pnl_now is not None:
-        # C1 amendment 2: the alpha-P&L high-water mark resets to the current
-        # alpha_pnl (mirror of the peak_alpha_nav reset). The EPOCH is never
-        # touched. Own savepoint: a missing migration-160 column must not undo
-        # the re-arm above.
-        save_peak_alpha_pnl(cur, alpha_pnl_now)
     return ok
 
 
@@ -1508,23 +1521,37 @@ def run_once(session_date=None) -> int:
         pnl = compute_alpha_pnl_tick(cur, conn, equity, positions, bench)
 
         if rearm_requested(state):
-            # MAJOR-1: a recon>0 ledger is distrusted (P2) — it must not reset the
-            # HWM either, exactly as on a pnl-None tick.
+            # A token ALWAYS re-arms; the latch drop and the HWM write are ONE
+            # UPDATE (clear_halt). Trusted: HWM = current alpha_pnl. Distrusted
+            # (pnl None, or recon>0 — P2): HWM cleared to NULL, re-seeded by the
+            # first trusted tick (never left at the pre-halt peak).
             trusted = pnl is not None and not int(pnl.get('recon', 0) or 0) > 0
             rearmed = clear_halt(cur, alpha_pnl_now=pnl['alpha_pnl'] if trusted else None)
-            # fix round 1 item 3: `_commit` is now gated on `rearmed` too —
-            # a failed clear_halt already rolled back to its own savepoint
+            # fix round 1 item 3: `_commit` is gated on `rearmed` too — a
+            # failed clear_halt already rolled back to its own savepoint
             # (nothing to commit), and on a raising/failing commit AFTER a
             # successful clear_halt write, the pre-clear `state` (still
             # halted) must be kept rather than optimistically switching to
             # the un-halted default a write that never durably landed.
             if rearmed and _commit(conn):
-                logger.info('[account_breaker] re-armed by operator token; alpha-P&L '
-                            'hwm reset')
+                if trusted:
+                    logger.info('[account_breaker] re-armed by operator token; '
+                                'alpha-P&L hwm reset to %.2f', pnl['alpha_pnl'])
+                else:
+                    logger.warning('[account_breaker] re-armed by operator token on '
+                                   'an UNTRUSTED ledger (%s); alpha-P&L hwm CLEARED '
+                                   '— it re-seeds from the first trusted tick',
+                                   'pnl unavailable' if pnl is None
+                                   else f"recon={int(pnl.get('recon', 0) or 0)}")
                 state = {'halted': False, 'reason': None, 'breached_at': None,
                          'peak': None, 'dd': None, 'daily': None,
                          'pending_flatten': False}
-                if trusted:
+                if pnl is not None:
+                    # the pre-clear hwm/dd_pnl in `pnl` are stale; the stored HWM
+                    # is now alpha_pnl (trusted) or NULL (which seeds to
+                    # alpha_pnl) — so this tick's displayed/evaluated values are
+                    # hwm = alpha_pnl, dd_pnl = 0. Persistence is separately
+                    # gated (peak_pnl_w None while distrusted).
                     pnl['hwm'], pnl['dd_pnl'] = pnl['alpha_pnl'], 0.0
             else:
                 logger.error('[account_breaker] re-arm failed to persist '

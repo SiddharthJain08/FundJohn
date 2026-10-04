@@ -219,6 +219,10 @@ class FakeDB:
             self.peak_pnl = params[0]
         elif 'rearmed_at = NOW()' in f:
             self.halted = False
+            if 'peak_alpha_pnl = NULL' in f:
+                self.peak_pnl = None
+            elif 'peak_alpha_pnl = %s' in f:
+                self.peak_pnl = params[0]
         if 'peak_alpha_nav =' in f and f.startswith('UPDATE'):
             self.peak_nav_writes += 1
 
@@ -300,10 +304,10 @@ def test_clear_halt_resets_hwm_not_epoch():
     assert ab.clear_halt(db, 9_000.0, alpha_pnl_now=1_234.0) is True
     assert db.peak_pnl == 1_234.0 and db.epoch_at == EPOCH
     assert db.sql('alpha_epoch_at =') == [] and db.epoch_inserts == 0
-    # legacy-only callers (no alpha_pnl_now) leave the hwm alone
+    # no alpha_pnl_now (distrusted ledger): the hwm is CLEARED in the same UPDATE
     db2 = FakeDB(peak_pnl=5_000.0, epoch_at=EPOCH)
     ab.clear_halt(db2, 9_000.0)
-    assert db2.peak_pnl == 5_000.0
+    assert db2.peak_pnl is None and db2.sql('SET peak_alpha_pnl') == []
 
 
 def test_save_state_persists_peak_alpha_pnl_after_the_latch_write():
@@ -930,14 +934,125 @@ def test_clean_recon_still_persists_the_hwm(wired):
     assert db.peak_pnl == 500.0
 
 
-def test_rearm_on_a_recon_mismatch_tick_does_not_reset_the_hwm(wired, monkeypatch):
-    breached = datetime(2026, 9, 29, 15, 0, tzinfo=timezone.utc)
-    monkeypatch.setenv(ab.REARM_ENV, breached.isoformat())
-    db = _recon_db_low_peak(halted=True, breached_at=breached)
+BREACHED = datetime(2026, 9, 29, 15, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def notices(monkeypatch):
+    got = []
+    monkeypatch.setattr(ab, 'post_fallback_notice',
+                        lambda now=None: got.append(1) or True)
+    return got
+
+
+def _rearm_updates(db):
+    return db.sql('rearmed_at = NOW()')
+
+
+def _untrusted_rearm_assertions(db, caplog, why):
+    ups = _rearm_updates(db)
+    assert len(ups) == 1 and 'peak_alpha_pnl = NULL' in ups[0][0] and not ups[0][1]
+    assert db.halted is False and db.peak_pnl is None
+    assert db.sql('SET peak_alpha_pnl') == []        # no separate HWM write, none persisted
+    w = [r.getMessage() for r in caplog.records if r.levelname == 'WARNING'
+         and 're-armed by operator token on an UNTRUSTED ledger' in r.getMessage()]
+    assert len(w) == 1 and why in w[0] and 'hwm CLEARED' in w[0]
+    assert not any('DEFERRED' in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize('armed', [False, True])
+def test_rearm_on_a_recon_mismatch_tick_clears_latch_and_hwm(
+        wired, monkeypatch, caplog, notices, no_flatten, armed):
+    monkeypatch.setenv(ab.REARM_ENV, BREACHED.isoformat())
+    if armed:
+        monkeypatch.setenv(ab.ARM_ENV, '1')
+    db = _recon_db_low_peak(halted=True, breached_at=BREACHED)
     wired['install'](db, 100_000.0, _recon_book())
-    assert ab.run_once(session_date=SESSION) == 0
-    assert db.sql('SET peak_alpha_pnl') == [] and db.peak_pnl == 100.0
-    assert db.sql('rearmed_at = NOW()')            # the re-arm itself still happened
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        assert ab.run_once(session_date=SESSION) == 0
+    _untrusted_rearm_assertions(db, caplog, 'recon=1')
+    assert 'halted=0' in _last_line(caplog) and 'rule=none' in _last_line(caplog)
+    assert no_flatten == []
+    if armed:
+        assert 'dd_pnl=n/a' in _last_line(caplog)     # drawdown skipped (P2)
+    assert len(notices) == (1 if armed else 0)        # only the pre-existing armed P2 notice
+
+
+@pytest.mark.parametrize('armed', [False, True])
+def test_rearm_on_a_pnl_unavailable_tick_clears_latch_and_hwm(
+        wired, monkeypatch, caplog, notices, no_flatten, armed):
+    monkeypatch.setenv(ab.REARM_ENV, BREACHED.isoformat())
+    if armed:
+        monkeypatch.setenv(ab.ARM_ENV, '1')
+    monkeypatch.setattr(ab, 'compute_alpha_pnl_tick', lambda *a, **k: None)
+    db = _recon_db_low_peak(halted=True, breached_at=BREACHED)
+    wired['install'](db, 100_000.0, BOOK)
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        assert ab.run_once(session_date=SESSION) == 0
+    _untrusted_rearm_assertions(db, caplog, 'pnl unavailable')
+    assert 'halted=0' in _last_line(caplog) and 'dd_pnl=n/a' in _last_line(caplog)
+    assert len(notices) == (1 if armed else 0)
+
+
+@pytest.mark.parametrize('armed', [False, True])
+def test_rearm_on_a_trusted_tick_sets_hwm_in_the_same_update(
+        wired, monkeypatch, caplog, notices, armed):
+    monkeypatch.setenv(ab.REARM_ENV, BREACHED.isoformat())
+    if armed:
+        monkeypatch.setenv(ab.ARM_ENV, '1')
+    db = _recon_db_low_peak(halted=True, breached_at=BREACHED)
+    wired['install'](db, 100_000.0,
+                     {'AAPL': _pos(100, 100, 105), 'SPY': _pos(1, 1, 1, mv=1_000)})
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        assert ab.run_once(session_date=SESSION) == 0
+    ups = _rearm_updates(db)
+    assert len(ups) == 1 and 'peak_alpha_pnl = %s' in ups[0][0] and ups[0][1] == (500.0,)
+    assert db.halted is False and db.peak_pnl == 500.0
+    assert any('alpha-P&L hwm reset to 500.00' in r.getMessage() for r in caplog.records)
+    assert 'dd_pnl=0.0000' in _last_line(caplog) and notices == []
+
+
+def test_distrusted_rearm_then_trusted_tick_seeds_hwm_and_does_not_relatch(
+        wired, monkeypatch, caplog, notices, no_flatten):
+    monkeypatch.setenv(ab.REARM_ENV, BREACHED.isoformat())
+    monkeypatch.setenv(ab.ARM_ENV, '1')
+    # pre-halt peak 20_000 is far above alpha_pnl 500: the old behaviour re-latched
+    db = FakeDB(peak_pnl=20_000.0, epoch_at=EPOCH, halted=True, breached_at=BREACHED,
+                lots=[{'ticker': 'AAPL', 'qty': 100, 'avg_entry_price': 100, 'side': 'long'}])
+    wired['install'](db, 100_000.0, _recon_book())            # tick 1: recon=1
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        ab.run_once(session_date=SESSION)
+    assert db.halted is False and db.peak_pnl is None
+    monkeypatch.delenv(ab.REARM_ENV)                           # operator removes the token
+    wired['install'](db, 100_000.0,                            # tick 2: clean ledger
+                     {'AAPL': _pos(100, 100, 105), 'SPY': _pos(1, 1, 1, mv=1_000)})
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        ab.run_once(session_date=SESSION)
+    assert db.peak_pnl == 500.0                                # seeded + persisted
+    assert db.halted is False and no_flatten == []
+    assert 'dd_pnl=0.0000' in _last_line(caplog) and 'breach=0' in _last_line(caplog)
+
+
+@pytest.mark.parametrize('armed', [False, True])
+def test_failed_clear_halt_write_keeps_the_latch_and_retries(
+        wired, monkeypatch, caplog, notices, no_flatten, armed):
+    monkeypatch.setenv(ab.REARM_ENV, BREACHED.isoformat())
+    if armed:
+        monkeypatch.setenv(ab.ARM_ENV, '1')
+    db = _recon_db_low_peak(halted=True, breached_at=BREACHED)
+    wired['install'](db, 100_000.0, _recon_book())
+    real, fail = ab.clear_halt, [True]
+    monkeypatch.setattr(ab, 'clear_halt',
+                        lambda *a, **k: False if fail[0] else real(*a, **k))
+    with caplog.at_level('INFO', logger=ab.logger.name):
+        ab.run_once(session_date=SESSION)
+    assert db.halted is True and db.peak_pnl == 100.0
+    assert any('re-arm failed to persist' in r.getMessage() for r in caplog.records)
+    assert 'halted=1' in _last_line(caplog)
+    fail[0] = False                                            # next tick: write works
+    wired['install'](db, 100_000.0, _recon_book())
+    ab.run_once(session_date=SESSION)
+    assert db.halted is False
 
 
 def test_capped_tick_without_forward_progress_logs_an_error(monkeypatch, caplog):
