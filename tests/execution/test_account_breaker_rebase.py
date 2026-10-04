@@ -392,8 +392,10 @@ def test_lagged_closing_fill_not_yet_ingested_blocks_the_first_tick_then_restart
     assert r2['rebased'] == 0 and db.rebase_inserts == 0 and env['calls'] == []
     assert db.watch['AAPL'][0] == env['now'] and db.watch['AAPL'][4] == 60.0   # episode restarted
     env['now'] += timedelta(seconds=300)
-    r3 = _tick(db, SPLIT_BOOK)                           # stable pair, explained
-    assert r3['rebased'] == 1 and r3['recon'] == 0
+    r3 = _tick(db, SPLIT_BOOK)                           # stable pair (60, 160) — but 8:3 is not a
+    # split ratio (R2 whitelist), so the no-qty SPLIT activity does NOT explain it: a mismatch that
+    # absorbed a lagged fill is left to the operator rather than auto-rebased.
+    assert r3['rebased'] == 0 and r3['recon'] == 1 and db.rebase_inserts == 0
 
 
 def test_fill_landing_between_two_ticks_changes_the_pair_and_restarts(env):
@@ -795,7 +797,8 @@ def test_r2_plausible_split_ratios_pass_on_broker_qty_and_no_qty_paths(ledger, b
     assert q({}, 'symbol', 'SPLIT', ledger, broker)                       # no usable quantity
 
 
-@pytest.mark.parametrize('ledger, broker', [(100, 137), (100, 0), (0, 50), (100, -100)])
+@pytest.mark.parametrize('ledger, broker', [(100, 137), (100, 0), (0, 50), (100, -100),
+                                            (100, 95), (100, 90), (100, 85), (50, 45)])
 def test_r2_implausible_ratio_is_not_explained(ledger, broker):
     q = ab._quantity_consistent
     assert not q({}, 'symbol', 'SPLIT', ledger, broker)
@@ -911,3 +914,15 @@ def test_r1_operator_rebase_with_realized_adjust_clears_the_marker_and_moves_alp
     after = _tick(db, SPLIT_BOOK)
     assert after['recon'] == 0 and after['rebased'] == 0
     assert after['alpha_pnl'] - before['alpha_pnl'] == pytest.approx(100.0)   # exactly the adjustment
+
+
+
+@pytest.mark.parametrize('bad', [float('nan'), float('inf'), float('-inf')])
+def test_operator_rebase_refuses_a_non_finite_realized_adjust(env, bad):
+    """A NaN carry would make alpha_pnl/dd NaN and silently kill the drawdown rule."""
+    db = FakeDB(lots=[_epoch_row('AAPL', 100, 100)], fills=[])
+    conn, out = FakeConn(db), []
+    rc = ab.rebase_cli(db, conn, SPLIT_BOOK, {'SPY'}, ['AAPL'], 'x', True,
+                       now=env['now'], realized_adjust=bad, out=out.append)
+    assert rc == 2 and db.rebase_inserts == 0
+    assert 'finite' in '\n'.join(out)

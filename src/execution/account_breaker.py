@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -1655,17 +1656,23 @@ def _qty_tol(broker_q) -> float:
     return 1e-4 * max(1.0, abs(broker_q))
 
 
+# R2 (re-review 2026-10-04): a p/q grid up to 20x20 accepted nearly every round-lot
+# missing fill (100 -> 95 is 19/20), i.e. it filtered nothing in exactly the case it
+# exists for. Only ratios real splits use are plausible — these or their inverses.
+_SPLIT_RATIOS = (2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 25, 30, 40, 50, 100,
+                 3 / 2, 4 / 3, 5 / 4, 5 / 2, 5 / 3)
+
+
 def _ratio_plausible(ledger_q, broker_q) -> bool:
-    """R2: broker_q / ledger_q is a split-like ratio p/q of small positive integers
-    (p, q <= 20: 2:1, 3:2, 1:10 reverse...) within the recon tolerance. A ledger
-    qty of 0 (nothing to scale) or a sign change is never plausible."""
+    """R2: broker_q / ledger_q is a COMMON split ratio (or its inverse — a reverse
+    split) from `_SPLIT_RATIOS`, within the recon tolerance. A ledger qty of 0
+    (nothing to scale) or a sign change is never plausible."""
     if not ledger_q or ledger_q * broker_q <= 0:
         return False
     tol = _qty_tol(broker_q)
-    for p in range(1, 21):
-        for q in range(1, 21):
-            if abs(broker_q - ledger_q * p / q) <= tol:
-                return True
+    for r in _SPLIT_RATIOS:
+        if abs(broker_q - ledger_q * r) <= tol or abs(broker_q - ledger_q / r) <= tol:
+            return True
     return False
 
 
@@ -2550,9 +2557,18 @@ def rebase_cli(cur, conn, positions, bench, tickers, reason, apply, *,
     markers = _late_markers(watch)
     before = _force_late(before, markers)          # R1: an open late-fill marker is a mismatch
     mism = before.get('mismatch') or {}
-    adj = float(realized_adjust or 0.0)
+    try:
+        adj = float(realized_adjust or 0.0)
+    except (TypeError, ValueError):
+        adj = float('nan')
 
     refusals, plan = [], []
+    if not math.isfinite(adj):
+        # re-review 2026-10-04: argparse type=float accepts nan/inf; a NaN carry
+        # makes alpha_pnl and dd NaN, `dd <= DD_LIMIT` is then never true and the
+        # drawdown rule dies silently (the cent-continuity check passes on NaN).
+        refusals.append('--realized-adjust must be a finite number')
+        adj = 0.0
     for k in tickers:
         sym, p = _broker_position(positions, k)
         if k in bench:
