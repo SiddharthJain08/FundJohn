@@ -1,4 +1,6 @@
 'use strict';
+// These tests pin policy v2 (no bench leg); spec §9 Amendment 2 kill switch keeps them on v2.
+process.env.OPENCLAW_PROMOTION_BENCH_GATE = '0';
 const test = require('node:test');
 const assert = require('node:assert');
 const { evaluatePromotionGate, computeQualifyingRegimes } = require('../../src/lib/promotion_service');

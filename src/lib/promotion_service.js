@@ -1,4 +1,5 @@
 'use strict';
+const { clampExcessValue } = require('../channels/api/activation_preview');
 // Shared promotion gate + transition core. Single source both the dashboard
 // /transition route AND the Discord /approve-strategy call, so the engine's
 // trade-gate (strategy_registry.status='approved') can only be reached through
@@ -11,12 +12,21 @@
 //   max_dd_pct of the SLEEVE ≤ max_drawdown_pct (same class values as before,
 //     now judged per regime, not total-window),
 //   trade_count of the SLEEVE ≥ min_trades (100).
-// It then goes live in exactly its qualifying regimes. Post-promotion, live
-// execution is gated by bench-relative activation (spec 2026-09-25-
-// activation-bench-relative: sharpe[r] >= S_beta_spy's own per-regime
-// Sharpe, hysteresis 0.10 → activation_assigner; the min-Sharpe SLIDER
-// this used to be is RETIRED), so this entry gate is deliberately
-// permissive; the bench comparator is the risk dial.
+// It then goes live in exactly its qualifying regimes.
+// Amendment 2 (operator ruling 2026-10-04, spec 2026-09-25-activation-bench-
+// relative §9): a fourth, BENCH leg — the sleeve must also clear the
+// activation ENTRY threshold, sharpe[r] >= bench[r] + excess (bench =
+// pipeline_config.strategy_activation_bench_sharpe, excess =
+// strategy_activation_excess_sharpe; no hysteresis band, that is
+// deactivate-only). The v2 gate was deliberately permissive and left the
+// bench comparator to activation alone; the two disagreeing produced a weekly
+// promote -> activate-nowhere -> auto-demote loop (S_sparse_cca_mean_revert:
+// 08-22 / 09-28 / 10-03), so promotion now implies >= 1 activatable regime.
+// Fail-safe: a missing/malformed bench entry or a config read error falls
+// back to 0.5 per regime (never 0) with one WARN. Benchmark sleeves are exempt;
+// `force` bypasses everything; kill switch OPENCLAW_PROMOTION_BENCH_GATE=0
+// restores v2 exactly (read at call time). Post-promotion, live execution is
+// still gated by bench-relative activation (activation_assigner).
 // 2026-07-27 Calmar escape hatch on the DD leg (mirrors lifecycle.py): max DD
 // is a running-max extreme that deepens mechanically with backtest duration /
 // breadth, so the flat ceiling systematically killed long-history sleeves
@@ -33,6 +43,69 @@ const PROMOTION_THRESHOLDS = {
   option: { min_sharpe: 0, max_drawdown_pct: 30, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 60 },
   crypto: { min_sharpe: 0, max_drawdown_pct: 70, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 85 },
 };
+// ── Amendment 2: bench leg ──────────────────────────────────────────────────
+const BENCH_KEY = 'strategy_activation_bench_sharpe';
+const EXCESS_KEY = 'strategy_activation_excess_sharpe';
+const BENCH_FALLBACK = 0.5;   // activation_assigner DEFAULT_MIN_SHARPE (tier 3)
+function benchGateEnabled() { return process.env.OPENCLAW_PROMOTION_BENCH_GATE !== '0'; }
+// Benchmark-sleeve exemption: registry parameters.benchmark_sleeve = 'true'
+// (same source as channels/api/server.js, reachable through dbQuery; the
+// manifest is not). A failed lookup does NOT exempt — fail closed.
+async function _isBenchmarkSleeve(dbQuery, sid) {
+  try {
+    const r = await dbQuery(
+      `SELECT 1 FROM strategy_registry WHERE id = $1 AND (parameters ->> 'benchmark_sleeve') = 'true'`, [sid]);
+    return !!(r && r.rows && r.rows.length > 0);
+  } catch (_) { return false; }
+}
+// One config query for both keys. Returns { bench: {regime: number}, excess }
+// with EVERY canonical regime present. One console.warn per call lists every
+// regime that fell back to BENCH_FALLBACK.
+async function _loadBenchVector(dbQuery) {
+  const bench = {};
+  let excess = 0;
+  let raw = null, why = null;
+  try {
+    const r = await dbQuery(`SELECT key, value FROM pipeline_config WHERE key = ANY($1)`, [[BENCH_KEY, EXCESS_KEY]]);
+    const rows = (r && r.rows) || [];
+    const bRow = rows.find(x => x.key === BENCH_KEY);
+    const eRow = rows.find(x => x.key === EXCESS_KEY);
+    if (eRow && eRow.value != null) {
+      const e = clampExcessValue(eRow.value);
+      excess = e == null ? 0 : e;
+    }
+    if (!bRow || bRow.value == null) why = `${BENCH_KEY} not set`;
+    else {
+      try { raw = typeof bRow.value === 'string' ? JSON.parse(bRow.value) : bRow.value; }
+      catch (_) { why = `${BENCH_KEY} is not valid JSON`; }
+      if (!why && (raw == null || typeof raw !== 'object' || Array.isArray(raw))) { why = `${BENCH_KEY} is not an object`; raw = null; }
+    }
+  } catch (e) { why = `config read failed (${e && e.message})`; }
+  const fell = [];
+  for (const regime of CANONICAL_REGIMES) {
+    const v = raw ? raw[regime] : undefined;
+    const n = (typeof v === 'number' || (typeof v === 'string' && v.trim() !== '')) ? Number(v) : NaN;
+    if (Number.isFinite(n)) bench[regime] = n;
+    else { bench[regime] = BENCH_FALLBACK; fell.push(regime); }
+  }
+  if (fell.length > 0) {
+    console.warn(`[promotion_service] WARN: bench vector degraded (${why || 'regime missing/non-finite'}); `
+      + `using ${BENCH_FALLBACK} for ${fell.join(',')}`);
+  }
+  return { bench, excess };
+}
+// Activation ENTRY threshold for one regime — same rounding as the assigner's _judge.
+function _benchThreshold(vec, regime) {
+  const b = vec.bench[regime] != null ? vec.bench[regime] : BENCH_FALLBACK;
+  return vec.excess === 0 ? b : Math.round((b + vec.excess) * 1e10) / 1e10;
+}
+// Resolve the bench vector for one gate evaluation, or null when the leg does
+// not apply (kill switch, or benchmark sleeve).
+async function _benchContext(dbQuery, sid) {
+  if (!benchGateEnabled()) return null;
+  if (await _isBenchmarkSleeve(dbQuery, sid)) return null;
+  return _loadBenchVector(dbQuery);
+}
 const CANONICAL_REGIMES = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
 function getPromotionThreshold(instrumentClass) {
   return PROMOTION_THRESHOLDS[instrumentClass] || PROMOTION_THRESHOLDS.equity;
@@ -41,13 +114,16 @@ function getPromotionThreshold(instrumentClass) {
 // must not go live until the live mirror (Phase 2) is enabled.
 function exitHookLiveEnabled() { return process.env.OPENCLAW_EXIT_HOOK_LIVE === '1'; }
 // Judge ONE regime sleeve row against the class thresholds. Returns the list
-// of failed gate kinds ('no_backtest' | 'sharpe' | 'max_dd' | 'trades'); an
+// of failed gate kinds ('no_backtest' | 'sharpe' | 'max_dd' | 'trades' | 'bench'); an
 // empty list means the sleeve qualifies. Missing row / NULL metric fails
 // closed as no_backtest — never a silent pass.
 //
-// `ctx` is accepted for call-site compatibility (callers pass
-// {instrumentClass, sid, regime}) and is unused since 2026-08-29 (spec D1:
-// the R1 benchmark leg was removed; SPY's regime Sharpe sizes, it never gates).
+// `ctx` ({instrumentClass, sid, regime}) is call-site metadata, plus the
+// optional `ctx.benchThreshold` (Amendment 2): when a finite number, the
+// sleeve must also satisfy sharpe >= benchThreshold or 'bench' is appended.
+// Undefined (kill switch, benchmark sleeve, other callers) = the v2 behaviour.
+// (2026-08-29 D1 removed the old R1 leg; Amendment 2 restores a bench leg for
+// the promotion gate only, on the activation entry threshold.)
 function judgeRegimeSleeve(row, thresholds, ctx = {}) {
   const s  = row && row.sharpe      != null ? parseFloat(row.sharpe)          : NaN;
   const dd = row && row.max_dd_pct  != null ? parseFloat(row.max_dd_pct)      : NaN;
@@ -65,6 +141,8 @@ function judgeRegimeSleeve(row, thresholds, ctx = {}) {
   if (!(s > thresholds.min_sharpe)) fails.push('sharpe');          // strict: must EXCEED
   if (!ddOk) fails.push('max_dd');
   if (n < thresholds.min_trades) fails.push('trades');
+  if (ctx && typeof ctx.benchThreshold === 'number' && Number.isFinite(ctx.benchThreshold)
+      && !(s >= ctx.benchThreshold)) fails.push('bench');
   return fails;
 }
 async function _latestPrimaryRun(dbQuery, sid) {
@@ -151,16 +229,19 @@ async function computeQualifyingRegimes({ dbQuery, sid, instrumentClass }) {
   if (await _holdCapMismatch(dbQuery, sid, run)) { out.exit_hook_hold_cap_mismatch = true; return out; }
   const byRegime = await _regimeSleeves(dbQuery, run.runId);
   if (!byRegime) return out;                       // no sleeves recorded → nothing qualifies
+  const bctx = await _benchContext(dbQuery, sid);
   for (const regime of CANONICAL_REGIMES) {
     const row = byRegime.get(regime);
     if (!row) continue;                            // strategy never fired in this regime
-    const fails = judgeRegimeSleeve(row, thresholds, { instrumentClass, sid, regime });
+    const thr = bctx ? _benchThreshold(bctx, regime) : undefined;
+    const fails = judgeRegimeSleeve(row, thresholds, { instrumentClass, sid, regime, benchThreshold: thr });
     out.diag[regime] = {
       sharpe: row.sharpe != null ? parseFloat(row.sharpe) : null,
       trade_count: row.trade_count != null ? parseInt(row.trade_count, 10) : null,
       max_dd_pct: row.max_dd_pct != null ? parseFloat(row.max_dd_pct) : null,
       failed: fails,
     };
+    if (bctx) { out.diag[regime].bench = bctx.bench[regime]; out.diag[regime].threshold = thr; }
     if (fails.length === 0) out.qualifying.push(regime);
   }
   return out;
@@ -186,13 +267,18 @@ async function evaluatePromotionGate({ dbQuery, sid, instrumentClass, force, eli
   const byRegime = await _regimeSleeves(dbQuery, run.runId);
   const named = Array.isArray(eligibleRegimes) && eligibleRegimes.length > 0;
   const failedGates = [];
+  // Amendment 2 bench leg: resolved once per evaluation, only when sleeves are
+  // judged (the legacy total-window fallback below has no per-regime sleeve).
+  const bctx = (named || (byRegime && byRegime.size > 0)) ? await _benchContext(dbQuery, sid) : null;
+  const ctxFor = (regime) => ({ instrumentClass, sid, regime,
+    benchThreshold: bctx ? _benchThreshold(bctx, regime) : undefined });
   if (named) {
     // Caller names the activation set → EVERY named regime must qualify on
     // its own sleeve (all three gates). Fail tags are regime-qualified:
     // 'sharpe:CRISIS', 'max_dd:LOW_VOL', 'trades:HIGH_VOL', 'no_backtest:R'.
     const qualifying = [];
     for (const regime of eligibleRegimes) {
-      const fails = byRegime ? judgeRegimeSleeve(byRegime.get(regime), thresholds, { instrumentClass, sid, regime }) : ['no_backtest'];
+      const fails = byRegime ? judgeRegimeSleeve(byRegime.get(regime), thresholds, ctxFor(regime)) : ['no_backtest'];
       if (fails.length === 0) qualifying.push(regime);
       for (const f of fails) failedGates.push(`${f}:${regime}`);
     }
@@ -206,7 +292,7 @@ async function evaluatePromotionGate({ dbQuery, sid, instrumentClass, force, eli
     for (const regime of CANONICAL_REGIMES) {
       const row = byRegime.get(regime);
       if (!row) continue;
-      const fails = judgeRegimeSleeve(row, thresholds, { instrumentClass, sid, regime });
+      const fails = judgeRegimeSleeve(row, thresholds, ctxFor(regime));
       if (fails.length === 0) qualifying.push(regime);
       else for (const f of fails) diagFails.push(`${f}:${regime}`);
     }
