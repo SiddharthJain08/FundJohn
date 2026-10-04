@@ -259,7 +259,7 @@ function buildCoderContext(strategySpec, variantDirective = null) {
     role:          'implement_strategy',
     STRATEGY_SPEC: JSON.stringify(strategySpec),
     instructions:  'Implement this strategy. Apply fundjohn:strategy-coder and fundjohn:backtest-plumb skills.',
-    INFERRED_UNIVERSE_FILTER:  validInferred,  // null or one of the 16 CANDIDATE_PREDICATES (12 legacy + 4 SP-7 tier ladder)
+    INFERRED_UNIVERSE_FILTER:  validInferred,  // null or one of the 20 CANDIDATE_PREDICATES (12 legacy + 4 SP-7 tier ladder + 4 stocks_*; the ladder/stocks tiers are not on the PaperHunter mint menu)
     INFERRED_INSTRUMENT_CLASS: validClass,     // equity (default/gate-off) | option | etp | crypto | futures
   };
   // Porting mode (Blueprint Fast Lane): git-imported strategies arrive with

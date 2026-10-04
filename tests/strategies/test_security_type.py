@@ -44,6 +44,8 @@ def _meta(**over):
     ({'_fetched_at': 'x', '_empty': True}, None),
     ({}, None), (None, None), ('junk', None),
     ({'sector': 'Tech', 'mktCap': 1.0}, None),   # legacy entry, no flags -> unknown
+    ({'isEtf': False, 'isFund': False, 'isAdr': True, 'industry': 'Shell Companies'}, 'spac'),
+    ({'isEtf': True, 'industry': 'Shell Companies'}, 'etf'),
 ])
 def test_security_type_from_profile(profile, expected):
     assert security_type_from_profile(profile) == expected
@@ -249,3 +251,102 @@ def test_migration_163_strictly_additive():
     assert not re.search(r'\b(DROP|DELETE|TRUNCATE|RENAME|UPDATE)\b', body, re.I)
     assert re.search(r'ADD COLUMN IF NOT EXISTS security_type TEXT', body)
     assert 'COMMENT ON COLUMN ticker_metadata_snapshots.security_type' in body
+
+
+def test_overlay_failure_is_fail_open_and_memoized(monkeypatch):
+    """A failing LATEST_SECURITY_TYPE_SQL (after the column probe passed) must not
+    break the existing metadata read: rows load with security_type None, the
+    connection is rolled back, and the failing query is not re-issued."""
+    from src.strategies import _db_adapters as dba
+
+    class Cur(_FakeCur):
+        def execute(self, sql, params=None):
+            self.executed.append(sql)
+            if sql is dba.LATEST_SECURITY_TYPE_SQL:
+                raise RuntimeError('statement timeout')
+
+    class Conn:
+        def __init__(self): self.c = Cur(True, {}); self.c.executed = []; self.rollbacks = 0
+        def cursor(self): return self.c
+        def rollback(self): self.rollbacks += 1
+
+    conn = Conn()
+    monkeypatch.setattr(dba.PostgresMetadataDB, '_fetch',
+                        lambda self, c, as_of: [_Row(_meta(symbol='AAPL')), _Row(_meta(symbol='SPY'))])
+    db = dba.PostgresMetadataDB('dsn', conn=conn)
+    rows = db.fetch_metadata_as_of(AS_OF)
+    assert [r.metadata.symbol for r in rows] == ['AAPL', 'SPY']
+    assert all(r.metadata.security_type is None for r in rows)
+    assert conn.rollbacks == 1
+    db.fetch_metadata_as_of(date(2026, 1, 2))          # next as_of
+    assert conn.c.executed.count(dba.LATEST_SECURITY_TYPE_SQL) == 1   # not retried
+
+
+# ── expanded mapping: instruments that are not common equity ─────────────────
+def _p(name, industry='Software', adr=False):
+    return {'isEtf': False, 'isFund': False, 'isAdr': adr, 'companyName': name, 'industry': industry}
+
+
+@pytest.mark.parametrize('name,industry,expected', [
+    # caught (real names from the vendor cache)
+    ('Revolution Medicines, Inc. Warrant', 'Biotechnology', 'deriv'),                      # RVMDW
+    ('Duke Energy Corporation Units 1.08.29', 'Regulated Electric', 'deriv'),              # DUKU
+    ('Gen Digital Inc. Contingent Value Rights', 'Software - Infrastructure', 'deriv'),
+    ('Prudential Financial, Inc. 4.125% Junior Subordinated Notes due 2060', 'Insurance - Life', 'pref'),  # PFH
+    ('MicroStrategy Incorporated 10.00% Series A Perpetual Strife Preferred Stock', 'Software - Application', 'pref'),  # STRF
+    ('AGNC Investment Corp. 8.75% Series H Fixed-Rate Cumulative Redeemable Preferred Stock', 'REIT - Mortgage', 'pref'),  # AGNCZ
+    ('Alphabet Inc. Depository Shs Repr 1/20th Conv Pfd Registered Shs', 'Software - Application', 'pref'),
+    ('Churchill Capital Corp XI', 'Shell Companies', 'spac'),
+    ('Churchill Capital Corp XI Units', 'Shell Companies', 'spac'),                        # spac outranks deriv
+    ('Cohen & Steers REIT and Preferred Income Fund, Inc.', 'Asset Management', 'cef'),    # RNP (not pref)
+    ('Blackstone Secured Lending Fund', 'Asset Management', 'cef'),                        # BXSL
+    ('MSC Income Fund, Inc.', 'Asset Management', 'cef'),                                  # MSIF
+    ('Ares Capital Corporation', 'Asset Management', 'cef'),
+    # must stay stock / adr
+    ('Apple Inc.', 'Consumer Electronics', 'stock'),
+    ('BlackRock, Inc.', 'Asset Management', 'stock'),
+    ('T. Rowe Price Group, Inc.', 'Asset Management', 'stock'),
+    ('Blue Owl Capital Inc.', 'Asset Management', 'stock'),
+    ('Invesco Ltd.', 'Asset Management', 'stock'),
+    ('United Rentals, Inc.', 'Rental & Leasing Services', 'stock'),
+    ('United Parcel Service, Inc.', 'Integrated Freight & Logistics', 'stock'),
+    ('Unity Software Inc.', 'Software - Application', 'stock'),
+    ('Rightmove plc', 'Internet Content & Information', 'stock'),
+    ('Preferred Bank', 'Banks - Regional', 'stock'),
+    ('Senior Housing Properties Trust', 'REIT', 'stock'),
+    ('Noteworthy Medical Systems', 'Medical', 'stock'),
+    ('Arm Holdings plc American Depositary Shares', 'Semiconductors', 'stock'),
+])
+def test_expanded_mapping_conservative(name, industry, expected):
+    assert security_type_from_profile(_p(name, industry)) == expected
+
+
+def test_adr_still_adr_and_only_after_other_rules():
+    assert security_type_from_profile(_p('Taiwan Semiconductor Manufacturing Company Limited',
+                                         'Semiconductors', adr=True)) == 'adr'
+    assert security_type_from_profile(_p('Foo SA Warrants', adr=True)) == 'deriv'
+
+
+def test_common_stock_excludes_new_types():
+    for t in ('spac', 'deriv', 'pref', 'cef'):
+        assert ud.common_stock(_meta(security_type=t, in_sp500=True), AS_OF) is False
+
+
+_CACHE = Path('/root/openclaw/data/.cache/fmp_profile.json')
+
+
+@pytest.mark.skipif(not _CACHE.exists(), reason='vendor profile cache not on this box')
+def test_real_cache_names():
+    import json
+    d = json.loads(_CACHE.read_text())
+    caught = {'RVMDW': 'deriv', 'PFH': 'pref', 'STRF': 'pref', 'AGNCZ': 'pref',
+              'DUKU': 'deriv', 'RNP': 'cef', 'BXSL': 'cef', 'MSIF': 'cef'}
+    for sym, t in caught.items():
+        assert security_type_from_profile(d[sym]) == t, sym
+    spacs = [k for k, v in d.items() if security_type_from_profile(v) == 'spac']
+    assert len(spacs) > 100 and security_type_from_profile(d['CCXI']) == 'spac'
+    for sym in ('AAPL', 'BLK', 'TROW', 'URI', 'UPS', 'U', 'PFBC', 'BX', 'KKR'):
+        assert security_type_from_profile(d[sym]) == 'stock', sym
+    assert security_type_from_profile(d['TSM']) == 'adr'
+    assert security_type_from_profile(d['SPY']) == 'etf'
+    assert security_type_from_profile(d['BRK.B']) is None

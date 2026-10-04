@@ -12,12 +12,13 @@ import psycopg2
 from ..registry import check
 from ..types import Status
 
+try:
+    from src.strategies.universe_default import STOCK_TIER_BASE
+except ImportError:  # run with src/ on the path
+    from strategies.universe_default import STOCK_TIER_BASE  # type: ignore
+
 MEGA_CAPS = ('AAPL', 'MSFT', 'NVDA', 'JPM')
 PROBE_MONTHS = ('2021-07-31', '2023-06-30', '2025-06-30')
-
-
-STOCK_TIER_BASE = {'stocks_sp500': 'sp500', 'stocks_r1000': 'tier_r1000',
-                   'stocks_r3000': 'tier_r3000', 'stocks_liquid': 'tier_liquid'}
 
 
 def stock_tier_problems(df, types: dict) -> list:

@@ -218,15 +218,19 @@ def fetch_profile(symbol: str, api_key: str) -> Optional[dict]:
     return None  # unreachable
 
 
-def fetch_profile_with_alias(symbol: str, api_key: str, fetch=None) -> Optional[dict]:
+def fetch_profile_with_alias(symbol: str, api_key: str, fetch=None,
+                             sleep_s: float = 0.0, sleeper=None) -> Optional[dict]:
     """fetch_profile, but a dotted broker symbol (``BRK.B``) that FMP has no
     profile for is retried once in the vendor's hyphen form (``BRK-B``) before
     the caller writes a tombstone. The cache key stays the broker symbol.
-    Undotted symbols: exactly one fetch, as before. ``fetch`` is injectable
-    for tests (default: fetch_profile)."""
+    Undotted symbols: exactly one fetch, as before. The alias retry is a second
+    request for the same symbol, so it sleeps ``sleep_s`` first (the same
+    pacing as between symbols; 300 req/min). ``fetch`` / ``sleeper`` are
+    injectable for tests (default: fetch_profile / time.sleep)."""
     fetch = fetch or fetch_profile
     raw = fetch(symbol, api_key)
     if not raw and '.' in symbol:
+        (sleeper or time.sleep)(sleep_s)
         raw = fetch(symbol.replace('.', '-'), api_key)
     return raw
 
@@ -280,7 +284,7 @@ def main(argv=None) -> int:
     try:
         for i, sym in enumerate(todo, 1):
             try:
-                raw = fetch_profile_with_alias(sym, api_key)
+                raw = fetch_profile_with_alias(sym, api_key, sleep_s=args.sleep)
             except FMPAuthError:
                 raise
             except Exception as e:  # noqa: BLE001 — one bad symbol must not end the sweep

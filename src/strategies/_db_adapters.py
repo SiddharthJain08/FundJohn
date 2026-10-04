@@ -40,11 +40,23 @@ class PostgresMetadataDB:
         predicate ignores security_type; only stocks_* tiers read it."""
         if self._security_types is None:
             conn = conn if conn is not None else self._conn
-            if conn is not None:
-                self._security_types = self._fetch_security_types(conn)
-            else:
-                with psycopg2.connect(self._dsn) as c:
-                    self._security_types = self._fetch_security_types(c)
+            try:
+                if conn is not None:
+                    self._security_types = self._fetch_security_types(conn)
+                else:
+                    with psycopg2.connect(self._dsn) as c:
+                        self._security_types = self._fetch_security_types(c)
+            except Exception as e:  # noqa: BLE001 — FAIL-OPEN: no Phase-1 strategy reads it
+                import logging
+                logging.getLogger(__name__).warning(
+                    'security_type overlay unavailable (%s: %s) — continuing with '
+                    'unknown types; existing universes are unaffected', type(e).__name__, e)
+                if conn is not None:
+                    try:
+                        conn.rollback()   # leave the caller's transaction usable
+                    except Exception:  # noqa: BLE001
+                        pass
+                self._security_types = {}   # memoize: do not re-issue the failing query
         return self._security_types
 
     @staticmethod

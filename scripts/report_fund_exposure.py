@@ -23,7 +23,8 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Iterable, Optional
+from collections import Counter
+from typing import Iterable, Mapping, Optional, Union
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -46,17 +47,19 @@ def ticker_security_type(ticker: str, profiles: dict) -> Optional[str]:
     return t
 
 
-def fund_share(tickers: Iterable[str], profiles: dict) -> dict:
-    """{'total', 'fund', 'unknown', 'share'} over a list of per-trade tickers
-    (one entry per trade). share = fund / total (None when total == 0)."""
+def fund_share(trades: Union[Iterable[str], Mapping[str, int]], profiles: dict) -> dict:
+    """{'total', 'fund', 'unknown', 'share'}. `trades` is either {ticker: trade
+    count} (what the DB path supplies, via GROUP BY) or a list with one ticker
+    per trade. share = fund / total (None when total == 0)."""
+    counts = trades if isinstance(trades, Mapping) else Counter(trades)
     total = fund = unknown = 0
-    for tk in tickers:
-        total += 1
+    for tk, n in counts.items():
+        total += n
         t = ticker_security_type(tk, profiles)
         if t is None:
-            unknown += 1
+            unknown += n
         elif t in FUND_TYPES:
-            fund += 1
+            fund += n
     return {'total': total, 'fund': fund, 'unknown': unknown,
             'share': (fund / total) if total else None}
 
@@ -106,7 +109,7 @@ def format_table(rows: list[dict], min_share: float = 0.0) -> str:
 
 def fetch_inputs(dsn: str, strategy_ids: list[str]):
     """SELECT-only reads on a read-only session. Returns
-    (trades_by_strategy {sid: [ticker per trade]}, active_by_strategy {sid: bool})."""
+    (trades_by_strategy {sid: {ticker: trade count}}, active_by_strategy {sid: bool})."""
     import psycopg2
     conn = psycopg2.connect(dsn)
     try:
@@ -117,13 +120,17 @@ def fetch_inputs(dsn: str, strategy_ids: list[str]):
                   FROM strategy_backtest_runs WHERE primary_window
                  ORDER BY strategy_id, run_at DESC""")
             runs = {sid: rid for sid, rid in cur.fetchall() if sid in set(strategy_ids)}
-            trades: dict[str, list[str]] = {sid: [] for sid in runs}
+            trades: dict[str, dict[str, int]] = {sid: {} for sid in runs}
             by_run = {rid: sid for sid, rid in runs.items()}
             if by_run:
-                cur.execute("SELECT run_id::text, ticker FROM strategy_backtest_trades "
-                            "WHERE run_id::text = ANY(%s)", (list(by_run),))
-                for rid, tk in cur.fetchall():
-                    trades[by_run[rid]].append(tk)
+                # run_id compared as uuid (index-friendly, no cast on the key
+                # column) and aggregated in SQL: one row per (run, ticker).
+                cur.execute("SELECT run_id::text, ticker, count(*) "
+                            "FROM strategy_backtest_trades "
+                            "WHERE run_id = ANY(%s::uuid[]) GROUP BY 1, 2",
+                            (list(by_run),))
+                for rid, tk, n in cur.fetchall():
+                    trades[by_run[rid]][tk] = int(n)
             cur.execute("SELECT strategy_id, bool_or(eligible) FROM strategy_regime_params "
                         "GROUP BY strategy_id")
             active = {sid: bool(a) for sid, a in cur.fetchall()}

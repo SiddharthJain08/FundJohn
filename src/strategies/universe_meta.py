@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 from dataclasses import dataclass
 from datetime import date
 from typing import Iterable, Mapping, Optional
@@ -36,12 +37,36 @@ class TickerMetadata:
         return cls(**kw)
 
 
-SECURITY_TYPES = ("etf", "fund", "adr", "stock")
+SECURITY_TYPES = ("etf", "fund", "spac", "deriv", "pref", "cef", "adr", "stock")
+
+# companyName patterns (word-boundary, case-insensitive). Conservative by design:
+# a real operating company must stay 'stock' — e.g. "Unity Software", "United
+# Rentals", "Rightmove", "Preferred Bank" (bare words never match).
+_DERIV_RE = re.compile(r"\b(Warrants?|Units?|Rights?)\b", re.I)
+_PREF_RE = re.compile(
+    r"\bPreferred\s+(Stock|Shares?|Securities|Units?)\b"
+    r"|\bTrust\s+Preferred\b|\bPfd\b"
+    r"|\bNotes?\s+due\b|\bSenior\s+Notes?\b|\bSubordinated\b|\bDebentures?\b"
+    r"|\bJR\s?SUB\b|\bNTS\b"
+    r"|\bSeries\s+[A-Z0-9]+\b.*\bPreferred\b"
+    r"|\d\s*%",
+    re.I)
+_CEF_RE = re.compile(
+    r"\bFunds?\b|\bMunicipal\b|\bClosed[- ]End\b|\bLending\b|\bBDC\b"
+    r"|\b(Capital|Finance|Investment)\s+Corp(oration)?\.?$",
+    re.I)
 
 
 def security_type_from_profile(profile) -> Optional[str]:
     """The ONE mapping from a vendor profile dict (data/.cache/fmp_profile.json
-    entry) to a security type. Precedence etf > fund > adr > stock.
+    entry) to a security type. Precedence, top to bottom:
+
+      isEtf -> 'etf'; isFund -> 'fund';
+      industry == 'Shell Companies' -> 'spac';
+      companyName warrant/unit/right phrasing -> 'deriv';
+      companyName preferred/notes/debenture/subordinated/'%' phrasing -> 'pref';
+      industry startswith 'Asset Management' AND closed-end/BDC naming -> 'cef';
+      isAdr -> 'adr'; else 'stock'.
 
     Returns None (unknown) for a missing / empty / tombstoned (``_empty``)
     profile, and also for a non-empty profile that carries none of the
@@ -55,6 +80,16 @@ def security_type_from_profile(profile) -> Optional[str]:
         return "etf"
     if profile.get("isFund"):
         return "fund"
+    industry = profile.get("industry") or ""
+    name = profile.get("companyName") or ""
+    if industry == "Shell Companies":
+        return "spac"
+    if _DERIV_RE.search(name):
+        return "deriv"
+    if _PREF_RE.search(name):
+        return "pref"
+    if industry.startswith("Asset Management") and _CEF_RE.search(name):
+        return "cef"
     if profile.get("isAdr"):
         return "adr"
     return "stock"

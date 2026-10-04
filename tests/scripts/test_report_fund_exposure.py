@@ -56,3 +56,18 @@ def test_format_table_min_share_and_na():
              'backtest_universe_cap': None, 'any_regime_active': False}]
     t = rep.format_table(rows, min_share=0.05)
     assert '50.0' in t and 'n/a' in t and '\nC ' not in t
+
+
+def test_fund_share_from_grouped_counts_matches_per_trade_list():
+    counts = {'SPY': 2, 'VFIAX': 1, 'AAPL': 1, 'TSM': 1, 'NOPE': 1}
+    lst = ['SPY', 'SPY', 'VFIAX', 'AAPL', 'TSM', 'NOPE']
+    assert rep.fund_share(counts, P) == rep.fund_share(lst, P)
+    rows = rep.build_rows({'strategies': {'A': {'state': 'live', 'metadata': {}}}}, {'live'},
+                          {'A': counts}, P, {})
+    assert rows[0]['trades'] == 6 and rows[0]['fund_trades'] == 3
+
+
+def test_fetch_inputs_query_is_uuid_array_group_by():
+    import inspect
+    src = inspect.getsource(rep.fetch_inputs)
+    assert '::uuid[]' in src and 'GROUP BY 1, 2' in src and 'run_id::text =' not in src

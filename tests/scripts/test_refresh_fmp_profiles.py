@@ -145,3 +145,14 @@ def test_dotted_tombstone_marked_and_old_ones_retried():
     assert not mod.needs_refresh(old, NOW, 30)                      # no symbol -> legacy behaviour
     assert not mod.needs_refresh(_entry(1, _empty=True, _alias_tried=True), NOW, 30, 'BRK.B')
     assert mod.select_symbols(['BRK.B', 'ZZZZ'], {'BRK.B': old, 'ZZZZ': old}, NOW, 30, None) == ['BRK.B']
+
+
+def test_alias_retry_is_paced():
+    slept = []
+    mod.fetch_profile_with_alias('BRK.B', 'k', fetch=lambda s, k: None,
+                                 sleep_s=0.2, sleeper=slept.append)
+    assert slept == [0.2]
+    slept.clear()
+    mod.fetch_profile_with_alias('AAPL', 'k', fetch=lambda s, k: None,
+                                 sleep_s=0.2, sleeper=slept.append)
+    assert slept == []
