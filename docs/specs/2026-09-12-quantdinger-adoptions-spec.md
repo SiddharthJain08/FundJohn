@@ -240,6 +240,56 @@ dd_t               = (alpha_pnl_t − hwm_t) / equity_t        # NAV-denominated
 - The per-position breaker (C2) is unchanged. Denominator = broker equity (not the alpha slice) so a fixed dollar loss reads
   the same after any allocation shift, consistent with the daily-loss rule.
 
+### C1 — Amendment 2b (operator-ruled 2026-10-04 21:42 UTC: "brief the pre-arming blocker next"): bounded ledger distrust — per-ticker REBASE
+
+**Problem (Task 3 review, 2026-10-04).** `recon` flags any ticker whose ledger quantity (epoch lots + FILL activities) differs from
+the broker quantity. Broker events that change quantity WITHOUT a FILL activity — split / reverse split, spin-off, merger, symbol
+change, option exercise/assignment delivering stock, journal or ACATS transfer — leave `recon > 0` for that ticker PERMANENTLY
+(also after the position is closed: non-zero ledger qty vs broker 0). Under Amendment 2a/P2 an ARMED breaker then skips the
+drawdown rule forever, silently apart from the throttled notice. Harmless in shadow; a blocker for arming.
+
+**Rule.** Distrust must be bounded. A mismatched ticker is repaired by a per-ticker REBASE row, never by moving the epoch.
+
+- Storage (additive migration **162**): `account_breaker_alpha_epoch` gains `kind TEXT NOT NULL DEFAULT 'epoch'`
+  (`'epoch' | 'rebase'`), `realized_carry NUMERIC NOT NULL DEFAULT 0`, `reason TEXT`, `activity_ref TEXT`. Rows are append-only.
+  The table keeps one `epoch` row per ticker and any number of later `rebase` rows.
+- Ledger read: per ticker, the LATEST lot row (max `taken_at`) seeds the average-cost book with its `qty` / `avg_entry_price` /
+  `side`, only fills with `filled_at >` that row's `taken_at` are applied for that ticker, and that row's `realized_carry` is added
+  to the ticker's realized P&L. A ticker with no lot row is unchanged (all fills since the global epoch). With no `rebase` rows the
+  result is byte-identical to today.
+- A rebase of ticker `k` at time `t` writes: `qty`, `side`, `avg_entry_price` = the BROKER position at `t` (qty 0 / NULL avg when the
+  broker holds none), `realized_carry` = the ticker's ledger realized P&L up to `t` (carry of the previous lot row + realized from
+  fills since it), `kind='rebase'`, `reason`, `activity_ref`. Because the broker's own cost basis is carried through corporate
+  actions, `realized_carry + broker unrealized_pl` is continuous across the rebase: no P&L is invented or lost, and the high-water
+  mark is not touched.
+- AUTOMATIC rebase — only when the mismatch is EXPLAINED: on a tick where ticker `k` mismatches and its newest fill is older than
+  `REBASE_FILL_QUIET_S` (default 120 s — never rebase inside closing-fill lag), the breaker looks for a non-FILL account activity
+  for `k` (or, for symbol changes/mergers, referencing `k`) created since `k`'s latest lot row, among the corporate-action /
+  transfer types the broker reports (SPLIT, SPIN, MA, NC, REORG, OPEXC, OPASN, OPEXP, JNLS, ACATC, ACATS — the implementer pins the
+  exact list against the broker CLI/API reference and records it). Found ⇒ rebase with `reason='auto:<TYPE>'`,
+  `activity_ref=<activity id>`; INFO line; counted in a new shadow-line token `rebased=<n>` for that tick; the ledger is recomputed
+  in the same tick so `recon` drops. The activity lookup is one bounded call (page cap + wall-clock budget like P1); any failure ⇒
+  no rebase this tick (stay distrusted, retry next tick).
+- UNEXPLAINED mismatch (no such activity) is never auto-repaired — it may be a missing fill, i.e. unknown real P&L. The tick stays
+  distrusted (P2 unchanged). After `REBASE_ESCALATE_S` (default 1800 s) of continuous distrust on the same ticker, an operator notice
+  names the ticker, both quantities and the exact command. Continuity is tracked in an additive table
+  `account_breaker_recon_watch (ticker PK, first_seen_at, last_seen_at, notified_at)` (rows are upserted while mismatched and marked
+  cleared — `cleared_at` — when the ticker reconciles; never deleted).
+- OPERATOR rebase: `python3 src/execution/account_breaker.py --rebase TICKER[,TICKER…] [--reason TEXT] [--apply]` — dry-run by
+  default (prints ledger qty, broker qty, the row it would write and the alpha P&L before/after, which must be equal); `--apply`
+  writes `kind='rebase'`, `reason='operator:<text>'`. Refuses a ticker that currently reconciles, and refuses inside the fill-quiet
+  window.
+- Both modes: rebases happen in shadow too (they are ledger repairs, state rows only), so the shadow window exercises them before
+  arming.
+- Out of scope: reconstructing P&L for an unexplained mismatch; option-leg accounting (options stay excluded by asset class).
+
+**Acceptance.** (1) no rebase rows ⇒ ledger byte-identical (pin with the existing fixtures); (2) 2-for-1 split fixture: broker qty
+doubles / avg halves, SPLIT activity present ⇒ auto-rebase, `recon` 0 same tick, `alpha_pnl` continuous to the cent, hwm untouched;
+(3) symbol change: old key rebased to qty 0 with its realized carried, new key rebased to the broker lot; (4) unexplained mismatch ⇒
+no rebase, distrusted, notice after the escalation window, operator command repairs it; (5) mismatch inside the fill-quiet window ⇒
+no rebase; (6) activity lookup failure / page cap ⇒ no rebase, no crash; (7) rebase after the position is closed (ledger qty ≠ 0,
+broker 0); (8) migration 162 strictly additive.
+
 ### C2 Per-position circuit breaker: no regime exemption (ruling R2)
 - `src/execution/position_circuit_breaker.py` header + `:8-9`: remove the
   "skips HIGH_VOL/CRISIS (independent mode)" branch so the 2 %-of-NAV
