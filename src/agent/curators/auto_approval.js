@@ -14,7 +14,10 @@
  *      actor 'system:sunday-auto-approval' with NO eligible_regimes named →
  *      the per-regime qualification gate (promotion_service, policy
  *      2026-07-13 v2: sharpe > 0 AND sleeve max-DD ≤ class ceiling AND
- *      ≥ 100 trades, per regime) computes the qualifying set itself and the
+ *      ≥ 100 trades, per regime; PLUS, since spec 2026-09-25 §9 Amendment 2
+ *      (2026-10-04), sharpe[r] ≥ bench[r] + excess — the activation entry
+ *      threshold, so a promoted strategy is always activatable in ≥ 1
+ *      regime; kill switch OPENCLAW_PROMOTION_BENCH_GATE=0) computes the qualifying set itself and the
  *      route syncs strategy_regime_params to exactly those regimes.
  *      422 (no qualifying regime / no backtest) simply leaves it candidate —
  *      re-offered every Sunday as backtests refresh.
