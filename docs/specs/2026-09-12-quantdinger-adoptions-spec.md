@@ -290,6 +290,33 @@ no rebase, distrusted, notice after the escalation window, operator command repa
 no rebase; (6) activity lookup failure / page cap ⇒ no rebase, no crash; (7) rebase after the position is closed (ledger qty ≠ 0,
 broker 0); (8) migration 162 strictly additive.
 
+**Amendment 2b — AS BUILT (2026-10-04; three review rounds; where this differs from the text above, THIS governs).**
+- Activity codes verified live against the paper API: an unknown code is rejected with HTTP 400 for the WHOLE request.
+  AUTO-rebase types = `SPLIT, SPIN, SC, NC, MA, REORG` (the broker carries cost basis through). OPERATOR-ONLY types =
+  `OPASN, OPEXC, JNLS, ACATS` (option delivery / transfers would fold non-alpha P&L into the ledger): fetched in the same call,
+  never auto-rebased, named in the notice as a possible cause. `OPEXP` is not requested (expiry never moves shares).
+- A rebase row's `taken_at` is the broker POSITIONS SNAPSHOT time of the tick, not the write time.
+- Stable-mismatch rule replaces the bare fill-quiet window: `account_breaker_recon_watch` stores the `(ledger_qty, broker_qty)`
+  pair; a changed pair restarts the episode; auto-rebase needs the pair unchanged for ≥ 120 s (so the second tick at the earliest)
+  AND no ingested fill younger than 120 s. A fill that executed but had not posted changes the ledger when it lands and restarts
+  the episode.
+- The explaining activity must be dated ≥ (episode first_seen − 3 days), match the ticker in a STRUCTURED field (its `symbol`, or
+  an explicit old/new-symbol field) — a description mention never auto-rebases — and be quantity-consistent: `qty` equals the
+  delta (either sign for symbol-change-like types); when `qty` is the resulting position or absent, `broker_qty / ledger_qty`
+  must be a common split ratio or its inverse (2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 25, 30, 40, 50, 100, 3/2, 4/3, 5/4, 5/2, 5/3).
+  A new-symbol key is auto-rebased only together with its broker-flat old-symbol key, old first. The activity fetch window starts
+  at the earliest eligible first_seen − 3 days.
+- Late-fill detector: a fill newly ingested with `filled_at ≤` its ticker's rebase cutoff is NOT silently skipped — ERROR, an
+  open marker (`recon_watch.late_fill_ref`) keeps the ticker distrusted every tick and bars auto-rebase until the operator
+  rebases it; the operator command takes `--realized-adjust <finite amount>` (one ticker) to book the fill's realized P&L.
+  Accepted residual: a late fill ingested first by the daily reconcile step, or on a tick that returned early, is not flagged
+  (needs a >1-tick posting lag AND an auto-rebase on the same ticker inside it; exact fix available: compare
+  `broker_fills.ingested_at` with a `created_at` on the lot row).
+- With migration 162 unavailable the repair step is skipped entirely (behaviour identical to before this amendment).
+- Migration 162 as shipped: `account_breaker_alpha_epoch` + `kind`, `realized_carry`, `reason`, `activity_ref`;
+  `account_breaker_recon_watch (ticker PK, first_seen_at, last_seen_at, notified_at, cleared_at, ledger_qty, broker_qty,
+  late_fill_ref)`.
+
 ### C2 Per-position circuit breaker: no regime exemption (ruling R2)
 - `src/execution/position_circuit_breaker.py` header + `:8-9`: remove the
   "skips HIGH_VOL/CRISIS (independent mode)" branch so the 2 %-of-NAV
