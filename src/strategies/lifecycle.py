@@ -98,6 +98,10 @@ VALID_TRANSITIONS: Dict[Tuple[StrategyState, StrategyState], str] = {
 # class ceiling AND sleeve trades >= 100, promoting into exactly the
 # qualifying regimes). This python mirror judges caller-supplied totals
 # defensively — keep the VALUES in sync with promotion_service.js.
+# Amendment 2 (2026-10-04, spec 2026-09-25-activation-bench-relative §9): the
+# JS gate ALSO requires sharpe[r] >= bench[r] + excess (activation entry
+# threshold, read from pipeline_config). That leg needs DB-held vectors and is
+# NOT mirrored here — comment only, no behaviour change in this module.
 CANDIDATE_TO_LIVE_MIN_SHARPE:   float = 0.0
 CANDIDATE_TO_LIVE_MAX_DRAWDOWN: float = 0.20   # 20 %
 CANDIDATE_TO_LIVE_MIN_TRADES:   int   = 100

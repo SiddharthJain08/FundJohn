@@ -1,4 +1,6 @@
 'use strict';
+// These tests pin policy v2 (no bench leg); spec §9 Amendment 2 kill switch keeps them on v2.
+process.env.OPENCLAW_PROMOTION_BENCH_GATE = '0';
 const assert = require('assert');
 const { getPromotionThreshold, evaluatePromotionGate, computeQualifyingRegimes, judgeRegimeSleeve } = require('../src/lib/promotion_service');
 
@@ -6,13 +8,14 @@ const { getPromotionThreshold, evaluatePromotionGate, computeQualifyingRegimes, 
 // Sharpe must STRICTLY EXCEED min_sharpe (0 → "positive Sharpe"); max-DD is
 // judged PER REGIME SLEEVE with the same class ceilings as before; every
 // qualifying sleeve needs ≥ 100 trades.
-assert.deepStrictEqual(getPromotionThreshold('equity'), { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100 });
-assert.deepStrictEqual(getPromotionThreshold('etp'),    { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100 });
-assert.deepStrictEqual(getPromotionThreshold('option'), { min_sharpe: 0, max_drawdown_pct: 30, min_trades: 100 });
-assert.deepStrictEqual(getPromotionThreshold('crypto'), { min_sharpe: 0, max_drawdown_pct: 70, min_trades: 100 });
-assert.deepStrictEqual(getPromotionThreshold('weird'),  { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100 }); // fallback
-assert.deepStrictEqual(getPromotionThreshold(undefined), { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100 });
+assert.deepStrictEqual(getPromotionThreshold('equity'), { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 50 });
+assert.deepStrictEqual(getPromotionThreshold('etp'),    { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 50 });
+assert.deepStrictEqual(getPromotionThreshold('option'), { min_sharpe: 0, max_drawdown_pct: 30, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 60 });
+assert.deepStrictEqual(getPromotionThreshold('crypto'), { min_sharpe: 0, max_drawdown_pct: 70, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 85 });
+assert.deepStrictEqual(getPromotionThreshold('weird'),  { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 50 }); // fallback
+assert.deepStrictEqual(getPromotionThreshold(undefined), { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 50 });
 
+// (Calmar fields added 2026-10-04: this pin was stale since the 2026-07-27 Calmar escape hatch.)
 // judgeRegimeSleeve — the single-sleeve rule
 {
   const thr = getPromotionThreshold('equity');
@@ -29,8 +32,9 @@ assert.deepStrictEqual(getPromotionThreshold(undefined), { min_sharpe: 0, max_dr
 }
 
 // mock dbQuery: canonical strategy_backtest_runs + strategy_backtest_regimes
-// only (registry mirror retired 2026-07-05 — a strategy_registry query must
-// never be issued).
+// only (registry mirror retired 2026-07-05 — under the kill switch this file
+// runs with, a strategy_registry query must never be issued; with the bench
+// gate ON the benchmark-sleeve exemption lookup does query it).
 function mkQuery(runRow, regimeRows) {
   return async (sql) => {
     if (/strategy_backtest_runs/.test(sql)) return { rows: runRow ? [runRow] : [] };
