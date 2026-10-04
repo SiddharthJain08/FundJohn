@@ -88,10 +88,15 @@ class FillPagesTruncated(RuntimeError):
 
 
 def _fetch_fill_pages(window_args, *, page_size: int = 100, max_pages: int = 50,
-                      raise_on_cap: bool = False, deadline_s=None):
-    """Shared FILL-activity pager: `window_args` is the CLI window selector
+                      raise_on_cap: bool = False, deadline_s=None,
+                      activity_types: str = 'FILL'):
+    """Shared account-activity pager: `window_args` is the CLI window selector
     (`['--date', d]` or `['--after', ts, '--direction', 'asc']`). Returns the
     list of activity dicts; raises RuntimeError on a CLI/parse failure.
+
+    `activity_types` is the comma-separated `--activity-types` value; it
+    defaults to 'FILL' so every pre-existing caller builds a byte-identical
+    argv (Breaker Task 4 generalised it for the non-FILL corporate-action pull).
 
     Default (`raise_on_cap=False`, `deadline_s=None`) keeps the historical
     behaviour used by fetch_fills_for_date: hitting `max_pages` is a silent
@@ -113,7 +118,7 @@ def _fetch_fill_pages(window_args, *, page_size: int = 100, max_pages: int = 50,
                 break
             timeout = min(60, remaining)
         args = [ALPACA_CLI, 'account', 'activity', 'list',
-                '--activity-types', 'FILL',
+                '--activity-types', activity_types,
                 *window_args,
                 '--page-size', str(page_size)]
         if page_token:
@@ -177,6 +182,27 @@ def fetch_fills_since(after: str, *, page_size: int = 100, max_pages: int = 200,
     return _fetch_fill_pages(['--after', after, '--direction', 'asc'],
                              page_size=page_size, max_pages=max_pages,
                              raise_on_cap=raise_on_cap, deadline_s=deadline_s)
+
+
+def fetch_activities_since(after: str, activity_types, *, page_size: int = 100,
+                           max_pages: int = 5, raise_on_cap: bool = True,
+                           deadline_s=None):
+    """NON-FILL account activities (corporate actions / transfers) created after
+    `after` (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ), oldest first. `activity_types`
+    is an iterable (or an already comma-joined string) of Alpaca activity-type
+    codes; the CLI takes them comma-separated (`--activity-types SSP,SC,...`).
+    Same pager, page-cap and wall-clock mechanism as fetch_fills_since — but
+    opted INTO raise_on_cap by default: a truncated list must never be read as
+    complete (Breaker Task 4, spec C1 Amendment 2b; any failure there means "no
+    rebase this tick")."""
+    types = (activity_types if isinstance(activity_types, str)
+             else ','.join(str(t).strip() for t in activity_types if str(t).strip()))
+    if not types:
+        raise ValueError('activity_types is empty')
+    return _fetch_fill_pages(['--after', after, '--direction', 'asc'],
+                             page_size=page_size, max_pages=max_pages,
+                             raise_on_cap=raise_on_cap, deadline_s=deadline_s,
+                             activity_types=types)
 
 
 def collapse_fills(fills):
