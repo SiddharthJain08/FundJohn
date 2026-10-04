@@ -58,8 +58,9 @@ def _split(aid, sym, day='2026-10-05', **kw):
 def env(monkeypatch):
     """Hermetic broker + a controllable clock. `acts` is what the stubbed
     non-FILL activity lookup returns; `calls` records each lookup."""
-    h = {'now': NOW, 'acts': [], 'calls': [], 'posts': [], 'raise': None}
-    monkeypatch.setattr(ar, 'fetch_fills_since', lambda after, **k: [])
+    h = {'now': NOW, 'acts': [], 'calls': [], 'posts': [], 'raise': None, 'feed': []}
+    monkeypatch.setattr(ar, 'fetch_fills_since', lambda after, **k: list(h['feed']))
+    monkeypatch.setattr(ab, '_LAST_NEW_FILLS', [])
     monkeypatch.setattr(sr, 'fetch_recent_closed_orders', lambda *a, **k: (False, []))
     monkeypatch.setattr(ab, '_LAST_ACTIVITY_ID', None)
     monkeypatch.setattr(ab, '_utcnow', lambda: h['now'])
@@ -128,10 +129,23 @@ class FakeDB:
             if self.missing_162:
                 raise RuntimeError('relation "account_breaker_recon_watch" does not exist')
             self._all = [(t, *v) for t, v in self.watch.items()]
+        elif f.startswith('INSERT INTO account_breaker_recon_watch') and 'late_fill_ref' in f:
+            t, first, last, ref = params
+            row = self.watch.setdefault(t, [first, last, None, None, None, None, None])
+            row[6] = ref
+        elif f.startswith('UPDATE account_breaker_recon_watch SET late_fill_ref = NULL'):
+            self.watch[params[0]][6] = None
         elif f.startswith('INSERT INTO account_breaker_recon_watch'):
             self.watch_writes = getattr(self, 'watch_writes', 0) + 1
             t, first, last, notified, cleared, lq, bq = params
-            self.watch[t] = [first, last, notified, cleared, lq, bq]
+            old = self.watch.get(t)
+            self.watch[t] = [first, last, notified, cleared, lq, bq, old[6] if old else None]
+        elif f.startswith('INSERT INTO broker_fills'):
+            if params[0] not in {x['activity_id'] for x in self.fills}:
+                self.fills.append({'ticker': params[4], 'side': params[5], 'qty': params[8],
+                                   'price': params[9], 'activity_id': params[0],
+                                   'filled_at': datetime.fromisoformat(
+                                       params[10].replace('Z', '+00:00'))})
 
     def fetchone(self):
         return self._all[0] if self._all else None
@@ -300,12 +314,12 @@ def test_activity_classification_is_conservative():
 def test_quantity_consistency_rule():
     q = ab._quantity_consistent
     assert q({'qty': '80'}, 'symbol', 'SPLIT', 80, 160)              # == delta
-    assert q({'qty': '160'}, 'symbol', 'SPLIT', 80, 160)             # == resulting position
+    assert q({'qty': '160'}, 'symbol', 'SPLIT', 80, 160)             # == resulting position, ratio 2:1
     assert not q({'qty': '1000'}, 'symbol', 'SPLIT', 80, 160)
     assert not q({'qty': '-80'}, 'symbol', 'SPLIT', 80, 160)         # sign flip only for SC-like
     assert q({'qty': '-80'}, 'symbol', 'MA', 80, 160)
     assert q({}, 'symbol', 'SPLIT', 80, 160) and q({'qty': 'x'}, 'symbol', 'SPLIT', 80, 160)
-    assert q({'qty': '0'}, 'symbol', 'SPLIT', 80, 160)               # absent => allowed
+    assert q({'qty': '0'}, 'symbol', 'SPLIT', 80, 160)               # absent + plausible ratio => allowed
     assert q({'qty': '999'}, 'related_new', 'SC', 0, 50)             # other symbol's qty: not tested
     assert q({'qty': '999'}, 'related_old', 'SC', 50, 0)
     assert not q({}, 'related_old', 'SC', 50, 10)                    # old key must be gone
@@ -328,7 +342,7 @@ def test_acc4_unexplained_mismatch_notice_after_window_and_operator_command_repa
     db = _split_db()
     res = _tick(db, SPLIT_BOOK)
     assert res['rebased'] == 0 and res['recon'] == 1 and db.rebase_inserts == 0
-    assert db.watch['AAPL'] == [NOW, NOW, None, None, 80.0, 160.0]
+    assert db.watch['AAPL'] == [NOW, NOW, None, None, 80.0, 160.0, None]
     assert env['posts'] == []
     env['now'] = NOW + timedelta(seconds=ab.REBASE_ESCALATE_S - 60)
     _tick(db, SPLIT_BOOK)
@@ -361,7 +375,7 @@ def test_acc4_unexplained_mismatch_notice_after_window_and_operator_command_repa
     assert db.watch['AAPL'][3] == env['now']                         # cleared, row kept
     env['now'] += timedelta(hours=2)
     _tick(db, {'AAPL': _pos(170, 50, 55, upl=850), 'SPY': _pos(1, 1, 1)})
-    assert db.watch['AAPL'] == [env['now'], env['now'], None, None, 160.0, 170.0]
+    assert db.watch['AAPL'] == [env['now'], env['now'], None, None, 160.0, 170.0, None]
 
 
 # ── MAJOR-1: lagged fills / stable pair ─────────────────────────────────────
@@ -564,7 +578,8 @@ def test_acc8_migration_162_is_strictly_additive():
     assert 'CREATE TABLE IF NOT EXISTS account_breaker_recon_watch' in norm
     for col in ('ticker TEXT PRIMARY KEY', 'first_seen_at TIMESTAMPTZ NOT NULL',
                 'last_seen_at TIMESTAMPTZ NOT NULL', 'notified_at TIMESTAMPTZ',
-                'cleared_at TIMESTAMPTZ', 'ledger_qty NUMERIC,', 'broker_qty NUMERIC'):
+                'cleared_at TIMESTAMPTZ', 'ledger_qty NUMERIC,', 'broker_qty NUMERIC,',
+                'late_fill_ref TEXT'):
         assert col in norm
     stmts = [s.strip() for s in code.split(';') if s.strip()]
     assert all(s.startswith(('ALTER TABLE account_breaker_alpha_epoch', 'CREATE TABLE IF NOT EXISTS'))
@@ -700,12 +715,13 @@ def test_cli_refuses_when_positions_unavailable_or_fill_sync_fails(env, monkeypa
 def test_main_routes_rebase_without_running_a_breaker_tick(monkeypatch):
     ticks, cli = [], []
     monkeypatch.setattr(ab, 'run_once', lambda *a, **k: ticks.append(1) or 0)
-    monkeypatch.setattr(ab, '_run_rebase_cli', lambda t, r, a: cli.append((t, r, a)) or 0)
+    monkeypatch.setattr(ab, '_run_rebase_cli', lambda t, r, a, adj=0.0: cli.append((t, r, a, adj)) or 0)
     assert ab.main([]) == 0 and ticks == [1] and cli == []
     ticks.clear()
     assert ab.main(['--rebase', 'aapl, msft', '--reason', 'why']) == 0
-    assert cli == [(['AAPL', 'MSFT'], 'why', False)] and ticks == []
-    assert ab.main(['--rebase', 'AAPL', '--apply']) == 0 and cli[-1] == (['AAPL'], None, True)
+    assert cli == [(['AAPL', 'MSFT'], 'why', False, 0.0)] and ticks == []
+    assert ab.main(['--rebase', 'AAPL', '--apply']) == 0 and cli[-1] == (['AAPL'], None, True, 0.0)
+    assert ab.main(['--rebase', 'AAPL', '--realized-adjust', '12.5']) == 0 and cli[-1][3] == 12.5
     with pytest.raises(SystemExit):
         ab.main(['--apply'])
 
@@ -768,3 +784,130 @@ def test_repair_failure_never_raises_out_of_the_tick(env, monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(ValueError('bug')))
     _r, res = _two(db, SPLIT_BOOK, env)
     assert res is not None and res['rebased'] == 0 and res['recon'] == 1
+
+
+# ── R2: ratio plausibility on the weak paths ────────────────────────────────
+
+@pytest.mark.parametrize('ledger, broker', [(80, 160), (100, 150), (100, 10), (7, 21)])
+def test_r2_plausible_split_ratios_pass_on_broker_qty_and_no_qty_paths(ledger, broker):
+    q = ab._quantity_consistent
+    assert q({'qty': str(broker)}, 'symbol', 'SPLIT', ledger, broker)    # qty == broker_qty path
+    assert q({}, 'symbol', 'SPLIT', ledger, broker)                       # no usable quantity
+
+
+@pytest.mark.parametrize('ledger, broker', [(100, 137), (100, 0), (0, 50), (100, -100)])
+def test_r2_implausible_ratio_is_not_explained(ledger, broker):
+    q = ab._quantity_consistent
+    assert not q({}, 'symbol', 'SPLIT', ledger, broker)
+    if ledger and broker:       # (qty == broker_qty is also the delta when ledger==0; qty 0 == absent)
+        assert not q({'qty': str(broker)}, 'symbol', 'SPLIT', ledger, broker)
+    # the qty == delta path is unchanged (needs no ratio)
+    assert q({'qty': str(broker - ledger)}, 'symbol', 'SPLIT', ledger, broker)
+
+
+def test_r2_end_to_end_implausible_ratio_stays_distrusted(env):
+    db = FakeDB(lots=[_epoch_row('AAPL', 100, 100)], fills=[])
+    env['acts'] = [_split('s1', 'AAPL')]
+    book = {'AAPL': _pos(137, 70, 75, upl=685), 'SPY': _pos(1, 1, 1)}
+    _r, res = _two(db, book, env)
+    assert res['rebased'] == 0 and res['recon'] == 1 and db.rebase_inserts == 0
+
+
+# ── R3: new-symbol keys rebase only together with the old key ───────────────
+
+def test_r3_related_new_alone_never_auto_rebases_and_is_named_in_the_notice(env):
+    db = FakeDB(lots=[], fills=[])                       # OLDT is not mismatched / not held
+    book = {'NEWT': _pos(50, 20, 22, upl=100), 'SPY': _pos(1, 1, 1)}
+    env['acts'] = [{'id': 'sc1', 'activity_type': 'SC', 'symbol': 'OLDT', 'new_symbol': 'NEWT',
+                    'date': '2026-10-05'}]
+    _tick(db, book)
+    env['now'] = NOW + ESC + timedelta(seconds=1)
+    res = _tick(db, book)
+    assert res['rebased'] == 0 and db.rebase_inserts == 0 and res['recon'] == 1
+    (_ch, msg), = env['posts']
+    assert 'NEWT' in msg and 'new symbol only' in msg
+
+
+def test_r3_old_and_new_together_are_both_rebased_old_first(env):
+    db = FakeDB(lots=[_epoch_row('OLDT', 50, 20)], fills=[])
+    book = {'NEWT': _pos(50, 20, 22, upl=100), 'SPY': _pos(1, 1, 1)}
+    env['acts'] = [{'id': 'sc1', 'activity_type': 'SC', 'symbol': 'OLDT', 'new_symbol': 'NEWT',
+                    'qty': '50', 'date': '2026-10-05'}]
+    _r, res = _two(db, book, env)
+    assert res['rebased'] == 2 and res['recon'] == 0
+    assert [r['ticker'] for r in db.rebases()] == ['OLDT', 'NEWT']      # old first
+
+
+# ── R1: late fill after a rebase ────────────────────────────────────────────
+
+def _rebased_split(env):
+    db = _split_db()
+    env['acts'] = [_split('act1', 'AAPL', qty='80')]
+    _two(db, SPLIT_BOOK, env)
+    assert db.rebase_inserts == 1
+    return db
+
+
+def test_r1_late_fill_after_a_rebase_is_detected_distrusted_every_tick_never_auto_rebased(
+        env, caplog):
+    db = _rebased_split(env)
+    cutoff = db.rebases()[0]['taken_at']
+    # a closing fill from BEFORE the rebase cutoff is ingested only now (posting lag)
+    late = {'id': 'late1', 'order_id': 'olate1', 'symbol': 'AAPL', 'side': 'sell', 'qty': '10',
+            'price': '120', 'transaction_time': (cutoff - timedelta(hours=1)).isoformat()}
+    env['feed'] = [late]
+    env['now'] += timedelta(seconds=300)
+    with caplog.at_level('ERROR', logger=ab.logger.name):
+        res = _tick(db, SPLIT_BOOK)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith('[account_breaker] LATE FILL late1 AAPL filled_at=')
+               and '<= rebase cutoff' in m
+               and 'realized P&L of this fill is NOT in the ledger' in m for m in msgs)
+    assert db.watch['AAPL'][6] and db.watch['AAPL'][6].startswith('late1@')
+    assert res['recon'] == 1 and 'AAPL' in res['mismatch']      # ledger==broker, still distrusted
+    # it is skipped by the cutoff: alpha unchanged by the late fill
+    assert res['alpha_pnl'] == pytest.approx(1_000.0)
+    # distrusted on every later tick, never auto-rebased even with a fresh SPLIT activity
+    env['acts'].append(_split('act2', 'AAPL', day='2026-10-05'))
+    for _ in range(3):
+        env['now'] += timedelta(seconds=300)
+        r = _tick(db, SPLIT_BOOK)
+        assert r['recon'] == 1 and r['rebased'] == 0 and 'AAPL' in r['mismatch']
+    assert db.rebase_inserts == 1
+    # existing notice path, with the late-fill text and the command
+    env['now'] += ESC
+    _tick(db, SPLIT_BOOK)
+    msg = env['posts'][-1][1]
+    assert 'late fill after a rebase — operator review required' in msg
+    assert 'account_breaker.py --rebase AAPL' in msg and '--realized-adjust' in msg
+
+
+def test_r1_operator_rebase_with_realized_adjust_clears_the_marker_and_moves_alpha_by_exactly_it(env):
+    db = _rebased_split(env)
+    cutoff = db.rebases()[0]['taken_at']
+    env['feed'] = [{'id': 'late1', 'order_id': 'o', 'symbol': 'AAPL', 'side': 'sell', 'qty': '10',
+                    'price': '120', 'transaction_time': (cutoff - timedelta(hours=1)).isoformat()}]
+    env['now'] += timedelta(seconds=300)
+    before = _tick(db, SPLIT_BOOK)
+    assert before['recon'] == 1
+    out = []
+    conn = FakeConn(db)
+    rc = ab.rebase_cli(db, conn, SPLIT_BOOK, {'SPY'}, ['AAPL'], 'late fill', False,
+                       now=env['now'], realized_adjust=100.0, out=out.append)
+    text = '\n'.join(out)
+    assert rc == 0 and db.rebase_inserts == 1 and 'LATE FILL' in text and 'late1@' in text
+    assert 'before 1000.00 | after 1100.00' in text and db.watch['AAPL'][6]      # dry-run: marker stays
+    rc = ab.rebase_cli(db, conn, SPLIT_BOOK, {'SPY'}, ['AAPL', 'MSFT'], 'x', True,
+                       now=env['now'], realized_adjust=100.0, out=out.append)
+    assert rc == 2                                              # adjust needs exactly one ticker
+    rc = ab.rebase_cli(db, conn, SPLIT_BOOK, {'SPY'}, ['AAPL'], 'late fill', True,
+                       now=env['now'], realized_adjust=100.0, out=out.append)
+    assert rc == 0 and db.rebase_inserts == 2
+    row = db.rebases()[-1]
+    assert row['realized_carry'] == pytest.approx(200.0 + 100.0)
+    assert 'realized-adjust=+100.00' in row['reason'] and row['reason'].startswith('operator:late fill')
+    assert db.watch['AAPL'][6] is None                          # marker cleared (row kept)
+    env['now'] += timedelta(seconds=300)
+    after = _tick(db, SPLIT_BOOK)
+    assert after['recon'] == 0 and after['rebased'] == 0
+    assert after['alpha_pnl'] - before['alpha_pnl'] == pytest.approx(100.0)   # exactly the adjustment

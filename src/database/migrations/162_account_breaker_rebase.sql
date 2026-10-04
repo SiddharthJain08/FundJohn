@@ -27,5 +27,8 @@ CREATE TABLE IF NOT EXISTS account_breaker_recon_watch (
   notified_at   TIMESTAMPTZ,
   cleared_at    TIMESTAMPTZ,
   ledger_qty    NUMERIC,                  -- the (ledger, broker) quantity pair last seen;
-  broker_qty    NUMERIC                   -- a changed pair restarts the episode (lagged fill)
+  broker_qty    NUMERIC,                  -- a changed pair restarts the episode (lagged fill)
+  late_fill_ref TEXT                      -- open LATE-FILL marker: ';'-joined '<activity_id>@<filled_at>'
+                                          -- of fills ingested after a rebase cutoff; NULL = none. Set
+                                          -- to NULL (not deleted) by the operator rebase.
 );
