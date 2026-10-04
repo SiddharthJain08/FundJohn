@@ -331,8 +331,8 @@ def test_format_line_appends_new_fields_and_keeps_existing():
     assert line.startswith('[account_breaker] shadow equity=95400.00 bench_mv=86600.00 '
                            'alpha_nav=8800.00 peak=14500.00 dd=-0.0123 ')
     assert ('halted=0 | alpha_pnl=500.00 realized=100.00 unrealized=400.00 hwm=800.00 '
-            'dd_pnl=-0.0123 unmatched=2 recon=3 excluded=crypto:1') in line
-    assert line.endswith('excluded=crypto:1') and 'legacy' not in line and 'dd_nav' not in line     # P4
+            'dd_pnl=-0.0123 unmatched=2 recon=3 excluded=crypto:1 rebased=0') in line
+    assert line.endswith('excluded=crypto:1 rebased=0') and 'legacy' not in line and 'dd_nav' not in line     # P4
     # without pnl the line is byte-identical to the legacy format
     assert '|' not in ab.format_line('shadow', equity=1.0, bench_mv=0.0, alpha=1.0, st=st,
                                      open_equity=1.0, open_src='x', halted=False)

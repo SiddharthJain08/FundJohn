@@ -200,6 +200,60 @@ _SELL_SIDES = ('sell', 'sell_short')
 _QTY_EPS = 1e-9
 
 
+def _as_dt(x):
+    """tz-aware UTC datetime from a datetime / ISO string, else None. A naive
+    value is read as UTC (one comparison domain for fills, lot rows and the
+    clock — mixing naive and aware raises TypeError)."""
+    if isinstance(x, str):
+        try:
+            x = datetime.fromisoformat(x.strip().replace('Z', '+00:00'))
+        except ValueError:
+            return None
+    if not isinstance(x, datetime):
+        return None
+    return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+
+
+def _select_lot_rows(rows):
+    """Amendment 2b ledger read. Per ticker key the LATEST lot row (max
+    taken_at; on a tie a rebase beats an epoch row, then the later row) decides:
+      * latest is a `rebase` row -> only that row seeds the key's book, only
+        fills with filled_at > its taken_at apply to the key, and its
+        realized_carry joins the key's realized P&L;
+      * otherwise (epoch rows only) -> every row of the key applies exactly as
+        before the rebase feature existed, with no fill cutoff.
+    A rebase row with an unreadable taken_at is IGNORED (logged): the key then
+    falls back to its epoch row and recon flags it — never a guessed cutoff.
+    Returns (rows_to_apply, {key: cutoff_dt}, {key: carry})."""
+    by_key = {}
+    for i, r in enumerate(rows):
+        k = _pos_key(r.get('ticker'))
+        by_key.setdefault(k, []).append((i, r))
+    keep, cutoff, carry = [], {}, {}
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+    for k, items in by_key.items():
+        usable = []
+        for i, r in items:
+            is_rb = str(r.get('kind') or '').lower() == 'rebase'
+            dt = _as_dt(r.get('taken_at'))
+            if is_rb and dt is None:
+                logger.error('[account_breaker] rebase row for %s has no usable '
+                             'taken_at; ignored', k)
+                continue
+            usable.append(((dt or floor, 1 if is_rb else 0, i), i, r, is_rb, dt))
+        if not usable:
+            continue
+        best = max(usable, key=lambda u: u[0])
+        if best[3]:
+            keep.append((best[1], best[2]))
+            cutoff[k] = best[4]
+            carry[k] = _f(best[2].get('realized_carry'), 0.0)
+        else:
+            keep.extend((u[1], u[2]) for u in usable if not u[3])
+    keep.sort(key=lambda t: t[0])
+    return [r for _, r in keep], cutoff, carry
+
+
 def alpha_pnl(equity, positions, bench_tickers, fills_since_epoch, epoch_lots) -> dict:
     """Cumulative alpha P&L = realized (AVERAGE-COST ledger over fills since the
     epoch, seeded by the epoch lots — mirrors the broker, C1 amendment 2a) +
@@ -227,12 +281,22 @@ def alpha_pnl(equity, positions, bench_tickers, fills_since_epoch, epoch_lots) -
     The unrealized leg prefers the broker's `unrealized_pl`, falling back to
     qty*(cur-avg). `recon` = tickers whose ledger qty != broker qty (including
     closed positions with a non-zero ledger qty). Fail-open: nothing raises.
+
+    Amendment 2b (rebase): epoch_lots rows may carry `kind` / `taken_at` /
+    `realized_carry` (see _select_lot_rows). Rows without `kind` (the legacy
+    shape) and epoch-only keys behave exactly as before.
+
     Returns {alpha_pnl, realized, unrealized, unmatched, unpriced, n_positions,
-    excluded, excluded_by_class, recon}."""
+    excluded, excluded_by_class, recon} plus the additive per-key maps
+    `realized_by_key` ({key: realized $ incl. carry}) and `mismatch`
+    ({key: (ledger_qty, broker_qty)})."""
     bench = {_pos_key(t) for t in (bench_tickers or ())}
     fills = list(fills_since_epoch or ())
     lots_in = list(epoch_lots or ())
     positions = positions or {}
+    rb_cutoff, rb_carry = {}, {}
+    if any(str(l.get('kind') or '').lower() == 'rebase' for l in lots_in):
+        lots_in, rb_cutoff, rb_carry = _select_lot_rows(lots_in)
 
     # Class per key: a live broker position's asset_class wins; keys seen only
     # in fills/lots (closed positions) use the shape guess. A key is non-equity
@@ -324,10 +388,23 @@ def alpha_pnl(equity, positions, bench_tickers, fills_since_epoch, epoch_lots) -
         return (str(f.get('filled_at') or ''), str(f.get('activity_id') or ''))
 
     realized, unmatched = 0.0, 0
+    realized_by_key = {}
     for f in sorted(fills, key=_key):
         if not _in_scope(f.get('ticker')):
             continue
         k = _pos_key(f.get('ticker'))
+        if k in rb_cutoff:
+            # Amendment 2b: only fills strictly after the key's latest (rebase)
+            # lot row apply; earlier ones are already inside its seed + carry.
+            fdt = _as_dt(f.get('filled_at'))
+            if fdt is None:
+                unmatched += 1
+                logger.warning('[account_breaker] fill %s %s has no usable filled_at '
+                               'against a rebase cutoff (counted, skipped)',
+                               k, f.get('activity_id'))
+                continue
+            if fdt <= rb_cutoff[k]:
+                continue
         q, px = _f(f.get('qty')), _f(f.get('price'))
         side = str(f.get('side') or '').strip().lower()
         if not q or px is None:
@@ -346,14 +423,22 @@ def alpha_pnl(equity, positions, bench_tickers, fills_since_epoch, epoch_lots) -
             logger.warning('[account_breaker] unknown side %r on fill %s qty=%s @%s '
                            '(counted, not applied)', f.get('side'), k, q, px)
             continue
-        realized += _apply(k, dq, px)
+        r_k = _apply(k, dq, px)
+        realized += r_k
+        realized_by_key[k] = realized_by_key.get(k, 0.0) + r_k
 
-    recon = 0
+    for k, c in rb_carry.items():
+        if c and _in_scope(k):
+            realized += c
+            realized_by_key[k] = realized_by_key.get(k, 0.0) + c
+
+    recon, mismatch = 0, {}
     for k in set(book) | set(broker_qty):
         lq = book.get(k, [0.0, 0.0])[0]
         bq = broker_qty.get(k, 0.0)
         if abs(lq - bq) > 1e-4 * max(1.0, abs(bq)):
             recon += 1
+            mismatch[k] = (lq, bq)
             logger.warning('[account_breaker] recon mismatch %s ledger_qty=%.6f '
                            'broker_qty=%.6f', k, lq, bq)
 
@@ -362,7 +447,8 @@ def alpha_pnl(equity, positions, bench_tickers, fills_since_epoch, epoch_lots) -
             'unpriced': unpriced, 'n_positions': n_pos,
             'excluded': len(excluded_keys),
             'excluded_by_class': dict(Counter(excluded_keys.values())),
-            'recon': recon}
+            'recon': recon, 'realized_by_key': realized_by_key,
+            'mismatch': mismatch}
 
 
 # ── state layer (C1b) ────────────────────────────────────────────────────────
@@ -538,7 +624,17 @@ def take_alpha_epoch(cur, positions, bench_tickers) -> bool:
 
 
 def load_alpha_inputs(cur, epoch_at):
-    """(epoch_lots, fills_since_epoch) as lists of dicts, or None on failure."""
+    """(lot_rows, fills_since_epoch) as lists of dicts, or None on failure.
+
+    The legacy epoch-lot and fills reads are UNCHANGED (same SQL). Amendment 2b:
+    a separate savepoint-guarded read adds the migration-162 columns (kind,
+    taken_at, realized_carry, reason, activity_ref) for ALL lot rows; when it
+    succeeds and returns rows those REPLACE the legacy lot list (alpha_pnl picks
+    each ticker's latest row and applies the per-ticker fill cutoff). When it
+    fails (migration 162 not applied) or returns nothing, the legacy epoch lots
+    are used — exactly today's behaviour. If it fails while the legacy read
+    shows more than one row for a ticker (a rebase exists but cannot be read),
+    the ledger would double-count: return None (drawdown skipped this tick)."""
     def _read():
         cur.execute('SELECT ticker, qty, avg_entry_price, side '
                     'FROM account_breaker_alpha_epoch')
@@ -552,7 +648,29 @@ def load_alpha_inputs(cur, epoch_at):
                  for r in (cur.fetchall() or [])]
         return lots, fills
     ok, res = _savepoint_guarded(cur, 'sp_ab_alpha_inputs', _read)
-    return res if ok else None
+    if not ok:
+        return None
+    lots, fills = res
+
+    def _read_rows():
+        cur.execute('SELECT kind, ticker, qty, avg_entry_price, side, taken_at, '
+                    'realized_carry, reason, activity_ref '
+                    'FROM account_breaker_alpha_epoch ORDER BY taken_at')
+        return [{'kind': r[0], 'ticker': r[1], 'qty': r[2], 'avg_entry_price': r[3],
+                 'side': r[4], 'taken_at': r[5], 'realized_carry': r[6],
+                 'reason': r[7], 'activity_ref': r[8]}
+                for r in (cur.fetchall() or [])]
+    ok2, rows = _savepoint_guarded(cur, 'sp_ab_alpha_lot_rows', _read_rows)
+    if ok2 and rows:
+        return rows, fills
+    if not ok2:
+        keys = [_pos_key(l.get('ticker')) for l in lots]
+        if len(keys) != len(set(keys)):
+            logger.error('[account_breaker] lot rows carry more than one row per '
+                         'ticker but the migration-162 columns are unreadable; '
+                         'the ledger would double-count — no alpha P&L this tick')
+            return None
+    return lots, fills
 
 
 def load_flatten_attempts(cur) -> int:
@@ -702,7 +820,9 @@ def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
     Emitted on EVERY tick — a missing line means the process died, which is why
     rule=none exists. Do not reorder or rename existing tokens; `flatten_partial`
     is appended at the END when `flatten` is given (flatten.get, not flatten[] —
-    this line must never KeyError on every-tick emission)."""
+    this line must never KeyError on every-tick emission). The `| alpha_pnl=…`
+    tail ends with `excluded=… rebased=<n>` (Task 4: rebases performed THIS tick,
+    normally 0; a pnl dict without the key renders rebased=0)."""
     daily = 'n/a' if st.get('daily') is None else f"{st['daily']:.4f}"
     # peak/dd render 'n/a' rather than raising on None (supplement item 5):
     # the line must be emitted on EVERY tick — a missing line is the signal
@@ -735,7 +855,8 @@ def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
                  f"dd_pnl={'n/a' if dd_pnl is None else f'{float(dd_pnl):.4f}'} "
                  f"unmatched={int(pnl.get('unmatched', 0))} "
                  f"recon={int(pnl.get('recon', 0))} "
-                 f"excluded={_excluded_token(pnl)}")
+                 f"excluded={_excluded_token(pnl)} "
+                 f"rebased={int(pnl.get('rebased', 0) or 0)}")
     return line
 
 
@@ -1375,6 +1496,353 @@ def post_fallback_notice(now=None) -> bool:
     return True
 
 
+# ── per-ticker REBASE (Breaker alpha P&L Task 4; spec C1 Amendment 2b) ────────
+#
+# A broker event that changes a position's quantity WITHOUT a FILL activity
+# (split, spin-off, merger, symbol change, option exercise/assignment, journal /
+# ACATS transfer) leaves ledger qty != broker qty for that ticker forever, which
+# under P2 makes an ARMED breaker skip the drawdown rule forever. Distrust must be
+# bounded: a mismatched ticker is repaired by a per-ticker `rebase` row in
+# account_breaker_alpha_epoch (re-seeds ONE ticker from the broker position and
+# carries its realized P&L), never by moving the epoch and never by touching the
+# high-water mark. Only an EXPLAINED mismatch (a corporate-action / transfer
+# activity exists) is repaired automatically; an unexplained one may be a missing
+# fill (unknown real P&L) and waits for the operator (`--rebase`).
+
+REBASE_FILL_QUIET_S = 120       # never rebase while a fill is still settling
+REBASE_ESCALATE_S = 1800        # continuous distrust before the operator is told
+REBASE_ACTIVITY_MAX_PAGES = 5   # bounded like P1: page cap + wall-clock budget
+REBASE_ACTIVITY_BUDGET_S = 30
+
+# Alpaca account-activity type codes that move a stock position (or its symbol)
+# without a FILL. Source: Alpaca Trading API "Account Activities" activity-type
+# table (docs.alpaca.markets; the CLI passes the comma-joined list straight to
+# GET /v2/account/activities?activity_types=). Chosen:
+#   SSP   stock split            SSO   stock spin-off
+#   SC    symbol change          NC    name change (CUSIP/symbol re-key)
+#   MA    merger / acquisition   REORG reorganisation
+#   OPASN option assignment      OPXRC option exercise      OPEXP option expiration
+#   JNLS  journal (securities)   ACATS ACATS transfer (securities)
+# Deliberately NOT listed: cash-only types (ACATC, JNLC, DIV*, FEE, INT*, CSD/CSR),
+# none of which move shares. NOTE the spec's illustrative SPLIT / SPIN / OPEXC are
+# not Alpaca codes as far as the reference is remembered (SSP / SSO / OPXRC are).
+# An unknown code could make the broker reject the WHOLE request (=> no rebase,
+# stay distrusted, retry), so this list needs ONE live verification by the
+# operator: `alpaca account activity list --activity-types <this list> --page-size 5`.
+REBASE_ACTIVITY_TYPES = ('SSP', 'SSO', 'SC', 'NC', 'MA', 'REORG',
+                         'OPASN', 'OPXRC', 'OPEXP', 'JNLS', 'ACATS')
+_OPTION_ACTIVITY_TYPES = frozenset({'OPASN', 'OPXRC', 'OPEXP'})
+_SYMBOL_CHANGE_TYPES = frozenset({'SC', 'NC', 'MA', 'REORG', 'SSO'})
+_OCC_UNDERLYING_RE = re.compile(r'^([A-Z.]{1,6})\d{6}[CP]\d{8}$')
+_RELATED_SYMBOL_FIELDS = ('old_symbol', 'symbol_old', 'new_symbol', 'symbol_new',
+                          'related_symbol', 'from_symbol', 'to_symbol')
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _broker_position(positions, key):
+    for sym, p in (positions or {}).items():
+        if _pos_key(sym) == key:
+            return sym, (p or {})
+    return None, None
+
+
+def rebase_seed(positions, key):
+    """(qty, avg_entry_price, side) a rebase row for `key` would hold: the BROKER
+    position now — (0.0, None, None) when the broker holds none. None when the
+    broker holds a position whose average entry price is unusable (never guess)."""
+    _sym, p = _broker_position(positions, key)
+    qty = _f((p or {}).get('qty'), 0.0) if p else 0.0
+    if not qty:
+        return (0.0, None, None)
+    avg = _f(p.get('avg_entry_price'))
+    if avg is None:
+        return None
+    return (abs(qty), avg, 'short' if str(p.get('side') or '').lower() == 'short' else 'long')
+
+
+def _newest_fill_at(fills, key):
+    best = None
+    for f in fills:
+        if _pos_key(f.get('ticker')) != key:
+            continue
+        dt = _as_dt(f.get('filled_at'))
+        if dt is not None and (best is None or dt > best):
+            best = dt
+    return best
+
+
+def _inside_quiet_window(fills, key, now) -> bool:
+    nf = _newest_fill_at(fills, key)
+    return nf is not None and (now - nf).total_seconds() < REBASE_FILL_QUIET_S
+
+
+def _lot_since(lots, key, epoch_at):
+    """When this ticker's latest lot row was taken (the global epoch if none)."""
+    best = None
+    for r in lots:
+        if _pos_key(r.get('ticker')) != key:
+            continue
+        dt = _as_dt(r.get('taken_at'))
+        if dt is not None and (best is None or dt > best):
+            best = dt
+    return best or _as_dt(epoch_at)
+
+
+def _used_activity_refs(lots, key) -> set:
+    return {str(r.get('activity_ref')) for r in lots
+            if _pos_key(r.get('ticker')) == key and r.get('activity_ref')}
+
+
+def _activity_date(a):
+    for f in ('date', 'transaction_time', 'created_at'):
+        v = a.get(f)
+        if isinstance(v, str) and len(v) >= 10:
+            try:
+                return datetime.strptime(v[:10], '%Y-%m-%d').date()
+            except ValueError:
+                continue
+    return None
+
+
+def _activity_matches(a, key) -> bool:
+    """Does non-FILL activity `a` concern ticker `key`? Deliberately conservative:
+      * `symbol` equals the key (every type);
+      * option types (OPASN/OPXRC/OPEXP): the OCC contract's UNDERLYING equals
+        the key (assignment/exercise delivers or removes the underlying shares);
+      * symbol-change-like types (SC/NC/MA/REORG/SSO) additionally: an explicit
+        old/new/related-symbol field equals the key, or — keys of 3+ characters
+        only, to avoid 'A'/'T'/'ON' false hits — the key appears as a whole
+        upper-case word in `description`.
+    Anything else is NOT a match; the operator CLI covers the remainder."""
+    t = str(a.get('activity_type') or '').upper()
+    if t not in REBASE_ACTIVITY_TYPES:
+        return False
+    raw = str(a.get('symbol') or '').strip().upper()
+    if raw and _pos_key(raw) == key:
+        return True
+    if t in _OPTION_ACTIVITY_TYPES:
+        m = _OCC_UNDERLYING_RE.match(raw)
+        return bool(m and m.group(1) == key)
+    if t in _SYMBOL_CHANGE_TYPES:
+        for f in _RELATED_SYMBOL_FIELDS:
+            v = a.get(f)
+            if v and _pos_key(v) == key:
+                return True
+        desc = str(a.get('description') or '')
+        if len(key) >= 3 and re.search(
+                r'(?<![A-Z0-9.])' + re.escape(key) + r'(?![A-Z0-9.])', desc):
+            return True
+    return False
+
+
+def find_explaining_activity(activities, key, since_dt, used_refs=()):
+    """Earliest non-FILL activity for `key` dated on/after the ET date of
+    `since_dt` (its latest lot row) whose id is not already the activity_ref of
+    one of the ticker's rows (so one same-day split can never explain a later,
+    different mismatch). None when there is none."""
+    since_d = since_dt.astimezone(_ET).date() if isinstance(since_dt, datetime) else None
+    best = None
+    for a in activities or ():
+        aid = a.get('id')
+        d = _activity_date(a)
+        if not aid or str(aid) in used_refs or d is None or since_d is None or d < since_d:
+            continue
+        if not _activity_matches(a, key):
+            continue
+        cand = (d, str(aid))
+        if best is None or cand < best[0]:
+            best = (cand, a)
+    return None if best is None else best[1]
+
+
+def fetch_rebase_activities(after_dt):
+    """ONE bounded broker call for the REBASE_ACTIVITY_TYPES activities created
+    since the day before `after_dt` (alpaca account activity list --activity-types
+    <comma-joined> --after YYYY-MM-DD --direction asc --page-size 100, paged with
+    --page-token like the FILL pull; page cap REBASE_ACTIVITY_MAX_PAGES and wall
+    clock REBASE_ACTIVITY_BUDGET_S). Returns a list, or None on ANY failure /
+    cap hit / timeout — the caller then does not rebase this tick."""
+    try:
+        from execution import alpaca_reconcile as ar
+        after = (after_dt.astimezone(_ET).date() - timedelta(days=1)).isoformat()
+        acts = ar.fetch_activities_since(
+            after, REBASE_ACTIVITY_TYPES, max_pages=REBASE_ACTIVITY_MAX_PAGES,
+            raise_on_cap=True, deadline_s=REBASE_ACTIVITY_BUDGET_S)
+    except Exception as e:  # noqa: BLE001 — incl. FillPagesTruncated, timeouts
+        logger.error('[account_breaker] corporate-action activity lookup failed '
+                     '(%s: %s); no rebase this tick', type(e).__name__, e)
+        return None
+    return [a for a in acts if isinstance(a, dict)
+            and str(a.get('activity_type') or '').upper() != 'FILL']
+
+
+def rebase_row(key, seed, realized_carry, now, reason, activity_ref=None) -> dict:
+    qty, avg, side = seed
+    return {'kind': 'rebase', 'ticker': key, 'qty': qty, 'avg_entry_price': avg,
+            'side': side, 'taken_at': now, 'realized_carry': float(realized_carry),
+            'reason': reason, 'activity_ref': activity_ref}
+
+
+def write_rebase_row(cur, row) -> bool:
+    """INSERT one rebase row in ONE savepoint (all-or-nothing). Never touches
+    alpha_epoch_at or peak_alpha_pnl. Returns True iff it landed."""
+    def _write():
+        cur.execute(
+            'INSERT INTO account_breaker_alpha_epoch '
+            '(ticker, qty, avg_entry_price, side, taken_at, kind, realized_carry, '
+            'reason, activity_ref) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
+            (row['ticker'], row['qty'], row['avg_entry_price'], row['side'],
+             row['taken_at'], 'rebase', row['realized_carry'], row['reason'],
+             row['activity_ref']))
+    ok, _ = _savepoint_guarded(cur, 'sp_ab_rebase', _write, on_error_level=logging.ERROR)
+    return ok
+
+
+_RECON_WATCH_UPSERT = (
+    'INSERT INTO account_breaker_recon_watch '
+    '(ticker, first_seen_at, last_seen_at, notified_at, cleared_at) '
+    'VALUES (%s, %s, %s, %s, %s) '
+    'ON CONFLICT (ticker) DO UPDATE SET first_seen_at = EXCLUDED.first_seen_at, '
+    'last_seen_at = EXCLUDED.last_seen_at, notified_at = EXCLUDED.notified_at, '
+    'cleared_at = EXCLUDED.cleared_at')
+
+
+def _escalation_msg(due, mismatch) -> str:
+    names = ','.join(sorted(due))
+    detail = '; '.join(f'{k}: ledger {mismatch[k][0]:g} vs broker {mismatch[k][1]:g}'
+                       for k in sorted(due))
+    return (f':warning: **Account breaker ledger mismatch, unexplained** — {detail} '
+            f'for >= {REBASE_ESCALATE_S // 60} min. No corporate-action/transfer '
+            'activity explains it, so the breaker will NOT auto-repair it (it may be '
+            'a missing fill = unknown P&L) and an ARMED drawdown rule stays skipped. '
+            'After confirming the broker position is right, from /root/openclaw run '
+            f'`python3 src/execution/account_breaker.py --rebase {names} '
+            '--reason "<why>"` (dry-run; prints ledger/broker qty and the alpha P&L '
+            'before/after), then repeat with `--apply`.')
+
+
+def _track_recon(cur, conn, res, now) -> None:
+    """Continuity of unreconciled tickers in account_breaker_recon_watch (migration
+    162; a missing table just skips tracking). Upserts mismatched tickers
+    (first_seen kept; last_seen advanced), marks reconciled ones cleared (never
+    deleted; a later mismatch starts a NEW episode), and when a ticker has been
+    continuously mismatched >= REBASE_ESCALATE_S with notified_at NULL / older
+    than that window, stamps notified_at, commits, THEN posts ONE operator notice
+    (its own throttle — not the fallback file)."""
+    mism = res.get('mismatch') or {}
+
+    def _read():
+        cur.execute('SELECT ticker, first_seen_at, last_seen_at, notified_at, '
+                    'cleared_at FROM account_breaker_recon_watch')
+        return cur.fetchall() or []
+    ok, rows = _savepoint_guarded(cur, 'sp_ab_recon_watch_read', _read)
+    if not ok:
+        return
+    state = {str(r[0]): r for r in rows}
+    writes, due = [], []
+    for k in sorted(mism):
+        r = state.get(k)
+        if r is None or r[4] is not None:                 # new episode
+            writes.append((k, now, now, None, None))
+            continue
+        first = _as_dt(r[1]) or now
+        notified = _as_dt(r[3])
+        if ((now - first).total_seconds() >= REBASE_ESCALATE_S
+                and (notified is None
+                     or (now - notified).total_seconds() >= REBASE_ESCALATE_S)):
+            notified = now
+            due.append(k)
+        writes.append((k, first, now, notified, None))
+    for k, r in state.items():
+        if k not in mism and r[4] is None:                # reconciled: mark, keep
+            writes.append((k, _as_dt(r[1]) or now, _as_dt(r[2]) or now,
+                           _as_dt(r[3]), now))
+    if not writes:
+        return
+
+    def _write():
+        for w in writes:
+            cur.execute(_RECON_WATCH_UPSERT, w)
+    ok, _ = _savepoint_guarded(cur, 'sp_ab_recon_watch', _write,
+                               on_error_level=logging.ERROR)
+    if not ok or not due:
+        return
+    if not _commit(conn):
+        return                      # notified_at not durable: never post unthrottled
+    _post('trade-reports', _escalation_msg(due, mism))
+
+
+def _repair_ledger(cur, conn, equity, positions, bench, lots, fills, res, epoch_at):
+    """Amendment 2b, automatic leg + continuity tracking. Returns the (possibly
+    recomputed) result dict with `rebased` = rebases performed this tick. Fail-open:
+    nothing here raises; on any error the tick keeps what it already has.
+    A mismatched ticker is auto-rebased only if (a) its newest fill is older than
+    REBASE_FILL_QUIET_S and (b) a non-FILL corporate-action/transfer activity for
+    it exists since its latest lot row (ONE bounded lookup per tick, only when a
+    ticker is eligible). Every landed rebase is committed; the ledger is then
+    recomputed so `recon` reflects it in the same tick."""
+    res['rebased'] = 0
+    rebased = 0
+    try:
+        now = _utcnow()
+        mism = res.get('mismatch') or {}
+        eligible = []
+        for k in sorted(mism):
+            if _inside_quiet_window(fills, k, now):
+                logger.info('[account_breaker] recon mismatch %s inside the %ds fill-'
+                            'quiet window; no rebase yet', k, REBASE_FILL_QUIET_S)
+            else:
+                eligible.append(k)
+        if eligible:
+            since = {k: _lot_since(lots, k, epoch_at) for k in eligible}
+            known = [d for d in since.values() if d is not None]
+            acts = fetch_rebase_activities(min(known)) if known else None
+            for k in eligible if acts else ():
+                if since[k] is None:
+                    continue
+                act = find_explaining_activity(acts, k, since[k],
+                                               _used_activity_refs(lots, k))
+                if act is None:
+                    logger.info('[account_breaker] recon mismatch %s has no explaining '
+                                'corporate-action activity; staying distrusted', k)
+                    continue
+                seed = rebase_seed(positions, k)
+                if seed is None:
+                    logger.warning('[account_breaker] cannot rebase %s: the broker '
+                                   'position has no usable avg_entry_price', k)
+                    continue
+                typ = str(act.get('activity_type') or '').upper()
+                row = rebase_row(k, seed, (res.get('realized_by_key') or {}).get(k, 0.0),
+                                 now, f'auto:{typ}', str(act.get('id')))
+                if not write_rebase_row(cur, row):
+                    continue
+                if not _commit(conn):
+                    break
+                lots.append(row)
+                rebased += 1
+                logger.info('[account_breaker] rebased %s (auto:%s activity %s): ledger '
+                            'qty %.6f -> broker qty %.6f, realized carry %.2f',
+                            k, typ, act.get('id'), mism[k][0], seed[0] * (
+                                -1.0 if seed[2] == 'short' else 1.0), row['realized_carry'])
+        if rebased:
+            res = alpha_pnl(equity, positions, bench, fills, lots)
+            res['rebased'] = rebased
+        _track_recon(cur, conn, res, now)
+    except Exception as e:  # noqa: BLE001 — a repair failure must never abort the tick
+        logger.error('[account_breaker] ledger repair step failed (%s: %s); keeping '
+                     'the unrepaired ledger', type(e).__name__, e)
+        if rebased and res.get('rebased') != rebased:
+            try:
+                res = alpha_pnl(equity, positions, bench, fills, lots)
+            except Exception:  # noqa: BLE001
+                pass
+            res['rebased'] = rebased
+    return res
+
+
 def compute_alpha_pnl_tick(cur, conn, equity, positions, bench):
     """One tick of the C1-amendment-2 measure. Returns
     {alpha_pnl, realized, unrealized, unmatched, hwm, dd_pnl, ...} or None when
@@ -1412,6 +1880,9 @@ def compute_alpha_pnl_tick(cur, conn, equity, positions, bench):
         return None
     lots, fills = inputs
     res = alpha_pnl(equity, positions, bench, fills, lots)
+    # Amendment 2b: explained mismatches are rebased (and recon re-derived) before
+    # the high-water mark is evaluated; never moves the epoch or the HWM itself.
+    res = _repair_ledger(cur, conn, equity, positions, bench, lots, fills, res, epoch_at)
     a = res['alpha_pnl']
     hwm = a if peak_pnl is None else max(peak_pnl, a)
     res['hwm'] = hwm
@@ -1619,6 +2090,7 @@ def run_once(session_date=None) -> int:
             'alpha_pnl': None, 'realized': None, 'unrealized': None, 'hwm': None,
             'dd_pnl': None, 'unmatched': 0,
             'recon': recon_n, 'excluded': 0 if pnl is None else pnl.get('excluded', 0),
+            'rebased': 0 if pnl is None else pnl.get('rebased', 0),
             'excluded_by_class': {} if pnl is None else pnl.get('excluded_by_class')}
         # MAJOR-1: never persist a HWM computed from a distrusted ledger (pnl None
         # or recon>0), in BOTH modes — a shadow tick must not seed an inflated HWM
@@ -1740,10 +2212,171 @@ def run_once(session_date=None) -> int:
                 pass
 
 
+# ── operator rebase CLI (Task 4, spec C1 Amendment 2b) ───────────────────────
+
+def _parse_tickers(arg) -> list:
+    out, seen = [], set()
+    for t in re.split(r'[,\s]+', str(arg or '')):
+        k = _pos_key(t)
+        if k and k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
+
+
+def rebase_cli(cur, conn, positions, bench, tickers, reason, apply, *,
+               now=None, out=print) -> int:
+    """`--rebase TICKER[,TICKER...] [--reason TEXT] [--apply]`. Dry-run by default:
+    prints, per ticker, the ledger qty, the broker qty, the row it would write and
+    the alpha P&L before/after (equal by construction; a difference > 1 cent
+    aborts), then ROLLS BACK — nothing persists (the fill sync it needs for an
+    up-to-date ledger is in the same rolled-back transaction). `--apply` writes
+    one `kind='rebase'`, reason='operator:<text>' row per ticker (one savepoint
+    each, ONE commit at the end; any failure rolls everything back).
+    ALL-OR-NOTHING validation: a ticker that currently reconciles, a benchmark or
+    non-us_equity ticker, one inside the fill-quiet window, or one whose broker
+    position has no usable average price refuses the WHOLE command (exit 2).
+    Never runs a breaker tick, never moves the epoch, never touches the HWM.
+    0 = ok, 1 = failed, 2 = refused."""
+    now = now or _utcnow()
+    if not tickers:
+        out('refused: no tickers given')
+        return 2
+    if not positions:
+        out('refused: broker positions unavailable/empty (cannot tell "holds none" '
+            'from a failed read)')
+        return 2
+    if bench is None:
+        out('refused: benchmark ticker lookup failed')
+        return 2
+    bench = {str(t).strip().upper() for t in bench}
+    a_state = load_alpha_state(cur)
+    if a_state is None or a_state[1] is None:
+        out('refused: alpha epoch not set / alpha state unreadable (no ledger to rebase)')
+        return 2
+    epoch_at = a_state[1]
+    if not sync_fills_since_epoch(cur, epoch_at):
+        out('refused: fill sync since the epoch failed or was truncated; the ledger '
+            'would be incomplete')
+        return 2
+    inputs = load_alpha_inputs(cur, epoch_at)
+    if inputs is None:
+        out('refused: alpha ledger inputs unreadable')
+        return 2
+    lots, fills = inputs
+    before = alpha_pnl(0.0, positions, bench, fills, lots)
+    mism = before.get('mismatch') or {}
+
+    refusals, plan = [], []
+    for k in tickers:
+        sym, p = _broker_position(positions, k)
+        if k in bench:
+            refusals.append(f'{k}: benchmark ticker (not alpha)')
+        elif _asset_class(sym or k, p) != _EQUITY_CLASS:
+            refusals.append(f'{k}: not a us_equity instrument (options/crypto are out '
+                            'of scope)')
+        elif k not in mism:
+            refusals.append(f'{k}: currently reconciles — nothing to rebase')
+        elif _inside_quiet_window(fills, k, now):
+            refusals.append(f'{k}: newest fill is inside the {REBASE_FILL_QUIET_S}s '
+                            'quiet window — retry shortly')
+        else:
+            seed = rebase_seed(positions, k)
+            if seed is None:
+                refusals.append(f'{k}: broker position has no usable avg_entry_price')
+            else:
+                plan.append((k, seed))
+    if refusals:
+        out('refused (nothing written):')
+        for r in refusals:
+            out(f'  - {r}')
+        conn.rollback()
+        return 2
+
+    text = (reason or '').strip() or 'manual'
+    rows, sim = [], list(lots)
+    for k, seed in plan:
+        row = rebase_row(k, seed, (before.get('realized_by_key') or {}).get(k, 0.0),
+                         now, f'operator:{text}', None)
+        rows.append(row)
+        sim.append(row)
+    after = alpha_pnl(0.0, positions, bench, fills, sim)
+    for k, _seed in plan:
+        row = next(r for r in rows if r['ticker'] == k)
+        lq, bq = mism[k]
+        out(f'{k}: ledger qty {lq:g} | broker qty {bq:g} | would write '
+            f"qty={row['qty']:g} avg={row['avg_entry_price']} side={row['side']} "
+            f"realized_carry={row['realized_carry']:.2f} reason={row['reason']!r}")
+    out(f"alpha P&L before {before['alpha_pnl']:.2f} | after {after['alpha_pnl']:.2f} "
+        f"(recon {before['recon']} -> {after['recon']})")
+    if abs(after['alpha_pnl'] - before['alpha_pnl']) > 0.005:
+        out('refused: alpha P&L is not continuous across the rebase (invariant broken); '
+            'nothing written')
+        conn.rollback()
+        return 2
+    if not apply:
+        out('DRY RUN — nothing written. Re-run with --apply to write the row(s).')
+        conn.rollback()
+        return 0
+    for row in rows:
+        if not write_rebase_row(cur, row):
+            out(f"FAILED writing the rebase row for {row['ticker']}; rolled back, "
+                'nothing written')
+            conn.rollback()
+            return 1
+    if not _commit(conn):
+        out('FAILED to commit; nothing written')
+        return 1
+    out(f'APPLIED {len(rows)} rebase row(s): {", ".join(r["ticker"] for r in rows)}')
+    return 0
+
+
+def _run_rebase_cli(tickers, reason, apply) -> int:
+    uri = os.environ.get('POSTGRES_URI')
+    if not uri:
+        print('POSTGRES_URI not set; aborting')
+        return 2
+    conn = None
+    try:
+        from execution.regime_liquidator import _load_broker_positions
+        positions = _load_broker_positions()
+        conn = psycopg2.connect(uri)
+        if conn.autocommit:
+            print('connection is autocommit=True; refusing')
+            return 2
+        cur = conn.cursor()
+        return rebase_cli(cur, conn, positions, bench_tickers(cur), tickers, reason, apply)
+    except Exception as e:  # noqa: BLE001
+        logger.error('[account_breaker] rebase CLI failed: %s: %s', type(e).__name__, e)
+        return 1
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def main(argv=None) -> int:
+    import argparse
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s %(levelname)s %(message)s')
-    return run_once()
+    ap = argparse.ArgumentParser(
+        prog='account_breaker.py',
+        description='No arguments: one breaker tick (the cron path). '
+                    '--rebase: operator ledger repair, dry-run unless --apply.')
+    ap.add_argument('--rebase', metavar='TICKER[,TICKER...]',
+                    help='re-seed the alpha ledger of these mismatched tickers from '
+                         'the broker position (no breaker tick is run)')
+    ap.add_argument('--reason', help='free text recorded as reason=operator:<text>')
+    ap.add_argument('--apply', action='store_true',
+                    help='write the rebase row(s); default is a dry-run')
+    args = ap.parse_args(argv)
+    if args.rebase is None:
+        if args.reason is not None or args.apply:
+            ap.error('--reason/--apply require --rebase')
+        return run_once()
+    return _run_rebase_cli(_parse_tickers(args.rebase), args.reason, args.apply)
 
 
 if __name__ == '__main__':
