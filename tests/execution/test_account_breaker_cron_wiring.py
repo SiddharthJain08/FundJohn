@@ -388,11 +388,6 @@ def test_already_halted_retries_the_pending_flatten_only(monkeypatch, wired):
 def test_operator_token_rearms_then_evaluates_normally(monkeypatch, wired):
     breached = datetime(2026, 9, 16, 17, 42, tzinfo=timezone.utc)
     monkeypatch.setenv(ab.REARM_ENV, breached.isoformat())
-    # Task 3: a re-arm needs a TRUSTED alpha ledger (pnl None would defer it).
-    monkeypatch.setattr(ab, 'compute_alpha_pnl_tick', lambda *a, **k: {
-        'alpha_pnl': 500.0, 'realized': 0.0, 'unrealized': 500.0, 'unmatched': 0,
-        'recon': 0, 'excluded': 0, 'excluded_by_class': {}, 'hwm': 500.0,
-        'dd_pnl': 0.0})
     cur = FakeCursor(_state(halted=True, peak=200_000.0, breached_at=breached,
                             reason='drawdown'), (205_000.0,))
     wired['install'](cur, 200_000.0)
