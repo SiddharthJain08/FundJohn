@@ -32,8 +32,9 @@ assert.deepStrictEqual(getPromotionThreshold(undefined), { min_sharpe: 0, max_dr
 }
 
 // mock dbQuery: canonical strategy_backtest_runs + strategy_backtest_regimes
-// only (registry mirror retired 2026-07-05 — a strategy_registry query must
-// never be issued).
+// only (registry mirror retired 2026-07-05 — under the kill switch this file
+// runs with, a strategy_registry query must never be issued; with the bench
+// gate ON the benchmark-sleeve exemption lookup does query it).
 function mkQuery(runRow, regimeRows) {
   return async (sql) => {
     if (/strategy_backtest_runs/.test(sql)) return { rows: runRow ? [runRow] : [] };

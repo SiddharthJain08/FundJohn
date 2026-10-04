@@ -1,5 +1,4 @@
 'use strict';
-const { clampExcessValue } = require('../channels/api/activation_preview');
 // Shared promotion gate + transition core. Single source both the dashboard
 // /transition route AND the Discord /approve-strategy call, so the engine's
 // trade-gate (strategy_registry.status='approved') can only be reached through
@@ -70,9 +69,12 @@ async function _loadBenchVector(dbQuery) {
     const rows = (r && r.rows) || [];
     const bRow = rows.find(x => x.key === BENCH_KEY);
     const eRow = rows.find(x => x.key === EXCESS_KEY);
+    // Mirrors activation_assigner.get_activation_excess: float(value); not
+    // numeric / non-finite / NULL => 0.0. No snapping, no bounds.
     if (eRow && eRow.value != null) {
-      const e = clampExcessValue(eRow.value);
-      excess = e == null ? 0 : e;
+      const sv = typeof eRow.value === 'string' ? eRow.value.trim() : eRow.value;
+      const e = (sv === '' || typeof sv === 'boolean') ? NaN : Number(sv);
+      excess = Number.isFinite(e) ? e : 0;
     }
     if (!bRow || bRow.value == null) why = `${BENCH_KEY} not set`;
     else {
@@ -209,6 +211,19 @@ async function _holdCapMismatch(dbQuery, sid, run) {
 }
 async function _regimeSleeves(dbQuery, runId) {
   if (runId == null) return null;
+  // Amendment 2: judge the CHOSEN universe-shrink tier's sleeves when present,
+  // exactly like activation_assigner._load_rows (the assigner would reject the
+  // chosen tier even if the full-universe sleeve passes). Empty/failed lookup
+  // falls back to strategy_backtest_regimes. Kill switch: original query only.
+  if (benchGateEnabled()) {
+    try {
+      const sh = await dbQuery(
+        `SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
+           FROM universe_shrink_metrics
+          WHERE run_id = $1 AND chosen AND regime_state <> 'TOTAL'`, [runId]);
+      if (sh && sh.rows && sh.rows.length > 0) return new Map(sh.rows.map(r => [r.regime_state, r]));
+    } catch (_) { /* fall through to the full-run sleeves */ }
+  }
   try {
     const rg = await dbQuery(
       `SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
@@ -229,7 +244,7 @@ async function computeQualifyingRegimes({ dbQuery, sid, instrumentClass }) {
   if (await _holdCapMismatch(dbQuery, sid, run)) { out.exit_hook_hold_cap_mismatch = true; return out; }
   const byRegime = await _regimeSleeves(dbQuery, run.runId);
   if (!byRegime) return out;                       // no sleeves recorded → nothing qualifies
-  const bctx = await _benchContext(dbQuery, sid);
+  const bctx = byRegime.size > 0 ? await _benchContext(dbQuery, sid) : null;
   for (const regime of CANONICAL_REGIMES) {
     const row = byRegime.get(regime);
     if (!row) continue;                            // strategy never fired in this regime
@@ -269,13 +284,14 @@ async function evaluatePromotionGate({ dbQuery, sid, instrumentClass, force, eli
   const failedGates = [];
   // Amendment 2 bench leg: resolved once per evaluation, only when sleeves are
   // judged (the legacy total-window fallback below has no per-regime sleeve).
-  const bctx = (named || (byRegime && byRegime.size > 0)) ? await _benchContext(dbQuery, sid) : null;
+  const bctx = (byRegime && byRegime.size > 0) ? await _benchContext(dbQuery, sid) : null;
   const ctxFor = (regime) => ({ instrumentClass, sid, regime,
     benchThreshold: bctx ? _benchThreshold(bctx, regime) : undefined });
   if (named) {
     // Caller names the activation set → EVERY named regime must qualify on
-    // its own sleeve (all three gates). Fail tags are regime-qualified:
-    // 'sharpe:CRISIS', 'max_dd:LOW_VOL', 'trades:HIGH_VOL', 'no_backtest:R'.
+    // its own sleeve (all three class gates, plus the bench leg unless the kill
+    // switch is set). Fail tags are regime-qualified: 'sharpe:CRISIS',
+    // 'max_dd:LOW_VOL', 'trades:HIGH_VOL', 'bench:CRISIS', 'no_backtest:R'.
     const qualifying = [];
     for (const regime of eligibleRegimes) {
       const fails = byRegime ? judgeRegimeSleeve(byRegime.get(regime), thresholds, ctxFor(regime)) : ['no_backtest'];
@@ -304,6 +320,13 @@ async function evaluatePromotionGate({ dbQuery, sid, instrumentClass, force, eli
   // Legacy total-window fallback — only reachable when the run has no run_id
   // to join sleeves on, or recorded no per-regime sleeves at all (pre-regime
   // backtest rows). Same three gates on total-window metrics.
+  // Amendment 2: with the bench gate ON a run without sleeves can never be
+  // activated by the assigner, so it must not promote (and the dry-run
+  // computeQualifyingRegimes agrees). Kill switch keeps the legacy path.
+  if (benchGateEnabled()) {
+    return { pass: false, failedGates: [byRegime ? 'no_qualifying_regime' : 'no_backtest'],
+             sharpe, maxDd, thresholds, qualifyingRegimes: [] };
+  }
   if (isNaN(sharpe) || isNaN(maxDd) || isNaN(run.trades)) failedGates.push('no_backtest');
   else {
     if (!(sharpe > thresholds.min_sharpe)) failedGates.push('sharpe');
@@ -324,7 +347,7 @@ async function transitionStrategy({ dbQuery, manifestPath, sid, toState, fromSta
   // strategy_regime_params to exactly the regimes that earned activation.
   let autoQualifying = null;
   if (gateApplies && !force) {
-    // Per-regime promotion gate (policy 2026-07-13 v2). A caller-named set
+    // Per-regime promotion gate (policy 2026-07-13 v2 + Amendment 2 bench leg). A caller-named set
     // (dashboard picker) is judged as-is: every named regime must qualify.
     // No named set → auto mode: the gate derives the qualifying set from the
     // latest primary backtest's sleeves itself (the old manifest-metadata

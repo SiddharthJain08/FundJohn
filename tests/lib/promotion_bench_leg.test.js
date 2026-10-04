@@ -5,6 +5,9 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const ps = require('../../src/lib/promotion_service');
 
 const BENCH = { LOW_VOL: 0.9457, TRANSITIONING: 0.4409, HIGH_VOL: 0.5326, CRISIS: 1.575 };
@@ -17,7 +20,11 @@ function mk(sleeves, opts = {}) {
   const q = async (sql) => {
     calls.push(sql);
     if (/strategy_backtest_runs/.test(sql)) return { rows: [RUN] };
-    if (/strategy_backtest_regimes/.test(sql)) return { rows: sleeves };
+    if (/universe_shrink_metrics/.test(sql)) {
+      if (opts.throwShrink) throw new Error('shrink down');
+      return { rows: opts.shrink || [] };
+    }
+    if (/strategy_backtest_regimes/.test(sql)) return { rows: opts.noRegimeRows ? [] : sleeves };
     if (/pipeline_config/.test(sql)) {
       if (opts.throwConfig) throw new Error('db down');
       const rows = [];
@@ -68,19 +75,29 @@ test('auto path: boundary qualifies, just below fails with bench; diag carries b
   assert.equal(r.diag.LOW_VOL.threshold, 0.9457);
 });
 
-test('excess is added to the threshold and clamped to [-1, 2]', async () => {
+test('excess is added to the threshold (no clamp, as get_activation_excess)', async () => {
   let r = (await withWarns(() => auto(mk([SL('LOW_VOL', 1.2457)], { bench: BENCH, excess: 0.3 })))).r;
   assert.deepEqual(r.qualifying, ['LOW_VOL']);          // 0.9457 + 0.3, boundary
   assert.equal(r.diag.LOW_VOL.threshold, 1.2457);
   r = (await withWarns(() => auto(mk([SL('LOW_VOL', 1.2456)], { bench: BENCH, excess: 0.3 })))).r;
   assert.deepEqual(r.diag.LOW_VOL.failed, ['bench']);
   r = (await withWarns(() => auto(mk([SL('LOW_VOL', 1.0)], { bench: BENCH, excess: 99 })))).r;
-  assert.equal(r.diag.LOW_VOL.threshold, 2.9457);       // clamped to 2.0
+  assert.equal(r.diag.LOW_VOL.threshold, 99.9457);      // unbounded, like the assigner
   r = (await withWarns(() => auto(mk([SL('LOW_VOL', 0.05)], { bench: BENCH, excess: -50 })))).r;
-  assert.equal(r.diag.LOW_VOL.threshold, -0.0543);      // clamped to -1.0
+  assert.equal(r.diag.LOW_VOL.threshold, -49.0543);
   r = (await withWarns(() => auto(mk([SL('LOW_VOL', 0.9457)], { bench: BENCH, excess: 'abc' })))).r;
   assert.equal(r.diag.LOW_VOL.threshold, 0.9457);       // malformed excess => 0
   assert.deepEqual(r.qualifying, ['LOW_VOL']);
+});
+
+test('excess mirrors get_activation_excess: no 0.05 snapping; empty/NaN/abc => 0', async () => {
+  let r = (await withWarns(() => auto(mk([SL('LOW_VOL', 1.0157)], { bench: BENCH, excess: '0.07' })))).r;
+  assert.equal(r.diag.LOW_VOL.threshold, 1.0157);       // round(0.9457 + 0.07, 10), not snapped to 0.05
+  assert.deepEqual(r.qualifying, ['LOW_VOL']);
+  for (const bad of ['abc', '', '  ', 'NaN', 'Infinity']) {
+    r = (await withWarns(() => auto(mk([SL('LOW_VOL', 0.9457)], { bench: BENCH, excess: bad })))).r;
+    assert.equal(r.diag.LOW_VOL.threshold, 0.9457, bad);
+  }
 });
 
 const FALLBACK_CASES = {
@@ -190,4 +207,84 @@ test('sparse-CCA fixture: no regime clears the bench => no_qualifying_regime (42
   assert.equal(g.pass, false);
   assert.equal(g.failedGates[0], 'no_qualifying_regime');
   assert.ok(g.failedGates.includes('bench:CRISIS'));
+});
+
+// ── MAJOR-1: the chosen universe-shrink tier is judged, like the assigner ──
+test('chosen shrink-tier sleeves win over strategy_backtest_regimes', async () => {
+  const q = mk([SL('CRISIS', 3)], { bench: BENCH, shrink: [SL('CRISIS', 0.8)] });
+  const { r } = await withWarns(() => auto(q));
+  assert.deepEqual(r.qualifying, []);                   // full sleeve would pass; chosen tier does not
+  assert.deepEqual(r.diag.CRISIS.failed, ['bench']);
+  assert.ok(q.calls.some(s => /universe_shrink_metrics[\s\S]*chosen[\s\S]*<> 'TOTAL'/.test(s)));
+  assert.equal(q.calls.filter(s => /FROM strategy_backtest_regimes/.test(s)).length, 0);
+});
+test('empty shrink => falls back to strategy_backtest_regimes', async () => {
+  const { r } = await withWarns(() => auto(mk([SL('CRISIS', 3)], { bench: BENCH, shrink: [] })));
+  assert.deepEqual(r.qualifying, ['CRISIS']);
+});
+test('shrink query throws => fallback, gate not failed on the lookup alone', async () => {
+  const { r } = await withWarns(() => auto(mk([SL('CRISIS', 3)], { bench: BENCH, throwShrink: true })));
+  assert.deepEqual(r.qualifying, ['CRISIS']);
+});
+test('kill switch issues no universe_shrink_metrics query', async () => {
+  process.env.OPENCLAW_PROMOTION_BENCH_GATE = '0';
+  try {
+    const q = mk([SL('CRISIS', 3)], { bench: BENCH, shrink: [SL('CRISIS', 0.8)] });
+    const r = await auto(q);
+    assert.deepEqual(r.qualifying, ['CRISIS']);
+    assert.equal(q.calls.filter(s => /universe_shrink_metrics/.test(s)).length, 0);
+  } finally { delete process.env.OPENCLAW_PROMOTION_BENCH_GATE; }
+});
+
+// ── MAJOR-2 / NIT-7: no sleeves => never promoted with the gate ON ──────────
+test('no sleeves (empty) => no_qualifying_regime; kill switch keeps legacy total-window pass; no bench load', async () => {
+  const q = mk([], { bench: BENCH, noRegimeRows: true });
+  const { r, warns } = await withWarns(() => gate(q));
+  assert.equal(r.pass, false);
+  assert.deepEqual(r.failedGates, ['no_qualifying_regime']);
+  assert.equal(q.calls.filter(s => /pipeline_config/.test(s)).length, 0);
+  assert.equal(warns.length, 0);
+  const c = (await withWarns(() => auto(mk([], { bench: BENCH, noRegimeRows: true })))).r;
+  assert.deepEqual(c.qualifying, []);
+  process.env.OPENCLAW_PROMOTION_BENCH_GATE = '0';
+  try {
+    const k = await gate(mk([], { bench: BENCH, noRegimeRows: true }));
+    assert.equal(k.pass, true);                          // legacy total-window path as on main
+  } finally { delete process.env.OPENCLAW_PROMOTION_BENCH_GATE; }
+});
+test('sleeve query error (null byRegime) => no_backtest; kill switch legacy pass', async () => {
+  const base = mk([], { bench: BENCH });
+  const q = async (sql, p) => { if (/strategy_backtest_regimes|universe_shrink_metrics/.test(sql)) throw new Error('boom'); return base(sql, p); };
+  const { r } = await withWarns(() => gate(q));
+  assert.deepEqual(r.failedGates, ['no_backtest']);
+  process.env.OPENCLAW_PROMOTION_BENCH_GATE = '0';
+  try { assert.equal((await gate(q)).pass, true); } finally { delete process.env.OPENCLAW_PROMOTION_BENCH_GATE; }
+});
+
+// ── MINOR-5: end to end through transitionStrategy (auto mode) ──────────────
+function tmpManifest() {
+  const p = path.join(os.tmpdir(), `bench_leg_manifest_${process.pid}_${Math.random().toString(36).slice(2)}.json`);
+  fs.writeFileSync(p, JSON.stringify({ strategies: { S_x: { state: 'candidate', history: [] } } }));
+  return p;
+}
+test('transitionStrategy auto mode: qualifying set returned when a regime clears the bench', async () => {
+  const mp = tmpManifest();
+  try {
+    const { r } = await withWarns(() => ps.transitionStrategy({ dbQuery: mk([SL('LOW_VOL', 1.0), SL('CRISIS', 0.8)], { bench: BENCH }),
+      manifestPath: mp, sid: 'S_x', toState: 'live', fromState: 'candidate', force: false, actor: 't', instrumentClass: 'equity', gateApplies: true }));
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.qualifyingRegimes, ['LOW_VOL']);
+    assert.equal(JSON.parse(fs.readFileSync(mp, 'utf8')).strategies.S_x.state, 'live');
+  } finally { fs.rmSync(mp, { force: true }); }
+});
+test('transitionStrategy auto mode: sparse-CCA fixture is refused (422 shape), manifest untouched', async () => {
+  const mp = tmpManifest();
+  const sleeves = [SL('CRISIS', 0.827, 860), SL('HIGH_VOL', -0.503), SL('LOW_VOL', -0.329), SL('TRANSITIONING', 0.013)];
+  try {
+    const { r } = await withWarns(() => ps.transitionStrategy({ dbQuery: mk(sleeves, { bench: BENCH, excess: 0 }),
+      manifestPath: mp, sid: 'S_x', toState: 'live', fromState: 'candidate', force: false, actor: 't', instrumentClass: 'equity', gateApplies: true }));
+    assert.equal(r.ok, false);
+    assert.equal(r.failedGates[0], 'no_qualifying_regime');
+    assert.equal(JSON.parse(fs.readFileSync(mp, 'utf8')).strategies.S_x.state, 'candidate');
+  } finally { fs.rmSync(mp, { force: true }); }
 });
