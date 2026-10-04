@@ -33,6 +33,7 @@ from src.pipeline.backfillers.universe_metadata import (
     rank_in_r1000_r3000,
     _sp500_membership_on,
 )
+from src.strategies.universe_meta import security_type_from_profile
 from src.strategies._sp500_membership import SP500_SET  # noqa: F401 (kept for back-compat)
 
 UPSERT_SQL = """
@@ -40,13 +41,13 @@ INSERT INTO ticker_metadata_snapshots (
     snapshot_date, symbol, asset_class, exchange, status,
     tradable, shortable, fractionable, easy_to_borrow,
     market_cap, adv_usd_20d, sector, industry, options_eligible,
-    in_sp500, in_r1000, in_r3000, listed_date, delisted_date, source_tag
+    in_sp500, in_r1000, in_r3000, listed_date, delisted_date, source_tag, security_type
 ) VALUES (
     %(snapshot_date)s, %(symbol)s, %(asset_class)s, %(exchange)s, %(status)s,
     %(tradable)s, %(shortable)s, %(fractionable)s, %(easy_to_borrow)s,
     %(market_cap)s, %(adv_usd_20d)s, %(sector)s, %(industry)s, %(options_eligible)s,
     %(in_sp500)s, %(in_r1000)s, %(in_r3000)s, %(listed_date)s, %(delisted_date)s,
-    %(source_tag)s
+    %(source_tag)s, %(security_type)s
 )
 ON CONFLICT (snapshot_date, symbol) DO UPDATE SET
     asset_class=EXCLUDED.asset_class,
@@ -66,7 +67,10 @@ ON CONFLICT (snapshot_date, symbol) DO UPDATE SET
     in_r3000=EXCLUDED.in_r3000,
     listed_date=EXCLUDED.listed_date,
     delisted_date=EXCLUDED.delisted_date,
-    source_tag=EXCLUDED.source_tag
+    source_tag=EXCLUDED.source_tag,
+    -- keep the latest KNOWN type: a re-write from a source that has no profile
+    -- (NULL) must not erase a previously written one.
+    security_type=COALESCE(EXCLUDED.security_type, ticker_metadata_snapshots.security_type)
 """
 
 
@@ -125,6 +129,7 @@ def build_metadata_rows(
             "in_sp500": sym in sp500,
             "in_r1000": False,   # filled below after ranking
             "in_r3000": False,   # filled below after ranking
+            "security_type": security_type_from_profile(p),
             "listed_date": p.get("ipoDate") or a.get("first_seen_at"),
             "delisted_date": (
                 None if a["status"] == "active" else a.get("last_seen_at")
@@ -187,6 +192,9 @@ def build_today_snapshot_via_builder(
     df['industry'] = df['symbol'].map(
         lambda s: (fmp_profile.get(s, {}) or {}).get('industry')
     )
+    df['security_type'] = df['symbol'].map(
+        lambda s: security_type_from_profile(fmp_profile.get(s))
+    )
     df['options_eligible'] = df['symbol'].map(
         lambda s: bool(options_cache.get(s, False))
     )
@@ -218,7 +226,9 @@ def write_snapshots(dsn: str, rows: list[dict]) -> int:
     written = 0
     with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
         for r in rows:
-            cur.execute(UPSERT_SQL, r)
+            # rows from older builders carry no security_type -> NULL (COALESCE
+            # in the upsert keeps any value already stored).
+            cur.execute(UPSERT_SQL, {"security_type": None, **r})
             written += 1
         conn.commit()
     return written
