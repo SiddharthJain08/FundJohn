@@ -268,7 +268,7 @@ def rank_in_r1000_r3000(rows_or_df) -> tuple[set[str], set[str]]:
 
     Pool = rows where tradable=True AND status='active' AND market_cap is not
     None AND security_type is not a known non-common type
-    (NON_COMMON_SECURITY_TYPES: etf/fund/spac/deriv/pref/cef). 'stock', 'adr',
+    (NON_COMMON_SECURITY_TYPES: etf/fund/spac/deriv/pref/cef/secondary). 'stock', 'adr',
     None/NaN and a MISSING security_type key/column stay in the pool, so inputs
     without types behave exactly as before. OPENCLAW_RANK_COMMON_ONLY=0
     restores the old pool. Tickers outside the pool are NOT in r1000/r3000.

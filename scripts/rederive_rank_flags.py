@@ -149,10 +149,7 @@ def load_overlay(db_types: dict, profile_path, warn=None) -> dict:
     return overlay
 
 
-def reproducibility(rows: list[dict]) -> tuple[int, int, int]:
-    """Recompute WITHOUT types (the old pool) and compare to the STORED flags.
-    Returns (rows differing, r1000 diffs, r3000 diffs); (0,0,0) = reproducible."""
-    base1, base3 = recompute_flags(rows, {})
+def _stored_diffs(rows: list[dict], base1: set, base3: set) -> tuple[int, int, int]:
     n = a = b = 0
     for r in rows:
         d1 = (r['symbol'] in base1) != bool(r['in_r1000'])
@@ -161,6 +158,28 @@ def reproducibility(rows: list[dict]) -> tuple[int, int, int]:
         b += d3
         n += d1 or d3
     return n, a, b
+
+
+def reproducibility(rows: list[dict], types: dict | None = None) -> tuple[int, int, int]:
+    """Are the STORED flags explained by a pool this code has ever produced?
+    Returns (rows differing, r1000 diffs, r3000 diffs); (0,0,0) = reproducible.
+
+    Accepted baselines, in order: (1) the OLD pool — recompute without types;
+    (2) the FIRST-PASS pool — the corrected pool before the `secondary` type
+    existed (2026-10-05 repair: `secondary` lines still ranked as stock);
+    (3) the CURRENT pool — the date is already fully repaired (diff is empty).
+    Without (2)/(3) a second repair pass over already-repaired dates would be
+    refused as "not reproducible" even though every stored flag is explained.
+    Diffs are reported against the old pool when no baseline matches."""
+    first = _stored_diffs(rows, *recompute_flags(rows, {}))
+    if first[0] == 0 or not types:
+        return first
+    first_pass = {k: ('stock' if v == 'secondary' else v) for k, v in types.items()}
+    if _stored_diffs(rows, *recompute_flags(rows, first_pass))[0] == 0:
+        return 0, 0, 0
+    if _stored_diffs(rows, *recompute_flags(rows, types))[0] == 0:
+        return 0, 0, 0
+    return first
 
 
 def run(conn, date_from: date, date_to: date, apply: bool, out=print,
@@ -184,7 +203,7 @@ def run(conn, date_from: date, date_to: date, apply: bool, out=print,
                 cur.execute(ROWS_SQL, (sd,))
                 rows = _fetch_dicts(cur)
                 d = diff_flags(rows, types)
-                n_bad, a_bad, b_bad = reproducibility(rows)
+                n_bad, a_bad, b_bad = reproducibility(rows, types)
                 d['skipped'] = False
                 if n_bad:
                     msg = (f'NOT REPRODUCIBLE {sd}: {n_bad} rows differ '
