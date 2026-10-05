@@ -59,6 +59,8 @@ from typing import Iterable, Optional
 
 import pandas as pd
 
+from src.strategies.universe_meta import NON_COMMON_SECURITY_TYPES
+
 ROOT = Path(__file__).resolve().parents[3]
 MASTER_PRICES = ROOT / 'data' / 'master' / 'prices.parquet'
 SP500_CSV = ROOT / 'data' / 'sp500_historical_membership_v1.csv'
@@ -255,25 +257,39 @@ def _alpaca_status_batch(
 
 
 # ── In-batch r1000/r3000 ranking ──────────────────────────────────────────────
+def _rank_common_only() -> bool:
+    """Kill switch OPENCLAW_RANK_COMMON_ONLY (read at call time; default ON,
+    only the literal '0' turns it off)."""
+    return os.environ.get('OPENCLAW_RANK_COMMON_ONLY', '1').strip() != '0'
+
+
 def rank_in_r1000_r3000(rows_or_df) -> tuple[set[str], set[str]]:
     """Rank tickers in r1000 / r3000 by descending market_cap.
 
     Pool = rows where tradable=True AND status='active' AND market_cap is not
-    None. Tickers outside the pool are NOT in r1000/r3000.
+    None AND security_type is not a known non-common type
+    (NON_COMMON_SECURITY_TYPES: etf/fund/spac/deriv/pref/cef). 'stock', 'adr',
+    None/NaN and a MISSING security_type key/column stay in the pool, so inputs
+    without types behave exactly as before. OPENCLAW_RANK_COMMON_ONLY=0
+    restores the old pool. Tickers outside the pool are NOT in r1000/r3000.
 
     Accepts either a list[dict] (Phase A live writer) or a pandas DataFrame
     (Phase B builder) — extracted as a shared helper so both call sites stay
     DRY.
     """
+    common_only = _rank_common_only()
     if hasattr(rows_or_df, 'empty'):  # DataFrame
         df = rows_or_df
         if df.empty:
             return set(), set()
-        elig = df[
+        mask = (
             df.get('tradable', False).fillna(False)
             & (df.get('status', '') == 'active')
             & df['market_cap'].notna()
-        ].copy()
+        )
+        if common_only and 'security_type' in df.columns:
+            mask = mask & ~df['security_type'].isin(NON_COMMON_SECURITY_TYPES)
+        elig = df[mask].copy()
         if elig.empty:
             return set(), set()
         elig = elig.sort_values('market_cap', ascending=False)
@@ -288,6 +304,10 @@ def rank_in_r1000_r3000(rows_or_df) -> tuple[set[str], set[str]]:
                     r.get('tradable', False)
                     and r.get('status') == 'active'
                     and r.get('market_cap') is not None
+                    and not (
+                        common_only
+                        and r.get('security_type') in NON_COMMON_SECURITY_TYPES
+                    )
                 )
             ),
             key=lambda x: -(x[1] or 0.0),
