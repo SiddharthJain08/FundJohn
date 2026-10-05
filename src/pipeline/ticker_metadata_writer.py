@@ -33,7 +33,7 @@ from src.pipeline.backfillers.universe_metadata import (
     rank_in_r1000_r3000,
     _sp500_membership_on,
 )
-from src.strategies.universe_meta import security_type_from_profile
+from src.strategies.universe_meta import security_types_from_profiles
 from src.strategies._sp500_membership import SP500_SET  # noqa: F401 (kept for back-compat)
 
 UPSERT_SQL = """
@@ -106,6 +106,10 @@ def build_metadata_rows(
         # daily flow stays unbroken in test environments.
         sp500 = set(SP500_SET)
 
+    # Cache-wide types (per-profile mapping + secondary-line pass), computed ONCE
+    # so every row carries its type BEFORE ranking.
+    types = security_types_from_profiles(fmp_profile)
+
     enriched: list[dict] = []
     for a in alpaca_rows:
         sym = a["symbol"]
@@ -132,7 +136,7 @@ def build_metadata_rows(
             "in_sp500": sym in sp500,
             "in_r1000": False,   # filled below after ranking
             "in_r3000": False,   # filled below after ranking
-            "security_type": security_type_from_profile(p),
+            "security_type": types.get(sym),
             "listed_date": p.get("ipoDate") or a.get("first_seen_at"),
             "delisted_date": (
                 None if a["status"] == "active" else a.get("last_seen_at")
@@ -195,9 +199,8 @@ def build_today_snapshot_via_builder(
     df['industry'] = df['symbol'].map(
         lambda s: (fmp_profile.get(s, {}) or {}).get('industry')
     )
-    df['security_type'] = df['symbol'].map(
-        lambda s: security_type_from_profile(fmp_profile.get(s))
-    )
+    types = security_types_from_profiles(fmp_profile)  # once, not per row
+    df['security_type'] = df['symbol'].map(types.get)
     df['options_eligible'] = df['symbol'].map(
         lambda s: bool(options_cache.get(s, False))
     )

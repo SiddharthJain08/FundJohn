@@ -213,3 +213,31 @@ def test_profile_cache_fallback_db_wins_and_missing_tolerated(tmp_path):
     warns = []
     assert rr.load_overlay({"B": "fund"}, tmp_path / "missing.json", warn=warns.append) == {"B": "fund"}
     assert len(warns) == 1 and warns[0].startswith("WARNING")
+
+
+def test_guard_accepts_first_pass_and_already_repaired_dates():
+    """A second repair pass (after `secondary` was added) must not be refused."""
+    import scripts.rederive_rank_flags as rr
+    rows = [
+        {'symbol': 'ETF1', 'tradable': True, 'status': 'active', 'market_cap': 900.0},
+        {'symbol': 'PARNP', 'tradable': True, 'status': 'active', 'market_cap': 800.0},
+        {'symbol': 'AAA', 'tradable': True, 'status': 'active', 'market_cap': 700.0},
+        {'symbol': 'BBB', 'tradable': True, 'status': 'active', 'market_cap': 600.0},
+    ]
+    types = {'ETF1': 'etf', 'PARNP': 'secondary', 'AAA': 'stock', 'BBB': 'stock'}
+
+    def stored(pool_types):
+        r1, r3 = rr.recompute_flags(rows, pool_types)
+        return [dict(r, in_r1000=r['symbol'] in r1, in_r3000=r['symbol'] in r3) for r in rows]
+
+    old = stored({})                                             # pre-fix flags
+    first_pass = stored({'ETF1': 'etf', 'PARNP': 'stock', 'AAA': 'stock', 'BBB': 'stock'})
+    repaired = stored(types)
+    assert rr.reproducibility(old, types) == (0, 0, 0)
+    assert rr.reproducibility(first_pass, types) == (0, 0, 0)
+    assert rr.reproducibility(repaired, types) == (0, 0, 0)
+    # a date explained by NO known pool is still flagged
+    bad = [dict(r) for r in old]
+    for r in bad:
+        r['in_r1000'] = r['in_r3000'] = False
+    assert rr.reproducibility(bad, types)[0] > 0

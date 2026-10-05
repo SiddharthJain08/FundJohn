@@ -37,13 +37,16 @@ class TickerMetadata:
         return cls(**kw)
 
 
-SECURITY_TYPES = ("etf", "fund", "spac", "deriv", "pref", "cef", "adr", "stock")
+SECURITY_TYPES = ("etf", "fund", "spac", "deriv", "pref", "cef", "secondary", "adr", "stock")
 
 # Known NON-common-stock types: the single source for "not an operating-company
 # share". The Russell-flag ranking (pipeline.backfillers.universe_metadata.
 # rank_in_r1000_r3000) drops these from its pool. 'stock', 'adr' and unknown
-# (None) are NOT in this set.
-NON_COMMON_SECURITY_TYPES = frozenset({"etf", "fund", "spac", "deriv", "pref", "cef"})
+# (None) are NOT in this set. 'secondary' = a preferred/note/warrant/unit line
+# the vendor lists under its parent's plain companyName (see
+# security_types_from_profiles' secondary-line pass).
+NON_COMMON_SECURITY_TYPES = frozenset(
+    {"etf", "fund", "spac", "deriv", "pref", "cef", "secondary"})
 
 # companyName patterns (word-boundary, case-insensitive). Conservative by design:
 # a real operating company must stay 'stock' — e.g. "Unity Software", "United
@@ -101,13 +104,62 @@ def security_type_from_profile(profile) -> Optional[str]:
     return "stock"
 
 
+# ── secondary-line post-pass ────────────────────────────────────────────────
+# Provenance: reviewer-tested on the 2026-10-03 profile cache: 226 hits, 63 at
+# >= $1B; false positives GOOGL (class share) and BBDO (ADR - excluded by the
+# not-adr guard).
+# A secondary line S: per-profile type 'stock' (never 'adr'), another symbol P
+# with the same non-empty cik AND identical companyName, S == P + suffix, S not
+# an allow-listed class share. Class letters A/B/C/K are excluded by the suffix
+# regex (1-2 trailing letters W/WW/WS/U/P-forms/L-M-N-O-Z-forms).
+SECONDARY_SUFFIX_RE = re.compile(r"^(W|WW|WS|U|[A-Z]?P|P[A-Z]|[A-Z]?[LMNOZ])$")
+# Genuine class shares that the suffix rule would otherwise catch (GOOGL = GOO + GL).
+SECONDARY_CLASS_SHARE_ALLOW = frozenset({"GOOGL"})
+# Secondary lines whose symbol is NOT parent+suffix; each applies only when the
+# symbol is in the cache and currently typed 'stock'.
+SECONDARY_DENY_LIST = frozenset(
+    "MGRB MGRD MGRE AFGB AFGC AFGD AFGE FCNCO FCNCP STRC STRD STRK DTB DTG DTK "
+    "PRH PRS SOJC SOJD SOJE RZC CRBD GOODN TWOD RWTQ PPLC SREA APOS KKRS HCXY "
+    "TRNI PFLA".split())
+
+
 def security_types_from_profiles(profiles: Mapping[str, dict]) -> dict:
-    """{symbol: type} for every profile that maps to a known type."""
+    """{symbol: type} for every profile that maps to a known type: the pure
+    per-profile mapping (security_type_from_profile) followed by the
+    cache-wide secondary-line pass. The ONE function every consumer that types
+    symbols from the profile cache must use (daily writer, membership overlay,
+    rank-flag repair, reports)."""
+    profiles = profiles or {}
     out = {}
-    for sym, prof in (profiles or {}).items():
+    for sym, prof in profiles.items():
         t = security_type_from_profile(prof)
         if t is not None:
             out[sym] = t
+    # Group every profile by (cik, companyName) -> symbols.
+    groups: dict = {}
+    for sym, prof in profiles.items():
+        if not isinstance(prof, dict):
+            continue
+        cik = prof.get("cik")
+        name = prof.get("companyName")
+        if not cik or not name:
+            continue
+        groups.setdefault((str(cik), name), set()).add(sym)
+    secondary = set()
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        for sym in members:
+            if out.get(sym) != "stock" or sym in SECONDARY_CLASS_SHARE_ALLOW:
+                continue
+            for parent in members:
+                if parent != sym and sym.startswith(parent) and \
+                        SECONDARY_SUFFIX_RE.match(sym[len(parent):]):
+                    secondary.add(sym)
+                    break
+    secondary.update(s for s in SECONDARY_DENY_LIST if out.get(s) == "stock")
+    for sym in secondary:
+        out[sym] = "secondary"
     return out
 
 
