@@ -89,7 +89,10 @@ def build_metadata_rows(
     Returns a list of row-dicts ready for UPSERT. in_r1000/in_r3000 are computed
     via the shared `rank_in_r1000_r3000` helper from the Phase-B builder
     (descending market_cap among tradable+active tickers with non-None
-    market_cap). Tickers without market_cap are excluded from the ranking pool.
+    market_cap). Tickers without market_cap are excluded from the ranking pool,
+    as are known non-common security types (etf/fund/spac/deriv/pref/cef; every
+    row carries `security_type` before ranking; OPENCLAW_RANK_COMMON_ONLY=0
+    restores the old pool).
 
     in_sp500 prefers the point-in-time historical CSV via
     `_sp500_membership_on(snapshot_date)`. Falls back to the hardcoded

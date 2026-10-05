@@ -39,6 +39,12 @@ class TickerMetadata:
 
 SECURITY_TYPES = ("etf", "fund", "spac", "deriv", "pref", "cef", "adr", "stock")
 
+# Known NON-common-stock types: the single source for "not an operating-company
+# share". The Russell-flag ranking (pipeline.backfillers.universe_metadata.
+# rank_in_r1000_r3000) drops these from its pool. 'stock', 'adr' and unknown
+# (None) are NOT in this set.
+NON_COMMON_SECURITY_TYPES = frozenset({"etf", "fund", "spac", "deriv", "pref", "cef"})
+
 # companyName patterns (word-boundary, case-insensitive). Conservative by design:
 # a real operating company must stay 'stock' — e.g. "Unity Software", "United
 # Rentals", "Rightmove", "Preferred Bank" (bare words never match).
