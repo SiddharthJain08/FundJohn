@@ -29,33 +29,42 @@ from typing import Iterable, Mapping, Optional, Union
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.strategies.universe_meta import security_type_from_profile  # noqa: E402
+from src.strategies.universe_meta import security_types_from_profiles  # noqa: E402
 
 MANIFEST = ROOT / 'src' / 'strategies' / 'manifest.json'
 PROFILE_CACHE = ROOT / 'data' / '.cache' / 'fmp_profile.json'
-FUND_TYPES = ('etf', 'fund')
+# 'secondary' (preferred/note/warrant lines under a parent's name) is non-common
+# and counted here with the funds.
+FUND_TYPES = ('etf', 'fund', 'secondary')
 
 
 # ── pure parts ───────────────────────────────────────────────────────────────
 
-def ticker_security_type(ticker: str, profiles: dict) -> Optional[str]:
+def ticker_security_type(ticker: str, profiles: dict, types: Optional[dict] = None) -> Optional[str]:
     """Type for a trade ticker: broker symbol first, then the vendor hyphen
-    form for dotted symbols (BRK.B -> BRK-B); None when unknown."""
-    t = security_type_from_profile(profiles.get(ticker))
+    form for dotted symbols (BRK.B -> BRK-B); None when unknown. `types` is the
+    cache-wide result of security_types_from_profiles (computed here when
+    omitted; pass it to avoid recomputing per ticker)."""
+    if types is None:
+        types = security_types_from_profiles(profiles)
+    t = types.get(ticker)
     if t is None and '.' in ticker:
-        t = security_type_from_profile(profiles.get(ticker.replace('.', '-')))
+        t = types.get(ticker.replace('.', '-'))
     return t
 
 
-def fund_share(trades: Union[Iterable[str], Mapping[str, int]], profiles: dict) -> dict:
+def fund_share(trades: Union[Iterable[str], Mapping[str, int]], profiles: dict,
+               types: Optional[dict] = None) -> dict:
     """{'total', 'fund', 'unknown', 'share'}. `trades` is either {ticker: trade
     count} (what the DB path supplies, via GROUP BY) or a list with one ticker
     per trade. share = fund / total (None when total == 0)."""
     counts = trades if isinstance(trades, Mapping) else Counter(trades)
+    if types is None:
+        types = security_types_from_profiles(profiles)
     total = fund = unknown = 0
     for tk, n in counts.items():
         total += n
-        t = ticker_security_type(tk, profiles)
+        t = ticker_security_type(tk, profiles, types)
         if t is None:
             unknown += n
         elif t in FUND_TYPES:
@@ -72,11 +81,12 @@ def build_rows(manifest: dict, states: set, trades_by_strategy: dict,
                profiles: dict, active_by_strategy: dict) -> list[dict]:
     """One row per manifest strategy in `states`, sorted by fund share desc."""
     rows = []
+    types = security_types_from_profiles(profiles)  # once per report
     for sid, entry in sorted(manifest.get('strategies', {}).items()):
         if entry.get('state') not in states:
             continue
         meta = entry.get('metadata') or {}
-        s = fund_share(trades_by_strategy.get(sid, []), profiles)
+        s = fund_share(trades_by_strategy.get(sid, []), profiles, types)
         rows.append({
             'strategy_id': sid,
             'state': entry.get('state'),
