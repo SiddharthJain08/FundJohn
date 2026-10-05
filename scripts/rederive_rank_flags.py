@@ -22,11 +22,13 @@ POSTGRES_URI comes from the environment.
 
 AFTER an apply the tier membership artifact must be REBUILT
 (scripts/build_tier_membership.py) for backtests to see the corrected month-ends.
-Exit status is non-zero on any error; the failing date is rolled back.
+Per date the stored flags must first REPRODUCE from the old (type-less) pool, else
+the date is skipped (exit 3 unless --force-unreproducible). Exit status is non-zero on any error; the failing date is rolled back.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections import Counter
@@ -41,6 +43,8 @@ from src.pipeline.backfillers.universe_metadata import rank_in_r1000_r3000  # no
 from src.strategies._db_adapters import LATEST_SECURITY_TYPE_SQL  # noqa: E402
 
 MIN_SAFE_FROM = date(2026, 8, 1)
+DEFAULT_PROFILE_CACHE = ROOT / 'data' / '.cache' / 'fmp_profile.json'
+EXIT_UNREPRODUCIBLE = 3
 
 DATES_SQL = (
     "SELECT DISTINCT snapshot_date FROM ticker_metadata_snapshots "
@@ -48,7 +52,7 @@ DATES_SQL = (
 )
 ROWS_SQL = (
     "SELECT symbol, tradable, status, market_cap, in_r1000, in_r3000 "
-    "FROM ticker_metadata_snapshots WHERE snapshot_date = %s"
+    "FROM ticker_metadata_snapshots WHERE snapshot_date = %s ORDER BY symbol"
 )
 UPDATE_SQL = (
     "UPDATE ticker_metadata_snapshots SET in_r1000 = %s, in_r3000 = %s "
@@ -110,15 +114,13 @@ def format_report(snapshot_date, d: dict) -> str:
 
 
 def format_total(per_date: list, apply: bool) -> str:
-    tot = {'rows': 0, 'n_r1000': 0, 'n_r3000': 0, 'updated': 0}
-    for _, d in per_date:
-        tot['rows'] += d['rows']
-        tot['n_r1000'] += d['n_r1000']
-        tot['n_r3000'] += d['n_r3000']
-        tot['updated'] += len(d['changes'])
-    out = (f"TOTAL ({'APPLIED' if apply else 'DRY-RUN'}): dates={len(per_date)} rows={tot['rows']} "
-           f"in_r1000_changes={tot['n_r1000']} in_r3000_changes={tot['n_r3000']} "
-           f"rows_to_update={tot['updated']}")
+    done = [d for _, d in per_date if not d.get('skipped')]
+    skipped = len(per_date) - len(done)
+    n1 = sum(d['n_r1000'] for d in done)
+    n3 = sum(d['n_r3000'] for d in done)
+    out = (f"SUMMARY ({'APPLIED' if apply else 'DRY-RUN'}): dates processed={len(done)} "
+           f"skipped-unreproducible={skipped} rows changed: in_r1000={n1} in_r3000={n3} "
+           f"rows_to_update={sum(len(d['changes']) for d in done)}")
     if apply:
         out += ("\nREMINDER: rebuild the tier membership artifact "
                 "(scripts/build_tier_membership.py) so backtests see the corrected month-ends.")
@@ -130,17 +132,51 @@ def _fetch_dicts(cur) -> list[dict]:
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def run(conn, date_from: date, date_to: date, apply: bool, out=print) -> list:
+def load_overlay(db_types: dict, profile_path, warn=None) -> dict:
+    """Latest-known type per symbol: profile-cache types as a fallback, DB type
+    wins (mirrors scripts/build_tier_membership.build_security_type_overlay).
+    A missing/unreadable cache => DB types only, one WARNING."""
+    from src.strategies.universe_meta import security_types_from_profiles
+    warn = warn or (lambda m: print(m, file=sys.stderr))
+    profiles = {}
+    try:
+        data = json.loads(Path(profile_path).read_text())
+        profiles = data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        warn(f'WARNING: profile cache {profile_path} unavailable - no profile fallback for types')
+    overlay = security_types_from_profiles(profiles)
+    overlay.update({k: v for k, v in (db_types or {}).items() if v})
+    return overlay
+
+
+def reproducibility(rows: list[dict]) -> tuple[int, int, int]:
+    """Recompute WITHOUT types (the old pool) and compare to the STORED flags.
+    Returns (rows differing, r1000 diffs, r3000 diffs); (0,0,0) = reproducible."""
+    base1, base3 = recompute_flags(rows, {})
+    n = a = b = 0
+    for r in rows:
+        d1 = (r['symbol'] in base1) != bool(r['in_r1000'])
+        d3 = (r['symbol'] in base3) != bool(r['in_r3000'])
+        a += d1
+        b += d3
+        n += d1 or d3
+    return n, a, b
+
+
+def run(conn, date_from: date, date_to: date, apply: bool, out=print,
+        profile_cache=None, force_unreproducible: bool = False) -> list:
     """Process every snapshot date in range. Raises on error after rolling the
     failing date back (earlier dates stay committed in --apply mode)."""
     if not apply:
         conn.set_session(readonly=True)
     with conn.cursor() as cur:
         cur.execute(LATEST_SECURITY_TYPE_SQL)
-        types = {sym: st for sym, st in cur.fetchall()}
+        db_types = {sym: st for sym, st in cur.fetchall()}
         cur.execute(DATES_SQL, (date_from, date_to))
         dates = [r[0] for r in cur.fetchall()]
     (conn.commit if apply else conn.rollback)()
+    types = (load_overlay(db_types, profile_cache, warn=lambda m: out(m))
+             if profile_cache is not None else db_types)
     per_date = []
     for sd in dates:
         try:
@@ -148,7 +184,17 @@ def run(conn, date_from: date, date_to: date, apply: bool, out=print) -> list:
                 cur.execute(ROWS_SQL, (sd,))
                 rows = _fetch_dicts(cur)
                 d = diff_flags(rows, types)
-                if apply and d['changes']:
+                n_bad, a_bad, b_bad = reproducibility(rows)
+                d['skipped'] = False
+                if n_bad:
+                    msg = (f'NOT REPRODUCIBLE {sd}: {n_bad} rows differ '
+                           f'(r1000 {a_bad}, r3000 {b_bad})')
+                    if force_unreproducible:
+                        out(f'WARNING: {msg} - processing anyway (--force-unreproducible)')
+                    else:
+                        d['skipped'] = True
+                        out(msg + ' - SKIPPED, nothing written for this date')
+                if apply and d['changes'] and not d['skipped']:
                     from psycopg2.extras import execute_batch
                     execute_batch(cur, UPDATE_SQL,
                                   [(n1, n3, sd, sym) for sym, n1, n3 in d['changes']])
@@ -159,7 +205,8 @@ def run(conn, date_from: date, date_to: date, apply: bool, out=print) -> list:
         except Exception:
             conn.rollback()
             raise
-        out(format_report(sd, d))
+        out(format_report(sd, d) + ('\n  (SKIPPED: corrected diff shown for information only)'
+                                    if d['skipped'] else ''))
         per_date.append((sd, d))
     out(format_total(per_date, apply))
     return per_date
@@ -170,6 +217,10 @@ def parse_args(argv=None):
     ap.add_argument('--from', dest='date_from', required=True, type=date.fromisoformat)
     ap.add_argument('--to', dest='date_to', type=date.fromisoformat, default=None)
     ap.add_argument('--apply', action='store_true', help='write (default: dry-run, read-only)')
+    ap.add_argument('--force-unreproducible', action='store_true',
+                    help='process dates whose stored flags do not reproduce from the old pool')
+    ap.add_argument('--profile-cache', default=str(DEFAULT_PROFILE_CACHE),
+                    help='vendor profile cache for the type fallback (DB type wins)')
     ap.add_argument('--force-range', action='store_true',
                     help=f'allow --from earlier than {MIN_SAFE_FROM}')
     a = ap.parse_args(argv)
@@ -194,10 +245,16 @@ def main(argv=None, connect=None) -> int:
         print(f'ERROR: cannot connect: {type(e).__name__}: {e}', file=sys.stderr)
         return 1
     try:
-        run(conn, args.date_from, args.date_to, args.apply)
+        per_date = run(conn, args.date_from, args.date_to, args.apply,
+                       profile_cache=args.profile_cache,
+                       force_unreproducible=args.force_unreproducible)
     except Exception as e:  # noqa: BLE001
         print(f'ERROR: {type(e).__name__}: {e}', file=sys.stderr)
         return 1
+    else:
+        if any(d.get('skipped') for _, d in per_date):
+            print(f'ERROR: unreproducible date(s) skipped; exit {EXIT_UNREPRODUCIBLE}', file=sys.stderr)
+            return EXIT_UNREPRODUCIBLE
     finally:
         try:
             conn.close()

@@ -43,7 +43,7 @@ def test_recompute_and_diff_counts():
     assert ("ETF", False, False) in d["changes"]
     text = rr.format_report(date(2026, 10, 5), d)
     assert "rows=1001" in text and "in_r1000_changes=2" in text and "etf=1" in text
-    assert "TOTAL (DRY-RUN)" in rr.format_total([(date(2026, 10, 5), d)], False)
+    assert "SUMMARY (DRY-RUN)" in rr.format_total([(date(2026, 10, 5), d)], False)
     assert "REMINDER" in rr.format_total([(date(2026, 10, 5), d)], True)
 
 
@@ -115,7 +115,7 @@ def test_dry_run_issues_no_update_and_is_read_only():
     assert c.readonly is True
     assert not [s for s, _ in c.log if s.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE"))]
     assert "commit" not in c.events
-    assert "TOTAL (DRY-RUN)" in out[-1]
+    assert "SUMMARY (DRY-RUN)" in out[-1]
 
 
 def test_apply_updates_only_two_columns_for_changed_rows(patch_batch):
@@ -157,3 +157,59 @@ def test_main_dry_run_default_returns_zero(monkeypatch):
     c = FakeConn([D1], {D1: _rows_1000()})
     assert rr.main(["--from", "2026-09-01"], connect=lambda dsn: c) == 0
     assert c.readonly is True
+
+
+def _bad_rows():
+    rows = _rows_1000()
+    rows[5] = dict(rows[5], in_r3000=False)   # stored != old-pool recompute
+    return rows
+
+
+def _ups(c):
+    return [p for s, p in c.log if s.startswith("UPDATE")]
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_unreproducible_date_skipped_exit3(patch_batch, monkeypatch, capsys, apply):
+    monkeypatch.setenv("POSTGRES_URI", "x")
+    c = FakeConn([D1, D2], {D1: _bad_rows(), D2: _rows_1000()})
+    out = []
+    per = rr.run(c, D1, D2, apply, out=out.append)
+    assert any(o.startswith(f"NOT REPRODUCIBLE {D1}: 1 rows differ (r1000 0, r3000 1)") for o in out)
+    assert dict(per)[D1]["skipped"] and not dict(per)[D2]["skipped"]
+    assert "skipped-unreproducible=1" in out[-1] or "skipped-unreproducible=1" in "\n".join(out)
+    assert all(p[2] != D1 for p in _ups(c))
+    if apply:
+        assert {p[2] for p in _ups(c)} == {D2}
+    else:
+        assert not _ups(c)
+    c2 = FakeConn([D1, D2], {D1: _bad_rows(), D2: _rows_1000()})
+    argv = ["--from", "2026-09-01"] + (["--apply"] if apply else [])
+    assert rr.main(argv + ["--profile-cache", "/nonexistent"], connect=lambda dsn: c2) == 3
+    assert "ERROR" in capsys.readouterr().err
+
+
+def test_force_unreproducible_processes_with_warning(patch_batch, monkeypatch):
+    monkeypatch.setenv("POSTGRES_URI", "x")
+    c = FakeConn([D1], {D1: _bad_rows()})
+    out = []
+    per = rr.run(c, D1, D1, True, out=out.append, force_unreproducible=True)
+    assert any(o.startswith("WARNING: NOT REPRODUCIBLE") for o in out)
+    assert not per[0][1]["skipped"] and _ups(c)
+    assert rr.main(["--from", "2026-09-01", "--force-unreproducible", "--profile-cache", "/x"],
+                   connect=lambda dsn: FakeConn([D1], {D1: _bad_rows()})) == 0
+
+
+def test_rows_sql_ordered_by_symbol():
+    assert rr.ROWS_SQL.rstrip().endswith("ORDER BY symbol")
+
+
+def test_profile_cache_fallback_db_wins_and_missing_tolerated(tmp_path):
+    import json
+    f = tmp_path / "p.json"
+    f.write_text(json.dumps({"A": {"isEtf": True}, "B": {"isEtf": True}, "C": {"isAdr": False}}))
+    ov = rr.load_overlay({"B": "stock"}, f)
+    assert ov == {"A": "etf", "B": "stock", "C": "stock"}
+    warns = []
+    assert rr.load_overlay({"B": "fund"}, tmp_path / "missing.json", warn=warns.append) == {"B": "fund"}
+    assert len(warns) == 1 and warns[0].startswith("WARNING")
