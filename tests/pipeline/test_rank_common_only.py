@@ -9,7 +9,7 @@ from src.pipeline.backfillers import universe_metadata as um
 from src.pipeline.backfillers.universe_metadata import rank_in_r1000_r3000
 from src.strategies import universe_meta
 
-EXCLUDED = ("etf", "fund", "spac", "deriv", "pref", "cef")
+EXCLUDED = ("etf", "fund", "spac", "deriv", "pref", "cef", "secondary")
 
 
 def _old_rank(rows_or_df):
