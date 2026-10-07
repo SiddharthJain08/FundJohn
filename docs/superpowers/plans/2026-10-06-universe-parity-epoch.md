@@ -115,3 +115,17 @@ assigner run), universes that collapsed (`post_universe_size`), and the 9 capped
   keep under hysteresis; the `current_eligible` column is the live truth.
 * `primary_window`: `run_backtest` always writes the new run `primary_window=TRUE` and demotes the strategy's previous rows, so every post-epoch row is primary
   until superseded and every pre-epoch baseline is non-primary.
+
+### Execution log — 2026-10-07 (controller)
+- 20:44Z checkpoint `pre-universe-parity-20261007` (done 135 lines / failed 47). Preconditions all green (nightly service inactive; both refresh
+  timers disabled; `.env` lacks the flag; `rederive_rank_flags` dry-run `rows_to_update=0`).
+- 20:44Z `artifact --run` was OOM-KILLED at 3.4 GB in 14 s: the 20:19Z EOD collect had appended to `prices.parquet`, which invalidates
+  `data/cache/coverage_index_counts.parquet` (freshness key = mtime+size), and the rebuild reads 19M (ticker, date) rows into pandas.
+  **Lesson for future epochs:** warm the coverage cache FIRST under a larger cap, then build:
+  `systemd-run --wait --pipe --collect --property=EnvironmentFile=/root/openclaw/.env --property=Nice=19 --property=MemoryMax=5200M
+   --setenv=PYTHONPATH=/root/openclaw/src python3 -c "from src.strategies.coverage_index import CoverageIndex;
+   CoverageIndex.from_parquet('data/master/prices.parquet')"` (20 s). The artifact build then peaks at ~290 MB (1 min 29 s).
+- 20:47Z artifact `universe_tier_membership_shrink-20261007.parquet` built: 8 tiers (4 ladder + 4 stocks_*), 2016-03-31 → 2026-10-07, 1,024 rows.
+- 20:47Z `install --run` (drop-in on openclaw-fleet-overnight-resume + weekend unit/timer, deadline 2026-10-12T10:30, OnCalendar Sun 2026-10-11 08:05Z);
+  `systemctl start fleet-universe-parity-epoch-20261007.timer` (next Sun 08:05Z); the nightly unit shows `OPENCLAW_BT_UNIVERSE_FILTER_REF=1`.
+- 20:47Z `rotate --run`; epoch start stamped `2026-10-07T20:47`. The 21:30Z nightly starts the flagged re-gate.
