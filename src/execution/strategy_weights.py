@@ -1009,6 +1009,8 @@ def _strategies_in_grace_period(manifest: dict, grace_days: int) -> set[str]:
         # Find most recent transition INTO live or monitoring
         most_recent_into_active = None
         for h in reversed(history):
+            if h.get('from_state') == h.get('to_state'):
+                continue  # same-state note, not a transition into active
             if h.get('to_state') in ('live', 'monitoring'):
                 ts_str = h.get('timestamp')
                 if not ts_str:
