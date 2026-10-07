@@ -25,19 +25,22 @@ resolvable through the same importlib.import_module + getattr path
 UniverseResolver._load_predicate uses; no strategy id appears twice in the list.
 
 PER-STRATEGY CHANGE: if metadata.universe_filter_ref already equals the target
-the strategy is a no-op. Otherwise three places change, nothing else:
-  1. metadata.universe_filter_ref        = target
-  2. metadata.universe_filter_ref_prior  = previous value, or the literal
+the strategy is a no-op. Otherwise four metadata keys change, nothing else:
+  1. metadata.universe_filter_ref             = target
+  2. metadata.universe_filter_ref_prior       = previous value, or the literal
      "<none>" (an existing _prior from an earlier run is KEPT — the first
      prior is the one worth restoring)
-  3. one appended `history` event, from_state == to_state == current state (no
-     state transition; lifecycle.py has no helper for a non-transition event,
-     so it is hand-built in the TransitionEvent shape), actor 'manual:operator',
-     metadata {prior, new}.
+  3. metadata.universe_filter_ref_changed_at  = apply-time UTC ms-'Z' stamp
+  4. metadata.universe_filter_ref_changed_by  = 'manual:operator'
+     (3 and 4 are overwritten on every real change.)
+NO history event is appended: strategy_weights._strategies_in_grace_period reads
+the latest history event with to_state in {live, monitoring} as a promotion, so
+a same-state event would silently put the strategy into the 30-day auto-demote
+grace window. Provenance lives in metadata only; `history` is untouched.
 
 --apply asserts, after writing and re-reading, that the file is valid JSON,
 that every entry NOT in the list is identical, and that listed entries differ
-only in the three places above. It writes an audit JSON
+only in the four metadata keys above (history unchanged). It writes an audit JSON
 {strategy_id: {prior, new, changed}} (default <list dir>/phase2-optin-audit.json)
 only when something changed, so a no-op re-run never clobbers the first run's
 audit. Idempotent: a second --apply changes nothing and does not rewrite the
@@ -83,9 +86,9 @@ except ImportError:
 
 ACTOR = 'manual:operator'
 SPEC_REF = 'docs/specs/2026-10-04-universe-security-type-spec.md'
-REASON = (f'Phase 2 stock-universe opt-in (spec {SPEC_REF} §2), '
-          '2026-10-06 operator approval')
 NONE_PRIOR = '<none>'
+PROVENANCE_KEYS = ('universe_filter_ref', 'universe_filter_ref_prior',
+                   'universe_filter_ref_changed_at', 'universe_filter_ref_changed_by')
 LOCK_ACTOR = 'universe-security-type:phase2-optin'
 TAG = '[apply_stock_universe_optin]'
 
@@ -173,23 +176,16 @@ def plan_changes(items: list[tuple[str, str]], strategies: dict, now: str):
         meta['universe_filter_ref'] = target
         if 'universe_filter_ref_prior' not in meta:   # keep the FIRST prior
             meta['universe_filter_ref_prior'] = prior
-        state = entry.get('state')
-        entry.setdefault('history', []).append({
-            'from_state': state,
-            'to_state': state,
-            'timestamp': now,
-            'actor': ACTOR,
-            'reason': REASON,
-            'metadata': {'prior': prior, 'new': target},
-        })
+        meta['universe_filter_ref_changed_at'] = now
+        meta['universe_filter_ref_changed_by'] = ACTOR
         audit[sid] = {'prior': prior, 'new': target, 'changed': True}
     return audit
 
 
 def check_only_expected_changed(before: dict, after: dict, audit: dict) -> list[str]:
     """Problems (empty == safe): entries outside the list identical; listed
-    entries differ only in metadata.universe_filter_ref, ..._prior and exactly
-    one appended history item (none when unchanged); top level untouched."""
+    entries differ only in the four PROVENANCE_KEYS metadata keys (history must
+    be unchanged); top level untouched."""
     bad: list[str] = []
     b = (before or {}).get('strategies', {}) or {}
     a = (after or {}).get('strategies', {}) or {}
@@ -208,15 +204,11 @@ def check_only_expected_changed(before: dict, after: dict, audit: dict) -> list[
             bad.append(sid)
             continue
         be2, ae2 = copy.deepcopy(be), copy.deepcopy(ae)
-        n_hist_before = len(be2.get('history') or [])
         for e in (be2, ae2):
             m = e.setdefault('metadata', {})
-            m.pop('universe_filter_ref', None)
-            m.pop('universe_filter_ref_prior', None)
-        ah = ae2.pop('history', None) or []
-        bh = be2.pop('history', None) or []
-        want = 1 if audit[sid]['changed'] else 0
-        if ae2 != be2 or len(ah) != n_hist_before + want or ah[:n_hist_before] != bh:
+            for k in PROVENANCE_KEYS:
+                m.pop(k, None)
+        if ae2 != be2:  # includes history: it must be byte-for-byte unchanged
             bad.append(sid)
     return bad
 
@@ -268,9 +260,9 @@ def run(list_path: Path, manifest_path: Path, audit_out: Path, apply: bool) -> i
                 print(f"{TAG} --apply would be a no-op.")
             else:
                 print(f"{TAG} confirmed: only metadata.universe_filter_ref / "
-                      f"universe_filter_ref_prior / one appended history event change on the "
-                      f"listed strategies; every other entry is identical. (history timestamps "
-                      f"below are a preview — --apply stamps the real time.)")
+                      f"_prior / _changed_at / _changed_by change on the "
+                      f"listed strategies (history untouched); every other entry is identical. "
+                      f"(_changed_at in the diff is a preview — --apply stamps the real time.)")
                 print()
                 sys.stdout.writelines(difflib.unified_diff(
                     text.splitlines(keepends=True),

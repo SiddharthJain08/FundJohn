@@ -91,7 +91,7 @@ def test_dry_run_writes_nothing_no_lock(world, monkeypatch, capsys):
     assert not Path(str(mp) + '.lock').exists()
 
 
-def test_apply_changes_exactly_three_places(world, capsys):
+def test_apply_changes_exactly_four_metadata_keys(world, capsys):
     mp, _, ao, orig = world
     assert _run(world, True) == 0
     after = json.loads(mp.read_text())
@@ -101,12 +101,14 @@ def test_apply_changes_exactly_three_places(world, capsys):
     for sid in 'AB':
         e, o = after['strategies'][sid], orig['strategies'][sid]
         assert e['metadata']['universe_filter_ref'] == TARGET
-        assert e['history'][:-1] == o['history'] and len(e['history']) == len(o['history']) + 1
+        assert e['history'] == o['history']
+        assert e['metadata']['universe_filter_ref_changed_by'] == 'manual:operator'
+        assert e['metadata']['universe_filter_ref_changed_at'].endswith('Z')
         e2, o2 = copy.deepcopy(e), copy.deepcopy(o)
         for x in (e2, o2):
             x['metadata'].pop('universe_filter_ref', None)
-            x['metadata'].pop('universe_filter_ref_prior', None)
-        e2.pop('history'); o2.pop('history')
+            for k in optin.PROVENANCE_KEYS:
+                x['metadata'].pop(k, None)
         assert e2 == o2
     assert after['strategies']['A']['metadata']['universe_filter_ref_prior'] == \
         'src.strategies.universe_default:tier_liquid'
@@ -115,20 +117,31 @@ def test_apply_changes_exactly_three_places(world, capsys):
     assert not Path(str(mp) + '.lock').exists()
 
 
-def test_history_event_shape(world):
-    mp, *_ = world
+def test_history_unchanged_and_provenance_in_metadata(world):
+    mp, _, _, orig = world
     _run(world, True)
-    ev = json.loads(mp.read_text())['strategies']['A']['history'][-1]
-    assert set(ev) == {'from_state', 'to_state', 'timestamp', 'actor', 'reason', 'metadata'}
-    assert ev['from_state'] == ev['to_state'] == 'live'
-    assert ev['actor'] == 'manual:operator'
-    assert ev['reason'] == ('Phase 2 stock-universe opt-in (spec '
-                            'docs/specs/2026-10-04-universe-security-type-spec.md §2), '
-                            '2026-10-06 operator approval')
-    assert ev['metadata'] == {'prior': 'src.strategies.universe_default:tier_liquid',
-                              'new': TARGET}
-    assert ev['timestamp'].endswith('Z') and 'T' in ev['timestamp']
-    assert json.loads(mp.read_text())['strategies']['B']['history'][-1]['from_state'] == 'candidate'
+    after = json.loads(mp.read_text())['strategies']
+    for sid in 'ABCD':
+        assert after[sid]['history'] == orig['strategies'][sid]['history']
+    ma = after['A']['metadata']
+    assert ma['universe_filter_ref_changed_by'] == 'manual:operator'
+    ts = ma['universe_filter_ref_changed_at']
+    assert ts.endswith('Z') and 'T' in ts and len(ts) == 24
+    assert 'universe_filter_ref_changed_at' not in after['C']['metadata']   # no-op entry
+
+
+def test_changed_at_by_overwritten_prior_kept(world):
+    mp, *_ = world
+    d = json.loads(mp.read_text())
+    m = d['strategies']['A']['metadata']
+    m.update(universe_filter_ref_prior='FIRST', universe_filter_ref_changed_at='old',
+             universe_filter_ref_changed_by='old')
+    mp.write_text(json.dumps(d, indent=2))
+    _run(world, True)
+    m = json.loads(mp.read_text())['strategies']['A']['metadata']
+    assert m['universe_filter_ref_prior'] == 'FIRST'
+    assert m['universe_filter_ref_changed_by'] == 'manual:operator'
+    assert m['universe_filter_ref_changed_at'] != 'old'
 
 
 def test_first_prior_kept(world):
