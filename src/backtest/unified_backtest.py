@@ -1368,8 +1368,8 @@ def _universe_filter_ref_tier(strategy_id: str, *, manifest_path) -> Optional[st
     return ref.rsplit(':', 1)[1]
 
 
-def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None,
-                      cap_override: Optional[str] = None):
+def _bounded_resolver_info(strategy_id: str, *, manifest_path=None, data_dir=None,
+                          cap_override: Optional[str] = None):
     """Universe ladder campaign W6: when the manifest sets
     metadata.backtest_universe_cap = <ladder tier>, bound the strategy's
     BACKTEST universe to that tier via the newest frozen membership artifact
@@ -1413,10 +1413,27 @@ def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None,
     Only the NEW fallback path is fail-open on an unknown/missing tier
     (logs + returns None, unbounded static universe) — the pre-existing
     cap_override / backtest_universe_cap path is untouched and still raises
-    on a genuinely misconfigured explicit cap, exactly as before."""
+    on a genuinely misconfigured explicit cap, exactly as before.
+
+    Phase 3 (2026-10-06 universe parity epoch): this variant returns
+    ``(resolver_or_None, info)`` so the caller can record HOW the universe
+    was bound in the run's config_json (the epoch gate reads it):
+      universe_bound_source: 'cap' (explicit cap_override / manifest
+          backtest_universe_cap), 'filter_ref' (the flag-gated fallback
+          resolved a tier), or 'none' (static universe: no cap and no
+          resolvable ref, flag off, artifact missing, or the ref tier absent
+          from the artifact -- fail-open).
+      universe_filter_ref_tier: the tier name when source == 'filter_ref',
+          else None.
+      universe_bound_tier: the tier actually bound (any source) or None.
+      universe_filter_ref_unresolved: the ref tier name when the fallback
+          was attempted but fell open (missing artifact / tier), else None.
+    ``_bounded_resolver`` below is the unchanged resolver-only wrapper."""
     manifest_path = Path(manifest_path or ROOT / 'src' / 'strategies' / 'manifest.json')
     data_dir = Path(data_dir or ROOT / 'data')
     cap_is_explicit = True
+    info = {'universe_bound_source': 'none', 'universe_filter_ref_tier': None,
+            'universe_bound_tier': None, 'universe_filter_ref_unresolved': None}
     if cap_override:
         # Explicit cap from the caller (--universe-cap): wins over the manifest
         # and needs no manifest entry — this is how a NEW candidate's FIRST
@@ -1430,31 +1447,43 @@ def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None,
                      .get(strategy_id) or {})
             cap = (entry.get('metadata') or {}).get('backtest_universe_cap')
         except Exception:
-            return None
+            return None, info
         if not cap and os.environ.get('OPENCLAW_BT_UNIVERSE_FILTER_REF') == '1':
             cap = _universe_filter_ref_tier(strategy_id, manifest_path=manifest_path)
             cap_is_explicit = False
+            if cap:
+                info['universe_filter_ref_unresolved'] = cap
     if not cap:
-        return None
+        return None, info
     arts = (sorted(data_dir.glob('universe_tier_membership_shrink-*.parquet'))
             or sorted(data_dir.glob('universe_tier_membership_*.parquet')))
     if not arts:
         _log(f'WARNING universe cap {cap!r} set for {strategy_id} but no '
              'membership artifact exists — falling back to the static universe')
-        return None
+        return None, info
     from backtest.precomputed_resolver import PrecomputedResolver
     if cap_is_explicit:
         _log(f'universe cap: {strategy_id} bounded to {cap} via {arts[-1].name}')
-        return PrecomputedResolver(arts[-1], cap)
+        info.update(universe_bound_source='cap', universe_bound_tier=cap)
+        return PrecomputedResolver(arts[-1], cap), info
     try:
         resolver = PrecomputedResolver(arts[-1], cap)
     except ValueError as e:
         _log(f'WARNING universe_filter_ref fallback tier {cap!r} for {strategy_id} '
              f'not found in {arts[-1].name} ({e}) — falling back to the static universe')
-        return None
+        return None, info
     _log(f'universe cap: {strategy_id} bounded to {cap} via {arts[-1].name} '
          f'(fallback from manifest universe_filter_ref)')
-    return resolver
+    info.update(universe_bound_source='filter_ref', universe_filter_ref_tier=cap,
+                universe_bound_tier=cap, universe_filter_ref_unresolved=None)
+    return resolver, info
+
+
+def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None,
+                      cap_override: Optional[str] = None):
+    """Resolver-only wrapper over _bounded_resolver_info (legacy signature)."""
+    return _bounded_resolver_info(strategy_id, manifest_path=manifest_path,
+                                  data_dir=data_dir, cap_override=cap_override)[0]
 
 
 def _manifest_backtest_tickers(strategy_id: str, *, manifest_path=None):
@@ -1565,8 +1594,12 @@ def run_backtest(strategy_id: str, *,
     # explicit resolvers (grid cells, coupling overrides) always win.
     # universe_cap (2026-08-10) is the caller-supplied override for strategies
     # not yet in the manifest (a new candidate's first backtest).
+    _bound_info = {'universe_bound_source': 'none', 'universe_filter_ref_tier': None,
+                   'universe_bound_tier': None, 'universe_filter_ref_unresolved': None}
     if resolver is None:
-        resolver = _bounded_resolver(strategy_id, cap_override=universe_cap)
+        resolver, _bound_info = _bounded_resolver_info(strategy_id, cap_override=universe_cap)
+    else:
+        _bound_info['universe_bound_source'] = 'explicit'   # caller-supplied resolver
 
     _bt_tickers = _manifest_backtest_tickers(strategy_id)
     if _bt_tickers:
@@ -1677,6 +1710,10 @@ def run_backtest(strategy_id: str, *,
                                    if resolver is not None and universe_sizes
                                    else len(universe)),
                 'methodology':    'discovery',
+                # Universe parity epoch (2026-10-06): how the backtest universe
+                # was bound ('cap' | 'filter_ref' | 'none' | 'explicit') and
+                # which tier. Read by scripts/universe_parity_gate.py.
+                **_bound_info,
                 'rf': {'source': _rf_source(), **(total_metrics.get('rf_shadow') or {})},
                 # Target geometry epoch (2026-09-10): 'flat' (legacy ±5 %) or
                 # 'atr_r' (R-multiples of the stop). Read by
