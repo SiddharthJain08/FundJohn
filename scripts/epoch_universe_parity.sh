@@ -183,3 +183,4 @@ uninstall)
   fi ;;
 *) echo "unknown subcommand $SUB" >&2; exit 2;;
 esac
+exit 0

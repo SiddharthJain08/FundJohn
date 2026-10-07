@@ -62,12 +62,12 @@ def _implication(pre, post, ela, elb, current, post_ref_failed):
             notes.append('would be DEACTIVATED in ' + ','.join(lost) + ' by the next activation_assigner --all')
         if gained:
             notes.append('would be ACTIVATED in ' + ','.join(gained))
-        if not ela.get(REGIMES[0]) and not any(ela.values()) and not any(elb.values()):
+        if not any(ela.values()) and not any(elb.values()):
             notes.append('ineligible in every regime before and after')
-        if any(elb.values()) is False and any(ela.values()):
+        if any(ela.values()) and not any(elb.values()):
             notes.append('DORMANT after (eligible nowhere) — falls out of the sizer')
-    if pre is not None and pre['sharpe'] is not None and post['sharpe'] is not None \
-            and pre['sharpe'] > 0 >= post['sharpe']:
+    if pre is not None and pre['total_sharpe'] is not None and post['total_sharpe'] is not None \
+            and pre['total_sharpe'] > 0 >= post['total_sharpe']:
         notes.append('Sharpe turned non-positive (fails the class gate)')
     if current is not None and elb is not None:
         diff = [r for r in REGIMES if bool(current.get(r)) != bool(elb.get(r))]
