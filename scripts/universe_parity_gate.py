@@ -20,8 +20,9 @@ Prints 'OK' or 'NOT_YET' on the first line, then per-gate detail.
      --min-positive-frac (default 0.90) x count(sharpe>0 before). Needs >=
      --min-pairs (default 20) pairs.
 
-Epoch start: --since YYYY-MM-DD[THH:MM] (UTC), else the date in the newest
-data/.refresh_backtests.done.pre-universe-parity-<YYYYMMDD> checkpoint file name.
+Epoch start: --since YYYY-MM-DD[THH:MM] (UTC), else the rotate time stamped by
+`epoch_universe_parity.sh rotate --run` in data/.refresh_backtests.done.pre-universe-parity-<YYYYMMDD>.since,
+else the date (00:00 UTC) in the newest checkpoint file name.
 NOT_YET goes to the operator with the numbers; this script never writes anything.
 
 Usage: python3 scripts/universe_parity_gate.py [--max-lagging N] [--min-median-dsharpe X]
@@ -44,6 +45,13 @@ def epoch_start(since, data_dir):
                   if (m := TAG_RE.search(p)))
     if not tags:
         return None
+    # `rotate --run` stamps the exact rotate time (ISO UTC) next to the checkpoint; prefer it.
+    stamp = os.path.join(data_dir, f'.refresh_backtests.done.pre-universe-parity-{tags[-1]}.since')
+    try:
+        txt = open(stamp).read().strip()
+        return datetime.strptime(txt[:16], '%Y-%m-%dT%H:%M').replace(tzinfo=timezone.utc)
+    except (OSError, ValueError):
+        pass
     return datetime.strptime(tags[-1], '%Y%m%d').replace(tzinfo=timezone.utc)
 
 
@@ -127,7 +135,9 @@ def read_uri(env_file):
 
 def fetch_rows(uri, live):
     import psycopg2
-    with psycopg2.connect(uri) as c, c.cursor() as cur:   # indexed: (strategy_id, run_at DESC)
+    with psycopg2.connect(uri) as c:
+        c.set_session(readonly=True)
+        cur = c.cursor()   # indexed: (strategy_id, run_at DESC)
         cur.execute("""SELECT strategy_id, config_json->>'universe_bound_source',
                               config_json->>'universe_filter_ref_tier', total_sharpe, run_at,
                               window_kind, primary_window

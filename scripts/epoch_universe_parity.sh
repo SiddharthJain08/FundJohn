@@ -34,16 +34,17 @@
 #   --on-calendar SPEC  install: also write a .timer firing the epoch unit (systemd calendar spec)
 #   --runtime-max SEC   install: RuntimeMaxSec of the weekend unit (default 99000 = 27.5 h)
 #   --end YYYY-MM-DD    artifact: window end (default = --date)
+#   --force-order       rotate: skip the 'drop-in must be installed first' guard (tests/emergencies)
 #   --restore-ledgers   uninstall: also restore the checkpoint ledgers
 #
 # Never sources or cats .env: units reference it via EnvironmentFile=; the one read is a
 # `grep -q` for the flag NAME (existence only) because EnvironmentFile wins over Environment=.
 set -u
 ROOT=/root/openclaw; ETC=/etc/systemd/system; RUN=0; DRY=0; DATE=""; DEADLINE=""
-ONCAL=""; RTMAX=99000; END=""; RESTORE=0; SUB=""
+ONCAL=""; RTMAX=99000; END=""; RESTORE=0; SUB=""; FORCE_ORDER=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --run) RUN=1;; --dry-run) DRY=1;; --restore-ledgers) RESTORE=1;;
+    --run) RUN=1;; --dry-run) DRY=1;; --restore-ledgers) RESTORE=1;; --force-order) FORCE_ORDER=1;;
     --date) DATE="$2"; shift;; --root) ROOT="$2"; shift;; --etc) ETC="$2"; shift;;
     --deadline) DEADLINE="$2"; shift;; --on-calendar) ONCAL="$2"; shift;;
     --runtime-max) RTMAX="$2"; shift;; --end) END="$2"; shift;;
@@ -53,9 +54,19 @@ while [ $# -gt 0 ]; do
   esac; shift
 done
 [ -n "$SUB" ] || { echo "usage: $0 {checkpoint|rotate|artifact|install|status|report|uninstall} [--run] ..." >&2; exit 2; }
-[ -n "$DATE" ] || DATE=$(date -u +%Y%m%d)
+DATE_GIVEN=1; [ -n "$DATE" ] || { DATE_GIVEN=0; DATE=$(date -u +%Y%m%d); }
 case "$DATE" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) echo "bad --date $DATE (want YYYYMMDD)" >&2; exit 2;; esac
 [ -n "$END" ] || END="${DATE:0:4}-${DATE:4:2}-${DATE:6:2}"
+if [ "$SUB" = uninstall ] && [ "$DATE_GIVEN" = 0 ]; then
+  # never default to today: find what the install/checkpoint actually used
+  found=$( { ls "$ETC"/fleet-universe-parity-epoch-*.service "$ETC"/fleet-universe-parity-epoch-*.timer 2>/dev/null \
+               | sed -E 's/.*epoch-([0-9]{8})\.(service|timer)$/\1/'
+             ls "$ROOT"/data/.refresh_backtests.done.pre-universe-parity-* 2>/dev/null \
+               | sed -E -n 's/.*pre-universe-parity-([0-9]{8})$/\1/p'; } | sort -u)
+  n=$(printf '%s' "$found" | grep -c .)
+  if [ "$n" -gt 1 ]; then echo "REFUSING: several epochs found ($(echo $found)); pass --date YYYYMMDD" >&2; exit 2
+  elif [ "$n" = 1 ]; then DATE=$found; echo "[uninstall] epoch date resolved to $DATE"; fi
+fi
 PY=${PYTHON:-python3}
 TAG="pre-universe-parity-$DATE"
 DATA="$ROOT/data"; DONE="$DATA/.refresh_backtests.done"; FAILED="$DATA/.refresh_backtests.done.failed"
@@ -77,7 +88,7 @@ dropin_content() {
     '# Backtest universe parity epoch ('"$DATE"'). The fleet re-backtest bounds each strategy'"'"'s universe by its' \
     '# manifest universe_filter_ref so every canonical row carries config_json.universe_bound_source.' \
     '# EnvironmentFile (.env) wins over Environment=; .env must NOT define '"$FLAG"'. Remove with:' \
-    '#   scripts/epoch_universe_parity.sh uninstall --run' \
+    '#   scripts/epoch_universe_parity.sh uninstall --date '"$DATE"' --run' \
     'Environment="'"$FLAG"'=1"'
 }
 
@@ -114,12 +125,24 @@ rotate)
   for f in "$DONE" "$FAILED"; do
     [ -e "$f" ] || { say "  (missing $f — skipped)"; continue; }
     ck="$f.$TAG"; dst="$f.rotated-$TAG"
+    if [ "$FORCE_ORDER" != 1 ] && [ ! -e "$DROPIN_ETC" ]; then
+      echo "REFUSING: drop-in $DROPIN_ETC not installed. Order is checkpoint -> artifact -> install --run -> rotate --run; rotating first lets the 21:30Z nightly re-run the fleet WITHOUT the flag. (--force-order overrides)" >&2; exit 1
+    fi
     [ -e "$ck" ] || { echo "REFUSING: checkpoint $ck missing — run 'checkpoint' first" >&2; exit 1; }
     cmp -s "$f" "$ck" || { echo "REFUSING: $f differs from its checkpoint $ck (driver ran since?)" >&2; exit 1; }
     [ -e "$dst" ] && { echo "REFUSING to overwrite $dst" >&2; exit 1; }
     plan "mv $f $dst   (the driver then sees done=0; the checkpoint copy is untouched)"
     [ "$RUN" = 1 ] && mv "$f" "$dst"
-  done ;;
+  done
+  SINCE_F="$DONE.$TAG.since"; NOWISO=$(date -u +%Y-%m-%dT%H:%M)
+  if [ "$RUN" = 1 ]; then
+    [ -e "$SINCE_F" ] && { echo "REFUSING to overwrite $SINCE_F" >&2; exit 1; }
+    echo "$NOWISO" > "$SINCE_F"
+    say "epoch start stamped: $NOWISO UTC -> $SINCE_F (gate/report read it by default; or pass --since $NOWISO)"
+    say "the next 21:30Z nightly now starts the flagged epoch by itself (drop-in + done=0)."
+  else
+    plan "stamp the rotate time (ISO UTC) into $SINCE_F"
+  fi ;;
 artifact)
   need_run
   if [ -e "$ARTIFACT" ]; then echo "REFUSING to overwrite existing $ARTIFACT (pick another --date)" >&2; exit 1; fi

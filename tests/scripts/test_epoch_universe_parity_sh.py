@@ -12,10 +12,10 @@ SH = ROOT / 'scripts' / 'epoch_universe_parity.sh'
 D = '20261010'
 
 
-def sh(tmp, *args, env=None):
+def sh(tmp, *args, env=None, date=True):
     import os
     e = dict(os.environ, NO_SYSTEMCTL='1', PYTHON='echo', **(env or {}))
-    return subprocess.run(['bash', str(SH), *args, '--root', str(tmp / 'root'), '--etc', str(tmp / 'etc'), '--date', D],
+    return subprocess.run(['bash', str(SH), *args, '--root', str(tmp / 'root'), '--etc', str(tmp / 'etc'), *(['--date', D] if date else [])],
                           capture_output=True, text=True, env=e)
 
 
@@ -54,8 +54,9 @@ def test_checkpoint_dry_run_writes_nothing(tmp):
 
 
 def test_rotate_requires_checkpoint_and_run(tmp):
-    assert sh(tmp, 'rotate', '--run').returncode == 1                   # no checkpoint yet
+    assert sh(tmp, 'rotate', '--run', '--force-order').returncode == 1  # no checkpoint yet
     sh(tmp, 'checkpoint')
+    sh(tmp, 'install', '--run', '--deadline', '2026-10-12T10:30')
     r = sh(tmp, 'rotate')
     assert 'dry-run' in r.stdout and (tmp / 'root' / 'data' / '.refresh_backtests.done').exists()
     r = sh(tmp, 'rotate', '--run')
@@ -133,3 +134,47 @@ def test_status_and_report_commands(tmp):
 
 def test_unknown_subcommand(tmp):
     assert sh(tmp, 'bogus').returncode == 2
+
+
+def test_rotate_refuses_without_dropin_installed(tmp):
+    sh(tmp, 'checkpoint')
+    r = sh(tmp, 'rotate', '--run')
+    assert r.returncode == 1 and 'drop-in' in r.stderr and 'not installed' in r.stderr
+    assert (tmp / 'root' / 'data' / '.refresh_backtests.done').exists()
+    assert not list((tmp / 'root' / 'data').glob('*.since'))
+
+
+def test_rotate_force_order_overrides(tmp):
+    sh(tmp, 'checkpoint')
+    r = sh(tmp, 'rotate', '--run', '--force-order')
+    assert r.returncode == 0, r.stderr
+    assert not (tmp / 'root' / 'data' / '.refresh_backtests.done').exists()
+
+
+def test_rotate_stamps_since_and_gate_reads_it(tmp):
+    import importlib.util, sys
+    from datetime import datetime, timezone
+    sh(tmp, 'checkpoint'); sh(tmp, 'install', '--run', '--deadline', '2026-10-12T10:30')
+    r = sh(tmp, 'rotate', '--run')
+    assert r.returncode == 0, r.stderr
+    f = tmp / 'root' / 'data' / f'.refresh_backtests.done.pre-universe-parity-{D}.since'
+    stamp = f.read_text().strip()
+    assert len(stamp) == 16 and stamp[10] == 'T' and stamp in r.stdout
+    spec = importlib.util.spec_from_file_location('upg', ROOT / 'scripts' / 'universe_parity_gate.py')
+    g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+    assert g.epoch_start(None, str(tmp / 'root' / 'data')) == datetime.strptime(stamp, '%Y-%m-%dT%H:%M').replace(tzinfo=timezone.utc)
+    assert sh(tmp, 'rotate', '--run', '--force-order').returncode == 1   # ledgers gone/stamp exists: no overwrite
+
+
+def test_uninstall_resolves_date_by_glob_and_refuses_ambiguity(tmp):
+    sh(tmp, 'checkpoint'); sh(tmp, 'install', '--run', '--deadline', '2026-10-12T10:30')
+    r = sh(tmp, 'uninstall', '--run', date=False)
+    assert r.returncode == 0 and f'resolved to {D}' in r.stdout
+    assert not (tmp / 'etc' / f'fleet-universe-parity-epoch-{D}.service').exists()
+    # two epochs -> refuse without --date
+    (tmp / 'etc').mkdir(exist_ok=True)
+    (tmp / 'etc' / 'fleet-universe-parity-epoch-20261010.service').write_text('x')
+    (tmp / 'etc' / 'fleet-universe-parity-epoch-20261017.service').write_text('x')
+    r = sh(tmp, 'uninstall', '--run', date=False)
+    assert r.returncode == 2 and 'REFUSING' in r.stderr
+    assert (tmp / 'etc' / 'fleet-universe-parity-epoch-20261010.service').exists()

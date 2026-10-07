@@ -18,39 +18,63 @@ before/after report.
 Every mutating subcommand prints its plan and does nothing until `--run` is added (`checkpoint`, `status`, `report`
 execute directly; `--dry-run` prints them instead). The script never sources or cats `.env`.
 
-## Preconditions (check, do not skip)
+## Preconditions (step 0 — check, do not skip)
 
-1. Phase 2 opt-in applied (the 21 strategies in `phase2-optin-audit.json` now point at `stocks_liquid`); this branch merged to `main`
-   by the operator (`unified_backtest.py` change must be live before the first epoch run).
-2. No other epoch in flight (ruling R1, never stack epochs): `systemctl is-active openclaw-fleet-overnight-resume.service 'fleet-*'` all inactive,
-   and `python3 scripts/target_mode_flip_gate.py` is settled.
-3. **`.env` must not define `OPENCLAW_BT_UNIVERSE_FILTER_REF`** — `EnvironmentFile=` wins over `Environment=`, so a stale `=0` there silently
-   defeats the whole epoch. `install` warns if it finds the name (names only; values are never printed).
-4. Other backtest writers that would drop un-flagged rows into the middle of the epoch: `openclaw-backtest-refresh.timer` (Sat 06:00 UTC,
-   `src/maintenance/refresh_backtests.sh`, no flag) and the Saturday weekend maintenance. Check `systemctl list-timers 'openclaw-backtest-refresh*'`;
-   if it would fire during the epoch, hold it (`systemctl stop` the timer; re-enable at the end). A flag-less run stamps `universe_bound_source='none'` and
-   shows up in the gate as lagging ("ref failed open") — it is visible, not silent, but it wastes a slot.
-5. `/root/fleet_overnight_resume.sh` has `ALLOW_ACTUATION=0` (verified 2026-10-07): reaching uniform does NOT auto-run `run_universe_shrink --adopt --reassign --force`.
-   Leave it at 0.
+1. Phase 2 opt-in applied (the 21 strategies in `phase2-optin-audit.json` now point at `stocks_liquid`); this branch merged to `main` by the operator
+   (the `unified_backtest.py` change must be live before the first epoch run).
+2. **Rank flags re-derived BEFORE the artifact build** (the artifact reads them): `scripts/rederive_rank_flags.py --apply` has been applied (passes 2026-10-05 and
+   2026-10-07). Verify read-only: `python3 scripts/rederive_rank_flags.py --from 2026-08-24` (dry-run, no `--apply`) must report `rows_to_update=0`.
+3. No other epoch in flight (ruling R1): `systemctl is-active openclaw-fleet-overnight-resume.service 'fleet-*'` all inactive, and
+   `python3 scripts/target_mode_flip_gate.py` is settled. **`openclaw-fleet-overnight-resume.timer` is ENABLED (Mon-Fri 21:30Z -> 10:30Z): do steps 1-4 in ONE sitting
+   between 11:00Z and 21:00Z, after `systemctl is-active openclaw-fleet-overnight-resume.service` prints `inactive`.**
+4. **`.env` must not define `OPENCLAW_BT_UNIVERSE_FILTER_REF`** — `EnvironmentFile=` wins over `Environment=`, so a stale `=0` there silently defeats the epoch.
+   `install` warns if it finds the name (names only; values never printed).
+5. Other backtest writers. Verify both report `disabled` (they are today): `systemctl is-enabled openclaw-backtest-refresh.timer openclaw-strategy-backtest-refresh.timer`.
+   If either is enabled, `systemctl disable --now` it (a plain `stop` does not survive a reboot) and re-enable at close-out.
+   * `openclaw-backtest-refresh` (Sat 06:00Z) runs `src/maintenance/refresh_backtests.sh` = `unified_backtest --all-live` (unflagged) THEN `eligibility_assigner --all` — the latter is REAL actuation.
+   * `openclaw-strategy-backtest-refresh` (Sun 06:00 America/New_York) runs `scripts/backfill_regime_backtests.py --states live`.
+   * Unflagged ad-hoc writers cannot be disabled: the dashboard per-strategy re-backtest, the staging approver and the weekend research finisher. Their mid-epoch rows
+     appear in the gate as lagging `source=none` ("ref failed open") — visible, not silent — and the strategy's next fleet run supersedes them.
+6. `/root/fleet_overnight_resume.sh` has `ALLOW_ACTUATION=0` (verified 2026-10-07); it stays 0. Reaching uniform does NOT auto-run `run_universe_shrink --adopt --reassign --force`.
 
 ## Ordered steps (UTC; the box is Etc/UTC)
 
+Steps 0-4 happen in ONE sitting, 11:00Z-21:00Z, nightly service inactive. **Once the drop-in is installed AND the ledgers are rotated (step 4), the next 21:30Z nightly
+starts the flagged epoch by itself** (done=0 + `OPENCLAW_BT_UNIVERSE_FILTER_REF=1`); the weekend unit only adds a window. `rotate` therefore REFUSES unless the drop-in is
+installed under `/etc/systemd/system` (`--force-order` overrides for tests/emergencies).
+
 | # | Command | Expected duration | Notes |
 |---|---|---|---|
-| 1 | `scripts/epoch_universe_parity.sh checkpoint` | seconds | Copies `data/.refresh_backtests.done{,.failed}` to `.pre-universe-parity-<YYYYMMDD>`; refuses to overwrite. The tag date is the epoch start the gate/report read (00:00 UTC of that day), so take the checkpoint the day the epoch starts. |
-| 2 | `scripts/epoch_universe_parity.sh artifact` (read the plan) then `... artifact --run` | minutes (estimate — not measured; MemoryMax 3500M, Nice 19) | Transient-unit build of `data/universe_tier_membership_shrink-<YYYYMMDD>.parquet` (`--start 2016-03-01 --end <today>`); refuses to overwrite. `_bounded_resolver` prefers the newest `shrink-*` file, so the corrected Aug/Sep month-ends and the `stocks_*` tiers are seen by BOTH the 9 capped strategies and the new fallback. Sanity: the parquet must contain the tiers `stocks_sp500, stocks_r1000, stocks_r3000, stocks_liquid` (an artifact that predates them makes the fallback fail open with a WARNING naming the tier). |
-| 3 | `scripts/epoch_universe_parity.sh rotate` then `... rotate --run` | seconds | Moves the two live ledgers to `.rotated-<tag>` (only if byte-identical to the checkpoint) so the driver sees `done=0` (as the 09-06 rotation did). The checkpoint copies stay. |
-| 4 | `scripts/epoch_universe_parity.sh install --deadline 2026-10-xxT10:30 --on-calendar "2026-10-xx 08:05:00 UTC"` then the same with `--run` | seconds | Writes the nightly drop-in `docs/systemd/openclaw-fleet-overnight-resume.service.d/universe-parity.conf` (copied to `/etc/systemd/system/...`) and `fleet-universe-parity-epoch-<date>.service` (+ `.timer` with `--on-calendar`); daemon-reload; **does not start or enable anything** — it prints the start command. Pick the deadline like the 09-13 unit (Sunday 08:05Z start, `--deadline` Monday 10:30Z, default RuntimeMaxSec 99000 s = 27.5 h). |
-| 5 | `systemctl start fleet-universe-parity-epoch-<date>.timer` (or `.service`) | weekend window ~26 h | The Mon-Fri 21:30 nightly (`openclaw-fleet-overnight-resume`) continues with the drop-in until uniform. Serial cost at the last epoch's average is ~128 strategies x ~25 min ≈ 53 h, so uniform is expected ≈ Wed after a Sat/Sun start (measure; the 21 `stocks_liquid` strategies and the ~95 now-bounded ones should run FASTER on smaller universes). |
-| 6 | `scripts/epoch_universe_parity.sh status` (daily) | seconds | Runs the gate: `OK` / `NOT_YET` + detail (below). |
-| 7 | When the gate prints OK (or NOT_YET with a short list of exceptions the operator accepts): `scripts/epoch_universe_parity.sh report` | seconds | Writes `docs/superpowers/plans/universe-parity-report-<date>.{csv,md}` (never overwrites). |
-| 8 | **OPERATOR REVIEW CHECKPOINT** — read the report. | — | See below. Nothing in steps 1–7 changes weights or activation. |
-| 9 | Only after sign-off: `python3 scripts/run_universe_shrink.py --adopt --reassign --force` -> weights rebuild -> floor recheck -> `activation_assigner --all` (preview first) -> re-enable `openclaw-weekly-strategy-weights.timer` / `OPENCLAW_ACTIVATION_ASSIGNER`/`AUTO_DEMOTE` as in the standing owed-sequence. | per the standing runbooks | Operator-gated; the nightly script stays `ALLOW_ACTUATION=0`. |
-| 10 | Close-out: `scripts/epoch_universe_parity.sh uninstall` then `--run`. | seconds | Removes the drop-in + epoch unit(s). If the operator wants the fallback permanent (so ad-hoc/candidate backtests also use it), set `OPENCLAW_BT_UNIVERSE_FILTER_REF=1` in `.env` BEFORE removing the drop-in (a later change; the code default is deliberately still OFF). |
+| 0 | Preconditions above | minutes | rank flags `rows_to_update=0`; nightly service inactive; both refresh timers disabled; `.env` has no flag. |
+| 1 | `scripts/epoch_universe_parity.sh checkpoint` | seconds | Copies `data/.refresh_backtests.done{,.failed}` to `.pre-universe-parity-<YYYYMMDD>`; refuses to overwrite. |
+| 2 | `scripts/epoch_universe_parity.sh artifact` (read the plan) then `... artifact --run` — **wait for completion** | minutes (estimate, not measured; MemoryMax 3500M, Nice 19) | Transient-unit build of `data/universe_tier_membership_shrink-<YYYYMMDD>.parquet` (`--start 2016-03-01 --end <today>`); refuses to overwrite. `_bounded_resolver` prefers the newest `shrink-*` file, so the capped strategies and the new fallback both see the corrected month-ends and `stocks_*` tiers. Sanity: the parquet must contain `stocks_sp500, stocks_r1000, stocks_r3000, stocks_liquid`. |
+| 3 | `scripts/epoch_universe_parity.sh install --deadline <YYYY-MM-DDT10:30> --on-calendar "<Sun 08:05:00> UTC"` then the same with `--run` | seconds | Writes the nightly drop-in (`/etc/systemd/system/openclaw-fleet-overnight-resume.service.d/universe-parity.conf`, plus the `docs/systemd` snapshot) and `fleet-universe-parity-epoch-<date>.service` + `.timer`; daemon-reload. **Starts/enables nothing.** Then `systemctl start fleet-universe-parity-epoch-<date>.timer` so the weekend window fires (the timer must be started once; it is not enabled to survive a reboot — re-start it after any reboot). Default RuntimeMaxSec 99000 s (27.5 h). |
+| 4 | `scripts/epoch_universe_parity.sh rotate` then `... rotate --run` | seconds | **Refuses unless step 3 `--run` happened.** Moves the live ledgers to `.rotated-<tag>` (only if byte-identical to the checkpoint) so the driver sees `done=0`, and **stamps the rotate time** (ISO UTC) into `data/.refresh_backtests.done.pre-universe-parity-<date>.since`; the gate and report read that file as the default epoch start (override with `--since`). Note the printed time. |
+| 5 | Commit the snapshot: `git add docs/systemd/openclaw-fleet-overnight-resume.service.d/universe-parity.conf && git commit` (on `main`, operator) | — | `install --run` wrote it. Remember `install_systemd.sh` installs every drop-in in that directory — remove it from the snapshot at close-out. Pre-existing drift (not ours): the snapshot dir also holds `target-atr-r.conf`, `rf-macro.conf`, `onfailure.conf` while `/etc` holds only `oom-continue.conf`. |
+| 6 | `scripts/epoch_universe_parity.sh status --since <rotate time>` (daily) | seconds | Runs the gate: `OK` / `NOT_YET` + detail. **"Uniform" means gate G1 OK** — NOT the nightly log's "outstanding" count: 2 quarantined strategies never reach 0 (and `ALLOW_ACTUATION=0` anyway). |
+| 7 | When G1 is OK (G2 OK or accepted): `scripts/epoch_universe_parity.sh report --since <rotate time>` | seconds | Writes `docs/superpowers/plans/universe-parity-report-<date>.{csv,md}` (never overwrites). |
+| 8 | **OPERATOR REVIEW CHECKPOINT** — read the report. | — | Nothing in steps 0-7 changes weights or activation. |
+| 9 | Only after sign-off: `python3 scripts/run_universe_shrink.py --adopt --reassign --force` -> weights rebuild -> floor recheck -> `activation_assigner --all` (preview first) -> re-enable `openclaw-weekly-strategy-weights.timer` / `OPENCLAW_ACTIVATION_ASSIGNER`/`AUTO_DEMOTE` per the standing owed-sequence. | per standing runbooks | Operator-gated. |
+| 10 | Close-out: `scripts/epoch_universe_parity.sh uninstall --date <epoch YYYYMMDD> --run [--restore-ledgers]` | seconds | `uninstall` never defaults the date to today: without `--date` it globs `fleet-universe-parity-epoch-*` under `/etc/systemd/system` and the `pre-universe-parity-*` checkpoint under `data/` and refuses if more than one epoch matches. Also stop the weekend unit/timer if running; re-enable any refresh timer disabled in step 0. To keep the fallback permanent for ad-hoc/candidate backtests, set `OPENCLAW_BT_UNIVERSE_FILTER_REF=1` in `.env` BEFORE removing the drop-in (a later change; the code default stays OFF). |
+
+### Fleet size and retry behaviour
+
+117 runnable strategies (105 live + 10 candidate + 4 staging − 2 quarantined), ordered live first (alphabetical) then candidates/staging. Only `.refresh_backtests.done` skips
+a strategy: failures and OOMs are logged to `.done.failed` and retried at every nightly. Serial cost at the last epoch's ~25 min average is ~49 h; the bounded universes should
+run faster than the old full panel (measure).
+
+### Schedule (controller follows this)
+
+* **Wed 2026-10-07 ~14:00Z** — steps 0–4 in one sitting (the nightly service must be `inactive`; 21:30Z nightly is the first epoch run, with the flag).
+* **Nightlies Wed 10-07, Thu 10-08, Fri 10-09** (21:30Z -> 10:30Z) run the flagged epoch from the drop-in.
+* **Saturday 10-10** — do NOT start anything: Sat 12:00Z through ~00:00Z belongs to the research chain (sunday-research split swapped onto Saturday). The Friday nightly
+  ends 10:30Z Saturday, clear of it.
+* **Weekend window unit Sun 2026-10-11 08:05Z -> Mon 10-12 10:30Z** (`--deadline 2026-10-12T10:30`; created in step 3 with `--on-calendar "2026-10-11 08:05:00 UTC"`).
+* **Expected uniform (G1 OK) ≈ Mon 2026-10-12**; then `report --since <rotate time>` -> operator review -> activation apply (step 9).
 
 ### The gate (`scripts/universe_parity_gate.py`; step 6)
 
-Epoch start = `--since YYYY-MM-DD[THH:MM]` or the date of the newest `.refresh_backtests.done.pre-universe-parity-<date>` checkpoint file.
+Epoch start = `--since YYYY-MM-DD[THH:MM]`, else the rotate time stamped in `.refresh_backtests.done.pre-universe-parity-<date>.since`, else the date of the newest checkpoint file.
 * **G1 uniformity** — each manifest-`live` strategy's LATEST primary run (run_at >= epoch start) has `config_json.universe_bound_source` in
   `cap`/`filter_ref`; or the strategy has neither `universe_filter_ref` nor `backtest_universe_cap`, in which case `none` is accepted and listed separately
   ("static by design"). Lagging = no key (pre-epoch code), older than the epoch start, `explicit`, or `none` with a manifest ref (the ref failed open).
@@ -70,10 +94,10 @@ assigner run), universes that collapsed (`post_universe_size`), and the 9 capped
 
 ## Rollback
 
-* Before step 5: `scripts/epoch_universe_parity.sh uninstall --run`; the live ledgers are in `.rotated-<tag>` — `mv` them back (or `uninstall --run --restore-ledgers`,
+* Before the first nightly after step 4: `scripts/epoch_universe_parity.sh uninstall --date <YYYYMMDD> --run`; the live ledgers are in `.rotated-<tag>` — `mv` them back (or `uninstall --date <YYYYMMDD> --run --restore-ledgers`,
   which restores from the checkpoint only if no live ledger exists). The new artifact file is additive and harmless to leave (the capped strategies pick it up on their
   next run either way).
-* Mid-epoch: `systemctl stop fleet-universe-parity-epoch-<date>.service`, `uninstall --run`. Rows already written stay (append-only history; the canonical row per
+* Mid-epoch: `systemctl stop fleet-universe-parity-epoch-<date>.service`, `uninstall --date <YYYYMMDD> --run`. Rows already written stay (append-only history; the canonical row per
   strategy is whatever ran last). To resume the OLD universe semantics for the not-yet-rerun strategies simply do nothing — they are still on the pre-epoch rows.
 * Nothing in this runbook touches weights, activation, the manifest, or the live engine, so there is nothing live to roll back before step 9.
 
