@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_adf_hurst_half_life_mean_reversion",
+  "required": ["prices"],
+  "optional": []
+}

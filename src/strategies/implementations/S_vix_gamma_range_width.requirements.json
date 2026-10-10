@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_vix_gamma_range_width",
+  "required": ["prices", "macro"],
+  "optional": ["options_eod"]
+}

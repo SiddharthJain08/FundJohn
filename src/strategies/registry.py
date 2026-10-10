@@ -388,6 +388,16 @@ _IMPL_MAP = {
     'S_nasdaq100_rsi3_mean_reversion': ('strategies.implementations.S_nasdaq100_rsi3_mean_reversion', 'Nasdaq100Rsi3MeanReversion'),
     # Trading & Investing Strategies 2026: 2-day consecutive pullback > 1 ATR + 200-SMA uptrend on SPY/QQQ
     'S_two_day_pullback_atr_uptrend': ('strategies.implementations.S_two_day_pullback_atr_uptrend', 'TwoDayPullbackAtrUptrend'),
+    # kruegeralgorithms.com 2026: >=1x ATR(14) down-day fade (LONG next session) on SPY/QQQ/DIA; up-days no-signal (falsification study)
+    'S_day_after_big_move_contrarian_fade': ('strategies.implementations.S_day_after_big_move_contrarian_fade', 'DayAfterBigMoveContrarianFade'),
+    # kruegeralgorithms.com 2026: confirmed close-through breakout of a 5-bar fractal swing + retest of the pre-breakout order block, FVG confluence (falsification study — 3308 ICT/SMC rule variants, no edge survives multiple-testing correction)
+    'S_ict_smart_money_concepts': ('strategies.implementations.S_ict_smart_money_concepts', 'IctSmartMoneyConceptsTV2'),
+    # kruegeralgorithms.com 2026: open vs EMA(12) of prior closes -> LONG/SHORT, broad equity universe (falsification study — viral +982% rule is leverage + bull drift, no detectable lead over always-long) (variant 1 of 2)
+    'S_first_candle_ema12_breakout': ('strategies.implementations.S_first_candle_ema12_breakout', 'FirstCandleEma12Breakout'),
+    # kruegeralgorithms.com 2026: 200-day SMA event-trigger trend filter on IAU (gold) (falsification study — trend profits are long-beta exposure, long gold ~91% of the time vs buy-and-hold) (variant 1 of 2)
+    'S_gold_trend_long_beta': ('strategies.implementations.S_gold_trend_long_beta', 'GoldTrendLongBeta'),
+    # arXiv 2610.11917 (Yadav & Mehra, 2026): robust mean / worst-case tau=0.10-expectile score (L1-Wasserstein-dilated by 0.5x MAD), top-5% long-only equal-weight sleeve (variant 1 of 2)
+    'S_expectile_wasserstein_robust_portfolio': ('strategies.implementations.S_expectile_wasserstein_robust_portfolio', 'ExpectileWassersteinRobustPortfolio'),
     # Trading & Investing Strategies 2025: 3 consecutive bearish candles (close<open) on SPY → mean-reversion long
     'S_spy_three_down_days_mean_reversion': ('strategies.implementations.S_spy_three_down_days_mean_reversion', 'SpyThreeDownDaysMeanReversion'),
     # QuantSeeker 2026: first 30-minute SPY/QQQ return predicts last 30-minute return → LONG at 15:30 ET
@@ -446,6 +456,16 @@ _IMPL_MAP = {
     'S_drawdown_cushion_exposure_control': ('strategies.implementations.S_drawdown_cushion_exposure_control', 'DrawdownCushionExposureControl'),
     # Cotton 2026: NCO/global-MV Schur bridge, gamma-damped cross-cluster complement, closed-form gamma* (variant 1 of 2)
     'S_nco_schur_bridge_minvar': ('strategies.implementations.S_nco_schur_bridge_minvar', 'NcoSchurBridgeMinVar'),
+    # Melchor Alaiz 2026: fixed-delta constant-correlation shrinkage, long-only global min-variance (variant 1 of 2)
+    'S_covariance_shrinkage_minvar': ('strategies.implementations.S_covariance_shrinkage_minvar', 'CovarianceShrinkageMinVar'),
+    # quantt.co.uk 2026: ADF (p<0.05) + Hurst<0.5 (R/S on returns) + finite OU half-life (3-60d) triple test, zscore vs rolling log-mean sized to half-life (variant 1 of 2)
+    'S_adf_hurst_half_life_mean_reversion': ('strategies.implementations.S_adf_hurst_half_life_mean_reversion', 'AdfHurstHalfLifeMeanReversion'),
+    # Melchor Alaiz 2026 (hmaquant.substack.com): per-ticker dealer GEX sign (options_eod OI x gamma) gates momentum (GEX<0) vs mean-reversion (GEX>=0) on the daily close-to-close return
+    'S_dealer_gamma_exposure_flow': ('strategies.implementations.S_dealer_gamma_exposure_flow', 'DealerGammaExposureFlow'),
+    # An/Kim 2026 (arXiv:2610.04348): price-weight (not cap-weight) diversity portfolio, p=0.5, split-jump names excluded rather than wealth-corrected
+    'S_diversity_weighted_price_generated': ('strategies.implementations.S_diversity_weighted_price_generated', 'DiversityWeightedPriceGenerated'),
+    # Krüger 2026 (kruegeralgorithms.com): VIX9D>VIX / VIX>VIX3M curve inversion, elevated VVIX, or short dealer gamma (>=2 of the available flags) predicts next-session range expansion on SPY ATM straddles
+    'S_vix_gamma_range_width': ('strategies.implementations.S_vix_gamma_range_width', 'VixGammaRangeWidth'),
 }
 
 

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_first_candle_ema12_breakout",
+  "required": ["prices"],
+  "optional": []
+}

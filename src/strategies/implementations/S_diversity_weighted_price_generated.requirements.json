@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_diversity_weighted_price_generated",
+  "required": ["prices"],
+  "optional": []
+}

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_dealer_gamma_exposure_flow",
+  "required": ["prices", "options_eod"],
+  "optional": []
+}

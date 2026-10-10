@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_expectile_wasserstein_robust_portfolio",
+  "required": ["prices"],
+  "optional": []
+}
