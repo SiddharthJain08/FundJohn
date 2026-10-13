@@ -41,6 +41,14 @@ class UniverseResolver:
         self._db = db
         self._coverage = coverage
         self._cache: dict[tuple[str, _date, bool], list[str]] = {}
+        # Many live strategies share the same universe_filter_ref (2026-10-08:
+        # 100 live strategies resolve to only 6 distinct predicates), so a
+        # second cache keyed on predicate identity (not strategy_id) lets
+        # them share one DB-row pass instead of each redoing the full
+        # tier_liquid/has_floor sweep — this is what was blowing the
+        # universe_resolution check's SLA (union_universe hit 70s wall with
+        # 100 live strategies, each re-walking ~15k metadata rows).
+        self._predicate_cache: dict[tuple, list[str]] = {}
         self._manifest_loader = manifest_loader
         self._today_fn = today_fn
         self._audit_writer = audit_writer
@@ -67,8 +75,13 @@ class UniverseResolver:
         if key in self._cache:
             return self._cache[key]
         predicate = self._load_predicate(strategy_id)
-        rows = self._db.fetch_metadata_as_of(as_of)
         cap_on = _liquid_cap_enabled()
+        pred_key = (predicate, as_of, apply_floor, cap_on)
+        if pred_key in self._predicate_cache:
+            out = self._predicate_cache[pred_key]
+            self._cache[key] = out
+            return out
+        rows = self._db.fetch_metadata_as_of(as_of)
         capped = 0
         out = []
         for row in rows:
@@ -90,6 +103,7 @@ class UniverseResolver:
             logger.info('universe_resolver: liquid cap dropped %d name(s) for %s @ %s '
                         '(predicate wider than tier_liquid)', capped, strategy_id, as_of)
         out.sort()
+        self._predicate_cache[pred_key] = out
         self._cache[key] = out
         return out
 

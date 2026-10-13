@@ -76,6 +76,7 @@ def _build_steps() -> list[tuple[str, str]]:
     base: list[tuple[str, str]] = [
         ('activation',           'activation_apply'),          # bench-relative activation → eligibility + weights (only when the min-trades slider or the bench sleeve's own backtest moved; never aborts in the JS graph)
         ('collect',              'run_collector_once'),        # one cycle of collector.js
+        ('coverage_warm',        'warm_coverage_cache'),       # rebuild+persist the coverage-index cache that `collect` just invalidated (2026-10-12: nothing did this, so the first caller each day — doctor.py's union_universe_size check — ate a 35s cold rebuild and timed out daily); advisory, never fails the cycle
         ('signals',              'engine'),                    # zero-LLM strategy executor
         ('ic_gate',              'ic_gate_runner'),            # IC approval gate (DEFAULT-OFF; gated on OPENCLAW_IC_GATE=1; fail-open)
         ('handoff',              'trade_handoff_builder'),     # structured handoff
@@ -114,6 +115,7 @@ NOTIFY_WEBHOOK = os.environ.get('ORCHESTRATOR_NOTIFY_WEBHOOK', '')
 STEP_FAILURE_CHANNEL = {
     'activation':  'data-alerts',
     'collect':     'data-alerts',
+    'coverage_warm': 'data-alerts',
     'sentiment':   'data-alerts',
     'signals':     'data-alerts',
     'ic_gate':     'trade-reports',
@@ -1045,6 +1047,7 @@ def main(argv=None):
     # Covers the 10am cycle step list.
     STEP_AGENTS = {
         'collect':     ('botjohn',      f'Collecting data: {run_date}',             None),
+        'coverage_warm': ('botjohn',    f'Warming coverage-index cache: {run_date}', None),
         'sentiment':   ('botjohn',      f'Scraping social + scoring news: {run_date}', None),
         'signals':     ('botjohn',      f'Running strategy signals: {run_date}',    None),
         'ic_gate':     ('tradedesk',    f'IC approval gate: {run_date}',            None),
