@@ -63,6 +63,7 @@ Recent `main` SHAs: breaker Tasks 2–4 `0c4d3011`/`e428f53c`/`93085923`; promot
 - 14 live strategies with no `universe_filter_ref` (listed by `epoch_universe_parity.sh status` as static_by_design) + ~6 more non-live.
 - `universe_resolution_audit` table never populated (`src/strategies/universe_resolver.py` audit_writer path).
 - Silent-strategy system check (`src/system_checks/`), post-merge opus review of M1 (signals-memory ledger), options-surface flip gate recalibration, dead `--throttle` flag, Saturday-night memory measurement.
+- Dashboard: `/api/strategies` (:3000, johnbot-hosted) shows the bound tier only for ladder-chosen overlays (`universe_tier` chip); surface `config_json.universe_bound_source` / `universe_bound_tier` from the primary run so filter_ref-bounded strategies display their universe too.
 - Hardening idea for §3.1: make `coverage_warm` non-fatal in the orchestrator (today any rc≠0 aborts the cycle; see `pipeline_orchestrator.py` "Step … failed — aborting pipeline").
 
 ## 5. Older open operator actions (pre-dating this window)
