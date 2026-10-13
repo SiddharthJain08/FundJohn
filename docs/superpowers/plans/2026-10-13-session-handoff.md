@@ -30,7 +30,7 @@ session and is the FIRST thing to read; this document is the durable, committed 
 | Activation assigner | bench-aware; Mon 10-12 threshold 0.9378 (LOW_VOL); newly dormant S_covariance_shrinkage_minvar, S_diversity_weighted_price_generated, S_micro_alpha_elastic_net. |
 | Universe security-type track | Phase 1 (`security_type`, mig 163), rank regression fix (`OPENCLAW_RANK_COMMON_ONLY`), history repair, Phase 2 opt-in (21 strategies → `stocks_liquid`; S_52wk_low_capitulation_reversal since auto-demoted), Phase 3 parity epoch 20261007 EXECUTED + CLOSED. |
 | Backtest universe parity | **PERMANENT**: `OPENCLAW_BT_UNIVERSE_FILTER_REF=1` at the end of `.env` (backup `.env.pre-universe-parity-permanent-20261012`). Fleet drop-in, one-shot weekend unit/timer removed 10-13 00:24Z. Fleet ledgers `data/.refresh_backtests.done{,.failed}` stay rotated (checkpoint `*.pre-universe-parity-20261007`). |
-| Epoch gate | OK: live 106 = 91 bound + 14 static-by-design (no `universe_filter_ref`) + 1 lagging (`S_pairs_trading_jump_diffusion_intraday`). G2 n=103 median ΔSharpe +0.010, positive 50 vs 48. Report `docs/superpowers/plans/universe-parity-report-20261011.{csv,md}`. |
+| Epoch gate | OK: live 106 = 92 bound + 14 static-by-design (no `universe_filter_ref`) + 0 lagging (uniform since 10-13 02:00Z). G2 n=103 median ΔSharpe +0.010, positive 50 vs 48. Report `docs/superpowers/plans/universe-parity-report-20261013.{csv,md}` (supersedes 20261011). |
 | Beta budget / rule C | LIVE; SPY clamped at `benchmark_max_nav_frac=1.0`×NAV (~$95k); alpha (~$15k) rides on margin. Cap draft `docs/specs/2026-10-07-beta-budget-cap-amendment-draft.md` recommends keeping 1.00. |
 | Daily cycle | 11-step base (`collect → coverage_warm → signals → …`); `coverage_warm` added 10-12 by the maintenance agent, committed 10-13 (see §3.1). |
 | Regime | LOW_VOL since 10-09 19:15Z (one-tick TRANSITIONING flicker 10-12 19:45Z, no redeploy). |
@@ -39,14 +39,16 @@ Recent `main` SHAs: breaker Tasks 2–4 `0c4d3011`/`e428f53c`/`93085923`; promot
 
 ## 2. In flight at hand-over
 
-- **`epoch-lag3-pairs.service`** (transient, started 10-13 00:27:54Z, MemoryMax 6200M, RuntimeMax 12600 s, log `logs/epoch-lag3-pairs.log`): re-backtest of the single lagging strategy. It needs ≥ 90 min and ~2–3 GB. On success: `echo S_pairs_trading_jump_diffusion_intraday >> data/.refresh_backtests.done` (checkpoint ONLY on success, like the driver), then `bash scripts/epoch_universe_parity.sh status` and `bash scripts/epoch_universe_parity.sh report` (writes `universe-parity-report-<today>.{csv,md}`), commit. On failure: leave to the nightly (it is the designated OOM victim; it dies by eviction, not time — the fleet per-strategy timeout is 14400 s).
+- Nothing running. The pairs re-run LANDED 10-13 02:00Z (run `18edc6c6`, Sharpe 0.10 → 0.19, 4 GB peak, 1 h 42 min) and is checkpointed in `data/.refresh_backtests.done`; gate = 92 bound / 14 static / 0 lagging; report regenerated as `universe-parity-report-20261013.{csv,md}`.
+- Nightly queue left: `S_low_volatility_us_gk63` (candidate; OOM-killed at 3.4 GB each night — the fleet's `MEM_FLOOR_MB=5000` spawn gate does not cap the child) and `S_first_candle_ema12_breakout` (manifest repointed 10-13 → should now run). Quarantined by design: TR04/TR06.
+- WATCH tonight 10-13: first real `coverage_warm` run in the 20:15Z collect cycle (`logs/daily_cycle_steps_2026-10-13.log`), nightly 21:30Z.
 
 ## 3. Owed operator decisions
 
 1. ~~Maintenance agent's uncommitted fix~~ — DECIDED 10-13: keep + commit (done). WATCH the first premarket cycles (`logs/daily_cycle_steps_2026-10-13.log`): a `coverage_warm` line, then `signals` must run; a 600 s timeout or OOM of the rebuild would abort the cycle.
 2. **Parity report review** — `universe-parity-report-20261011.md` is the deliverable of the universe track. Worst movers S_HV20_iv_dispersion_reversion −6.34, S_HV8 −1.44, S_fama_french −1.01; best S_options_flow +3.52, S_HV19 +3.43, low_volatility_us +2.32 (−2.47 → −0.15, the cash-ETF artefact).
 3. **SPY cap** — keep 1.00 (draft `a8fd54ff`); regime-tiered ceiling is the documented alternative.
-4. **Two noisy nightly candidates**: `S_first_candle_ema12_breakout` (research commit 34470687; manifest `canonical_file` points at `S_first_candle_ema12_breakout.py`, only `_tv1.py` + `.requirements.json` exist → rc=1 every night) and `S_low_volatility_us_gk63` (OOM-killed at 3.4 GB nightly). Fix via operator manifest script (canonical_file / `backtest_quarantine` flag) — never by hand.
+4. **Noisy nightly candidate**: `S_low_volatility_us_gk63` (OOM-killed at 3.4 GB nightly) — quarantine flag via the operator manifest script, or run it once in a quiet window like pairs. (`S_first_candle_ema12_breakout` was fixed 10-13: the maintenance agent repointed `canonical_file` to the existing `_tv1.py`; committed.) NOTE: the daily maintenance agent (`run_maintenance.js --mode daily`, 16:00Z) edits the live tree but does NOT commit — check `git -C /root/openclaw status` after each run and commit or revert its changes deliberately.
 5. **Tier-1 vs tier-2 bench vector drift** (assigner logs "fail-safe tier 2 vector") — decide whether the registry sleeve run should be re-stamped.
 
 ## 4. Engineering backlog (from this program; each needs an SDD brief)

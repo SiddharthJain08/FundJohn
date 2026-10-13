@@ -7079,7 +7079,7 @@
       "state": "candidate",
       "state_since": "2026-10-10T18:16:05.987728+00:00",
       "metadata": {
-        "canonical_file": "S_first_candle_ema12_breakout.py",
+        "canonical_file": "S_first_candle_ema12_breakout_tv1.py",
         "class": "FirstCandleEma12Breakout",
         "description": "Daily-bar adaptation (variant 1 of 2): LONG if today's open is above EMA(12) of prior closes, SHORT if below, broad equity universe. Source paper finds no detectable edge over always-long once leverage and bull-market drift are accounted for."
       },
