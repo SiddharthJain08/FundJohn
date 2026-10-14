@@ -248,7 +248,7 @@ function makeStepNode(STEP, scriptName) {
     // failed gap-filler exactly like the 2026-07-22 rc=124 timeout that
     // motivated this exemption in the first place, so it warns through the
     // same way. Only `lockLost` overrides the exemption.
-    if ((STEP === 'sentiment' || STEP === 'activation') && !lockLost) {
+    if ((STEP === 'sentiment' || STEP === 'activation' || STEP === 'coverage_warm') && !lockLost) {
       completion.status = 'warn';
       await pipelineLog.feedEnd(STEP, 'warn', state.runDate, durationMs);
       return { completedSteps: [...(state.completedSteps || []), completion] };

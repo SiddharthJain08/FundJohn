@@ -89,9 +89,9 @@ def _build_steps() -> list[tuple[str, str]]:
         ('health',               'daily_health_digest'),       # daily health digest
     ]
     if os.environ.get('OPENCLAW_SENTIMENT_INGEST') == '1':
-        insert_at = next(i for i, (k, _) in enumerate(base) if k == 'collect') + 1
-        # Sentiment lands between `collect` and `signals` so strategies
-        # see fresh per-ticker scores. Script lives in src/pipeline/.
+        insert_at = next(i for i, (k, _) in enumerate(base) if k == 'coverage_warm') + 1
+        # Sentiment lands between `coverage_warm` and `signals` (i.e. after
+        # `collect`'s cache rebuild) so strategies see fresh per-ticker scores. Script lives in src/pipeline/.
         base.insert(insert_at, ('sentiment', 'run_sentiment_step'))
     return base
 

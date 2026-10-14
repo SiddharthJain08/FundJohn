@@ -28,7 +28,7 @@ const { postAbortAlert } = require('./daily_cycle_helpers');
 // daily_cycle_node.js non-abort set).
 const STEPS_IN_ORDER = [
   'activation',
-  'collect', 'sentiment', 'signals', 'option_hedge', 'ic_gate', 'handoff',
+  'collect', 'coverage_warm', 'sentiment', 'signals', 'option_hedge', 'ic_gate', 'handoff',
   'trade', 'alpaca', 'reconcile', 'stop_reattach', 'report',
   'pyportfolioopt_shadow', 'health',
 ];
@@ -41,6 +41,7 @@ const STEPS_IN_ORDER = [
 const STEP_SCRIPTS = {
   'activation':             'activation_apply',
   'collect':                'run_collector_once',
+  'coverage_warm':          'warm_coverage_cache',   // 2026-10-14: advisory cache rebuild after collect (warn-and-continue, see daily_cycle_node.js)
   'sentiment':              'run_sentiment_step',
   'signals':                'engine',
   'option_hedge':           'run_option_hedge_targets',

@@ -350,8 +350,8 @@ function start(swarm, generateId, notifyDiscord) {
         };
         // 3:10 PM ET — compute phase (close[t]-proxy signals; produces sized handoff; no execution).
         cron.schedule('10 15 * * 1-5', () => {
-            log('close-exec compute (3:10pm ET): activation → collect → sentiment → signals → ic_gate → handoff → trade');
-            dispatchCycle('scheduled-compute', ['activation', 'collect', 'sentiment', 'signals', 'ic_gate', 'handoff', 'trade']);
+            log('close-exec compute (3:10pm ET): activation → collect → coverage_warm → sentiment → signals → ic_gate → handoff → trade');
+            dispatchCycle('scheduled-compute', ['activation', 'collect', 'coverage_warm', 'sentiment', 'signals', 'ic_gate', 'handoff', 'trade']);
         }, { timezone: 'America/New_York' });
         // 3:55 PM ET — execute phase (market orders into the close).
         cron.schedule('55 15 * * 1-5', () => {
@@ -396,8 +396,8 @@ function start(swarm, generateId, notifyDiscord) {
         // EOD mode only — under same-day exec the 16:15 slot runs collect
         // alone (see the sameDayExec block below).
         if (eodSignalRegister) cron.schedule('15 16 * * 1-5', () => {
-            log('EOD compute (4:15pm ET): activation → collect → sentiment → signals → option_hedge');
-            dispatchCycle('eod-signal-register', ['activation', 'collect', 'sentiment', 'signals', 'option_hedge']);
+            log('EOD compute (4:15pm ET): activation → collect → coverage_warm → sentiment → signals → option_hedge');
+            dispatchCycle('eod-signal-register', ['activation', 'collect', 'coverage_warm', 'sentiment', 'signals', 'option_hedge']);
         }, { timezone: 'America/New_York' });
 
         // (a2) 09:05 ET Mon–Fri — pre-market news fetch, 10 min AHEAD of the gate.
@@ -609,8 +609,8 @@ function start(swarm, generateId, notifyDiscord) {
             // masters) + option_hedge. Signals are NOT recomputed here; the
             // 15:00 chain is the sole signal producer in this mode.
             cron.schedule('15 16 * * 1-5', () => {
-                log('same-day EOD collect (4:15pm ET): collect → option_hedge');
-                dispatchCycle('sameday-eod-collect', ['collect', 'option_hedge']);
+                log('same-day EOD collect (4:15pm ET): collect → coverage_warm → option_hedge');
+                dispatchCycle('sameday-eod-collect', ['collect', 'coverage_warm', 'option_hedge']);
             }, { timezone: 'America/New_York' });
 
             // 16:20 ET — evening measurement pass (parity marks, ledger,

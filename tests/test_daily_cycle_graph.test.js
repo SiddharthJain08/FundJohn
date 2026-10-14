@@ -15,7 +15,7 @@ const TRACEBUS_PATH    = path.join(ROOT, 'src/agent/traceBus.js');
 // (option_hedge + stop_reattach were added after the original 11-node graph).
 const STEPS_IN_ORDER = [
   'activation',
-  'collect', 'sentiment', 'signals', 'option_hedge', 'ic_gate', 'handoff',
+  'collect', 'coverage_warm', 'sentiment', 'signals', 'option_hedge', 'ic_gate', 'handoff',
   'trade', 'alpaca', 'reconcile', 'stop_reattach', 'report',
   'pyportfolioopt_shadow', 'health',
 ];
@@ -63,12 +63,12 @@ function makeStubbed({ abortAt = null } = {}) {
   return { mod, visited };
 }
 
-test('Full happy path: all 14 nodes visited in canonical order, status ok', async () => {
+test('Full happy path: all 15 nodes visited in canonical order, status ok', async () => {
   const { mod, visited } = makeStubbed();
   const out = await mod.runDailyCycleGraph({ runDate: '2026-05-21', reason: 'test' });
   assert.deepEqual(visited, STEPS_IN_ORDER);
   assert.equal(out.status, 'ok');
-  assert.equal(out.completedSteps.length, 14);
+  assert.equal(out.completedSteps.length, 15);
 });
 
 test('Subset request: graph runs without throwing (subset filtering tested in Task 4)', async () => {
@@ -108,6 +108,6 @@ test('Concurrent runs on different runDates have isolated state', async () => {
     mod.runDailyCycleGraph({ runDate: '2026-05-24', reason: 'test' }),
   ]);
   assert.notEqual(a.threadId, b.threadId);
-  assert.equal(a.completedSteps.length, 14);
-  assert.equal(b.completedSteps.length, 14);
+  assert.equal(a.completedSteps.length, 15);
+  assert.equal(b.completedSteps.length, 15);
 });

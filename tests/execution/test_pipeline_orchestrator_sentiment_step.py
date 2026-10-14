@@ -47,11 +47,11 @@ class SentimentStepGatingTests(unittest.TestCase):
             keys = [k for k, _ in mod.STEPS]
             self.assertIn('sentiment', keys,
                           'sentiment step should be inserted when gate=1')
-            collect_idx = keys.index('collect')
+            warm_idx = keys.index('coverage_warm')
             sentiment_idx = keys.index('sentiment')
             signals_idx = keys.index('signals')
-            self.assertEqual(sentiment_idx, collect_idx + 1,
-                             'sentiment must sit immediately after collect')
+            self.assertEqual(sentiment_idx, warm_idx + 1,
+                             'sentiment must sit immediately after coverage_warm (collect → coverage_warm → sentiment)')
             self.assertEqual(sentiment_idx, signals_idx - 1,
                              'sentiment must sit immediately before signals')
         finally:
