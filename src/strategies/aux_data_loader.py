@@ -42,6 +42,11 @@ MACRO_PATH = ROOT / 'data' / 'master' / 'macro.parquet'
 FINANCIALS_PATH = ROOT / 'data' / 'master' / 'financials.parquet'
 INSIDER_PATH = ROOT / 'data' / 'master' / 'insider.parquet'
 SENTIMENT_PATH = ROOT / 'data' / 'master' / 'sentiment.parquet'
+PRICES_30M_PATH = ROOT / 'data' / 'master' / 'prices_30m.parquet'
+
+# Trailing calendar-day window of 30-minute bars served per bar. cohort_base
+# only needs today's bars plus the trailing ~10 SPY opening bars.
+PRICES_30M_LOOKBACK_DAYS = 30
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +57,7 @@ _MACRO_SERIES: Optional[dict] = None
 _FIN_DF: Optional[pd.DataFrame] = None
 _FIN_AVAIL_DF: Optional[pd.DataFrame] = None
 _SENT_DF = None
+_P30_DF: Optional[pd.DataFrame] = None
 
 # camelCase aliases MUST mirror engine.py load_aux_data exactly — strategies
 # read the FMP-style names (S10_quality_value, S_bankruptcy_risk_anomaly).
@@ -369,6 +375,42 @@ def _vol_indices_slice(date_str: str) -> dict:
             if v is not None and not (isinstance(v, float) and pd.isna(v)):
                 out[col] = float(v)
     return out
+
+
+def _load_prices_30m() -> pd.DataFrame:
+    """Load prices_30m.parquet once (columns/dtypes as stored). Adds a parsed
+    ``_date`` Timestamp column (from the string ``date``) used only for slicing;
+    the frame is sorted by it. Missing/empty file -> cached empty frame."""
+    global _P30_DF
+    if _P30_DF is not None:
+        return _P30_DF
+    if not PRICES_30M_PATH.exists():
+        _P30_DF = pd.DataFrame()
+        return _P30_DF
+    df = pd.read_parquet(PRICES_30M_PATH)
+    if df.empty or 'date' not in df.columns:
+        _P30_DF = pd.DataFrame()
+        return _P30_DF
+    df['_date'] = pd.to_datetime(df['date'])
+    sort_cols = ['_date', 'datetime'] if 'datetime' in df.columns else ['_date']
+    _P30_DF = df.sort_values(sort_cols, kind='stable').reset_index(drop=True)
+    return _P30_DF
+
+
+def _prices_30m_slice(date_str: str) -> pd.DataFrame:
+    """Point-in-time 30-minute bars: session ``date`` in
+    [date_str - PRICES_30M_LOOKBACK_DAYS, date_str], no look-ahead. Returns a
+    copy with the stored columns (``_date`` helper dropped); empty if none."""
+    df = _load_prices_30m()
+    if df.empty:
+        return pd.DataFrame()
+    hi = pd.to_datetime(date_str)
+    lo = hi - pd.Timedelta(days=PRICES_30M_LOOKBACK_DAYS)
+    dates = df['_date']
+    sub = df[(dates <= hi) & (dates >= lo)]
+    if sub.empty:
+        return pd.DataFrame()
+    return sub.drop(columns=['_date']).reset_index(drop=True)
 
 
 def _load_macro_series() -> dict:
@@ -713,6 +755,12 @@ def load_aux_data(
                                 # for S15_insider_opportunistic_short Stage 2
                                 # classifier (t-15 to t-3 month pattern check).
                                 # Caller slices further by sub-window as needed.
+        'prices_30m':           pd.DataFrame,  # ONLY when non-empty (absent before
+                                # 2024-04-18 coverage); raw stored columns
+                                # (date, datetime[UTC], ticker, OHLCV, vwap,
+                                # transactions), session date in
+                                # [date-PRICES_30M_LOOKBACK_DAYS, date] — point-in-
+                                # time; mirrors engine.py live aux['prices_30m'].
         'recent_stop_outs': {ticker: pd.Timestamp},  # when strategy_id given
     }
     insider_txns is filtered to a INSIDER_SLICE_DAYS-day rolling window ending on
@@ -733,6 +781,9 @@ def load_aux_data(
         'insider_history_long': _insider_long_slice(date_str),
         'sentiment':            _sentiment_day_slice(date_str),
     }
+    p30 = _prices_30m_slice(date_str)
+    if not p30.empty:
+        out['prices_30m'] = p30
     if strategy_id:
         out['recent_stop_outs'] = _recent_stop_outs(
             date_str, strategy_id, run_stop_history=run_stop_history
