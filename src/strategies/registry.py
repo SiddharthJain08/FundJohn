@@ -466,6 +466,8 @@ _IMPL_MAP = {
     'S_diversity_weighted_price_generated': ('strategies.implementations.S_diversity_weighted_price_generated', 'DiversityWeightedPriceGenerated'),
     # Krüger 2026 (kruegeralgorithms.com): VIX9D>VIX / VIX>VIX3M curve inversion, elevated VVIX, or short dealer gamma (>=2 of the available flags) predicts next-session range expansion on SPY ATM straddles
     'S_vix_gamma_range_width': ('strategies.implementations.S_vix_gamma_range_width', 'VixGammaRangeWidth'),
+    # Lewis 2026 (arXiv:2610.22144): OAS shrinkage intensity corrected by cross-sectional excess kurtosis (heavy tails), long-short global min-variance weights (variant 1 of 2)
+    'S_oas_extended_covariance_shrinkage': ('strategies.implementations.S_oas_extended_covariance_shrinkage', 'OasExtendedCovarianceShrinkage'),
 }
 
 

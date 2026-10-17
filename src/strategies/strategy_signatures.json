@@ -529,21 +529,6 @@
       "TRANSITIONING"
     ]
   },
-  "S_commodity_seasonal_ssa_dvr": {
-    "regime_set_hash": "c722b3f150c07554",
-    "direction_hash": "ad8944b86def7516",
-    "formula_tokens": [
-      "realized_vol",
-      "regime",
-      "rv",
-      "value"
-    ],
-    "regimes": [
-      "HIGH_VOL",
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
   "S_commodity_seasonal_ssa_dvr_tv2": {
     "regime_set_hash": "c722b3f150c07554",
     "direction_hash": "ad8944b86def7516",
@@ -565,6 +550,39 @@
     "direction_hash": "a8f3862b96300e62",
     "formula_tokens": [
       "beta",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_covariance_shrinkage_minvar": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "correlation",
+      "delta",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_covariance_shrinkage_minvar_tv2": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "correlation",
+      "delta",
       "regime",
       "rv",
       "value"
@@ -645,6 +663,70 @@
     "formula_tokens": [
       "regime",
       "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_day_after_big_move_contrarian_fade": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "regime",
+      "value",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_day_after_big_move_contrarian_fade_tv2": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "regime",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_dealer_gamma_exposure_flow": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "gamma",
+      "gex",
+      "momentum",
+      "regime",
+      "reversion",
+      "value",
+      "zscore"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_diversity_weighted_price_generated": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "dispersion",
+      "regime",
+      "rv",
+      "tilt",
+      "value",
+      "weighted"
     ],
     "regimes": [
       "HIGH_VOL",
@@ -758,6 +840,21 @@
       "TRANSITIONING"
     ]
   },
+  "S_expectile_wasserstein_robust_portfolio_tv2": {
+    "regime_set_hash": "900af3274024f50d",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "dispersion",
+      "regime",
+      "rv",
+      "value",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL"
+    ]
+  },
   "S_extreme_intraday_reversal_nasdaq": {
     "regime_set_hash": "c722b3f150c07554",
     "direction_hash": "ad8944b86def7516",
@@ -786,6 +883,21 @@
       "TRANSITIONING"
     ]
   },
+  "S_first_candle_ema12_breakout_tv1": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
   "S_gold_donchian_breakout_ema_filter": {
     "regime_set_hash": "10b0b5eb7bebe610",
     "direction_hash": "a8f3862b96300e62",
@@ -808,6 +920,23 @@
       "dual_momentum",
       "momentum",
       "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_gold_trend_long_beta_tv2": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "f2a0793adc86d594",
+    "formula_tokens": [
+      "atr",
+      "beta",
+      "momentum",
+      "regime",
+      "rv",
       "value"
     ],
     "regimes": [
@@ -1733,6 +1862,28 @@
       "value"
     ],
     "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_vix_gamma_range_width": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "48cc186c8b1aabe2",
+    "formula_tokens": [
+      "atm",
+      "atr",
+      "beta",
+      "delta",
+      "gamma",
+      "gex",
+      "regime",
+      "rv",
+      "straddle",
+      "theta",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
       "LOW_VOL",
       "TRANSITIONING"
     ]
@@ -3745,5 +3896,22 @@
     ],
     "ejected": true,
     "ejected_at": "2026-10-03"
+  },
+  "S_commodity_seasonal_ssa_dvr": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "realized_vol",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-10-10"
   }
 }
