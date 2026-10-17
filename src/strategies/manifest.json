@@ -1942,6 +1942,19 @@
           "spec": "docs/specs/2026-09-12-quantdinger-adoptions-spec.md",
           "quarantine_reason": "revived 2026-09-13; fed live via cohort_base's aux['prices_30m'] -> market_data wiring, but the backtest's own aux builder (src/strategies/aux_data_loader.py::load_aux_data) returns no prices_30m key \u2014 0-trade backtest runs until that is wired",
           "owed": "wire intraday 30m bars into aux_data"
+        },
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
+        "universe_filter_ref_prior": "<none>",
+        "universe_filter_ref_changed_at": "2026-10-16T16:09:17.219Z",
+        "universe_filter_ref_changed_by": "manual:operator",
+        "backtest_quarantine_lifted": {
+          "at": "2026-10-16T16:09:17.281Z",
+          "by": "manual:operator",
+          "reason": "operator 2026-10-16 \"lift the backtest quarantine on both\": backtest aux loader now serves prices_30m (merge 958ca812); bound to tier_liquid the same day",
+          "prior": {
+            "reason": "revived 2026-09-13; fed live via cohort_base's aux['prices_30m'] -> market_data wiring, but the backtest's own aux builder (src/strategies/aux_data_loader.py::load_aux_data) returns no prices_30m key \u2014 0-trade backtest runs until that is wired",
+            "since": "2026-09-13"
+          }
         }
       },
       "history": [
@@ -1992,11 +2005,7 @@
           }
         }
       ],
-      "instrument_class": "equity",
-      "backtest_quarantine": {
-        "reason": "revived 2026-09-13; fed live via cohort_base's aux['prices_30m'] -> market_data wiring, but the backtest's own aux builder (src/strategies/aux_data_loader.py::load_aux_data) returns no prices_30m key \u2014 0-trade backtest runs until that is wired",
-        "since": "2026-09-13"
-      }
+      "instrument_class": "equity"
     },
     "S_TR06_baltussen_eod_reversal": {
       "state": "candidate",
@@ -2041,6 +2050,19 @@
           "spec": "docs/specs/2026-09-12-quantdinger-adoptions-spec.md",
           "quarantine_reason": "revived 2026-09-13; fed live via cohort_base's aux['prices_30m'] -> market_data wiring, but the backtest's own aux builder (src/strategies/aux_data_loader.py::load_aux_data) returns no prices_30m key \u2014 0-trade backtest runs until that is wired",
           "owed": "wire intraday 30m bars into aux_data"
+        },
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
+        "universe_filter_ref_prior": "<none>",
+        "universe_filter_ref_changed_at": "2026-10-16T16:09:17.219Z",
+        "universe_filter_ref_changed_by": "manual:operator",
+        "backtest_quarantine_lifted": {
+          "at": "2026-10-16T16:09:17.281Z",
+          "by": "manual:operator",
+          "reason": "operator 2026-10-16 \"lift the backtest quarantine on both\": backtest aux loader now serves prices_30m (merge 958ca812); bound to tier_liquid the same day",
+          "prior": {
+            "reason": "revived 2026-09-13; fed live via cohort_base's aux['prices_30m'] -> market_data wiring, but the backtest's own aux builder (src/strategies/aux_data_loader.py::load_aux_data) returns no prices_30m key \u2014 0-trade backtest runs until that is wired",
+            "since": "2026-09-13"
+          }
         }
       },
       "history": [
@@ -2083,11 +2105,7 @@
           }
         }
       ],
-      "instrument_class": "equity",
-      "backtest_quarantine": {
-        "reason": "revived 2026-09-13; fed live via cohort_base's aux['prices_30m'] -> market_data wiring, but the backtest's own aux builder (src/strategies/aux_data_loader.py::load_aux_data) returns no prices_30m key \u2014 0-trade backtest runs until that is wired",
-        "since": "2026-09-13"
-      }
+      "instrument_class": "equity"
     },
     "low_volatility_us": {
       "state": "live",
