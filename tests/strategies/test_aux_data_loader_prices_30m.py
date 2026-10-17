@@ -136,11 +136,17 @@ def test_cohort_base_translates_slice_to_spy_bars(p30, only_p30):
     bars = market_data.get('spy_30m_bars')
     assert bars, 'spy_30m_bars missing — slice did not reach cohort_base'
     assert all(b['ticker'] == 'SPY' for b in bars)
-    # 5 in-window sessions x 3 bars (2026-01-15 excluded by the lookback).
-    assert len(bars) == 15
+    # Today's RTH session only (not the 5-session slice). 14:30Z/15:00Z/15:30Z in
+    # March 2026 (EST, before the 03-08 DST change) are 09:30/10:00/10:30 ET.
+    assert len(bars) == 3
+    assert market_data['intraday_30m_session'] == '2026-03-06'
+    assert [b['time_et'] for b in bars] == ['09:30', '10:00', '10:30']
+    assert {b['session'] for b in bars} == {'2026-03-06'}
     # cohort_base sorts by datetime ascending.
     dts = [b['datetime'] for b in bars]
     assert dts == sorted(dts)
+    # Trailing stat uses the 4 prior in-window sessions only (< 5): left unset.
+    assert 'spy_10d_volume_avg' not in market_data
     # intraday_30m_bars = the latest session only, per ticker.
     today = market_data['intraday_30m_bars']
     assert set(today) == set(TICKERS)
