@@ -20,10 +20,12 @@ surfaces. A cohort strategy subclasses `CohortBaseStrategy`, declares
     - `aux_data['macro']` (dict of pd.Series) → `market_data['vix_close'/...]`.
     - `aux_data['vol_indices']` DataFrame (if present) → vix9d/skew/vix6m.
     - Wide `prices` DataFrame → SPY close history, spy_prev_close, spx_close.
-    - `aux_data['prices_30m']` → spy_30m_bars, intraday_30m_bars.
+    - `aux_data['prices_30m']` → today's RTH (ET) spy_30m_bars, intraday_30m_bars,
+      intraday_30m_session, spy_10d_volume_avg (prior sessions only).
     - `aux_data['options'][ticker]` → `opts_map[ticker]` with cohort field
       aliases (iv_spread_atm_oi_weighted, smirk_otmput_atmcall, iv_30d, iv_90d,
-      rv20, last_price fallback, avg_dollar_volume_30d on-the-fly).
+      rv20, last_price fallback). `avg_dollar_volume_30d` comes from the
+      prices_30m RTH bars (mean daily $-volume over the prior 30 sessions).
 
 Strategies that need fields not yet available (e.g., forward
 earnings_calendar, iv_history, SPX options) simply return [] until those feeds
@@ -170,40 +172,15 @@ class CohortBaseStrategy(BaseStrategy):
                 market_data['spy_prev_close'] = float(spy_close.iloc[-1])
                 market_data['spx_close'] = float(spy_close.iloc[-1])
 
-        # ----- 30-minute bars -----
+        # ----- 30-minute bars (ET sessions, RTH only; see _translate_prices_30m) -----
+        adv30: Dict[str, float] = {}
         prices_30m = aux.get('prices_30m')
         if prices_30m is not None and hasattr(prices_30m, 'empty') and not prices_30m.empty:
             try:
-                df30 = prices_30m.copy()
-                if 'datetime' in df30.columns:
-                    df30['datetime'] = pd.to_datetime(df30['datetime'])
-                if 'ticker' in df30.columns:
-                    spy30 = df30[df30['ticker'] == 'SPY'].sort_values(
-                        'datetime' if 'datetime' in df30.columns else df30.columns[0]
-                    )
-                    if not spy30.empty:
-                        market_data['spy_30m_bars'] = spy30.to_dict('records')
-                    today = df30.copy()
-                    if 'datetime' in df30.columns:
-                        today_date = df30['datetime'].dt.date.max()
-                        today = df30[df30['datetime'].dt.date == today_date]
-                    by_tk: Dict[str, list] = {}
-                    for tk, grp in today.groupby('ticker'):
-                        by_tk[tk] = grp.to_dict('records')
-                    market_data['intraday_30m_bars'] = by_tk
-
-                    # 10-day average of the 09:30 opening bar volume for SPY (S_TR04)
-                    if 'datetime' in df30.columns:
-                        opens = df30[df30['datetime'].dt.time == pd.Timestamp('09:30').time()]
-                        spy_opens = opens[opens['ticker'] == 'SPY']
-                        if len(spy_opens) >= 5 and 'volume' in spy_opens.columns:
-                            market_data['spy_10d_volume_avg'] = float(
-                                spy_opens['volume'].tail(10).mean()
-                            )
-                else:
-                    market_data['spy_30m_bars'] = df30.to_dict('records')
+                adv30 = self._translate_prices_30m(prices_30m, market_data)
             except Exception as e:
-                logger.debug(f"30m bars translation skipped: {e}")
+                logger.warning(f"30m bars translation skipped: {e}")
+                adv30 = {}
 
         # ----- SPX IV (from a raw engine key if present) -----
         if aux.get('spx_iv_30d') is not None:
@@ -257,19 +234,78 @@ class CohortBaseStrategy(BaseStrategy):
                         except Exception:
                             pass
 
-            # 30-day average dollar volume for liquidity gating (S_TR06)
-            if 'avg_dollar_volume_30d' not in ot and ticker in prices_series:
-                ts = prices_series[ticker]
-                if len(ts) >= 30:
-                    try:
-                        closes = ts.tail(30)
-                        # Without per-ticker volume series we approximate using
-                        # close * 1.0 (no-op); the engine currently does not
-                        # surface daily $volume. Leave unset rather than fake.
-                        pass
-                    except Exception:
-                        pass
-
             opts_map[ticker] = ot
 
+        # 30-day average dollar volume for liquidity gating (S_TR06), from the
+        # prices_30m RTH bars. An options-provided value wins; tickers without
+        # an options row still get an entry.
+        for tk, adv in adv30.items():
+            opts_map.setdefault(tk, {}).setdefault('avg_dollar_volume_30d', adv)
+
         return market_data, opts_map
+
+    # ---- 30-minute translation ----
+    @staticmethod
+    def _translate_prices_30m(prices_30m: pd.DataFrame, market_data: Dict[str, Any]) -> Dict[str, float]:
+        """Fill the 30-minute keys of `market_data`; return {ticker: adv30}.
+
+        Sessions are ET calendar dates derived from the bar timestamp (the
+        stored `date` column is ignored: after-hours bars carry the next day's
+        label). Only regular-trading-hours bars (09:30 <= ET start < 16:00) are
+        used, so the old extended-hours and the new RTH-only bar conventions
+        yield the same 13-bar day. `today` = latest session with an RTH bar.
+        """
+        adv30: Dict[str, float] = {}
+        df30 = prices_30m.copy()
+        if 'datetime' not in df30.columns:
+            market_data['spy_30m_bars'] = df30.to_dict('records')
+            return adv30
+        if 'ticker' not in df30.columns:
+            df30['ticker'] = 'SPY'
+
+        dt = pd.to_datetime(df30['datetime'], utc=True)  # naive input == UTC
+        et = dt.dt.tz_convert('America/New_York')
+        df30['datetime'] = dt
+        df30['session'] = et.dt.strftime('%Y-%m-%d')
+        df30['time_et'] = et.dt.strftime('%H:%M')
+        rth = df30[(df30['time_et'] >= '09:30') & (df30['time_et'] < '16:00')]
+        if rth.empty:
+            return adv30
+
+        today = rth['session'].max()
+        market_data['intraday_30m_session'] = today
+        today_rth = rth[rth['session'] == today].sort_values('datetime')
+        spy_today = today_rth[today_rth['ticker'] == 'SPY']
+        if not spy_today.empty:
+            market_data['spy_30m_bars'] = spy_today.to_dict('records')
+        market_data['intraday_30m_bars'] = {
+            tk: grp.to_dict('records') for tk, grp in today_rth.groupby('ticker')
+        }
+
+        prior = rth[rth['session'] < today]
+        if prior.empty or 'volume' not in prior.columns:
+            return adv30
+
+        # Mean 09:30-bar SPY volume over up to 10 sessions strictly before today.
+        opens = prior[(prior['ticker'] == 'SPY') & (prior['time_et'] == '09:30')]
+        opens = opens.dropna(subset=['volume']).sort_values('session')
+        opens = opens.drop_duplicates('session', keep='last').tail(10)
+        if len(opens) >= 5:
+            market_data['spy_10d_volume_avg'] = float(opens['volume'].mean())
+
+        # Per-ticker mean daily dollar volume over up to 30 prior sessions.
+        px = prior['close']
+        if 'vwap' in prior.columns:
+            px = prior['vwap'].where(prior['vwap'] > 0, prior['close'])
+        dv = (prior['volume'] * px).rename('dv')
+        daily = (
+            pd.concat([prior[['ticker', 'session']], dv], axis=1)
+            .dropna(subset=['dv'])
+            .groupby(['ticker', 'session'], as_index=False)['dv'].sum()
+            .sort_values(['ticker', 'session'])
+        )
+        last30 = daily.groupby('ticker').tail(30)
+        agg = last30.groupby('ticker')['dv'].agg(['mean', 'count'])
+        for tk, row in agg[agg['count'] >= 5].iterrows():
+            adv30[tk] = float(row['mean'])
+        return adv30
