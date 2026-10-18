@@ -52,7 +52,7 @@ from src.strategies.base import Signal
 from src.strategies.cohort_base import CohortBaseStrategy
 class BaltussenEODReversal(CohortBaseStrategy):
     id = 'S_TR06_baltussen_eod_reversal'
-    version = '2.0.0'
+    version = '2.1.0'
     regime_filter = ['HIGH_VOL', 'NEUTRAL', 'LOW_VOL']
 
     INTRADAY_DRIFT_MIN: float = 0.010      # 1.0 % combined drift
@@ -71,17 +71,18 @@ class BaltussenEODReversal(CohortBaseStrategy):
             adv = opts.get('avg_dollar_volume_30d')
             if adv is None or adv < self.LIQUIDITY_DOLLAR_VOL_MIN:
                 continue
-            if not bars or len(bars) < 12:
+            if not bars:
                 continue
 
-            # Bars are sorted chronologically; first = 09:30, last = 16:00
-            # Use closes at indices 0 (09:30 open), 7 (13:00 close), 11 (15:30 close)
+            # Select bars by ET start time (never by index): half days / gaps
+            # must skip the ticker rather than mis-pick a bar.
+            by_t = {b.get('time_et'): b for b in bars}
             try:
-                p_open = float(bars[0]['open'])
-                p_mid = float(bars[6]['close'])     # ~13:00
-                p_late = float(bars[11]['close'])   # ~15:30
-                p_close = float(bars[12]['close']) if len(bars) >= 13 else p_late
-            except (KeyError, IndexError):
+                p_open = float(by_t['09:30']['open'])
+                p_mid = float(by_t['12:30']['close'])     # ~13:00
+                p_late = float(by_t['15:00']['close'])    # ~15:30
+                p_close = float(by_t['15:30']['close']) if '15:30' in by_t else p_late
+            except (KeyError, TypeError):
                 continue
             if p_open <= 0:
                 continue

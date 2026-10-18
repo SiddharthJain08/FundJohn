@@ -58,7 +58,7 @@ def compute_nope(prev_close: float, today_open: float, first_bar_volume: float,
 
 class ZarattiniIntradaySPY(CohortBaseStrategy):
     id = 'S_TR04_zarattini_intraday_spy'
-    version = '2.0.0'
+    version = '2.1.0'
     regime_filter = ['HIGH_VOL', 'NEUTRAL', 'LOW_VOL']
 
     NOPE_LONG_MIN: float = 0.20
@@ -79,7 +79,9 @@ class ZarattiniIntradaySPY(CohortBaseStrategy):
         if vix > self.VIX_HARD_CAP:
             return []
 
-        first = bars[0]
+        first = next((b for b in bars if b.get('time_et') == '09:30'), None)
+        if first is None:
+            return []
         today_open = float(first.get('open', 0.0))
         first_vol = float(first.get('volume', 0.0))
         if today_open <= 0:
