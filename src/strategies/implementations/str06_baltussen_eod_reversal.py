@@ -52,7 +52,7 @@ from src.strategies.base import Signal
 from src.strategies.cohort_base import CohortBaseStrategy
 class BaltussenEODReversal(CohortBaseStrategy):
     id = 'S_TR06_baltussen_eod_reversal'
-    version = '2.1.0'
+    version = '2.2.0'
     regime_filter = ['HIGH_VOL', 'NEUTRAL', 'LOW_VOL']
 
     INTRADAY_DRIFT_MIN: float = 0.010      # 1.0 % combined drift
@@ -120,6 +120,7 @@ class BaltussenEODReversal(CohortBaseStrategy):
                     'side': 'LONG_OVERSOLD',
                     'kind': 'intraday_eod',
                     'exit_on': 'session_close',
+                    'entry_bar_et': '15:30',
                 },
             ))
         for r_total, ticker, price, opts in tops:
@@ -139,6 +140,7 @@ class BaltussenEODReversal(CohortBaseStrategy):
                     'side': 'SHORT_OVERBOUGHT',
                     'kind': 'intraday_eod',
                     'exit_on': 'session_close',
+                    'entry_bar_et': '15:30',
                 },
             ))
         return signals
