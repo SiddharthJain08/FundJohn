@@ -25,6 +25,12 @@ and the research-orchestrator pre-flight, both on the path a candidate file
 takes on its way to being promoted — `strategies.registry.load_strategy_class`
 (used to instantiate an already-promoted strategy at runtime) never calls
 this lint and is unlinted by design.
+
+Kind `intraday` (2026-10-19) is a static check on the session-simulator opt-in
+(docs/specs/2026-10-19-intraday-session-simulator-spec.md s2): a dict literal
+with `'exit_on': 'session_close'` must carry a string-literal `entry_bar_et`
+naming an RTH 30-minute bar, and `session_close_params(...)` must be called
+with such a literal; still a pure AST walk, the candidate is never imported.
 """
 from __future__ import annotations
 
@@ -34,6 +40,8 @@ import re
 import sys
 from collections import namedtuple
 from pathlib import Path
+
+from strategies.intraday import RTH_BAR_STARTS_ET  # pure constants; the candidate is never imported
 
 Violation = namedtuple('Violation', 'line kind detail')
 
@@ -102,6 +110,49 @@ def _call_repr(fn) -> str:
     if isinstance(fn, ast.Attribute):
         return f'{_call_repr(fn.value)}.{fn.attr}'
     return '<call>'
+
+
+def _str_const(node):
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _lint_intraday(tree) -> list:
+    """kind='intraday': see the module docstring. Pure AST, no imports of the candidate."""
+    out = []
+    allowed = ', '.join(RTH_BAR_STARTS_ET)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            pairs = [(_str_const(k), v) for k, v in zip(node.keys, node.values)]  # `**x` keys are None
+            vals = {k: v for k, v in pairs if k is not None}
+            bar = vals.get('entry_bar_et')
+            if _str_const(vals.get('exit_on')) == 'session_close':
+                if bar is None:
+                    out.append(Violation(node.lineno, 'intraday',
+                                         "exit_on='session_close' requires entry_bar_et 'HH:MM' "
+                                         "(RTH 30-min bar start)"))
+                elif _str_const(bar) is None:
+                    out.append(Violation(node.lineno, 'intraday',
+                                         "entry_bar_et must be a string literal (RTH 30-min bar start)"))
+            bad = _str_const(bar) if bar is not None else None
+            if bad is not None and bad not in RTH_BAR_STARTS_ET:
+                out.append(Violation(node.lineno, 'intraday',
+                                     f"entry_bar_et {bad!r} is not an RTH 30-min bar start ({allowed})"))
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            name = fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else None
+            if name != 'session_close_params':
+                continue
+            arg = node.args[0] if node.args else next(
+                (kw.value for kw in node.keywords if kw.arg == 'entry_bar_et'), None)
+            lit = _str_const(arg) if arg is not None else None
+            if lit is None:
+                out.append(Violation(node.lineno, 'intraday',
+                                     "session_close_params(...) first argument must be a string literal "
+                                     "(RTH 30-min bar start)"))
+            elif lit not in RTH_BAR_STARTS_ET:
+                out.append(Violation(node.lineno, 'intraday',
+                                     f"session_close_params({lit!r}) is not an RTH 30-min bar start ({allowed})"))
+    return out
 
 
 def lint_source(source: str, filename: str = '<candidate>') -> list:
@@ -182,6 +233,7 @@ def lint_source(source: str, filename: str = '<candidate>') -> list:
                                          f'{_call_repr(fn)}(…) called with a network literal '
                                          f'{arg.value!r}'))
 
+    out.extend(_lint_intraday(tree))
     out.sort(key=lambda v: (v.line, v.kind, v.detail))
     return out
 
