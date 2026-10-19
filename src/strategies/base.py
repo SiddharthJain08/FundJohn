@@ -177,6 +177,7 @@ class BaseStrategy(ABC):
     # (strategy_regime_params.eligible; enforced in the sizer's loaders).
     calendar_edge:    bool = False
     min_lookback:     int = 20
+    max_lookback_days: int = 0   # calendar days of price history generate_signals needs; 0 = undeclared
     active_in_regimes: List[str] = None
     # Safety cap: generate_signals should not return more than this many signals.
     # Prevents runaway signal counts at large universe sizes without slicing in each strategy.

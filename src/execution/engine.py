@@ -783,7 +783,7 @@ def _memory_footprint() -> str:
         return ''
 
 
-def _parquet_date_axis(path, date_col: str = 'date'):
+def _parquet_date_axis(path, date_col: str = 'date', cutoff: str | None = None):
     """Every distinct value of `date_col` in the parquet, as a sorted DatetimeIndex.
 
     Reads ONE column via Arrow and dedupes in Arrow (no pandas materialisation):
@@ -798,13 +798,17 @@ def _parquet_date_axis(path, date_col: str = 'date'):
     all-NaN rows, but it is gated (OPENCLAW_EQUITY_TRADING_CALENDAR) and crypto
     ALWAYS gets the full union calendar, so the difference would be live-visible.
 
+    With `cutoff` (A3 trailing window) only dates >= cutoff are read, so the axis
+    stays windowed instead of re-expanding the frame to the full history.
+
     Returns None on any structural surprise; the caller then keeps the filtered
     frame's own index rather than guessing.
     """
     try:
         import pyarrow.parquet as _pq
         import pyarrow.compute as _pc
-        tab = _pq.read_table(path, columns=[date_col])
+        _f = [(date_col, '>=', cutoff)] if cutoff else None
+        tab = _pq.read_table(path, columns=[date_col], filters=_f)
         vals = _pc.unique(tab.column(date_col).combine_chunks()).to_pylist()
         del tab
         _gc.collect()
@@ -813,7 +817,22 @@ def _parquet_date_axis(path, date_col: str = 'date'):
         return None
 
 
-def load_prices(universe: list) -> pd.DataFrame:
+PRICES_TRAILING_FLOOR_DAYS = 1095   # A3: floor 3 years (calendar days)
+
+
+def trailing_window_days(strategies):
+    """Calendar-day price window for the live load, or None (full read).
+
+    None unless OPENCLAW_PRICES_TRAILING_WINDOW=1; otherwise the max of the
+    floor and every strategy's declared `max_lookback_days` (0 = undeclared).
+    """
+    if os.environ.get('OPENCLAW_PRICES_TRAILING_WINDOW') != '1':
+        return None
+    return max([PRICES_TRAILING_FLOOR_DAYS]
+               + [int(getattr(s, 'max_lookback_days', 0) or 0) for s in strategies])
+
+
+def load_prices(universe: list, *, lookback_days: int | None = None) -> pd.DataFrame:
     """Load master price parquet; pivot to wide format (date index × ticker columns, close prices).
 
     When OPENCLAW_CLOSE_PROXY_SNAPSHOT=1, append a today-dated (ET) row from a
@@ -857,9 +876,18 @@ def load_prices(universe: list) -> pd.DataFrame:
         # Take the full date axis BEFORE the panel read (and release it) so the
         # transient does not stack onto the peak; needed to restore any date the
         # universe filter drops. Skipped entirely when we aren't filtering.
-        _date_axis = _parquet_date_axis(master_path) if _uni else None
+        _cutoff = None
+        if lookback_days is not None:
+            _cutoff = (pd.Timestamp.today().normalize()
+                       - pd.Timedelta(days=lookback_days)).strftime('%Y-%m-%d')
+        _date_axis = _parquet_date_axis(master_path, cutoff=_cutoff) if _uni else None
+        _filters = []
         if _uni:
-            _read_kwargs['filters'] = [('ticker', 'in', _uni)]
+            _filters.append(('ticker', 'in', _uni))
+        if _cutoff is not None:
+            _filters.append(('date', '>=', _cutoff))
+        if _filters:
+            _read_kwargs['filters'] = _filters
         df = pd.read_parquet(master_path, **_read_kwargs)
 
         if df.empty:
@@ -897,6 +925,12 @@ def load_prices(universe: list) -> pd.DataFrame:
     except (OSError, ValueError, KeyError) as e:   # narrow: parquet read/pivot only
         logger.error(f"Failed to load prices: {e}")
         return pd.DataFrame()
+
+    if lookback_days is None:
+        logger.info(f"[prices_window] mode=full rows={len(wide)}")
+    else:
+        logger.info(f"[prices_window] mode=trailing days={lookback_days} "
+                    f"cutoff={_cutoff} rows={len(wide)}")
 
     # close[t]-proxy injection — OUTSIDE the try so CloseProxyError propagates.
     if os.environ.get('OPENCLAW_CLOSE_PROXY_SNAPSHOT') == '1':
@@ -3018,7 +3052,7 @@ def main():
         _aux_needed_kinds, _aux_running_ids, _aux_needed = \
             _resolve_aux_load_plan_safe(strategies, regime_state)
 
-        prices   = load_prices(universe)
+        prices   = load_prices(universe, lookback_days=trailing_window_days(strategies))
         aux_data = load_aux_data(universe, as_of=run_date,
                                  needed_kinds=_aux_needed_kinds)
 
