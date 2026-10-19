@@ -135,7 +135,11 @@ def validate(filepath: str) -> dict:
     # Runs BEFORE the first import, so a candidate that reaches for subprocess
     # / requests / open() never gets executed. unified_backtest.load_strategy_class
     # calls validate() first, so this covers that path too.
-    from strategies.strategy_lint import lint_file, format_violations
+    from strategies.strategy_lint import (lint_file, format_violations,
+                                          lint_file_warnings, format_warnings)
+    # WARN channel (C1): advisory only, never changes the return value.
+    for _w in format_warnings(lint_file_warnings(abs_path)):
+        print(_w, file=sys.stderr)
     lint_violations = lint_file(abs_path)
     if lint_violations:
         return {'ok': False,

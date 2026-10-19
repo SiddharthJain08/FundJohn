@@ -257,16 +257,150 @@ def format_violations(violations) -> list:
     return [f'[import-lint] line {v.line}: {v.kind}: {v.detail}' for v in violations]
 
 
+# ── WARN channel (C1, 2026-10-19) ────────────────────────────────────────────
+# Mechanical rules that are advisory: they never change `ok`, `violations` or
+# the exit code unless `--strict` is passed (nothing in the pipeline does).
+# Pure AST — `strategies.asof` is matched as an import STATEMENT, never imported.
+WARN_KINDS = ('negative_shift', 'unguarded_parquet_read',
+              'rolling_without_min_periods', 'raw_epsilon_literal')
+
+_MAIN_TAG = ' [__main__]'
+
+
+def _neg_int(node) -> bool:
+    if isinstance(node, ast.Constant):
+        return type(node.value) is int and node.value < 0
+    return (isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub)
+            and isinstance(node.operand, ast.Constant)
+            and type(node.operand.value) is int and node.operand.value > 0)
+
+
+def _call_name(fn):
+    return fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else None
+
+
+def _imports_asof(tree) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(a.name == 'strategies.asof' or a.name.startswith('strategies.asof.')
+                   for a in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom) and not node.level:
+            mod = node.module or ''
+            if mod == 'strategies.asof' or mod.startswith('strategies.asof.'):
+                return True
+            if mod == 'strategies' and any(a.name == 'asof' for a in node.names):
+                return True
+    return False
+
+
+def _is_main_guard(node) -> bool:
+    t = node.test
+    return (isinstance(node, ast.If) and isinstance(t, ast.Compare)
+            and isinstance(t.left, ast.Name) and t.left.id == '__name__'
+            and len(t.ops) == 1 and isinstance(t.ops[0], ast.Eq)
+            and len(t.comparators) == 1 and isinstance(t.comparators[0], ast.Constant)
+            and t.comparators[0].value == '__main__')
+
+
+def lint_warnings(source: str, filename: str = '<candidate>') -> list:
+    """WARN-channel findings (WARN_KINDS) for `source`. Syntax errors yield []."""
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError:
+        return []
+    main_lines = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and _is_main_guard(node):
+            for stmt in node.body:
+                main_lines.update(range(stmt.lineno, (stmt.end_lineno or stmt.lineno) + 1))
+    guarded = _imports_asof(tree)
+
+    out = []
+
+    def add(node, kind, detail):
+        out.append(Violation(node.lineno, kind,
+                             detail + (_MAIN_TAG if node.lineno in main_lines else '')))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = _call_name(fn)
+            if isinstance(fn, ast.Attribute) and fn.attr == 'shift':
+                arg = node.args[0] if node.args else next(
+                    (kw.value for kw in node.keywords if kw.arg == 'periods'), None)
+                if arg is not None and _neg_int(arg):
+                    add(node, 'negative_shift', 'shift with a negative period reads the future (look-ahead)')
+            elif name == 'lag':
+                cands = list(node.args) + [kw.value for kw in node.keywords if kw.arg in ('n', 'periods')]
+                if any(_neg_int(a) for a in cands):
+                    add(node, 'negative_shift', 'lag(...) with a negative period reads the future (look-ahead)')
+            if name in ('read_parquet', 'read_csv') and not guarded:
+                add(node, 'unguarded_parquet_read',
+                    f'{name}(...) in a module that does not import strategies.asof')
+            if isinstance(fn, ast.Attribute) and fn.attr == 'rolling' \
+                    and not any(kw.arg == 'min_periods' for kw in node.keywords):
+                add(node, 'rolling_without_min_periods', '.rolling(...) without min_periods=')
+        elif isinstance(node, ast.Constant) and type(node.value) is float \
+                and 1e-12 <= abs(node.value) <= 1e-6:
+            add(node, 'raw_epsilon_literal', f'float literal {node.value!r} (use a named epsilon)')
+    out.sort(key=lambda v: (v.line, v.kind, v.detail))
+    return out
+
+
+def lint_file_warnings(path) -> list:
+    try:
+        source = Path(path).read_text(encoding='utf-8')
+    except Exception:
+        return []   # lint_file already reports the io violation
+    return lint_warnings(source, filename=str(path))
+
+
+def format_warnings(violations) -> list:
+    return [f'[strategy-lint-warn] line {v.line}: {v.kind}: {v.detail}' for v in violations]
+
+
+def census(paths) -> dict:
+    """Per-rule fleet counts: files with >=1 hit, total hits, hits inside `__main__`."""
+    rules = {k: {'files': 0, 'hits': 0, 'hits_in_main': 0} for k in WARN_KINDS}
+    for path in paths:
+        seen = set()
+        for v in lint_file_warnings(path):
+            r = rules[v.kind]
+            r['hits'] += 1
+            if v.detail.endswith(_MAIN_TAG):
+                r['hits_in_main'] += 1
+            seen.add(v.kind)
+        for k in seen:
+            rules[k]['files'] += 1
+    return {'files': len(paths), 'rules': rules}
+
+
 def main(argv=None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv:
+    import argparse
+    ap = argparse.ArgumentParser(prog='strategy_lint.py', add_help=True)
+    ap.add_argument('paths', nargs='*')
+    ap.add_argument('--strict', action='store_true',
+                    help='promote WARN findings to violations (exit 1)')
+    ap.add_argument('--census', action='store_true',
+                    help='print per-rule WARN counts over the fleet (or the given paths)')
+    args = ap.parse_args(list(sys.argv[1:] if argv is None else argv))
+    if args.census:
+        paths = args.paths or sorted(str(p) for p in (Path(__file__).parent / 'implementations').glob('*.py'))
+        print(json.dumps(census(paths), indent=2))
+        return 0
+    if not args.paths:
         print('Usage: strategy_lint.py <file> [<file>...]', file=sys.stderr)
         return 2
-    rows = []
-    for path in argv:
+    rows, warns = [], []
+    for path in args.paths:
         for v in lint_file(path):
             rows.append({'file': path, 'line': v.line, 'kind': v.kind, 'detail': v.detail})
-    print(json.dumps({'ok': not rows, 'violations': rows}, indent=2))
+        for v in lint_file_warnings(path):
+            warns.append({'file': path, 'line': v.line, 'kind': v.kind, 'detail': v.detail})
+    if args.strict:
+        rows, warns = rows + warns, []
+    print(json.dumps({'ok': not rows, 'violations': rows, 'warnings': warns}, indent=2))
     return 1 if rows else 0
 
 
