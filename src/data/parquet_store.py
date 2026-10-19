@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import re
 import tempfile
 import time
 from contextlib import contextmanager
@@ -218,6 +219,56 @@ def read_filtered(
     if limit:
         sql += f" LIMIT {int(limit)}"
     return duckdb.sql(sql).df()
+
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_WINDOW_STATS_COLS = ['ticker', 'last_close', 'last_date', 'adv_usd', 'n_rows']
+
+
+def ticker_window_stats(
+    path: Path | str,
+    *,
+    cutoff: str,
+    upto: Optional[str] = None,
+    last_n: int = 20,
+) -> pd.DataFrame:
+    """
+    Per-ticker windowed aggregate over a prices parquet (DuckDB predicate pushdown).
+
+    One row per ticker with any row in [cutoff, upto]: last non-NaN close, max date,
+    n_rows (count(*) in the window, NaN rows included) and adv_usd = mean of
+    close*volume over the ticker's last `last_n` window rows (rows counted NaN
+    included, NaN products skipped, mirroring pandas tail(n).mean()).
+    adv_usd equals legacy tail(last_n) only when n_rows >= last_n.
+    Empty frame with the columns above if the file is missing.
+    """
+    path = Path(path)
+    if not path.exists():
+        return pd.DataFrame(columns=_WINDOW_STATS_COLS)
+    for name, v in (('cutoff', cutoff), ('upto', upto)):
+        if v is not None and not _ISO_DATE_RE.match(str(v)):
+            raise ValueError(f"{name} must be an ISO date YYYY-MM-DD, got {v!r}")
+    last_n = int(last_n)
+    # Footer-only schema peek: callers that only need last_close may pass files without volume.
+    vol = "volume" if "volume" in pq.read_schema(path).names else "CAST(NULL AS DOUBLE) AS volume"
+    qpath = str(path).replace("'", "''")
+    where = f"date >= '{cutoff}'"
+    if upto is not None:
+        where += f" AND date <= '{upto}'"
+    sql = f"""
+        WITH w AS (SELECT ticker, date, close, {vol}
+                   FROM read_parquet('{qpath}', hive_partitioning=false)
+                   WHERE {where}),
+             r AS (SELECT *, row_number() OVER (PARTITION BY ticker ORDER BY date DESC) AS rn FROM w)
+        SELECT ticker,
+               arg_max(close, date) FILTER (WHERE close IS NOT NULL AND NOT isnan(close)) AS last_close,
+               max(date) AS last_date,
+               count(*) AS n_rows,
+               avg(close*volume) FILTER (WHERE rn <= {last_n} AND close*volume IS NOT NULL
+                                           AND NOT isnan(close*volume)) AS adv_usd
+        FROM r GROUP BY ticker
+    """
+    return duckdb.sql(sql).df()[_WINDOW_STATS_COLS]
 
 
 def max_date(path: Path | str, date_col: str = 'date') -> Optional[str]:
