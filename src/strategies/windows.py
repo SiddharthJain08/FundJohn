@@ -149,3 +149,23 @@ def episodes_to_trades(episode_ids, price, dates, *, regime=None, direction='LON
             'regime_state': None if regs is None else regs[i0],
         })
     return rows
+
+
+def crossing(a: pd.Series, b, *, direction: str = 'up') -> pd.Series:
+    """Bool Series: ``a`` crosses ``b`` on this bar (diffrax ``Event.direction`` semantics).
+
+    ``'up'``: ``a.shift(1) <= b_prev`` and ``a > b`` (a touch from below that
+    starts on the line counts; arriving exactly on the line does not).
+    ``'down'``: ``a.shift(1) >= b_prev`` and ``a < b``.  ``'any'``: either.
+    ``b`` may be a scalar.  Any NaN in the current or previous pair gives
+    False; the first bar is always False.
+    """
+    if direction not in ('up', 'down', 'any'):
+        raise ValueError(f"direction must be 'up', 'down' or 'any' (got {direction!r})")
+    if not isinstance(b, pd.Series):
+        b = pd.Series(b, index=a.index, dtype=float)
+    a_prev, b_prev = a.shift(1), b.shift(1)
+    up = (a_prev <= b_prev) & (a > b)
+    down = (a_prev >= b_prev) & (a < b)
+    out = up if direction == 'up' else down if direction == 'down' else (up | down)
+    return out.fillna(False).astype(bool)

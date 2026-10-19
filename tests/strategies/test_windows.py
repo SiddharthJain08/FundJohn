@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from strategies.windows import (episodes_to_trades, event_window, session_gaps,
+from strategies.windows import (crossing, episodes_to_trades, event_window, session_gaps,
                                 state_window, statecount, stateduration)
 
 
@@ -228,3 +228,46 @@ def test_parity_czar_loop():
     for x, y in zip(a, b):
         assert x[:2] == y[:2]
         assert x[2] == pytest.approx(y[2], abs=1e-12)
+
+
+# ---- crossing ---------------------------------------------------------------
+
+def test_crossing_up_down_any():
+    a = pd.Series([1.0, 2.0, 3.0, 3.0, 2.0, 1.0, 1.0, 2.0])
+    b = pd.Series([2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 1.0, 1.0])
+    up = crossing(a, b, direction='up')
+    down = crossing(a, b, direction='down')
+    # bar1: prev 1<=2, now 2>2 False (touch from below, no cross)
+    # bar2: prev 2<=2 and 3>2 True (prev == b counts)
+    # bar3: a==b now, 3>3 False (touch without cross)
+    # bar6: prev 1>=3, now 1<1 False; bar7: prev 1<=1 & 2>1 True
+    assert L(up) == [False, False, True, False, False, False, False, True]
+    assert L(down) == [False, False, False, False, True, False, False, False]
+    assert L(crossing(a, b, direction='any')) == [x or y for x, y in zip(L(up), L(down))]
+    assert up.dtype == bool and not up.iloc[0]
+
+
+def test_crossing_scalar_b_and_nan():
+    a = pd.Series([-1.0, 0.0, 1.0, np.nan, 1.0, -1.0])
+    assert L(crossing(a, 0.0, direction='up')) == [False, False, True, False, False, False]
+    assert L(crossing(a, 0.0, direction='down')) == [False, False, False, False, False, True]
+    a2 = pd.Series([1.0, -1.0, 1.0])
+    assert L(crossing(a2, 0.0, direction='down')) == [False, True, False]
+    b = pd.Series([0.0, np.nan, 0.0, 0.0, 0.0, 0.0])
+    assert L(crossing(pd.Series([-1.0, 1.0, 1.0, -1.0, 1.0, 2.0]), b)) == \
+        [False, False, False, False, True, False]
+
+
+def test_crossing_matches_kalman_idiom():
+    rng = np.random.default_rng(3)
+    k = pd.Series(np.cumsum(rng.normal(size=200)))
+    l = pd.Series(np.cumsum(rng.normal(size=200)))
+    k.iloc[[10, 50]] = np.nan
+    l.iloc[[70]] = np.nan
+    idiom = ((k.shift(1) <= l.shift(1)) & (k > l)).fillna(False).astype(bool)
+    assert crossing(k, l, direction='up').equals(idiom)
+
+
+def test_crossing_bad_direction():
+    with pytest.raises(ValueError):
+        crossing(pd.Series([1.0, 2.0]), 1.0, direction='sideways')
