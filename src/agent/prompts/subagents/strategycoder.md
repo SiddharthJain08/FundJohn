@@ -112,6 +112,7 @@ Rules:
 - All Signal fields must be correct Python types (float not numpy.float64, str dates not datetime)
 - `confidence` must be str `'HIGH'`, `'MED'`, or `'LOW'` — never a float, never None
 - **Never use covariance-based optimization (scipy.optimize, mean-variance, tangency portfolio) unless you can guarantee at least 3× more observations than assets.** Underdetermined covariance matrices silently fail, producing 0 signals in backtesting. Use rank-based or momentum-based scoring instead.
+- If a strategy needs a long-only tangency or minimum-EVaR weight vector, call `from lib.convex import tangency_weights, min_evar_weights`. Never import cvxpy in a strategy file. A `None` return means fall back (e.g. to equal weight). The 3×-observations rule above still applies; a convex solver does not fix an underdetermined Σ.
 - **Always add a `print(f'[debug] signals={len(signals)}', file=sys.stderr)` line before the return** so the backtest harness can diagnose zero-signal runs.
 - Strategies must generate signals across all regime periods in the backtest (2017–2025). Avoid strategies that only trigger in very specific market conditions with less than 20 trades per 3-year window.
 
