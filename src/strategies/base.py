@@ -19,7 +19,9 @@ import os
 
 try:  # tolerant: S23/S24 load this file as top-level module `base`
     from strategies import indicators as _indicators
-except ImportError:  # pragma: no cover
+except ModuleNotFoundError as _e:  # pragma: no cover
+    if _e.name not in ('strategies', 'strategies.indicators'):
+        raise
     import indicators as _indicators
 
 

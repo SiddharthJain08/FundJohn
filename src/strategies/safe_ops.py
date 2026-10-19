@@ -22,12 +22,23 @@ EPS: float = 1e-9
 
 def _wrap(like, values):
     if isinstance(like, (pd.Series, pd.DataFrame)):
-        return like.copy().__class__(values, index=like.index, **(
+        return type(like)(values, index=like.index, **(
             {'columns': like.columns} if isinstance(like, pd.DataFrame) else {'name': like.name}))
     return values
 
 
 def safe_div(a, b, fill=0.0):
+    pa, pb = isinstance(a, (pd.Series, pd.DataFrame)), isinstance(b, (pd.Series, pd.DataFrame))
+    if pa and pb:
+        # Align on labels like pandas does (never divide by position).
+        if isinstance(a, pd.DataFrame) and isinstance(b, pd.Series):
+            a, b = a.align(b, axis=0)
+            b = pd.DataFrame({c: b for c in a.columns}, index=a.index)
+        elif isinstance(a, pd.Series) and isinstance(b, pd.DataFrame):
+            a, b = a.align(b, axis=0)
+            a = pd.DataFrame({c: a for c in b.columns}, index=b.index)
+        else:
+            a, b = a.align(b)
     ref = b if isinstance(b, (pd.Series, pd.DataFrame)) else a
     scalar = np.ndim(a) == 0 and np.ndim(b) == 0
     av = np.asarray(a, dtype=float)

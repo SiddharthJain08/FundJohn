@@ -64,3 +64,24 @@ def test_no_runtime_warnings():
         safe_log(-1.0)
         clip_pos(-1.0)
         safe_div(pd.DataFrame({'a': z}), pd.DataFrame({'a': z}))
+
+
+def test_safe_div_aligns_misordered_indexes_like_pandas():
+    a = pd.Series([1., 2., 3.], index=['x', 'y', 'z'])
+    b = pd.Series([4., 0., 2.], index=['z', 'y', 'x'])
+    out = safe_div(a, b)
+    assert out.to_dict() == {'x': 0.5, 'y': 0.0, 'z': 0.75}
+    # partial overlap: missing side -> NaN (pandas rule), tiny denominator -> fill
+    c = pd.Series([1., 1.], index=['x', 'q'])
+    out2 = safe_div(a, c)
+    assert out2['x'] == 1.0 and np.isnan(out2['y']) and np.isnan(out2['q'])
+
+
+def test_safe_div_dataframe_by_series_aligns_on_index():
+    idx = ['d1', 'd2', 'd3']
+    df = pd.DataFrame({'ZZTEST1': [1., 2., 3.], 'ZZTEST2': [4., 5., 6.]}, index=idx)
+    s = pd.Series([2., 0., 1.], index=['d3', 'd2', 'd1'])
+    out = safe_div(df, s)
+    assert list(out.columns) == ['ZZTEST1', 'ZZTEST2'] and list(out.index) == idx
+    assert out['ZZTEST1'].tolist() == [1., 0., 1.5]
+    assert out['ZZTEST2'].tolist() == [4., 0., 3.]

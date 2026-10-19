@@ -111,7 +111,7 @@ def test_short_and_empty_inputs_return_nan_series():
         ]
         for o in outs:
             assert isinstance(o, pd.Series) and o.index.equals(s.index)
-        for o in outs[:7]:
+        for o in outs[:7] + outs[-1:]:  # ema/csum/diff are defined on short input
             assert o.isna().all() or len(s) == 0
 
 

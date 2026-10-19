@@ -12,7 +12,9 @@ import pandas as pd
 
 try:  # tolerant: base.py may be loaded as a top-level module (bare-script strategies)
     from strategies.safe_ops import EPS, safe_div
-except ImportError:  # pragma: no cover - exercised via the top-level `base` import test
+except ModuleNotFoundError as _e:  # pragma: no cover - top-level `base` import path
+    if _e.name not in ('strategies', 'strategies.safe_ops'):
+        raise
     from safe_ops import EPS, safe_div
 
 _ATR_METHODS = ('true_range', 'close_diff')
@@ -93,4 +95,6 @@ def rsi(close: pd.Series, n: int = 14) -> pd.Series:
     loss = (-d.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean()
     rs = safe_div(gain, loss, fill=np.inf)
     out = 100 - 100 / (1 + rs)
-    return out.where(~(loss <= EPS), 100.0)
+    out = out.where(~(loss <= EPS), 100.0)
+    out.iloc[:n] = np.nan   # warm-up: need n+1 points (matches oxford rsi_wilder)
+    return out
