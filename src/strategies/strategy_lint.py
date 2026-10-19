@@ -41,7 +41,13 @@ import sys
 from collections import namedtuple
 from pathlib import Path
 
-from strategies.intraday import RTH_BAR_STARTS_ET  # pure constants; the candidate is never imported
+# Script mode (`python3 src/strategies/strategy_lint.py <file>`, as the research
+# orchestrator spawns it) puts src/strategies on sys.path, not src — make the
+# `strategies` package importable either way (same shim as validate_strategy.py).
+_SRC_DIR = str(Path(__file__).resolve().parents[1])
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+from strategies.intraday import RTH_BAR_STARTS_ET  # noqa: E402  pure constants; the candidate is never imported
 
 Violation = namedtuple('Violation', 'line kind detail')
 

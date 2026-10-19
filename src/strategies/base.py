@@ -71,7 +71,7 @@ class Signal:
     #                with strategies.intraday.session_close_params; contract:
     #                docs/specs/2026-10-19-intraday-session-simulator-spec.md
     #   strategy_id  provenance tag used by the sizer / ledgers
-    #   confidence   strategy-supplied conviction (free-form; HIGH | MED | LOW or numeric)
+    #   confidence   HIGH | MED | LOW as read back by trade_handoff_builder (default MED)
     signal_params:     dict = field(default_factory=dict)
     # Phase 5 (2026-04-22): per-signal deterministic features that used to be
     # computed by research_report.py — HV, beta, momentum, EV/p_t1, any
