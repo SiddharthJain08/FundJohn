@@ -170,9 +170,9 @@ def test_trade_columns_match_unified_backtest_insert():
     assert tuple(re.findall(r'\w+', block[block.index('(')+1:block.index(')')])) == tp.TRADE_COLUMNS
 def test_persist_syncs_after_demotion_before_commit():
     src = Path(ub.__file__).read_text()
-    i_dem, i_sync, i_commit = (src.index('SET primary_window = FALSE'),
-                               src.index('sync_primary_trades(cur, strategy_id, run_id, trade_rows)'),
-                               src.index('            conn.commit()'))
+    i_dem = src.index('SET primary_window = FALSE')
+    i_sync = src.index('sync_primary_trades(cur, strategy_id, run_id, trade_rows)')
+    i_commit = src.index('conn.commit()', i_dem)
     assert i_dem < i_sync < i_commit
     assert 'trade_rows = []' in src[src.index('regime_rows = []'):i_dem]   # defined even when trades is empty
 ```
@@ -258,6 +258,15 @@ def test_legacy_sql_is_byte_identical_when_flag_unset(monkeypatch):
 def test_universe_shrink_reads_via_trades_source():
     src = (ROOT / 'scripts/run_universe_shrink.py').read_text()
     assert 'FROM {trades_source()} WHERE run_id=%s' in src and 'FROM strategy_backtest_trades WHERE' not in src
+def test_reader_imports_follow_path_bootstrap():
+    for rel, anchor in (('src/execution/strategy_similarity.py', 'from execution.orthogonalization import'),
+                        ('src/backtest/backtest_panel.py', "sys.path.insert(0, str(ROOT / 'src'))"),
+                        ('scripts/run_universe_shrink.py', "sys.path.insert(0, str(ROOT / 'src'))")):
+        src = (ROOT / rel).read_text()
+        assert src.index(anchor) < src.index('from backtest.trades_primary import trades_source'), rel
+    import inspect, execution.backtest_coupled_recs as bcr
+    assert 'from backtest.trades_primary import trades_source' in inspect.getsource(bcr._stored_baseline)
+    assert 'from backtest.trades_primary' not in Path(bcr.__file__).read_text().split('def _stored_baseline')[0]
 def test_server_bw_query_uses_bt_trades_table():
     src = (ROOT / 'src/channels/api/server.js').read_text()
     blk = src[src.index('Best/worst realized trade %'):src.index('const bwById')]
@@ -278,7 +287,11 @@ Expected: FAIL (`ImportError: cannot import name 'trades_source'`; `Cannot find 
   - Add `trades_source()` and `bt_trades_source.js`.
   - In each reader, replace the literal `strategy_backtest_trades` in the FROM clause with an f-string / template interpolation of `trades_source()` / `btTradesTable()`.
   - Keep whitespace so the flag-unset string equals main's.
-  - Each Python reader does `from backtest.trades_primary import trades_source` at module top. `src` is already on `sys.path` in all five: `backtest_panel.py:32`, `run_universe_shrink.py:42`, and the package imports for `execution.*`. `backtest_coupled_recs.py`'s query string becomes an f-string.
+  - Import placement, so the import can never run before `src` is on `sys.path` (verified launchers in brackets):
+    - `strategy_similarity.py`: top-level, directly under the existing `from execution.orthogonalization import _dir_to_int` (`:17`). That line already proves `src` is importable [`-m execution.strategy_similarity` from `weekly_live_sharpe.js:95`, `run_maintenance.js:1047`, `saturday_brain_finisher.js:408`].
+    - `backtest_panel.py`: top-level, after the `sys.path.insert` at `:32`, next to `:34-36` [`-m backtest.backtest_panel`, in-process from `unified_backtest.py:2032`].
+    - `run_universe_shrink.py`: after the bootstrap at `:41-42`, next to `:44-48` [`python3 scripts/run_universe_shrink.py`, from `staging_approver.js:588` and `fleet_overnight_resume.sh:143`].
+    - `backtest_coupled_recs.py`: has no `sys.path` bootstrap (`-m execution.backtest_coupled_recs` from `weekend_saturday.sh:36`), so use a LOCAL import inside `_stored_baseline`, beside its existing local `import json`/`import psycopg2`. Its query string becomes an f-string.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -454,8 +467,9 @@ What a cron row means: the wrapper times the **callback**. For the callbacks tha
 **Interfaces:**
 - Produces, in `src/lib/job_stat.js`, the JS twin of `job_stat.py`: same table, same `[job_stat]` prefix, same kill switch. It never throws.
   - `enabled() -> boolean`
-  - `recordStart(pool, job, { source = 'cron', pid = process.pid, host = os.hostname(), note = null } = {}) -> Promise<number|null>`
-  - `recordFinish(pool, { id, job, rc, success, note, source = 'cron' }) -> Promise<boolean>`: UPDATE by `id` when `id != null`, else INSERT a complete row with the `no-start-row; ` note prefix.
+  - `recordStart(pool, job, { source = 'cron', pid = process.pid, host = os.hostname(), note = null, startedAt = new Date() } = {}) -> Promise<number|null>`: `started_at` is passed as a PARAMETER, never `DEFAULT NOW()`. A `runPython`/`execSync` callback (`:362`, `:655`, `:760`) blocks the event loop for minutes, and node-postgres only writes the INSERT to the socket after the callback returns, so the DB clock would stamp the finish time.
+  - `recordFinish(pool, { id, job, rc, success, note, source = 'cron', finishedAt = new Date() }) -> Promise<boolean>`: UPDATE by `id` when `id != null`, else INSERT a complete row with the `no-start-row; ` note prefix (`started_at = finished_at = finishedAt`).
+  - Every query is issued as `{ text, values, query_timeout: 5000 }`, matching the Python twin's 5 s. A hung DB therefore cannot pin connections in the shared module pool at `cron-schedule.js:21`, which `weekly-maintenance-sun0800` also uses.
   - `runTracked(pool, job, fn) -> ReturnType<fn>`:
     - Fires `recordStart` without awaiting it, then calls `fn()` synchronously.
     - If `fn` returns a non-promise: finish with `rc=0, success=true, note='callback-returned'`.
@@ -486,6 +500,8 @@ What a cron row means: the wrapper times the **callback**. For the callbacks tha
 ```js
 // tests/lib/job_stat.test.js — FakePool whose query() returns a controllable promise and records (sql, params)
 test('runTracked calls fn before the start write resolves', () => { /* pool.query never resolves; fn sets flag; assert flag true synchronously after runTracked */ });
+test('started_at is captured before a synchronously blocking fn returns', () => { /* fn busy-waits 50 ms; the INSERT's started_at param (Date) <= the time recorded at fn entry; finished_at param >= fn exit */ });
+test('every query carries query_timeout 5000', () => { /* FakePool records config objects */ });
 test('runTracked rethrows the original error', () => { /* fn throws e; assert.throws(() => runTracked(pool,'zz',fn), e) ; after microtasks an UPDATE/INSERT with rc=1, success=false was issued */ });
 test('runTracked returns the same promise and records resolve/reject', async () => { ... });
 test('a failing pool never throws and logs [job_stat]', async () => { /* query rejects → no throw; console.log captured contains "[job_stat] zz start write failed" */ });
@@ -635,8 +651,9 @@ git commit -m "feat(ops): job-stat systemd drop-in snapshot (uninstalled) + sche
 
 ## Runbook (controller, after the Stream E merge — never an implementer)
 
-1. **Pre-apply 166 off-hours.** Outside 18:45Z–20:45Z on a trading day, with no fleet unit active (R1). Run it as a transient unit:
-   `systemd-run --unit=openclaw-mig166 --property=MemoryMax=1G nice -n 19 psql "$POSTGRES_URI" -1 -v ON_ERROR_STOP=1 -f src/database/migrations/166_backtest_trades_primary.sql`.
+1. **Pre-apply 166 off-hours, BEFORE the first johnbot restart after the merge.** `bot.js` runs `await migrate()` (`:1663`) before `cronSchedule.start()` (`:1763-1765`). A restart with 166 unapplied therefore registers no cron (including the 15:00/15:55 legs) until the 2–6 min backfill finishes. Do this outside 18:45Z–20:45Z on a trading day, with no fleet unit active (R1). Run it as a transient unit:
+   - First check whether `psql` exists on the host (`command -v psql`). Postgres runs in the `openclaw-postgres` container.
+   - If it does not, use `systemd-run --unit=openclaw-mig166 --wait /bin/sh -c 'docker exec -i openclaw-postgres psql -U <user> -d <db> -1 -v ON_ERROR_STOP=1 < /root/openclaw/src/database/migrations/166_backtest_trades_primary.sql'`. Take the user and db from `POSTGRES_URI`, and write them literally into the unit command, because a transient unit does not inherit the caller's shell environment.
    - `-1` makes it one transaction, matching the johnbot runner.
    - Expect 2–6 min and a `[166] backfilled ≈5.1M rows from ≈304 primary runs` NOTICE.
    - Backtest persists wait on the SHARE lock meanwhile.
