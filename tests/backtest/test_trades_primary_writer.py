@@ -17,6 +17,7 @@ ROW2 = ROW[:1] + (2,) + ROW[2:]
 class FakeCursor:
     def __init__(self, table_exists=True, delete_rowcount=0, insert_rowcount=0):
         self.table_exists = table_exists
+        self.raise_on = None
         self.delete_rowcount = delete_rowcount
         self.insert_rowcount = insert_rowcount
         self.calls = []
@@ -25,6 +26,8 @@ class FakeCursor:
 
     def execute(self, sql, params=None):
         self.calls.append((sql, params))
+        if self.raise_on and sql.strip().startswith(self.raise_on):
+            raise RuntimeError('boom')
         s = sql.strip()
         if 'to_regclass' in s:
             self._row = (self.table_exists,)
@@ -71,7 +74,7 @@ def test_sync_deletes_then_inserts_in_order(capsys, monkeypatch):
     deletes = [c for c in cur.calls if c[0].startswith('DELETE')]
     assert deletes == [('DELETE FROM strategy_backtest_trades_primary WHERE strategy_id = %s',
                         ('S_ZZTEST1',))]
-    assert cur.calls.index(deletes[0]) < len(cur.calls) - 1  # insert came after
+    assert cur.calls[cur.calls.index(deletes[0]) + 1][0] == ev.sql  # execute_values right after DELETE
     assert ev.sql.strip().startswith('INSERT INTO strategy_backtest_trades_primary')
     assert ev.rows == [ROW, ROW2] and ev.page_size == 500
     assert 'deleted=7 inserted=2' in capsys.readouterr().out
@@ -105,7 +108,29 @@ def test_trade_columns_match_unified_backtest_insert():
 def test_persist_syncs_after_demotion_before_commit():
     src = Path(ub.__file__).read_text()
     i_dem = src.index('SET primary_window = FALSE')
-    i_sync = src.index('sync_primary_trades(cur, strategy_id, run_id, trade_rows)')
+    i_sync = src.index('sync_primary_trades_safe(cur, strategy_id, run_id, trade_rows)')
     i_commit = src.index('conn.commit()', i_dem)
     assert i_dem < i_sync < i_commit
     assert 'trade_rows = []' in src[src.index('regime_rows = []'):i_dem]
+
+
+def test_safe_happy_path_savepoint_release(monkeypatch):
+    cur = FakeCursor(table_exists=True)
+    record_execute_values(monkeypatch)
+    assert tp.sync_primary_trades_safe(cur, 'S_ZZTEST1', 'r4', [ROW]) == 1
+    sqls = [s.strip() for s, _ in cur.calls]
+    assert sqls[0] == 'SAVEPOINT trades_primary'
+    assert sqls[-1] == 'RELEASE SAVEPOINT trades_primary'
+    assert not any('ROLLBACK' in s for s in sqls)
+
+
+def test_safe_failure_rolls_back_to_savepoint_without_raising(capsys):
+    cur = FakeCursor(table_exists=True)
+    cur.raise_on = 'DELETE'
+    assert tp.sync_primary_trades_safe(cur, 'S_ZZTEST1', 'r5', [ROW]) is None
+    sqls = [s.strip() for s, _ in cur.calls]
+    assert sqls[0] == 'SAVEPOINT trades_primary'
+    assert sqls[-1] == 'ROLLBACK TO SAVEPOINT trades_primary'
+    assert not any(s.startswith('RELEASE') for s in sqls)
+    err = capsys.readouterr().err
+    assert '[bt_trades_primary] skipped: RuntimeError' in err

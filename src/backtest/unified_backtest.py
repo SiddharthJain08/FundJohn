@@ -2059,8 +2059,8 @@ def run_backtest(strategy_id: str, *,
 
         # Hot-cache sync (migration 166): same transaction as the demotion, so
         # it commits/rolls back with it (also for commit=False ephemeral runs).
-        from backtest.trades_primary import sync_primary_trades
-        sync_primary_trades(cur, strategy_id, run_id, trade_rows)
+        from backtest.trades_primary import sync_primary_trades_safe
+        sync_primary_trades_safe(cur, strategy_id, run_id, trade_rows)
 
         if commit:
             conn.commit()

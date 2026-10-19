@@ -12,7 +12,7 @@ Rules:
     statement aborts the caller's transaction). A missing table (migration
     166 rolled back) is a logged no-op.
 """
-import os  # noqa: F401  (kept for parity with sibling modules; no env reads today)
+import sys
 
 HOT_TABLE = 'strategy_backtest_trades_primary'
 
@@ -68,3 +68,19 @@ def resync_strategy(cur, strategy_id) -> int:
          WHERE r.strategy_id = %s
     """, (strategy_id,))
     return cur.rowcount
+
+
+def sync_primary_trades_safe(cur, strategy_id, run_id, trade_rows):
+    """sync_primary_trades inside a SAVEPOINT: a cache failure must never abort the
+    caller's persist transaction (a ~900 s fleet run). On failure only the sync is
+    rolled back; the strategy's previous hot rows stay until ``--resync`` repairs them."""
+    cur.execute('SAVEPOINT trades_primary')
+    try:
+        n = sync_primary_trades(cur, strategy_id, run_id, trade_rows)
+        cur.execute('RELEASE SAVEPOINT trades_primary')
+        return n
+    except Exception as e:
+        cur.execute('ROLLBACK TO SAVEPOINT trades_primary')
+        print(f'[bt_trades_primary] skipped: {type(e).__name__} '
+              f'strategy={strategy_id} run_id={run_id}', file=sys.stderr, flush=True)
+        return None
