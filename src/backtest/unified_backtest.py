@@ -42,6 +42,7 @@ import os
 import statistics
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import asdict
 from datetime import date as _date, datetime, timezone
@@ -61,6 +62,8 @@ sys.path.insert(0, str(ROOT))
 from strategies.base import BaseStrategy, Signal, CANONICAL_REGIMES  # noqa: E402
 from strategies.validate_strategy import validate                     # noqa: E402
 from backtest import options_backtest  # SP-4 Phase 0
+from backtest import trackers as _trk  # six-repo D3: per-bar tracker layer
+from backtest.trackers import FinishedBacktest  # noqa: F401  (re-exported: main() reports it)
 from execution import regime_param_override  # noqa: E402  # per-(strategy, regime) bracket override
 from strategies.lifecycle import VALID_INSTRUMENT_CLASSES, _detect_module_instrument_class  # noqa: E402  # SP-4 dispatch
 from backtest.risk_free import RISK_FREE_ANNUAL_CONST as _RF_CONST, excess_sharpe as _excess_sharpe_rf, sharpe_pair as _sharpe_pair_rf, rf_source as _rf_source
@@ -1040,9 +1043,6 @@ def _per_bar_simulate(
     days_with_signals = 0
     entries_asset_gated = 0
     entries_event_gated = 0
-    intraday_trades = 0
-    intraday_no_bars = 0
-    intraday_missing_entry_bar = 0
     _intraday_on = os.environ.get('OPENCLAW_BT_INTRADAY_EXIT', '1') != '0'
     bars_raised = 0
     first_raise: str | None = None
@@ -1078,7 +1078,21 @@ def _per_bar_simulate(
                   f'{_e}) — entries NOT gated', file=sys.stderr)
             _event_gate_sessions = {}
     open_book: list = []
-    hook_counters: dict = {}
+    # Tracker layer (six-repo D3): diagnostics counters live in ctx.counters
+    # (hook_* written by advance_open_book, intraday_* by the loop below) and
+    # are folded into `info` at the end; persist reads them from there.
+    _tctx = _trk.BacktestContext(
+        instance=instance, close_wide=close_wide, strategy_id=strategy_id,
+        oos_dates=oos_dates, trades=trades, counters={})
+    _tlist = [_trk.ExitCensusTracker(exit_reason_census), _trk.HookTracker(),
+              _trk.IntradayBarTracker()]
+    if os.environ.get('OPENCLAW_BT_CONSISTENCY_ABORT') == '1':
+        _tlist.append(_trk.ConsistencyTracker())        # BEFORE MaxRuntime: a non-finite abort wins
+    _max_rt = float(os.environ.get('OPENCLAW_BT_MAX_RUNTIME_S', '0') or 0)
+    if _max_rt > 0:
+        _tlist.append(_trk.MaxRuntimeTracker(_max_rt))
+    _tracks = _trk.TrackerCollection(_tlist)
+    _tracks.initialize(_tctx)
     if _use_open_book:
         from backtest.open_book import OpenTrade, advance_open_book, resolve_hold_cap
 
@@ -1091,7 +1105,9 @@ def _per_bar_simulate(
                                  for r1 in CANONICAL_REGIMES},
         }
 
-    for current_date in oos_dates:
+    for _bar_i, current_date in enumerate(oos_dates):
+        _tctx.current_date = current_date
+        _tracks.handle(_tctx, _bar_i)     # FIRST statement, outside every try: aborts propagate
         # Need at least min_lookback days of history before strategy can run
         prices_to_date = close_wide.loc[:current_date]
         if _use_open_book and open_book:
@@ -1106,7 +1122,7 @@ def _per_bar_simulate(
                     _aux_ob = {'options': {}}
             for _ct in advance_open_book(open_book, current_date, bars_by_ticker, prices_to_date,
                                          _rp, _aux_ob, instance,
-                                         dt_priority=_dt_priority, counters=hook_counters):
+                                         dt_priority=_dt_priority, counters=_tctx.counters):
                 if _ct['exit_reason'] == 'stop':
                     _sd = pd.Timestamp(_ct['exit_date'])
                     if run_stop_history.get(_ct['ticker']) is None or _sd > run_stop_history[_ct['ticker']]:
@@ -1242,12 +1258,14 @@ def _per_bar_simulate(
                 # fill (entry_bar_et open); NEVER the daily simulator.
                 _ebar = _sp.get('entry_bar_et')
                 if not _ebar:
-                    intraday_missing_entry_bar += 1
+                    _tctx.counters['intraday_missing_entry_bar'] = \
+                        _tctx.counters.get('intraday_missing_entry_bar', 0) + 1
                     continue
                 _sess_bars = intraday_session_bars(aux.get('prices_30m'), ticker, current_date)
                 entry_price = intraday_entry_open(_sess_bars, str(_ebar))
                 if entry_price is None:
-                    intraday_no_bars += 1
+                    _tctx.counters['intraday_no_bars'] = \
+                        _tctx.counters.get('intraday_no_bars', 0) + 1
                     continue
                 fill_date = current_date
             else:
@@ -1296,9 +1314,11 @@ def _per_bar_simulate(
                     stop_loss=stop_loss, target_1=target_1,
                     slippage_bps=_tkr_bps, dt_priority=_dt_priority)
                 if exit_info is None:
-                    intraday_no_bars += 1
+                    _tctx.counters['intraday_no_bars'] = \
+                        _tctx.counters.get('intraday_no_bars', 0) + 1
                     continue
-                intraday_trades += 1
+                _tctx.counters['intraday_trades'] = \
+                    _tctx.counters.get('intraday_trades', 0) + 1
             else:
                 exit_info = simulate_trade(ticker_bars, fill_date, direction,
                                            entry_price, stop_loss, target_1, max_hold_days,
@@ -1331,8 +1351,12 @@ def _per_bar_simulate(
                 'daily_marks':    exit_info.get('daily_marks', []) if _true_mtm else [],
             })
 
+    _drain_k = 0
     if _use_open_book and open_book:
         for _dt in close_wide.index[close_wide.index > end_dt]:
+            _tctx.current_date = _dt
+            _tracks.handle(_tctx, len(oos_dates) + _drain_k)   # FIRST statement of each drain iteration
+            _drain_k += 1
             if not open_book:
                 break
             _rs = regimes.get(_dt, None)
@@ -1346,7 +1370,7 @@ def _per_bar_simulate(
                     _aux_dr = {'options': {}}
             for _ct in advance_open_book(open_book, _dt, bars_by_ticker, close_wide.loc[:_dt],
                                          _rp, _aux_dr, instance,
-                                         dt_priority=_dt_priority, counters=hook_counters):
+                                         dt_priority=_dt_priority, counters=_tctx.counters):
                 trades.append(_ct if _true_mtm else {**_ct, 'daily_marks': []})
         for _t in open_book:   # ticker has no bar at all after entry
             if _t.holding_days != 0:
@@ -1369,10 +1393,18 @@ def _per_bar_simulate(
                            'signal_target': _t.target_1,
                            'daily_marks': list(_t.daily_marks) if _true_mtm else []})
         open_book.clear()
-    if hook_counters.get('hook_exits') or hook_counters.get('hook_raised'):
-        _log(f'exit hook: {hook_counters.get("hook_exits", 0)} hook exits, '
-             f'{hook_counters.get("hook_raised", 0)} hook errors'
-             + (f' (first: {hook_counters["first_hook_raise"]})' if hook_counters.get('first_hook_raise') else ''))
+    # Final tick: the last drained/flushed trades are checked and the budget
+    # re-read BEFORE finalize (an abort here still precedes any persist).
+    _tctx.current_date = None
+    _tracks.handle(_tctx, len(oos_dates) + _drain_k)
+    info = _tracks.finalize()
+    _log(f'[bt_trackers] trackers={",".join(_tracks.names())} bars={len(oos_dates)} '
+         f'elapsed_s={time.monotonic() - _tctx.started:.1f} max_runtime_s={_max_rt:g} '
+         f'consistency={"on" if any(n == "consistency" for n in _tracks.names()) else "off"}')
+    if info.get('hook_exits') or info.get('hook_raised'):
+        _log(f'exit hook: {info.get("hook_exits", 0)} hook exits, '
+             f'{info.get("hook_raised", 0)} hook errors'
+             + (f' (first: {info["first_hook_raise"]})' if info.get('first_hook_raise') else ''))
     if bars_raised:
         total_bars = days_processed + bars_raised
         print(f'[WARN] generate_signals raised on {bars_raised}/{total_bars} bars '
@@ -1393,15 +1425,16 @@ def _per_bar_simulate(
         'days_with_signals': days_with_signals,
         'entries_asset_gated': entries_asset_gated,
         'entries_event_gated': entries_event_gated,
-        'intraday_trades':  intraday_trades,
-        'intraday_no_bars': intraday_no_bars,
-        'intraday_missing_entry_bar': intraday_missing_entry_bar,
+        'intraday_trades':  info['intraday_trades'],
+        'intraday_no_bars': info['intraday_no_bars'],
+        'intraday_missing_entry_bar': info['intraday_missing_entry_bar'],
         'bars_raised':      bars_raised,
         'static_universe':  static_universe,
         'min_lookback':     min_lookback,
-        'hook_exits':       hook_counters.get('hook_exits', 0),
-        'hook_raised':      hook_counters.get('hook_raised', 0),
-        'first_hook_raise': hook_counters.get('first_hook_raise'),
+        'hook_exits':       info['hook_exits'],
+        'hook_raised':      info['hook_raised'],
+        'first_hook_raise': info['first_hook_raise'],
+        'info':             info,
     }
 
 
@@ -1778,6 +1811,7 @@ def run_backtest(strategy_id: str, *,
         **_sim_kwargs,
     )
     trades         = sim['trades']
+    _info          = sim.get('info') or {}      # tracker output; absent on the options path
     universe_sizes = sim['universe_sizes']
     days_processed = sim['days_processed']
     days_with_signals = sim['days_with_signals']
@@ -1866,9 +1900,9 @@ def run_backtest(strategy_id: str, *,
                 # missing_entry_bar count SKIPPED entries (never a daily fallback).
                 'intraday_exit': ('off' if (os.environ.get('OPENCLAW_BT_INTRADAY_EXIT', '1') == '0'
                                             or _sim_fn is not _per_bar_simulate) else 'on'),
-                'intraday_trades': int(sim.get('intraday_trades', 0)),
-                'intraday_no_bars': int(sim.get('intraday_no_bars', 0)),
-                'intraday_missing_entry_bar': int(sim.get('intraday_missing_entry_bar', 0)),
+                'intraday_trades': int(_info.get('intraday_trades', 0)),
+                'intraday_no_bars': int(_info.get('intraday_no_bars', 0)),
+                'intraday_missing_entry_bar': int(_info.get('intraday_missing_entry_bar', 0)),
                 # Gap-fill provenance (2026-09-12 §A2): 'level' = a bracket
                 # touch returns the LEVEL (legacy); 'open' = a bar that opens
                 # beyond the level fills at that open. Read by
@@ -1883,18 +1917,19 @@ def run_backtest(strategy_id: str, *,
                 # Exit-reason census + modelled cost drag (2026-09-12 §A3).
                 # Provenance only — never a Sharpe, never a gate input. Hook
                 # exits appear as 'strategy_exit:<reason>'.
-                'exit_reasons': exit_reason_census(trades),
+                'exit_reasons': (_info['exit_reasons'] if 'exit_reasons' in _info
+                                else exit_reason_census(trades)),
                 'cost_drag_bps': cost_drag_bps(
                     trades,
                     cost_bps_by_ticker=_sim_kwargs.get('cost_bps_by_ticker'),
                     flat_bps=_slippage_bps),
                 'exit_hook':   bool(getattr(instance, 'exit_hook', False)),
-                'hook_exits':  int(sim.get('hook_exits', 0)),
+                'hook_exits':  int(_info.get('hook_exits', 0)),
                 # Persisted, not just logged: a run whose hook raised on every
                 # bar has the same trade list as one whose hook never fired
                 # (spec §1: raise => hold), so without this the two are
                 # indistinguishable once the journal rolls.
-                'hook_raised': int(sim.get('hook_raised', 0)),
+                'hook_raised': int(_info.get('hook_raised', 0)),
                 # Fill-timing provenance (2026-07-29 same-day pivot):
                 # same_close = signal[t] fills at close[t]; close/open = legacy t+1.
                 'fill_model': fill_model,
