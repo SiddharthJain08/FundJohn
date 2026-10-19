@@ -191,6 +191,27 @@ staging. The same file drives the unstack-removal flow in
   type fails approval, missing an optional type just downgrades the
   signal quality.
 
+## Intraday (single-session) strategies
+
+If the edge is entered and closed inside ONE regular-hours session (e.g. "buy 10:00 ET, flat at the close"), the daily
+backtester would measure it as an overnight trade. Opt into the intraday session simulator instead. Contract:
+`docs/specs/2026-10-19-intraday-session-simulator-spec.md`.
+
+- Build `signal_params` with `from strategies.intraday import session_close_params` →
+  `session_close_params('<HH:MM>', strategy_id=self.id, ...)`. The first argument MUST be a string literal naming an RTH
+  30-minute bar start (`09:30` … `15:30`); the lint rejects anything else.
+- `entry_bar_et` = the first RTH bar AFTER the last bar you read (read through the 09:30 bar ⇒ `'10:00'`). The fill is
+  that bar's OPEN; the simulator re-anchors your bracket to it and flattens at the last RTH bar (half days end 13:00).
+- `entry_price` = your decision price (e.g. the close of the last bar you read), not the fill.
+- Data (spec §5): cohort route (`CohortBaseStrategy`: `market_data['intraday_30m_bars']`) or raw route
+  (`aux_data.get('prices_30m')` + `strategies.cohort_base.tag_rth_30m`). Declare `prices_30m` in the manifest
+  `data_dependencies`. Select bars by `time_et`, never by index (half days have fewer bars).
+- Declare `horizon_days: 1`. Coverage is SPY from 2024-04-18 and ~115 liquid names from 2026-03-02; earlier trades are
+  skipped and counted, never faked.
+- LIVE CAVEAT (spec §6): backtest-only. The live chain has no entry-bar scheduler and no flatten-at-close, so the
+  promotion gate refuses any run with `intraday_trades > 0` (`intraday_exit_live_disabled`) until
+  `OPENCLAW_INTRADAY_EXIT_LIVE=1`, which the operator will not set before live support lands.
+
 ## Mental Dry-Run Requirement
 Before finalizing, mentally verify: `generate_signals(pd.DataFrame())` returns `[]` without raising. If it would raise, fix it first.
 
@@ -257,7 +278,7 @@ The template enforces:
 - Orders fill at next bar's open (no look-ahead by construction)
 - Commission is a callable `fn(size, price) -> float` — pass `alpaca_fee`
   from the example for production-shaped fee modeling
-- `close_at_eod=True` flattens at end-of-data (good for intraday strategies)
+- `close_at_eod=True` flattens at end-of-DATA (the template ABC's last bar), NOT at end-of-SESSION; intraday strategies use the "Intraday (single-session) strategies" section above
 
 Existing strategies under `src/strategies/implementations/` use the older
 `BaseStrategy` contract; do NOT migrate them as part of new-strategy work.

@@ -177,6 +177,47 @@ class TestRejected(unittest.TestCase):
         self.assertIn('socket', lines[0])
 
 
+class TestIntraday(unittest.TestCase):
+    def kinds(self, body):
+        return [v.kind for v in sl.lint_source(OK_HEAD + body)]
+
+    def test_clean_opt_in_literal(self):
+        self.assertEqual(sl.lint_source(
+            OK_HEAD + "P = {'exit_on': 'session_close', 'entry_bar_et': '10:00', 'x': 1}\n"), [])
+
+    def test_non_session_close_exit_on_is_ignored(self):
+        self.assertEqual(sl.lint_source(OK_HEAD + "P = {'exit_on': 'target'}\n"), [])
+
+    def test_missing_entry_bar(self):
+        v = sl.lint_source(OK_HEAD + "P = {'exit_on': 'session_close'}\n")
+        self.assertEqual([x.kind for x in v], ['intraday'])
+        self.assertIn('requires entry_bar_et', v[0].detail)
+
+    def test_bad_bar_literal_reported_once(self):
+        v = sl.lint_source(OK_HEAD + "P = {'exit_on': 'session_close', 'entry_bar_et': '10:15'}\n")
+        self.assertEqual([x.kind for x in v], ['intraday'])
+        self.assertIn("'10:15'", v[0].detail)
+
+    def test_bad_bar_without_exit_on_still_flagged(self):
+        self.assertEqual(self.kinds("P = {'entry_bar_et': '16:00'}\n"), ['intraday'])
+
+    def test_name_value_is_not_a_literal(self):
+        v = sl.lint_source(OK_HEAD + "B = '10:00'\nP = {'exit_on': 'session_close', 'entry_bar_et': B}\n")
+        self.assertEqual([x.kind for x in v], ['intraday'])
+        self.assertIn('string literal', v[0].detail)
+
+    def test_helper_call_good_and_bad(self):
+        self.assertEqual(self.kinds("P = session_close_params('15:30', strategy_id='S')\n"), [])
+        self.assertEqual(self.kinds("P = intraday.session_close_params('10:00')\n"), [])
+        self.assertEqual(self.kinds("P = session_close_params('10:15')\n"), ['intraday'])
+        self.assertEqual(self.kinds("B = '10:00'\nP = session_close_params(B)\n"), ['intraday'])
+        self.assertEqual(self.kinds("P = session_close_params()\n"), ['intraday'])
+
+    def test_dict_with_unpack_is_handled(self):
+        self.assertEqual(self.kinds(
+            "E = {}\nP = {**E, 'exit_on': 'session_close', 'entry_bar_et': '09:30'}\n"), [])
+
+
 class TestCLIContract(unittest.TestCase):
     """Hermetic: `main()` called in-process (no subprocess) against a real
     temp file, with stdout captured. Exercises exactly what

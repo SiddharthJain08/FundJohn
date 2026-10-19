@@ -115,6 +115,10 @@ function getPromotionThreshold(instrumentClass) {
 // Exit-hook spec §4: a backtest that flattened on BaseStrategy.should_exit
 // must not go live until the live mirror (Phase 2) is enabled.
 function exitHookLiveEnabled() { return process.env.OPENCLAW_EXIT_HOOK_LIVE === '1'; }
+// Intraday session simulator spec §6: a run with intraday_trades > 0 was
+// measured on a path the live chain cannot execute (no entry-bar scheduler, no
+// flatten-at-close). Twin of the exit-hook guard; do not set before live support lands.
+function intradayExitLiveEnabled() { return process.env.OPENCLAW_INTRADAY_EXIT_LIVE === '1'; }
 // Judge ONE regime sleeve row against the class thresholds. Returns the list
 // of failed gate kinds ('no_backtest' | 'sharpe' | 'max_dd' | 'trades' | 'bench'); an
 // empty list means the sleeve qualifies. Missing row / NULL metric fails
@@ -148,7 +152,7 @@ function judgeRegimeSleeve(row, thresholds, ctx = {}) {
   return fails;
 }
 async function _latestPrimaryRun(dbQuery, sid) {
-  let sharpe = NaN, maxDd = NaN, trades = NaN, runId = null, hasRun = false, exitHook = false, maxHoldDays = null;
+  let sharpe = NaN, maxDd = NaN, trades = NaN, runId = null, hasRun = false, exitHook = false, maxHoldDays = null, leanedOnIntraday = false;
   try {
     const ubt = await dbQuery(
       `SELECT run_id, total_sharpe, total_max_dd_pct, total_trades, config_json FROM strategy_backtest_runs
@@ -171,6 +175,11 @@ async function _latestPrimaryRun(dbQuery, sid) {
         try { cfg = JSON.parse(cfg); } catch (_) { cfg = null; cfgBroken = true; }
       }
       exitHook = cfgBroken || !!(cfg && cfg.exit_hook === true);
+      // Same fail-closed rule for the intraday simulator: an unparseable
+      // config_json cannot prove the run did not lean on it.
+      const intradayTrades = cfgBroken ? NaN
+        : (cfg && cfg.intraday_trades != null ? parseInt(cfg.intraday_trades, 10) : 0);
+      leanedOnIntraday = cfgBroken || intradayTrades > 0;
       // I5: the hold cap the RUN was measured at. NULL when unrecorded (or
       // when config_json would not parse) — the guard below then has nothing
       // to compare and stays out of the way.
@@ -178,7 +187,7 @@ async function _latestPrimaryRun(dbQuery, sid) {
       maxHoldDays = Number.isFinite(mh) ? mh : null;
     }
   } catch (_) {}
-  return { hasRun, runId, sharpe, maxDd, trades, exitHook, maxHoldDays };
+  return { hasRun, runId, sharpe, maxDd, trades, exitHook, maxHoldDays, leanedOnIntraday };
 }
 // The hold cap the LIVE exit-hook time stop will actually apply — JS twin of
 // execution/regime_param_resolver.configured_max_hold_days: MAX of the
@@ -241,6 +250,7 @@ async function computeQualifyingRegimes({ dbQuery, sid, instrumentClass }) {
   const out = { hasRun: run.hasRun, runId: run.runId, thresholds, qualifying: [], diag: {} };
   if (!run.hasRun) return out;
   if (run.exitHook && !exitHookLiveEnabled()) { out.exit_hook_live_disabled = true; return out; }
+  if (run.leanedOnIntraday && !intradayExitLiveEnabled()) { out.intraday_exit_live_disabled = true; return out; }
   if (await _holdCapMismatch(dbQuery, sid, run)) { out.exit_hook_hold_cap_mismatch = true; return out; }
   const byRegime = await _regimeSleeves(dbQuery, run.runId);
   if (!byRegime) return out;                       // no sleeves recorded → nothing qualifies
@@ -275,6 +285,9 @@ async function evaluatePromotionGate({ dbQuery, sid, instrumentClass, force, eli
   }
   if (run.exitHook && !exitHookLiveEnabled()) {
     return { pass: false, failedGates: ['exit_hook_live_disabled'], sharpe, maxDd, thresholds, qualifyingRegimes: [] };
+  }
+  if (run.leanedOnIntraday && !intradayExitLiveEnabled()) {
+    return { pass: false, failedGates: ['intraday_exit_live_disabled'], sharpe, maxDd, thresholds, qualifyingRegimes: [] };
   }
   if (await _holdCapMismatch(dbQuery, sid, run)) {
     return { pass: false, failedGates: ['exit_hook_hold_cap_mismatch'], sharpe, maxDd, thresholds, qualifyingRegimes: [] };
