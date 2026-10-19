@@ -123,8 +123,9 @@ class GBMPathGen:
         import pandas as pd
         if not _PRICES_DAILY_PATH.exists():
             return None
-        df = pd.read_parquet(_PRICES_DAILY_PATH, columns=['ticker', 'date', 'close'])
-        df = df[df.ticker == ticker]
+        import pyarrow.parquet as pq
+        df = pq.read_table(_PRICES_DAILY_PATH, columns=['ticker', 'date', 'close'],
+                           filters=[('ticker', '==', ticker)]).to_pandas()
         if df.empty:
             return None
         df['date'] = pd.to_datetime(df.date)
@@ -322,6 +323,12 @@ def run_path_mc(strategy_id: str, regime_state: str,
     sharpes: list[float] = []
     boot_means: list[float] = []
     rng2 = random.Random(rng.random())
+    # Each simulated trade is held ~proposed_max_hold_days, so annualise by
+    # sqrt(252 / hold) rather than treating it as a daily observation. NOTE:
+    # the linear MC's _bootstrap_sharpe (regime_param_montecarlo.py:72)
+    # annualises with sqrt(252/n), so the dashboard's sharpe_p50_delta is not
+    # like-for-like (that module is out of scope here).
+    ann = math.sqrt(TRADING_DAYS_PER_YEAR / max(int(proposed_max_hold_days), 1))
     for _ in range(min(n_iter, len(returns))):
         bs = [rng2.choice(returns) for _ in range(len(returns))]
         m = sum(bs) / len(bs)
@@ -329,7 +336,7 @@ def run_path_mc(strategy_id: str, regime_state: str,
         if len(bs) >= 2:
             v = sum((x - m) ** 2 for x in bs) / (len(bs) - 1)
             sd = math.sqrt(v)
-            sharpes.append((m / sd) * math.sqrt(TRADING_DAYS_PER_YEAR) if sd > 0 else 0.0)
+            sharpes.append((m / sd) * ann if sd > 0 else 0.0)
     sharpes.sort()
     boot_means.sort()
     max_dds.sort()

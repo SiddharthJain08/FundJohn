@@ -14,6 +14,43 @@ sys.path.insert(0, str(ROOT / 'src'))
 from metrics import intraday_path_montecarlo as ipm  # noqa: E402
 
 
+# ---------- Synthetic masters (never touch real data/master) ---------- #
+
+def _synthetic_frame():
+    import pandas as pd
+    rows = []
+    for k, t in enumerate(('ZZTEST1', 'ZZTEST2')):
+        rng = random.Random(1000 + k)
+        px = 100.0
+        for d in pd.bdate_range('2026-01-05', periods=120):
+            px *= math.exp(rng.gauss(0.0004, 0.012))
+            rows.append({'ticker': t, 'date': d.strftime('%Y-%m-%d'), 'close': px})
+    return pd.DataFrame(rows)
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_masters(tmp_path, monkeypatch):
+    _synthetic_frame().to_parquet(tmp_path / 'prices.parquet')
+    monkeypatch.setattr(ipm, '_PRICES_DAILY_PATH', tmp_path / 'prices.parquet')
+    monkeypatch.setattr(ipm, '_PRICES_30M_PATH', tmp_path / 'missing_30m.parquet')
+    ipm._GEN_CACHE.clear()
+    yield
+    ipm._GEN_CACHE.clear()
+
+
+def _expected_bar_sigma(ticker, window_days=90):
+    import pandas as pd
+    df = _synthetic_frame()
+    df = df[df.ticker == ticker].copy()
+    df['date'] = pd.to_datetime(df.date)
+    df = df[df.date >= df.date.max() - pd.Timedelta(days=window_days)]
+    c = df.sort_values('date')['close'].astype(float).tolist()
+    r = [math.log(c[i] / c[i - 1]) for i in range(1, len(c))]
+    m = sum(r) / len(r)
+    sd = math.sqrt(sum((x - m) ** 2 for x in r) / (len(r) - 1))
+    return sd / math.sqrt(13)
+
+
 # ---------- Policy application ---------- #
 
 def test_apply_policy_long_target_hit():
@@ -112,7 +149,7 @@ def test_empirical_resamples_from_window():
 
 def test_run_path_mc_insufficient_trades():
     """Trade pool below MIN_TRADES_FOR_MC → INSUFFICIENT."""
-    pool = [{'ticker': 'AAPL', 'direction': 'LONG'}] * 3
+    pool = [{'ticker': 'ZZTEST1', 'direction': 'LONG'}] * 3
     result = ipm.run_path_mc(
         strategy_id='S_test', regime_state='LOW_VOL',
         current_size=1.0, proposed_size=1.0,
@@ -126,7 +163,7 @@ def test_run_path_mc_insufficient_trades():
 def test_run_path_mc_emits_hit_rates():
     """With a real ticker pool, MC produces stop/target/max_hold rates
     that sum near 1 (minus no-gen iterations)."""
-    pool = [{'ticker': 'SPY', 'direction': 'LONG'}] * 20
+    pool = [{'ticker': 'ZZTEST1', 'direction': 'LONG'}] * 20
     result = ipm.run_path_mc(
         strategy_id='S_test', regime_state='LOW_VOL',
         current_size=1.0, proposed_size=1.0,
@@ -145,7 +182,7 @@ def test_run_path_mc_emits_hit_rates():
 def test_run_path_mc_size_scaling_linear_inside_no_clip():
     """When no stop/target is hit, returns scale linearly with size ratio.
     Use a very wide stop/target so the path-MC reduces to linear PnL."""
-    pool = [{'ticker': 'AAPL', 'direction': 'LONG'}] * 20
+    pool = [{'ticker': 'ZZTEST1', 'direction': 'LONG'}] * 20
     base = ipm.run_path_mc(
         strategy_id='S_test', regime_state='LOW_VOL',
         current_size=1.0, proposed_size=1.0,
@@ -176,7 +213,7 @@ def test_apply_policy_filters_nan_returns_in_engine(monkeypatch):
 
     monkeypatch.setattr(ipm, '_gen_for_ticker',
                           lambda t, window_days=90: (NanGen(), 'gbm'))
-    pool = [{'ticker': 'AAPL', 'direction': 'LONG'}] * 20
+    pool = [{'ticker': 'ZZTEST1', 'direction': 'LONG'}] * 20
     result = ipm.run_path_mc(
         strategy_id='S_test', regime_state='LOW_VOL',
         current_size=1.0, proposed_size=1.0,
@@ -198,3 +235,26 @@ def test_path_mc_no_gen_fallthrough():
         n_iter=20, trade_pool=pool, seed=1)
     assert result['status'] == 'INSUFFICIENT'
     assert 'no path generator' in result['note']
+
+
+def test_gbm_from_parquet_filters_to_one_ticker(monkeypatch):
+    import pyarrow.parquet as pq
+    calls, orig = [], pq.read_table
+    monkeypatch.setattr(pq, "read_table", lambda *a, **k: calls.append(k) or orig(*a, **k))
+    gen = ipm.GBMPathGen.from_parquet("ZZTEST1")
+    assert calls and calls[0]["filters"] == [("ticker", "==", "ZZTEST1")]
+    assert calls[0]["columns"] == ["ticker", "date", "close"]
+    assert gen.sigma == pytest.approx(_expected_bar_sigma("ZZTEST1"), rel=1e-12)
+
+
+def test_sharpe_annualised_by_hold_days(monkeypatch):
+    class OneDrawGen:                      # consumes exactly one draw regardless of n_bars
+        sigma = 0.01
+        def sample_path(self, n_bars, rng): return [rng.gauss(0.001, 0.01)] + [0.0] * (n_bars - 1)
+    monkeypatch.setattr(ipm, "_gen_for_ticker", lambda t, window_days=90: (OneDrawGen(), "gbm"))
+    kw = dict(strategy_id="S_zz", regime_state="LOW_VOL", current_size=1.0, proposed_size=1.0,
+              proposed_stop_pct=1.0, proposed_target_pct=1.0, n_iter=300,
+              trade_pool=[{"ticker": "ZZTEST1", "direction": "LONG"}] * 20, seed=7)
+    r1 = ipm.run_path_mc(proposed_max_hold_days=1, **kw)
+    r4 = ipm.run_path_mc(proposed_max_hold_days=4, **kw)
+    assert r4["sharpe_p50"] == pytest.approx(r1["sharpe_p50"] / 2.0, rel=1e-12)
