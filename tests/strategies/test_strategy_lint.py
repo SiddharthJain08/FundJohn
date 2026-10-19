@@ -355,6 +355,51 @@ class TestWarnRules(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn('rules', payload)
 
+    def test_extra_rule_forms(self):
+        for snippet, kinds in [
+            ('e = 1.0e-9\n', ['raw_epsilon_literal']), ('e = 1E-9\n', ['raw_epsilon_literal']),
+            ('r = s.rolling(window=20).mean()\n', ['rolling_without_min_periods']),
+            ('r = s.rolling(window=20, min_periods=5).mean()\n', []),
+            ('r = s.rolling(20, **kw).mean()\n', []),
+            ('x = s.shift(-k)\n', []),
+            ("if '__main__' == __name__:\n    x = s.shift(-1)\n", ['negative_shift']),
+        ]:
+            with self.subTest(snippet=snippet):
+                self.assertEqual([v.kind for v in sl.lint_warnings(OK_HEAD + snippet)], kinds)
+        vs = sl.lint_warnings(OK_HEAD + "if '__main__' == __name__:\n    x = s.shift(-1)\n")
+        self.assertTrue(vs[0].detail.endswith('[__main__]'))
+
+    def test_syntax_error_file_has_no_warnings(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'broken.py'
+            f.write_text('def f(:\n')
+            rc, payload = self._run_main(f)
+        self.assertEqual(rc, 1)
+        self.assertEqual(payload['warnings'], [])
+        self.assertEqual([v['kind'] for v in payload['violations']], ['syntax'])
+
+    def test_crashing_rule_cannot_break_the_gate(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            f = self._warn_file(d)
+            err = io.StringIO()
+            with mock.patch.object(sl, 'lint_warnings', side_effect=RuntimeError('boom')), \
+                 contextlib.redirect_stderr(err):
+                rc, payload = self._run_main(f)
+        self.assertEqual(rc, 0)
+        self.assertIs(payload['ok'], True)
+        self.assertEqual(payload['warnings'], [])
+        self.assertIn('[lint] warnings channel failed: RuntimeError', err.getvalue())
+
+    def test_fleet_warn_channel_never_changes_the_gate(self):
+        files = sorted(glob.glob(str(ROOT / 'src' / 'strategies' / 'implementations' / '*.py')))
+        self.assertGreater(len(files), 100)
+        rc, payload = self._run_main(*files)
+        self.assertEqual(rc, 0)
+        self.assertIs(payload['ok'], True)
+        self.assertEqual(payload['violations'], [])
+        self.assertGreater(len(payload['warnings']), 0)
+
     def test_validate_prints_warnings_to_stderr(self):
         from unittest import mock
         from strategies import validate_strategy

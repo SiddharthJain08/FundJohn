@@ -295,12 +295,15 @@ def _imports_asof(tree) -> bool:
 
 
 def _is_main_guard(node) -> bool:
+    if not isinstance(node, ast.If):
+        return False
     t = node.test
-    return (isinstance(node, ast.If) and isinstance(t, ast.Compare)
-            and isinstance(t.left, ast.Name) and t.left.id == '__name__'
-            and len(t.ops) == 1 and isinstance(t.ops[0], ast.Eq)
-            and len(t.comparators) == 1 and isinstance(t.comparators[0], ast.Constant)
-            and t.comparators[0].value == '__main__')
+    if not (isinstance(t, ast.Compare) and len(t.ops) == 1 and isinstance(t.ops[0], ast.Eq)
+            and len(t.comparators) == 1):
+        return False
+    sides = (t.left, t.comparators[0])
+    return (any(isinstance(x, ast.Name) and x.id == '__name__' for x in sides)
+            and any(isinstance(x, ast.Constant) and x.value == '__main__' for x in sides))
 
 
 def lint_warnings(source: str, filename: str = '<candidate>') -> list:
@@ -339,7 +342,7 @@ def lint_warnings(source: str, filename: str = '<candidate>') -> list:
                 add(node, 'unguarded_parquet_read',
                     f'{name}(...) in a module that does not import strategies.asof')
             if isinstance(fn, ast.Attribute) and fn.attr == 'rolling' \
-                    and not any(kw.arg == 'min_periods' for kw in node.keywords):
+                    and not any(kw.arg in ('min_periods', None) for kw in node.keywords):  # **kw may carry it
                 add(node, 'rolling_without_min_periods', '.rolling(...) without min_periods=')
         elif isinstance(node, ast.Constant) and type(node.value) is float \
                 and 1e-12 <= abs(node.value) <= 1e-6:
@@ -349,11 +352,13 @@ def lint_warnings(source: str, filename: str = '<candidate>') -> list:
 
 
 def lint_file_warnings(path) -> list:
+    """Advisory channel: must never be able to break the gate, so any failure yields []."""
     try:
         source = Path(path).read_text(encoding='utf-8')
-    except Exception:
-        return []   # lint_file already reports the io violation
-    return lint_warnings(source, filename=str(path))
+        return lint_warnings(source, filename=str(path))
+    except Exception as e:  # lint_file reports io/syntax; a rule bug must not crash main()/validate()
+        print(f'[lint] warnings channel failed: {type(e).__name__}', file=sys.stderr)
+        return []
 
 
 def format_warnings(violations) -> list:
@@ -378,7 +383,7 @@ def census(paths) -> dict:
 
 def main(argv=None) -> int:
     import argparse
-    ap = argparse.ArgumentParser(prog='strategy_lint.py', add_help=True)
+    ap = argparse.ArgumentParser(prog='strategy_lint.py', add_help=True, allow_abbrev=False)
     ap.add_argument('paths', nargs='*')
     ap.add_argument('--strict', action='store_true',
                     help='promote WARN findings to violations (exit 1)')
