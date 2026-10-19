@@ -17,7 +17,9 @@ Two rules worth knowing:
   window.  Pass ``same_bar_single=True`` for end-wins (the bar is flat).
 
 ``close_unfinished=False`` is the only place the final bar is needed: an
-episode still open on the last bar is dropped (zeroed).
+episode still open on the last bar is dropped (zeroed).  That default is for
+backtests / loop parity only; live and signal paths, where the last bar is the
+decision bar, MUST pass ``close_unfinished=True``.
 """
 from __future__ import annotations
 
@@ -35,6 +37,8 @@ def _require_bool(s: pd.Series, name: str) -> pd.Series:
 
 def state_window(key: pd.Series, *, nan_breaks: bool = True) -> pd.Series:
     """Window id per maximal run of equal consecutive non-NaN keys (from 1); NaN -> 0."""
+    if not isinstance(key, pd.Series):
+        raise ValueError("key must be a pandas Series")
     notna = key.notna()
     if nan_breaks:
         prev = key.shift(1)
@@ -46,7 +50,11 @@ def state_window(key: pd.Series, *, nan_breaks: bool = True) -> pd.Series:
 
 
 def statecount(cond: pd.Series) -> pd.Series:
-    """Consecutive True bars ending at this bar; 0 where False."""
+    """Consecutive True bars ending at this bar; 0 where False.
+
+    Deliberate deviations from TDengine STATECOUNT: the count is 0 (not -1)
+    where cond is False, and NaN is rejected (ValueError) rather than skipped.
+    """
     cond = _require_bool(cond, "cond")
     grp = (~cond).cumsum()
     return cond.astype(int).groupby(grp).cumsum().astype(int)
@@ -71,7 +79,13 @@ def event_window(start: pd.Series, end: pd.Series, *, close_unfinished: bool = F
     An id marks bars where the position is held after that bar's decision: the
     entry bar carries the id, the end bar carries 0.  A repeated start while
     open continues the episode; an end while flat is a no-op.
+
+    Default ``close_unfinished=False`` zeroes an episode still open on the LAST
+    bar: use it for backtests / parity only.  Live and signal paths (last bar =
+    decision bar) must pass ``close_unfinished=True``.
     """
+    if start_true_for < 0 or end_true_for < 0:
+        raise ValueError("start_true_for / end_true_for must be >= 0")
     start = _require_bool(start, "start")
     end = _require_bool(end, "end")
     if not start.index.equals(end.index):
@@ -125,16 +139,21 @@ def episodes_to_trades(episode_ids, price, dates, *, regime=None, direction='LON
     if len(px) != n or len(dates) != n:
         raise ValueError("episode_ids, price and dates must have equal length")
     dirs = _scalar_or_pos(direction, n)
+    allowed = {'LONG', 'SHORT'}
+    probe = set(dirs[ids > 0].tolist()) if n else set()
+    if not probe <= allowed:
+        raise ValueError(f"direction must be 'LONG' or 'SHORT' (got {sorted(map(repr, probe - allowed))})")
     regs = None if regime is None else _scalar_or_pos(regime, n)
     d = pd.DatetimeIndex(pd.to_datetime(np.asarray(dates)))
     rows = []
     seen = set()
+    last_of = {int(k): i for i, k in enumerate(ids) if k > 0}
     for i0 in range(n):
-        k = ids[i0]
+        k = int(ids[i0])
         if k <= 0 or k in seen:
             continue
         seen.add(k)
-        last = int(np.flatnonzero(ids == k)[-1])
+        last = last_of[k]
         ix = last + 1 if last + 1 < n else n - 1
         entry, exit_ = px[i0], px[ix]
         dr = dirs[i0]

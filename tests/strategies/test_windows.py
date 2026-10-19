@@ -240,7 +240,8 @@ def test_crossing_up_down_any():
     # bar1: prev 1<=2, now 2>2 False (touch from below, no cross)
     # bar2: prev 2<=2 and 3>2 True (prev == b counts)
     # bar3: a==b now, 3>3 False (touch without cross)
-    # bar6: prev 1>=3, now 1<1 False; bar7: prev 1<=1 & 2>1 True
+    # bar4: down, prev 3>=3 and 2<3 True
+    # bar6: a==b now (1<1 False), no down; bar7: prev 1<=1 & 2>1 True (up)
     assert L(up) == [False, False, True, False, False, False, False, True]
     assert L(down) == [False, False, False, False, True, False, False, False]
     assert L(crossing(a, b, direction='any')) == [x or y for x, y in zip(L(up), L(down))]
@@ -271,3 +272,22 @@ def test_crossing_matches_kalman_idiom():
 def test_crossing_bad_direction():
     with pytest.raises(ValueError):
         crossing(pd.Series([1.0, 2.0]), 1.0, direction='sideways')
+
+
+def test_episodes_to_trades_rejects_bad_direction():
+    d = pd.date_range('2024-01-01', periods=3)
+    for bad in ('long', None, 'LNG'):
+        with pytest.raises(ValueError):
+            episodes_to_trades([0, 1, 1], [1.0, 2.0, 3.0], d, direction=bad)
+    with pytest.raises(ValueError):
+        episodes_to_trades([0, 1, 1], [1.0, 2.0, 3.0], d, direction=pd.Series(['LONG', 'x', 'LONG']))
+
+
+def test_event_window_last_bar_both_settings_and_arg_validation():
+    s, e = B(1, 0, 0), B(0, 0, 0)
+    assert event_window(s, e).iloc[-1] == 0
+    assert event_window(s, e, close_unfinished=True).iloc[-1] == 1
+    with pytest.raises(ValueError):
+        event_window(s, e, start_true_for=-1)
+    with pytest.raises(ValueError):
+        state_window([1, 2])
