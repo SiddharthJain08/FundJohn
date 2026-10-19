@@ -17,6 +17,7 @@ from __future__ import annotations
 import fcntl
 import os
 import re
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -74,6 +75,20 @@ def _atomic_write(path: Path, df: pd.DataFrame, *, write_page_index: bool = True
                    write_page_index=write_page_index,
                    row_group_size=row_group_size)
     os.replace(tmp, path)
+
+
+def _merge_threads() -> int:
+    """DuckDB merge threads: env OPENCLAW_PARQUET_MERGE_THREADS, default 1
+    (order-preserving). Non-integer or < 1 falls back to 1."""
+    raw = os.environ.get('OPENCLAW_PARQUET_MERGE_THREADS', '1')
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 1
+    if n < 1:
+        n = 1
+    print(f"[parquet_store] merge threads={n}", file=sys.stderr, flush=True)
+    return n
 
 
 def _merge_mem_limit() -> str:
@@ -145,7 +160,7 @@ def append_dedup(
         try:
             con.execute(f"SET memory_limit='{_merge_mem_limit()}'")
             con.execute(f"SET temp_directory='{_merge_spill_dir()}'")
-            con.execute(f"SET threads = {int(os.environ.get('OPENCLAW_PARQUET_MERGE_THREADS', '1'))}")
+            con.execute(f"SET threads = {_merge_threads()}")
             # Register the batch as an Arrow table (reliable dtype mapping; the bare
             # pandas replacement scan can choke on object columns) — same pyarrow
             # conversion the master file itself was written through.

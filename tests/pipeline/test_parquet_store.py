@@ -303,3 +303,13 @@ def test_append_dedup_keeps_rowgroups_date_monotone(tmp_path):
         batch = pd.DataFrame([{"date": d, "ticker": t, "close": 2.0} for t in reversed(tickers)])
         ps.append_dedup(path, batch, ["date", "ticker"], mode="replace")
         assert rowgroup_span_report(path)["monotone"] is True, k
+
+
+@pytest.mark.parametrize("val,exp", [(None, 1), ("abc", 1), ("0", 1), ("-3", 1), ("2", 2)])
+def test_merge_threads_env(monkeypatch, capsys, val, exp):
+    if val is None:
+        monkeypatch.delenv("OPENCLAW_PARQUET_MERGE_THREADS", raising=False)
+    else:
+        monkeypatch.setenv("OPENCLAW_PARQUET_MERGE_THREADS", val)
+    assert ps._merge_threads() == exp
+    assert capsys.readouterr().err.strip() == f"[parquet_store] merge threads={exp}"
