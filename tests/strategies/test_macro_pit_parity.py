@@ -16,10 +16,12 @@ def _rows(series, dates, v=1.0):
     return [(d, series, v + i) for i, d in enumerate(dates)]
 
 
-_PUB = (_rows('VIX', pd.date_range('2026-10-01', T).strftime('%Y-%m-%d'), 15.0)
-        + _rows('DGS10', pd.date_range('2026-10-01', '2026-10-14').strftime('%Y-%m-%d'), 4.0)
+# Strict after_close: bar T sees obs <= T - lag - 1 (VIX lag 0 -> 10-14; DGS10 lag 1 -> 10-13).
+_PUB = (_rows('VIX', pd.date_range('2026-10-01', '2026-10-14').strftime('%Y-%m-%d'), 15.0)
+        + _rows('DGS10', pd.date_range('2026-10-01', '2026-10-13').strftime('%Y-%m-%d'), 4.0)
         + _rows('INDPRO', ['2026-07-01', '2026-08-01'], 100.0))
-_UNPUB = [('2026-10-15', 'DGS10', 4.9), ('2026-09-01', 'INDPRO', 103.0)]
+_UNPUB = [('2026-10-14', 'DGS10', 4.8), ('2026-10-15', 'DGS10', 4.9),
+          ('2026-10-15', 'VIX', 20.0), ('2026-09-01', 'INDPRO', 103.0)]
 PUB = pd.DataFrame(_PUB, columns=['date', 'series', 'value'])
 FULL = pd.DataFrame(_PUB + _UNPUB, columns=['date', 'series', 'value'])
 
@@ -37,7 +39,7 @@ def env(monkeypatch, tmp_path):
     def run(adl_frame, engine_frame, flag):
         monkeypatch.setenv('OPENCLAW_MACRO_PIT', flag)
         monkeypatch.setattr(adl, 'MACRO_PATH', tmp_path / adl_frame / 'macro.parquet')
-        monkeypatch.setattr(adl, '_MACRO_SERIES', None)
+        adl._reset_macro_caches()
         d = tmp_path / f'eng_{engine_frame}'
         (d / 'data' / 'master').mkdir(parents=True, exist_ok=True)
         src = tmp_path / engine_frame / 'macro.parquet'

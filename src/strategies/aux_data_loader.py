@@ -453,8 +453,15 @@ def _load_macro_series() -> dict:
 # macro.parquet's `date` is the OBSERVATION date. Several series are published
 # well after it (INDPRO is stamped the 1st of its month, released ~6 weeks
 # later), so cutting at the observation date is look-ahead. `available_at =
-# date + MACRO_RELEASE_LAG_DAYS[series]` (calendar days); a row is visible iff
-# available_at <= as_of. Served Series keep their observation-date index.
+# date + MACRO_RELEASE_LAG_DAYS[series]` (calendar days). STRICT after_close
+# rule (controller ruling, == asof_align same_day='after_close'): a row is
+# visible on bar `as_of` iff available_at < as_of, i.e. obs date <= as_of -
+# lag - 1 day. Live timing: FRED H.15 for day D posts ~16:00 ET on D+1 and our
+# ingest runs 17:45 ET, so the 15:00 ET compute first sees D on the D+2 bar; an
+# inclusive (<=) rule would leave a one-day look-ahead. Applies to every
+# series, lag 0 included (a same-day close is not visible at the 15:00 compute
+# of that day's bar... it first appears the next bar). Served Series keep
+# their observation-date index.
 # Rationale (coordinator ruling 1, amending the spec's INDPRO 45 / daily FRED 1):
 #  - DEXUSEU/DEXJPUS/DTWEXBGS (Fed H.10) come out in a weekly Monday release:
 #    a Friday obs is public ~3 d later, a Monday obs ~7 d later; 7 is the
@@ -494,6 +501,14 @@ def _macro_pit_enabled() -> bool:
 def macro_release_lag(series: str) -> int:
     """Release lag in calendar days for a macro series (unmapped => 0)."""
     return MACRO_RELEASE_LAG_DAYS.get(series, MACRO_DEFAULT_LAG_DAYS)
+
+
+def _reset_macro_caches() -> None:
+    """Clear the macro series cache and the derived availability frame
+    (test-fixture convenience; they must be busted together)."""
+    global _MACRO_SERIES
+    _MACRO_SERIES = None
+    _AVAIL_FRAMES.pop('macro', None)
 
 
 def _announce_macro_pit(full: dict) -> None:
@@ -546,6 +561,8 @@ def available_at_frame(kind: str) -> pd.DataFrame:
                                'date': pd.Series(dtype='datetime64[ns]')})
         df['available_at'] = df['date']
     else:  # options
+        # NOTE: copies the WHOLE aggregates panel; narrow (columns/date range)
+        # before any production caller uses this.
         df = _load_panel().copy()
         if 'date' in df.columns:
             df['available_at'] = df['date']
@@ -561,7 +578,7 @@ def _macro_slice(date_str: str) -> dict:
     strategies already guard on missing macro).
 
     OPENCLAW_MACRO_PIT=1 cuts on the AVAILABILITY date instead: rows with
-    observation date <= date - MACRO_RELEASE_LAG_DAYS[series] (see the table
+    observation date <= date - MACRO_RELEASE_LAG_DAYS[series] - 1 day (see the table
     above). The served Series keep their observation-date index."""
     full = _load_macro_series()
     if not full:
@@ -571,7 +588,7 @@ def _macro_slice(date_str: str) -> dict:
     if _macro_pit_enabled():
         _announce_macro_pit(full)
         for name, s in full.items():
-            cut = s.loc[:ts - pd.Timedelta(days=macro_release_lag(name))]
+            cut = s.loc[:ts - pd.Timedelta(days=macro_release_lag(name) + 1)]
             if len(cut):
                 out[name] = cut
         return out
@@ -609,6 +626,8 @@ def _reset_financials_caches() -> None:
     `FINANCIALS_PATH`/`EARNINGS_PATH`, since `_FIN_AVAIL_DF` is derived from
     the other two."""
     global _FIN_DF, _EARNINGS_DF, _FIN_AVAIL_DF
+    # 'financials' is never stored in _AVAIL_FRAMES (served by
+    # _financials_with_availability); this pop is a harmless no-op kept for safety.
     _AVAIL_FRAMES.pop('financials', None)
     _AVAIL_FRAMES.pop('options', None)
     _FIN_DF = None

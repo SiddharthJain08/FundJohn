@@ -22,9 +22,9 @@ def _write_macro(tmp_path, rows):
 def macro(monkeypatch, tmp_path):
     def _make(rows, flag):
         monkeypatch.setattr(adl, 'MACRO_PATH', _write_macro(tmp_path, rows))
-        monkeypatch.setattr(adl, '_MACRO_SERIES', None)
-        monkeypatch.setattr(adl, '_MACRO_PIT_ANNOUNCED', False)
         monkeypatch.setattr(adl, '_AVAIL_FRAMES', {})
+        adl._reset_macro_caches()
+        monkeypatch.setattr(adl, '_MACRO_PIT_ANNOUNCED', False)
         if flag is None:
             monkeypatch.delenv('OPENCLAW_MACRO_PIT', raising=False)
         else:
@@ -39,8 +39,8 @@ def test_flag_unset_is_legacy_observation_cut(macro):
 
 def test_monthly_boundary_indpro(macro):
     macro([('2026-09-01', 'INDPRO', 100.0)], '1')
-    assert 'INDPRO' not in adl._macro_slice('2026-10-18')
-    out = adl._macro_slice('2026-10-19')
+    assert 'INDPRO' not in adl._macro_slice('2026-10-19')
+    out = adl._macro_slice('2026-10-20')
     assert out['INDPRO'].index.max() == pd.Timestamp('2026-09-01')
 
 
@@ -48,8 +48,8 @@ def test_monthly_boundary_indpro(macro):
 def test_weekly_release_boundary(macro, name):
     assert adl.macro_release_lag(name) == 7
     macro([('2026-10-09', name, 1.0)], '1')
-    assert name not in adl._macro_slice('2026-10-15')
-    assert name in adl._macro_slice('2026-10-16')
+    assert name not in adl._macro_slice('2026-10-16')
+    assert name in adl._macro_slice('2026-10-17')
 
 
 def test_lag_table_ruling_values():
@@ -63,23 +63,25 @@ def test_lag_table_ruling_values():
 
 def test_daily_boundary_dgs10(macro):
     macro([('2026-10-12', 'DGS10', 4.0)], '1')
-    assert 'DGS10' not in adl._macro_slice('2026-10-12')
-    assert 'DGS10' in adl._macro_slice('2026-10-13')
+    assert 'DGS10' not in adl._macro_slice('2026-10-13')
+    assert 'DGS10' in adl._macro_slice('2026-10-14')
 
 
-def test_vix_identical_both_states(macro):
+def test_vix_strict_after_close_vs_legacy(macro):
+    # Strict rule applies to lag 0 too: flag-on VIX on bar D == legacy VIX on D-1.
     rows = [('2026-10-01', 'VIX', 15.0), ('2026-10-02', 'VIX', 16.0)]
     macro(rows, None)
-    a = adl._macro_slice('2026-10-02')['VIX']
+    a = adl._macro_slice('2026-10-01')['VIX']
     macro(rows, '1')
     b = adl._macro_slice('2026-10-02')['VIX']
     pd.testing.assert_series_equal(a, b)
+    assert 'VIX' not in adl._macro_slice('2026-10-01')
 
 
 def test_unmapped_series_lag0_and_warned_once(macro, capsys):
     macro([('2026-10-12', 'ZZMACRO', 1.0)], '1')
-    assert 'ZZMACRO' in adl._macro_slice('2026-10-12')
-    adl._macro_slice('2026-10-13')
+    assert 'ZZMACRO' not in adl._macro_slice('2026-10-12')
+    assert 'ZZMACRO' in adl._macro_slice('2026-10-13')
     err = capsys.readouterr().err
     assert err.count('[macro_pit] WARN unmapped=ZZMACRO') == 1
     assert err.count('[macro_pit]') == 1
@@ -131,8 +133,8 @@ def test_available_at_frame_macro_matches_cut(macro):
     macro(rows, '1')
     frame = adl.available_at_frame('macro')
     assert set(frame.columns) == {'date', 'series', 'value', 'available_at'}
-    for d in ('2026-10-13', '2026-10-15', '2026-10-19'):
-        ts = pd.Timestamp(d)
+    for d in ('2026-10-13', '2026-10-15', '2026-10-20'):
+        ts = pd.Timestamp(d) - pd.Timedelta(days=1)  # strict: available_at < bar
         sl = adl._macro_slice(d)
         vis = frame[frame.available_at <= ts]
         assert set(sl) == set(vis.series.unique())
