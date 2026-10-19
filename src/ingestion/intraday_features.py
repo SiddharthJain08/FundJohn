@@ -4,7 +4,7 @@ Pulls a snapshot of every input the intraday HMM regime detector needs
 and returns a single 9-feature dict. Optionally appends to the master
 parquet at `data/master/intraday_features.parquet` using the
 append+dedup+atomic-write pattern from
-`src/ingestion/ingest_prices_30m.py:200-231`.
+the retired Polygon `ingest_prices_30m.py` (deleted 2026-10-19; see docs/archive/changelog.md).
 
 Sources (Alpaca-only since the SP-1 provider cutover, 2026-05-22):
   * SPY option chain (Alpaca CLI: ships bid/ask + delta + IV per contract)
@@ -381,7 +381,7 @@ def append_features_row(row: dict,
     Append+dedup+atomic-write — never deletes prior rows. If the
     parquet doesn't exist yet, creates it.
 
-    Mirrors `src/ingestion/ingest_prices_30m.py:200-231` discipline:
+    Mirrors the retired Polygon `ingest_prices_30m.py` (deleted 2026-10-19; see docs/archive/changelog.md) discipline:
         1. Read existing (if present)
         2. Concat new row(s)
         3. drop_duplicates(subset=['ts_utc'], keep='last')
