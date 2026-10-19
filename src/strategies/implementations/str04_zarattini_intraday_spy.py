@@ -58,7 +58,7 @@ def compute_nope(prev_close: float, today_open: float, first_bar_volume: float,
 
 class ZarattiniIntradaySPY(CohortBaseStrategy):
     id = 'S_TR04_zarattini_intraday_spy'
-    version = '2.1.0'
+    version = '2.2.0'
     regime_filter = ['HIGH_VOL', 'NEUTRAL', 'LOW_VOL']
 
     NOPE_LONG_MIN: float = 0.20
@@ -103,7 +103,9 @@ class ZarattiniIntradaySPY(CohortBaseStrategy):
                                   max(today_open, 1.0))
         stop_pct = min(max(1.5 * recent_range, 0.005), 0.020)
 
-        entry_price = today_open
+        # 2.2.0: price at decision time (10:00) = the 09:30 bar's close; the
+        # backtester's intraday simulator re-anchors brackets to the 10:00 open.
+        entry_price = float(first.get('close', 0.0)) or today_open
 
         if direction == 'LONG':
             stop = round(entry_price * (1 - stop_pct), 2)
@@ -132,5 +134,6 @@ class ZarattiniIntradaySPY(CohortBaseStrategy):
                 'first_bar_vol_ratio': round(first_vol / float(vol_10d), 4),
                 'kind': 'intraday',
                 'exit_on': 'session_close',
+                'entry_bar_et': '10:00',
             },
         )]

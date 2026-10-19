@@ -46,6 +46,24 @@ from src.strategies.base import BaseStrategy, Signal
 logger = logging.getLogger(__name__)
 
 
+def tag_rth_30m(df30: "pd.DataFrame") -> "pd.DataFrame":
+    """Tag 30-minute bars with their ET `session` ('YYYY-MM-DD') and `time_et`
+    ('HH:MM') and keep only regular-trading-hours rows (09:30 <= ET start <
+    16:00). `datetime` is normalised to tz-UTC (naive input == UTC). The stored
+    `date` column is ignored: after-hours bars carry the next day's label.
+    Single source of truth shared by CohortBaseStrategy._translate_prices_30m
+    and the backtester's intraday session simulator. Requires a `datetime`
+    column; the input frame is not mutated.
+    """
+    df = df30.copy()
+    dt = pd.to_datetime(df['datetime'], utc=True)  # naive input == UTC
+    et = dt.dt.tz_convert('America/New_York')
+    df['datetime'] = dt
+    df['session'] = et.dt.strftime('%Y-%m-%d')
+    df['time_et'] = et.dt.strftime('%H:%M')
+    return df[(df['time_et'] >= '09:30') & (df['time_et'] < '16:00')]
+
+
 class CohortBaseStrategy(BaseStrategy):
     """Base class for cohort strategies using (market_data, opts_map) surface."""
 
@@ -263,12 +281,7 @@ class CohortBaseStrategy(BaseStrategy):
         if 'ticker' not in df30.columns:
             df30['ticker'] = 'SPY'
 
-        dt = pd.to_datetime(df30['datetime'], utc=True)  # naive input == UTC
-        et = dt.dt.tz_convert('America/New_York')
-        df30['datetime'] = dt
-        df30['session'] = et.dt.strftime('%Y-%m-%d')
-        df30['time_et'] = et.dt.strftime('%H:%M')
-        rth = df30[(df30['time_et'] >= '09:30') & (df30['time_et'] < '16:00')]
+        rth = tag_rth_30m(df30)
         if rth.empty:
             return adv30
 

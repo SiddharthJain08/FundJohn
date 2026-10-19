@@ -223,10 +223,12 @@ def test_str04_long_on_gap_up_high_volume_and_empty_without_open_bar():
     sigs = strat._generate_signals_cohort(md, {})
     assert len(sigs) == 1
     assert sigs[0].ticker == 'SPY' and sigs[0].direction == 'LONG'
-    assert sigs[0].entry_price == 101.0          # the 09:30 bar's open, not an old bar
+    assert sigs[0].entry_price == pytest.approx(101.2)   # the 09:30 bar's CLOSE (decision price at 10:00), not an old bar
+    assert sigs[0].signal_params['entry_bar_et'] == '10:00'
+    assert sigs[0].signal_params['exit_on'] == 'session_close'
     md['spy_30m_bars'] = [b for b in md['spy_30m_bars'] if b['time_et'] != '09:30']
     assert strat._generate_signals_cohort(md, {}) == []
-    assert ZarattiniIntradaySPY.version == '2.1.0'
+    assert ZarattiniIntradaySPY.version == '2.2.0'
 
 
 def _s06_market(drop_1500=False):
@@ -259,8 +261,9 @@ def test_str06_uses_1230_and_1500_bars_and_skips_missing_1500():
     dn = next(s for s in sigs if s.ticker == 'DNX')
     assert dn.signal_params['r_total_intraday'] == pytest.approx(97.0 / 100.0 - 1, abs=1e-4)
     assert dn.entry_price == 97.0                       # 15:00 bar close (~15:30)
+    assert all(s.signal_params['entry_bar_et'] == '15:30' for s in sigs)
 
     md2, opts2 = _s06_market(drop_1500=True)
     got2 = {s.ticker for s in strat._generate_signals_cohort(md2, opts2)}
     assert 'DNX' not in got2
-    assert BaltussenEODReversal.version == '2.1.0'
+    assert BaltussenEODReversal.version == '2.2.0'

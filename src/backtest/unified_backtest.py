@@ -610,6 +610,92 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
             'daily_marks': daily_marks}
 
 
+def intraday_session_bars(prices_30m, ticker: str, session) -> Optional[pd.DataFrame]:
+    """RTH 30-minute bars for `ticker` on ET session `session`, time-sorted,
+    tagged with `session` / `time_et` (shared ET/RTH helper from cohort_base).
+    Returns None when `prices_30m` is absent/empty or has no such session.
+    Filters to the ticker BEFORE tagging so a 109-ticker slice stays cheap."""
+    if prices_30m is None or not isinstance(prices_30m, pd.DataFrame) or prices_30m.empty:
+        return None
+    if 'datetime' not in prices_30m.columns or 'ticker' not in prices_30m.columns:
+        return None
+    sub = prices_30m[prices_30m['ticker'] == ticker]
+    if sub.empty:
+        return None
+    from src.strategies.cohort_base import tag_rth_30m
+    rth = tag_rth_30m(sub)
+    sess = pd.Timestamp(session).strftime('%Y-%m-%d')
+    rth = rth[rth['session'] == sess]
+    if rth.empty:
+        return None
+    return rth.sort_values('datetime').reset_index(drop=True)
+
+
+def intraday_entry_open(bars_30m: Optional[pd.DataFrame], entry_bar_et: str) -> Optional[float]:
+    """`open` of the bar whose ET start == `entry_bar_et`, or None when the
+    session has < 2 RTH bars, no such bar, or a non-finite open."""
+    if bars_30m is None or len(bars_30m) < 2:
+        return None
+    hit = bars_30m[bars_30m['time_et'] == entry_bar_et]
+    if hit.empty:
+        return None
+    o = float(hit.iloc[0]['open'])
+    return o if math.isfinite(o) and o > 0 else None
+
+
+def simulate_intraday_trade(bars_30m: pd.DataFrame, *, direction: int,
+                            entry_bar_et: str, stop_loss: float, target_1: float,
+                            slippage_bps: float = 0.0,
+                            dt_priority: str = 'stop') -> Optional[dict]:
+    """Single-session intraday trade for signals with exit_on == 'session_close'.
+
+    `bars_30m` is ONE ticker's RTH bars for ONE ET session (columns open high
+    low close + time_et 'HH:MM' + session 'YYYY-MM-DD'). Entry fills at the
+    `open` of the bar whose time_et == entry_bar_et (adverse slippage as in
+    simulate_trade). The walk starts AT the entry bar (its own H/L count, as
+    with fill_model='open') and uses the shared _bar_exit, so double-touch and
+    OPENCLAW_BT_GAP_FILL behave as everywhere else. A bracket hit exits
+    'stop'/'target' at the adverse fill; otherwise the trade exits at the
+    close of the session's LAST RTH bar present ('session_close' - on a half
+    day that is the 13:00 bar, never an assumed 15:30).
+
+    Returns the simulate_trade dict shape with holding_days = 1 and a single
+    daily mark (exit_date, pnl_pct). Intraday trades therefore count as ONE
+    session: avg_holding_days reads 1.0 and the MTM Sharpe sees one return per
+    trade. Returns None - never a daily-simulator fallback - when the entry
+    bar is missing or the session has fewer than 2 RTH bars.
+
+    Point-in-time: reads only bars at/after the entry bar of the signal session.
+    """
+    if bars_30m is None or len(bars_30m) < 2:
+        return None
+    bars = bars_30m.sort_values('datetime') if 'datetime' in bars_30m.columns else bars_30m
+    hit = bars[bars['time_et'] == entry_bar_et]
+    if hit.empty:
+        return None
+    entry_open = float(hit.iloc[0]['open'])
+    if not math.isfinite(entry_open) or entry_open <= 0:
+        return None
+    s = float(slippage_bps) / 10000.0
+    entry_fill = entry_open * (1.0 + direction * s)
+    walk = bars[bars['time_et'] >= entry_bar_et]
+    exit_date = pd.Timestamp(str(walk.iloc[0]['session']))
+    exit_level, reason = None, None
+    for _, bar in walk.iterrows():
+        _o = bar.get('open')
+        _open = float(_o) if _o is not None and pd.notna(_o) else None
+        exit_level, reason = _bar_exit(direction, float(bar['high']), float(bar['low']),
+                                       stop_loss, target_1, dt_priority, open_=_open)
+        if exit_level is not None:
+            break
+    if exit_level is None:
+        exit_level, reason = float(walk.iloc[-1]['close']), 'session_close'
+    exit_fill = exit_level * (1.0 - direction * s)
+    pnl = direction * (exit_fill - entry_fill) / entry_fill
+    return {'exit_date': exit_date, 'exit_price': exit_fill, 'exit_reason': reason,
+            'holding_days': 1, 'pnl_pct': pnl, 'daily_marks': [(exit_date, pnl)]}
+
+
 def _reanchor_bracket(*, ref: float, entry_price: float, direction: int,
                       stop_ref: float, target_ref: float) -> tuple[float, float]:
     """Re-express a stop/target defined as pct distances from ``ref`` so they
@@ -954,6 +1040,10 @@ def _per_bar_simulate(
     days_with_signals = 0
     entries_asset_gated = 0
     entries_event_gated = 0
+    intraday_trades = 0
+    intraday_no_bars = 0
+    intraday_missing_entry_bar = 0
+    _intraday_on = os.environ.get('OPENCLAW_BT_INTRADAY_EXIT', '1') != '0'
     bars_raised = 0
     first_raise: str | None = None
     # Track per-bar universe sizes when resolver is active.
@@ -1139,11 +1229,30 @@ def _per_bar_simulate(
             # The exit walk always starts strictly after the fill bar's close,
             # so ≥1 future bar is required in every model (under same_close a
             # final-bar entry would be a zero-information open trade — skip).
+            _sp = getattr(sig, 'signal_params', None) or {}
+            _intraday_sig = _intraday_on and _sp.get('exit_on') == 'session_close'
+            if _intraday_sig and _use_open_book:
+                raise ValueError("exit_hook strategies cannot opt into exit_on='session_close' "
+                                 '(the intraday session simulator is not modelled in the open book)')
             _future_idx = ticker_bars.index[ticker_bars.index > current_date]
-            if len(_future_idx) == 0:
+            if len(_future_idx) == 0 and not _intraday_sig:
                 continue  # signal on the last available bar
-            fill_date = current_date if _same_day else _future_idx[0]
-            entry_price = float(ticker_bars.loc[fill_date, _price_col])
+            if _intraday_sig:
+                # Opted-in intraday signal: the session's 30m bars decide the
+                # fill (entry_bar_et open); NEVER the daily simulator.
+                _ebar = _sp.get('entry_bar_et')
+                if not _ebar:
+                    intraday_missing_entry_bar += 1
+                    continue
+                _sess_bars = intraday_session_bars(aux.get('prices_30m'), ticker, current_date)
+                entry_price = intraday_entry_open(_sess_bars, str(_ebar))
+                if entry_price is None:
+                    intraday_no_bars += 1
+                    continue
+                fill_date = current_date
+            else:
+                fill_date = current_date if _same_day else _future_idx[0]
+                entry_price = float(ticker_bars.loc[fill_date, _price_col])
             # A corrupt price bar (NaN fill price) cannot fill an order at a
             # known price. Skip rather than emit a NaN-entry trade whose NaN
             # pnl_pct would poison the aggregate metrics. (2026-06-15 BRK-B
@@ -1181,10 +1290,20 @@ def _per_bar_simulate(
                     signal_params=dict(getattr(sig, 'signal_params', None) or {}),
                     slippage=_s, prev_mark=entry_price * (1.0 + direction * _s)))
                 continue
-            exit_info = simulate_trade(ticker_bars, fill_date, direction,
-                                       entry_price, stop_loss, target_1, max_hold_days,
-                                       include_entry_bar=_include_fill_bar,
-                                       slippage_bps=_tkr_bps)
+            if _intraday_sig:
+                exit_info = simulate_intraday_trade(
+                    _sess_bars, direction=direction, entry_bar_et=str(_ebar),
+                    stop_loss=stop_loss, target_1=target_1,
+                    slippage_bps=_tkr_bps, dt_priority=_dt_priority)
+                if exit_info is None:
+                    intraday_no_bars += 1
+                    continue
+                intraday_trades += 1
+            else:
+                exit_info = simulate_trade(ticker_bars, fill_date, direction,
+                                           entry_price, stop_loss, target_1, max_hold_days,
+                                           include_entry_bar=_include_fill_bar,
+                                           slippage_bps=_tkr_bps)
             # Record stop exits in within-run history so future bars'
             # per-ticker cooldown can suppress same-ticker re-fires. Keep
             # the LATEST stop date per ticker.
@@ -1274,6 +1393,9 @@ def _per_bar_simulate(
         'days_with_signals': days_with_signals,
         'entries_asset_gated': entries_asset_gated,
         'entries_event_gated': entries_event_gated,
+        'intraday_trades':  intraday_trades,
+        'intraday_no_bars': intraday_no_bars,
+        'intraday_missing_entry_bar': intraday_missing_entry_bar,
         'bars_raised':      bars_raised,
         'static_universe':  static_universe,
         'min_lookback':     min_lookback,
@@ -1738,6 +1860,15 @@ def run_backtest(strategy_id: str, *,
                                         and _sim_fn is _per_bar_simulate)
                                else 'off'),
                 'entries_event_gated': int(sim.get('entries_event_gated', 0)),
+                # Intraday session simulator provenance (exit_on='session_close'
+                # signals; plan 2026-10-18). 'off' under OPENCLAW_BT_INTRADAY_EXIT=0
+                # or whenever _sim_fn is not _per_bar_simulate. no_bars /
+                # missing_entry_bar count SKIPPED entries (never a daily fallback).
+                'intraday_exit': ('off' if (os.environ.get('OPENCLAW_BT_INTRADAY_EXIT', '1') == '0'
+                                            or _sim_fn is not _per_bar_simulate) else 'on'),
+                'intraday_trades': int(sim.get('intraday_trades', 0)),
+                'intraday_no_bars': int(sim.get('intraday_no_bars', 0)),
+                'intraday_missing_entry_bar': int(sim.get('intraday_missing_entry_bar', 0)),
                 # Gap-fill provenance (2026-09-12 §A2): 'level' = a bracket
                 # touch returns the LEVEL (legacy); 'open' = a bar that opens
                 # beyond the level fills at that open. Read by
