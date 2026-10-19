@@ -456,9 +456,9 @@ class TestSignalExprLint(unittest.TestCase):
         r = subprocess.run(
             [sys.executable, '-c',
              'import sys; from strategies import strategy_lint as sl; import sys as s2; '
-             f'sl.lint_source({src!r}); print("sympy" in sys.modules)'],
+             f'sl.lint_source({src!r}); print("sympy" in sys.modules, "pandas" in sys.modules)'],
             cwd=str(ROOT / 'src'), capture_output=True, text=True, timeout=120)
-        self.assertEqual(r.stdout.strip(), 'False', r.stderr)
+        self.assertEqual(r.stdout.strip(), 'False False', r.stderr)
 
 
 class TestFleetIsClean(unittest.TestCase):

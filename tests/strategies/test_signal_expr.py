@@ -89,7 +89,8 @@ def test_rejects_bad_column_names(cols):
 
 
 def test_pow_dos_guards():
-    for e in ['close ** 1000', 'close ** (1/2)', '9 ** 9 ** 9', 'close ** (close ** 2)', '1e9 * close']:
+    for e in ['close ** 1000', 'close ** (1/2)', '9 ** 9 ** 9', 'close ** (close ** 2)', '1e9 * close',
+              '(close ** 2) ** 2', 'close + (((1000000**64)**64)**64)**64']:
         with pytest.raises(se.SignalExprError):
             se.formula_hash(e)
 
@@ -203,3 +204,28 @@ def test_constant_only_and_missing_field():
         se.compile_signal('1 + 2', columns=C)
     with pytest.raises(se.SignalExprError, match='no field'):
         se.compile_signal('volume', columns=C)(_panel(fields=('close',)))
+
+
+def test_nested_pow_rejected_fast():
+    import time
+    probe = 'close + (((1000000**64)**64)**64)**64'
+    for fn in (lambda: se.validate_expr_syntax(probe, columns=C),
+               lambda: se.compile_signal(probe, columns=C),
+               lambda: se.formula_hash(probe)):
+        t0 = time.monotonic()
+        with pytest.raises(se.SignalExprError, match='nested'):
+            fn()
+        assert time.monotonic() - t0 < 1.0
+
+
+def test_non_ascii_rejected():
+    with pytest.raises(se.SignalExprError, match='ASCII'):
+        se.validate_expr_syntax('\uff43lose + 1', columns={'close'})
+    with pytest.raises(se.SignalExprError, match='ASCII'):
+        se.validate_expr_syntax('\uff43lose', columns={'\uff43lose'})
+
+
+@pytest.mark.parametrize('name', ['Add', 'Mul', 'Pow', 'Integer', 'Float', 'Rational', 'Symbol'])
+def test_sympy_constructor_names_reserved(name):
+    with pytest.raises(se.SignalExprError):
+        se.validate_expr_syntax('1', columns={name})

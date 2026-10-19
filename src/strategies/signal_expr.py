@@ -23,7 +23,8 @@ Conventions (plan "Decisions beyond the spec" 1-6):
   always allowed arithmetic; division is ``safe_div(a, b, fill=nan)``.
 * Boolean/comparison syntax is rejected — a SIGNAL is a numeric score.
 * Powers: exponent literals only up to |64| when the exponent has no column
-  (write ``x ** 0.5``, not ``x ** (1/2)``), and no ``**`` inside an exponent;
+  (write ``x ** 0.5``, not ``x ** (1/2)``), and no ``**`` nested anywhere
+  inside another ``**`` (base or exponent);
   this keeps the canonical-hash evaluation (evaluate=True) from being asked to
   compute a huge integer power.
 """
@@ -38,6 +39,7 @@ from typing import Mapping
 __all__ = ['SignalExprError', 'OpSpec', 'DEFAULT_OPS', 'CompiledSignal',
            'validate_expr_syntax', 'compile_signal', 'formula_hash', 'make_panel']
 
+_RESERVED = frozenset({'abs', 'Add', 'Mul', 'Pow', 'Integer', 'Float', 'Rational', 'Symbol'})
 MAX_EXPR_CHARS = 2000
 MAX_NODES = 500
 MAX_CONST = 1e6
@@ -77,7 +79,7 @@ def _check_columns(columns, ops) -> None:
     for c in columns:
         if not isinstance(c, str) or not c.isidentifier() or keyword.iskeyword(c):
             raise SignalExprError(f'invalid column name {c!r}')
-        if c in ops or c == 'abs':
+        if c in ops or c in _RESERVED:
             raise SignalExprError(f'column name {c!r} collides with an operator')
 
 
@@ -104,8 +106,8 @@ def _walk(tree, columns, ops):
                 bad(node.op)
             if isinstance(node.op, ast.Pow):
                 r = node.right
-                if _has(r, ast.Pow):
-                    raise SignalExprError("'**' is not allowed inside an exponent")
+                if _has(node.left, ast.Pow) or _has(r, ast.Pow):
+                    raise SignalExprError("'**' may not be nested inside another '**'")
                 if not _has(r, ast.Name):
                     lit = r.operand if isinstance(r, ast.UnaryOp) else r
                     if not (_is_num(lit) and abs(lit.value) <= MAX_CONST_EXPONENT):
@@ -172,6 +174,8 @@ def _walk(tree, columns, ops):
 def _parse(expr):
     if not isinstance(expr, str):
         raise SignalExprError('SIGNAL must be a string')
+    if not expr.isascii():
+        raise SignalExprError('expression must be ASCII')
     if len(expr) > MAX_EXPR_CHARS:
         raise SignalExprError('expression too long')
     try:
@@ -260,6 +264,9 @@ class CompiledSignal:
             return cache[name]
 
         def percol(frame, fn):
+            # NOTE: dropna() also drops NaNs the expression itself produced
+            # (e.g. a zero denominator), not only missing input bars, so
+            # rolling ops span those cells too.
             if not isinstance(frame, pd.DataFrame):
                 raise SignalExprError('windowed operator applied to a constant')
             out = pd.DataFrame({i: fn(frame.iloc[:, i].dropna()).reindex(frame.index)
