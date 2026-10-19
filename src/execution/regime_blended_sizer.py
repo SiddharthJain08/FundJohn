@@ -1887,7 +1887,10 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     target_usd: dict[str, float] = {tkr: w * scale for tkr, w in ticker_w.items()}
     # B6: QP-shadow tracking target h = post-scale PRE-cap snapshot (before dust,
     # per-ticker cap, cluster cap, bench-corr removal, SPY NAV clamp).
-    _qp_h = dict(target_usd) if _qps.qp_shadow_enabled() else None
+    try:
+        _qp_h = dict(target_usd) if _qps.qp_shadow_enabled() else None
+    except Exception:  # noqa: BLE001 — shadow must never raise into sizing
+        _qp_h = None
 
     # Hard dust floor (2026-06-08). The per-regime min-notional PARAMETER
     # (regime_sizer_params.min_signal_notional_*, $100-500, regime-varying) was
@@ -2056,14 +2059,21 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         try:
             _qp_broker = _load_broker_positions_usd()
             _net_on, _net_frac = _load_net_cap_cfg()
+            # caps over the pre-cap names; names the cascade removed/zeroed
+            # between snapshot and hook enter the QP with cap 0 (l1_dist counts the gap)
+            _qp_base = _qp_h if _qp_h is not None else target_usd
+            _qp_caps = _qps.build_caps(
+                _qp_base, nav=nav, lam_global=lam_global, gate_net_sharpe=gate_net_sharpe,
+                bench_tkrs=_bench_tkrs, bench_exempt=_bench_exempt,
+                bench_frac=_bsz.benchmark_max_nav_frac(),
+                cap_active=(os.environ.get('OPENCLAW_EOD_RECONCILE') == '1'
+                            or os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1'))
+            for _t in _qp_base:
+                if not target_usd.get(_t):
+                    _qp_caps[_t] = 0.0
             _qps.run_qp_shadow(
                 target_usd, _qp_broker, nav=nav, lam_nav=lam * nav,
-                caps=_qps.build_caps(
-                    target_usd, nav=nav, lam_global=lam_global, gate_net_sharpe=gate_net_sharpe,
-                    bench_tkrs=_bench_tkrs, bench_exempt=_bench_exempt,
-                    bench_frac=_bsz.benchmark_max_nav_frac(),
-                    cap_active=(os.environ.get('OPENCLAW_EOD_RECONCILE') == '1'
-                                or os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1')),
+                caps=_qp_caps,
                 bench_tkrs=_bench_tkrs, net_frac=_net_frac if _net_on else None,
                 tau=_qps.resolve_tau(), h_usd=_qp_h)
         except Exception as _e:          # shadow must never break sizing

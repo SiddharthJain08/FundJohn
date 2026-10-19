@@ -25,8 +25,6 @@ import math
 import os
 import time
 
-import numpy as np
-
 logger = logging.getLogger(__name__)
 
 FLAG = 'OPENCLAW_QP_SHADOW'
@@ -89,6 +87,7 @@ def solve_qp(h, cur, cap, sgn, *, nav, gross_usd, net_frac, tau):
     """Returns (x_usd | None, status, solve_ms). Never raises."""
     t0 = time.perf_counter()
     try:
+        import numpy as np
         import cvxpy as cp
         n = len(h)
         with_net = net_frac is not None
@@ -162,6 +161,7 @@ def run_qp_shadow(target_usd, broker, *, nav, lam_nav, caps, bench_tkrs,
     dict); ``target_usd`` = the cascade's FINAL targets, used only for the
     gross_cascade / spy_cascade / l1_dist tokens. Default: h_usd = target_usd."""
     try:
+        import numpy as np
         if h_usd is None:
             h_usd = target_usd
         names = [t for t, v in h_usd.items()

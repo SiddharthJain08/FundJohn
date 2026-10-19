@@ -41,6 +41,7 @@ import execution.regime_blended_sizer as _sizer
 NAV = 100_000.0
 CAP = _sizer.PER_TICKER_CAP_SHARPE_FRAC
 LAM = 2.0  # stubbed _load_lambda
+_BROKER_CALLS: list = []  # one entry per stubbed broker fetch
 
 
 def _account(equity=NAV):
@@ -91,7 +92,11 @@ def _run_eod(monkeypatch, weights_rows, carried_rows, broker=None, params=None):
     monkeypatch.setattr(_sizer, '_load_approved_carried_signals',
                         lambda weight_by_strat, cadence_by_strat=None, **_kw: list(carried_rows))
     monkeypatch.setattr(_sizer, '_load_lambda', lambda default=2.0, *, intraday=False: LAM)
-    monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: dict(broker or {}))
+    def _stub_broker():
+        _BROKER_CALLS.append(1)
+        return dict(broker or {})
+
+    monkeypatch.setattr(_sizer, '_load_broker_positions_usd', _stub_broker)
 
     with _mock.patch('execution.strategy_weights.load_current', return_value=list(weights_rows)):
         return _sizer.size_positions(
@@ -371,3 +376,15 @@ class TestQpShadowWiringEOD:
         assert _run_eod(monkeypatch, w, c) == off
         recs = self._recs(caplog)
         assert len(recs) == 1 and recs[0].rstrip().split(' status=')[1].split()[0] == 'error:RuntimeError'
+
+    def test_qp_broker_fetched_once_per_cycle_flag_off_and_on(self, monkeypatch, caplog):
+        self._setup(monkeypatch, caplog)
+        w, c = self._rows()
+        for flag in (None, '1'):
+            if flag is None:
+                monkeypatch.delenv('OPENCLAW_QP_SHADOW', raising=False)
+            else:
+                monkeypatch.setenv('OPENCLAW_QP_SHADOW', flag)
+            _BROKER_CALLS.clear()
+            _run_eod(monkeypatch, w, c)
+            assert len(_BROKER_CALLS) == 1, (flag, _BROKER_CALLS)

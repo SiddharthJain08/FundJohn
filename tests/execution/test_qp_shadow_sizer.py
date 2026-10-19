@@ -176,3 +176,27 @@ def test_caps_sanitised_and_gross_strictly_interior():
     finally:
         q.solve_qp = orig
     assert seen['g'] < 20e3
+
+
+def test_cascade_removed_name_gets_zero_and_counts_in_l1(monkeypatch):
+    got = {}
+    orig = q.solve_qp
+
+    def _spy(*a, **k):
+        r = orig(*a, **k)
+        got['x'] = r[0]
+        return r
+    monkeypatch.setattr(q, 'solve_qp', _spy)
+    h = {T1: 30e3, T2: 20e3, T3: 10e3}
+    final = {T1: 30e3, T2: 20e3}   # cascade removed T3
+    caps = {T1: 20e3, T2: math.inf, T3: 0.0}
+    line = q.run_qp_shadow(final, {}, nav=NAV, lam_nav=50e3, caps=caps,
+                           bench_tkrs=set(), net_frac=None, tau=0.0, h_usd=h)
+    assert 'status=ok' in line and ' n=3 ' in line
+    assert abs(got['x'][2]) < 1e-3                       # T3 held at 0
+    assert abs(float(_f(line, 'l1_dist')) - 20e3) < 50.0   # |x - final|: T1 shaved, T2 absorbs, T3 stays 0
+    assert abs(got['x'].sum() - 50e3) < 5.0              # gross poured into T1/T2 only
+
+
+def test_module_has_no_numpy_or_cvxpy_at_module_level():
+    assert not hasattr(q, 'np') and not hasattr(q, 'cp')
