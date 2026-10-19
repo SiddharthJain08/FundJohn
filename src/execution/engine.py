@@ -14,6 +14,7 @@ Daily run sequence:
   9. Log execution run metrics
 """
 
+import math
 import os
 import sys
 import gc as _gc
@@ -828,11 +829,19 @@ def trailing_window_days(strategies):
     """
     if os.environ.get('OPENCLAW_PRICES_TRAILING_WINDOW') != '1':
         return None
-    return max([PRICES_TRAILING_FLOOR_DAYS]
-               + [int(getattr(s, 'max_lookback_days', 0) or 0) for s in strategies])
+    # Per strategy: the declared calendar-day lookback, else a fallback derived
+    # from min_lookback (bars): ceil(bars * 1.6) calendar days (1 bar ~ 1.45 cal
+    # days; 1.6 leaves holiday margin). Strategies that declare nothing must not
+    # be silently truncated to the floor.
+    def _need(s):
+        declared = int(getattr(s, 'max_lookback_days', 0) or 0)
+        bars = int(getattr(s, 'min_lookback', 0) or 0)
+        return max(declared, math.ceil(bars * 1.6))
+    return max([PRICES_TRAILING_FLOOR_DAYS] + [_need(s) for s in strategies])
 
 
-def load_prices(universe: list, *, lookback_days: int | None = None) -> pd.DataFrame:
+def load_prices(universe: list, *, lookback_days: int | None = None,
+                as_of=None) -> pd.DataFrame:
     """Load master price parquet; pivot to wide format (date index × ticker columns, close prices).
 
     When OPENCLAW_CLOSE_PROXY_SNAPSHOT=1, append a today-dated (ET) row from a
@@ -878,8 +887,9 @@ def load_prices(universe: list, *, lookback_days: int | None = None) -> pd.DataF
         # universe filter drops. Skipped entirely when we aren't filtering.
         _cutoff = None
         if lookback_days is not None:
-            _cutoff = (pd.Timestamp.today().normalize()
-                       - pd.Timedelta(days=lookback_days)).strftime('%Y-%m-%d')
+            _anchor = (pd.Timestamp(as_of).normalize() if as_of is not None
+                       else pd.Timestamp.today().normalize())
+            _cutoff = (_anchor - pd.Timedelta(days=lookback_days)).strftime('%Y-%m-%d')
         _date_axis = _parquet_date_axis(master_path, cutoff=_cutoff) if _uni else None
         _filters = []
         if _uni:
@@ -926,11 +936,9 @@ def load_prices(universe: list, *, lookback_days: int | None = None) -> pd.DataF
         logger.error(f"Failed to load prices: {e}")
         return pd.DataFrame()
 
-    if lookback_days is None:
-        logger.info(f"[prices_window] mode=full rows={len(wide)}")
-    else:
+    if lookback_days is not None:
         logger.info(f"[prices_window] mode=trailing days={lookback_days} "
-                    f"cutoff={_cutoff} rows={len(wide)}")
+                    f"cutoff={_cutoff} n_dates={len(wide)}")
 
     # close[t]-proxy injection — OUTSIDE the try so CloseProxyError propagates.
     if os.environ.get('OPENCLAW_CLOSE_PROXY_SNAPSHOT') == '1':
@@ -3052,7 +3060,8 @@ def main():
         _aux_needed_kinds, _aux_running_ids, _aux_needed = \
             _resolve_aux_load_plan_safe(strategies, regime_state)
 
-        prices   = load_prices(universe, lookback_days=trailing_window_days(strategies))
+        prices   = load_prices(universe, lookback_days=trailing_window_days(strategies),
+                                as_of=run_date)
         aux_data = load_aux_data(universe, as_of=run_date,
                                  needed_kinds=_aux_needed_kinds)
 

@@ -105,10 +105,22 @@ def test_prices_window_log_line(env, caplog):
     _write(env)
     with caplog.at_level(logging.INFO):
         load_prices(UNI)
-        recs = [r for r in caplog.records if '[prices_window]' in r.getMessage()]
-        assert len(recs) == 1 and 'mode=full' in recs[0].getMessage()
+        assert not [r for r in caplog.records if '[prices_window]' in r.getMessage()]
         caplog.clear()
         load_prices(UNI, lookback_days=1095)
         recs = [r for r in caplog.records if '[prices_window]' in r.getMessage()]
         assert len(recs) == 1
         assert 'mode=trailing days=1095 cutoff=' in recs[0].getMessage()
+        assert 'n_dates=' in recs[0].getMessage()
+
+
+def test_min_lookback_fallback_and_floor(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_PRICES_TRAILING_WINDOW', '1')
+    long_ = SimpleNamespace(min_lookback=1260, max_lookback_days=0)
+    short = SimpleNamespace(min_lookback=20, max_lookback_days=0)
+    d = trailing_window_days([long_])
+    assert d >= 2016
+    cutoff = _today() - pd.Timedelta(days=d)
+    assert cutoff <= _today() - pd.Timedelta(days=2016)
+    assert trailing_window_days([short]) == 1095
+    assert trailing_window_days([SimpleNamespace(min_lookback=20, max_lookback_days=3000)]) == 3000
