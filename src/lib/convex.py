@@ -41,6 +41,12 @@ def tangency_weights(mu: np.ndarray, Sigma: np.ndarray,
         return None
     import cvxpy as cp
     n = mu.shape[0]
+    if Sigma.shape != (n, n) or not np.all(np.isfinite(Sigma)):
+        return None
+    Sigma = (Sigma + Sigma.T) / 2.0
+    # psd_wrap would hide a non-PSD input from cvxpy's check: refuse it instead
+    if float(np.linalg.eigvalsh(Sigma).min()) < -1e-10:
+        return None
     y = cp.Variable(n)
     prob = cp.Problem(cp.Minimize(cp.quad_form(y, cp.psd_wrap(Sigma))),
                       [mu @ y == 1, y >= 0])

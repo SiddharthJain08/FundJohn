@@ -2054,6 +2054,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # h_usd=_qp_h is the post-scale PRE-cap snapshot (the QP's tracking target);
     # target_usd (positional) is the cascade's FINAL dict handed to
     # _emit_orders_from_targets, used for the gross/spy/l1_dist cascade tokens.
+    # Option delta-hedge names injected after the snapshot are NOT in h, so they
+    # are outside the shadow tokens (the QP and its comparison cover equity names only).
     _qp_broker = None
     if _qps.qp_shadow_enabled():
         try:
@@ -2067,7 +2069,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                 bench_tkrs=_bench_tkrs, bench_exempt=_bench_exempt,
                 bench_frac=_bsz.benchmark_max_nav_frac(),
                 cap_active=(os.environ.get('OPENCLAW_EOD_RECONCILE') == '1'
-                            or os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1'))
+                            or os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1'),
+                bench_clamp=bool(_beta_budget_applied))  # cascade clamps SPY only under the budget
             for _t in _qp_base:
                 if not target_usd.get(_t):
                     _qp_caps[_t] = 0.0

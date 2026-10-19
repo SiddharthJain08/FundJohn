@@ -38,3 +38,8 @@ def test_format_line_token_only_when_passed():
 def test_both_run_once_lines_pass_p_trip():
     import inspect
     assert inspect.getsource(ab.run_once).count("p_trip=p_trip_within(") == 2
+
+
+@pytest.mark.parametrize('bad', [float('nan'), float('inf'), float('-inf')])
+def test_p_trip_non_finite_dd_is_none(bad):
+    assert ab.p_trip_within(bad) is None

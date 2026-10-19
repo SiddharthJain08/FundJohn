@@ -170,9 +170,7 @@ def test_run_path_mc_emits_hit_rates():
         proposed_stop_pct=0.02, proposed_target_pct=0.05,
         proposed_max_hold_days=5,
         n_iter=200, trade_pool=pool, seed=42)
-    if result['status'] == 'INSUFFICIENT':
-        # Acceptable if no parquet in test env
-        pytest.skip('SPY 30m parquet not available')
+    assert result['status'] != 'INSUFFICIENT'
     total = (result['stop_hit_rate'] + result['target_hit_rate']
               + result['max_hold_hit_rate'])
     assert 0.95 < total <= 1.001
@@ -195,8 +193,7 @@ def test_run_path_mc_size_scaling_linear_inside_no_clip():
         proposed_stop_pct=1.0, proposed_target_pct=1.0,
         proposed_max_hold_days=2,
         n_iter=200, trade_pool=pool, seed=99)
-    if base['status'] == 'INSUFFICIENT' or doubled['status'] == 'INSUFFICIENT':
-        pytest.skip('AAPL parquet not available')
+    assert base['status'] != 'INSUFFICIENT' and doubled['status'] != 'INSUFFICIENT'
     # With wide stop/target, no clipping; median should ~double
     if abs(base['mean_pnl_p50']) > 1e-6:
         ratio = doubled['mean_pnl_p50'] / base['mean_pnl_p50']

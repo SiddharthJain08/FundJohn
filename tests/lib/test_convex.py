@@ -104,3 +104,15 @@ def test_requirements_pin_cvxpy_and_clarabel():
 def test_helpers_lint_clean_for_strategies():
     from strategies.strategy_lint import lint_source
     assert lint_source('from lib.convex import tangency_weights\n') == []
+
+
+def test_tangency_rejects_non_psd_sigma():
+    Sigma = np.array([[1.0, 2.0], [2.0, 1.0]])   # eigenvalues 3, -1
+    assert tangency_weights(np.array([0.1, 0.2]), Sigma) is None
+
+
+def test_tangency_symmetrises_sigma():
+    S = np.array([[0.04, 0.0100], [0.0102, 0.09]])
+    a = tangency_weights(np.array([0.1, 0.2]), S)
+    b = tangency_weights(np.array([0.1, 0.2]), (S + S.T) / 2)
+    assert a is not None and np.allclose(a, b, atol=1e-6)

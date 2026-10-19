@@ -143,6 +143,8 @@ def p_trip_within(dd: float | None, days: int = P_TRIP_HORIZON_DAYS, *,
     try:
         if dd is None:
             return None
+        if not math.isfinite(float(dd)):
+            return None
         a = float(dd) - DD_LIMIT
         if a <= 0:
             return 1.0

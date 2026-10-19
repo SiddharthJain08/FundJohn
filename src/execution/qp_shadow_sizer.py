@@ -48,7 +48,7 @@ def resolve_tau() -> float:
 
 
 def build_caps(target_usd, *, nav, lam_global, gate_net_sharpe, bench_tkrs,
-               bench_exempt, bench_frac, cap_active):
+               bench_exempt, bench_frac, cap_active, bench_clamp=True):
     """Per-ticker USD caps mirroring regime_blended_sizer.py:1918-1937 and
     :1972-1979 (benchmark NAV clamp). ``inf`` = uncapped."""
     from execution.regime_blended_sizer import PER_TICKER_CAP_SHARPE_FRAC
@@ -58,7 +58,7 @@ def build_caps(target_usd, *, nav, lam_global, gate_net_sharpe, bench_tkrs,
         gs = gate_net_sharpe.get(t)
         if cap_active and t not in bench_exempt and gs is not None:
             cap = PER_TICKER_CAP_SHARPE_FRAC * (abs(gs) + 1.0) * lam_global * nav
-        if t in bench_tkrs:
+        if bench_clamp and t in bench_tkrs:
             cap = min(cap, bench_frac * nav)
         caps[t] = cap
     return caps

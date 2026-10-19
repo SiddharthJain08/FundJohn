@@ -200,3 +200,10 @@ def test_cascade_removed_name_gets_zero_and_counts_in_l1(monkeypatch):
 
 def test_module_has_no_numpy_or_cvxpy_at_module_level():
     assert not hasattr(q, 'np') and not hasattr(q, 'cp')
+
+
+def test_build_caps_bench_clamp_flag():
+    kw = dict(nav=NAV, lam_global=2.0, gate_net_sharpe={}, bench_tkrs={B},
+              bench_exempt={B}, bench_frac=1.0, cap_active=False)
+    assert q.build_caps({B: 1.0}, **kw)[B] == NAV                      # default: clamped
+    assert q.build_caps({B: 1.0}, bench_clamp=False, **kw)[B] == math.inf
