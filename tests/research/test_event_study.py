@@ -106,3 +106,53 @@ def test_cli_on_tmp_parquets(tmp_path, capsys, cal):
     assert [r['n'] for r in j['rows'] if r['offset'] == 1] == [2]
     assert es.main(base + ['--offsets=-2:3']) == 0
     assert len(json.loads(capsys.readouterr().out)['rows']) == 6
+
+
+def test_event_after_panel_dropped(capsys):
+    out = es.markout(_ev([('ZZTEST1', '2026-06-01')]), _wide(), offsets=range(-2, 3))
+    assert (out['n'] == 0).all() and out['mean_ret'].isna().all()
+    assert 'dropped_after_panel=1' in capsys.readouterr().err
+    out2 = es.markout(_ev([('ZZTEST1', '2026-06-01'), ('ZZTEST1', '2026-03-16')]), _wide(), offsets=[0, 1])
+    assert list(out2['n']) == [1, 1]
+
+
+def _cli_files(tmp_path, ev_name, ev_df, dup_prices=False):
+    w = _wide()
+    long = w.rename_axis('date').reset_index().melt(id_vars='date', var_name='ticker', value_name='close')
+    long['date'] = long['date'].dt.strftime('%Y-%m-%d')
+    if dup_prices:
+        long = pd.concat([long, long])
+    pp = tmp_path / 'prices.parquet'
+    long.to_parquet(pp, index=False)
+    ep = tmp_path / ev_name
+    ev_df.to_parquet(ep, index=False)
+    return ep, pp
+
+
+def _args(master, since, ep, pp, cal):
+    return ['--master', master, '--since', since, '--events-path', str(ep),
+            '--prices-path', str(pp), '--calendar-path', str(cal), '--offsets=0:1']
+
+
+def test_cli_missing_date_column_exit_2(tmp_path, capsys, cal):
+    ep, pp = _cli_files(tmp_path, 'earnings.parquet', pd.DataFrame({'ticker': ['ZZTEST1'], 'x': ['2026-03-16']}))
+    assert es.main(_args('earnings', '2026-03-01', ep, pp, cal)) == 2
+    assert 'no event date column' in capsys.readouterr().err
+
+
+def test_cli_insider_since_and_dup_prices(tmp_path, capsys, cal):
+    ev = pd.DataFrame({'ticker': ['ZZTEST1', 'ZZTEST2'], 'date': ['2026-03-05', '2026-03-16']})
+    ep, pp = _cli_files(tmp_path, 'insider.parquet', ev, dup_prices=True)
+    assert es.main(_args('insider', '2026-03-10', ep, pp, cal)) == 0
+    j = json.loads(capsys.readouterr().out)
+    assert j['events'] == 1 and [r['n'] for r in j['rows']] == [1, 1]
+    assert j['rows'][1]['mean_ret'] == pytest.approx(0.99 - 1)
+
+
+def test_cli_drops_event_after_panel(tmp_path, capsys, cal):
+    ev = pd.DataFrame({'ticker': ['ZZTEST1'], 'report_date': ['2026-06-01']})
+    ep, pp = _cli_files(tmp_path, 'earnings.parquet', ev)
+    assert es.main(_args('earnings', '2026-03-01', ep, pp, cal)) == 0
+    cap = capsys.readouterr()
+    assert 'dropped_after_panel=1' in cap.err
+    assert [r['n'] for r in json.loads(cap.out)['rows']] == [0, 0]

@@ -49,7 +49,11 @@ def _markout_sql(con, events_view: str, prices_view: str, sessions_view: str, of
         CREATE OR REPLACE TEMP VIEW _es_anchor AS
         SELECT DISTINCT e.ticker, s.i AS ai, s.d AS ad
         FROM (SELECT ticker, CAST(event_date AS DATE) AS ed FROM {events_view}) e
-        ASOF JOIN _es_sess s ON e.ed >= s.d""")
+        ASOF JOIN _es_sess s ON e.ed >= s.d
+        WHERE e.ed <= (SELECT max(d) FROM _es_sess)""")
+    dropped = con.execute(f"""
+        SELECT count(*) FROM (SELECT DISTINCT ticker, CAST(event_date AS DATE) AS ed FROM {events_view})
+        WHERE ed > (SELECT max(d) FROM _es_sess)""").fetchone()[0]
     df = con.execute(f"""
         WITH obs AS (
             SELECT o.k, pt.close / pa.close - 1 AS ret
@@ -67,7 +71,11 @@ def _markout_sql(con, events_view: str, prices_view: str, sessions_view: str, of
     con.unregister('_es_offsets')
     out = df[['offset', 'mean_ret', 'median_ret', 'n']].copy()
     out['n'] = out['n'].astype('int64')
-    return out.reset_index(drop=True)
+    out = out.reset_index(drop=True)
+    out.attrs['dropped_after_panel'] = int(dropped)
+    if dropped:
+        print(f'[event_study] dropped_after_panel={dropped}', file=sys.stderr)
+    return out
 
 
 def markout(events: pd.DataFrame, prices_wide: pd.DataFrame, offsets=range(-5, 21)) -> pd.DataFrame:
@@ -146,10 +154,11 @@ def main(argv=None) -> int:
             FROM read_parquet({_q(ev_path)}) WHERE CAST("{dcol}" AS DATE) >= DATE {_q(since)}""")
         n_events = con.execute('SELECT count(*) FROM _cli_events').fetchone()[0]
         con.execute(f"""CREATE TEMP VIEW _cli_prices AS
-            SELECT CAST(ticker AS VARCHAR) AS ticker, CAST(date AS DATE) AS date, close
+            SELECT CAST(ticker AS VARCHAR) AS ticker, CAST(date AS DATE) AS date, max(close) AS close
             FROM read_parquet({_q(px_path)})
             WHERE ticker IN (SELECT DISTINCT ticker FROM _cli_events)
-              AND CAST(date AS DATE) >= DATE {_q(since)} - INTERVAL 40 DAY""")
+              AND CAST(date AS DATE) >= DATE {_q(since)} - INTERVAL 40 DAY
+            GROUP BY 1, 2""")
         lo, hi = con.execute('SELECT min(date), max(date) FROM _cli_prices').fetchone()
         sess = pd.DataFrame({'d': pd.to_datetime(tc.sessions(lo, hi) if lo is not None else [])})
         con.register('_cli_sessions', sess)
