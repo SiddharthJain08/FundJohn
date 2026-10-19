@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -285,3 +286,30 @@ def test_named_writers(tmp_path, monkeypatch):
         'insider_name': 'Jane', 'transaction_type': 'P-Purchase', 'shares': 1000,
     }]) == 1
     assert ps.write_macro([{'date': '2026-04-21', 'series': 'VIX', 'value': 18.87}]) == 1
+
+
+def test_append_dedup_keeps_rowgroups_date_monotone(tmp_path):
+    import pyarrow as pa
+    from src.data.parquet_layout import rowgroup_span_report
+    path = tmp_path / "prices.parquet"
+    tickers = [f"T{i:02d}" for i in range(20)]
+    days = pd.date_range("2026-01-01", periods=10).strftime("%Y-%m-%d")
+    seed = pd.DataFrame([{"date": d, "ticker": t, "close": 1.0}
+                         for d in days for t in tickers]).sort_values(["date", "ticker"])
+    ps._atomic_write(path, seed, row_group_size=50)
+    assert pq.ParquetFile(path).metadata.num_row_groups >= 3
+    for k in range(5):
+        d = (pd.Timestamp("2026-02-01") + pd.Timedelta(days=k)).strftime("%Y-%m-%d")
+        batch = pd.DataFrame([{"date": d, "ticker": t, "close": 2.0} for t in reversed(tickers)])
+        ps.append_dedup(path, batch, ["date", "ticker"], mode="replace")
+        assert rowgroup_span_report(path)["monotone"] is True, k
+
+
+@pytest.mark.parametrize("val,exp", [(None, 1), ("abc", 1), ("0", 1), ("-3", 1), ("2", 2)])
+def test_merge_threads_env(monkeypatch, capsys, val, exp):
+    if val is None:
+        monkeypatch.delenv("OPENCLAW_PARQUET_MERGE_THREADS", raising=False)
+    else:
+        monkeypatch.setenv("OPENCLAW_PARQUET_MERGE_THREADS", val)
+    assert ps._merge_threads() == exp
+    assert capsys.readouterr().err.strip() == f"[parquet_store] merge threads={exp}"

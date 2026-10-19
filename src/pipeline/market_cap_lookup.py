@@ -13,6 +13,8 @@ from typing import Optional
 
 import pandas as pd
 
+from src.data.parquet_store import ticker_window_stats
+
 SHARES_PARQUET = Path("/root/openclaw/data/master/shares_outstanding.parquet")
 PRICES_PARQUET = Path("/root/openclaw/data/master/prices.parquet")
 PRICE_STALENESS_DAYS = 10
@@ -29,6 +31,7 @@ def build_market_cap_lookup(
     shares_path, prices_path = Path(shares_path), Path(prices_path)
     if not shares_path.exists() or not prices_path.exists():
         return out
+    as_of = pd.Timestamp(as_of).date()
     iso = as_of.isoformat()
     floor_iso = (as_of - timedelta(days=PRICE_STALENESS_DAYS)).isoformat()
     symset = set(symbols)
@@ -37,11 +40,10 @@ def build_market_cap_lookup(
     sh = sh[sh.ticker.isin(symset) & (sh.asof_date.astype(str) <= iso)]
     latest_shares = (sh.sort_values("asof_date").groupby("ticker")["shares"].last())
 
-    px = pd.read_parquet(prices_path, columns=["ticker", "date", "close"])
-    px = px[px.ticker.isin(symset)
-            & (px.date.astype(str) <= iso)
-            & (px.date.astype(str) >= floor_iso)]
-    latest_close = (px.sort_values("date").groupby("ticker")["close"].last())
+    stats = ticker_window_stats(prices_path, cutoff=floor_iso, upto=iso,
+                                need_volume=False)
+    stats = stats[stats["ticker"].isin(symset)]
+    latest_close = stats.set_index("ticker")["last_close"]
 
     for s in symbols:
         sh_v = latest_shares.get(s)

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import fcntl
 import os
+import re
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -59,14 +61,34 @@ def _file_lock(path: Path, timeout: float = 30.0):
 
 # ── Write helpers ────────────────────────────────────────────────────────────
 
-def _atomic_write(path: Path, df: pd.DataFrame) -> None:
-    """Write to path.tmp then os.replace → atomic on POSIX."""
+def _atomic_write(path: Path, df: pd.DataFrame, *, write_page_index: bool = True,
+                  row_group_size: int | None = 131072) -> None:
+    """Write to path.tmp then os.replace → atomic on POSIX.
+
+    Writes a page index and bounded row groups (131072 rows) so date-sorted
+    files prune on row-group min/max. Container-only: data is unchanged."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(path) + '.tmp')
     # Use pyarrow directly to preserve types and compression consistent with existing files.
     table = pa.Table.from_pandas(df, preserve_index=False)
-    pq.write_table(table, tmp, compression='snappy')
+    pq.write_table(table, tmp, compression='snappy',
+                   write_page_index=write_page_index,
+                   row_group_size=row_group_size)
     os.replace(tmp, path)
+
+
+def _merge_threads() -> int:
+    """DuckDB merge threads: env OPENCLAW_PARQUET_MERGE_THREADS, default 1
+    (order-preserving). Non-integer or < 1 falls back to 1."""
+    raw = os.environ.get('OPENCLAW_PARQUET_MERGE_THREADS', '1')
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 1
+    if n < 1:
+        n = 1
+    print(f"[parquet_store] merge threads={n}", file=sys.stderr, flush=True)
+    return n
 
 
 def _merge_mem_limit() -> str:
@@ -121,12 +143,15 @@ def append_dedup(
 
         # NULL-safe key match (mirrors pandas treating NaN==NaN as a duplicate);
         # UNION ALL BY NAME reproduces the column-union-with-NULL-fill of the old
-        # reindex+concat. Insertion order is preserved (DuckDB default): existing rows
-        # stream out in their current file order, then the (same-date) batch appends —
-        # identical physical locality to the old pandas concat, so the row-group
-        # min/max date pruning the sliced pyarrow reads rely on is unchanged. (An
-        # ORDER BY key_cols was measured to make the file ticker-contiguous, which
-        # widened every row group's date range and broke date pruning — avoided.)
+        # reindex+concat. Output order = existing rows in file order, then the
+        # (same-date) batch -- but ONLY with a single DuckDB thread: COPY at
+        # default threads does not preserve insertion order (measured: widest row
+        # group 17->34 days over 15 appends), so the merge connection pins threads
+        # (OPENCLAW_PARQUET_MERGE_THREADS, default 1). Row-group date pruning then
+        # holds once the master is re-sorted by (date, ticker) (A1 script), since
+        # daily appends are date-monotone. Ticker-ordering (ORDER BY key_cols) is
+        # still avoided: it makes the file ticker-contiguous and widens every row
+        # group's date range.
         tmp = Path(str(path) + '.tmp')
         existing_lit = str(path).replace("'", "''")
         out_lit = str(tmp).replace("'", "''")
@@ -135,6 +160,7 @@ def append_dedup(
         try:
             con.execute(f"SET memory_limit='{_merge_mem_limit()}'")
             con.execute(f"SET temp_directory='{_merge_spill_dir()}'")
+            con.execute(f"SET threads = {_merge_threads()}")
             # Register the batch as an Arrow table (reliable dtype mapping; the bare
             # pandas replacement scan can choke on object columns) — same pyarrow
             # conversion the master file itself was written through.
@@ -212,6 +238,106 @@ def read_filtered(
     if limit:
         sql += f" LIMIT {int(limit)}"
     return duckdb.sql(sql).df()
+
+
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_WINDOW_STATS_COLS = ['ticker', 'last_close', 'last_date', 'adv_usd', 'n_rows']
+
+
+def _window_prep(path, cutoff, upto, need_volume):
+    """Validate dates (ISO only: they are interpolated as SQL literals) and the
+    footer schema. Returns (quoted_path, where_clause, volume_select) or None
+    when the file is missing."""
+    for name, v, optional in (('cutoff', cutoff, False), ('upto', upto, True)):
+        if v is None and optional:
+            continue
+        if not isinstance(v, str) or not _ISO_DATE_RE.fullmatch(v):
+            raise ValueError(f"{name} must be an ISO date YYYY-MM-DD string, got {v!r}")
+    path = Path(path)
+    if not path.exists():
+        return None
+    has_vol = "volume" in pq.read_schema(path).names
+    if need_volume and not has_vol:
+        raise KeyError("volume")
+    vol = "volume" if has_vol else "CAST(NULL AS DOUBLE) AS volume"
+    where = f"date >= '{cutoff}'"
+    if upto is not None:
+        where += f" AND date <= '{upto}'"
+    return str(path).replace("'", "''"), where, vol
+
+
+_TAIL_ROWS_COLS = ['ticker', 'date', 'close', 'volume', 'n_rows']
+
+
+def ticker_window_tail_rows(
+    path: Path | str,
+    *,
+    cutoff: str,
+    upto: Optional[str] = None,
+    last_n: int = 20,
+) -> pd.DataFrame:
+    """
+    The <= last_n most recent (ticker, date, close, volume) rows per ticker in
+    [cutoff, upto], plus per-ticker n_rows (window count(*)). Returns raw rows so
+    callers can run pandas math (identical summation order to a full read).
+    Empty frame if the file is missing; KeyError('volume') if it has no volume.
+    """
+    prep = _window_prep(path, cutoff, upto, True)
+    if prep is None:
+        return pd.DataFrame(columns=_TAIL_ROWS_COLS)
+    qpath, where, vol = prep
+    last_n = int(last_n)
+    sql = f"""
+        WITH w AS (SELECT ticker, date, close, {vol}
+                   FROM read_parquet('{qpath}', hive_partitioning=false)
+                   WHERE {where}),
+             r AS (SELECT *, row_number() OVER (PARTITION BY ticker ORDER BY date DESC) AS rn,
+                          count(*) OVER (PARTITION BY ticker) AS n_rows FROM w)
+        SELECT ticker, date, close, volume, n_rows FROM r WHERE rn <= {last_n}
+        ORDER BY ticker, date
+    """
+    return duckdb.sql(sql).df()[_TAIL_ROWS_COLS]
+
+
+def ticker_window_stats(
+    path: Path | str,
+    *,
+    cutoff: str,
+    upto: Optional[str] = None,
+    last_n: int = 20,
+    need_volume: bool = True,
+) -> pd.DataFrame:
+    """
+    Per-ticker windowed aggregate over a prices parquet (DuckDB predicate pushdown).
+
+    One row per ticker with any row in [cutoff, upto]: last non-NaN close, max date,
+    n_rows (count(*) in the window, NaN rows included) and adv_usd = mean of
+    close*volume over the ticker's last `last_n` window rows (rows counted NaN
+    included, NaN products skipped, mirroring pandas tail(n).mean()).
+    adv_usd equals legacy tail(last_n) only when n_rows >= last_n.
+    Empty frame with the columns above if the file is missing.
+    need_volume=True raises KeyError('volume') if the file has no volume column;
+    need_volume=False (last_close-only callers) yields NULL adv_usd instead.
+    """
+    prep = _window_prep(path, cutoff, upto, need_volume)
+    if prep is None:
+        return pd.DataFrame(columns=_WINDOW_STATS_COLS)
+    qpath, where, vol = prep
+    last_n = int(last_n)
+    sql = f"""
+        WITH w AS (SELECT ticker, date, close, {vol}
+                   FROM read_parquet('{qpath}', hive_partitioning=false)
+                   WHERE {where}),
+             r AS (SELECT *, row_number() OVER (PARTITION BY ticker ORDER BY date DESC) AS rn FROM w)
+        SELECT ticker,
+               arg_max(close, date) FILTER (WHERE close IS NOT NULL AND NOT isnan(close)) AS last_close,
+               max(date) AS last_date,
+               count(*) AS n_rows,
+               avg(close*volume) FILTER (WHERE rn <= {last_n} AND close*volume IS NOT NULL
+                                           AND NOT isnan(close*volume)) AS adv_usd
+        FROM r GROUP BY ticker
+    """
+    return duckdb.sql(sql).df()[_WINDOW_STATS_COLS]
 
 
 def max_date(path: Path | str, date_col: str = 'date') -> Optional[str]:

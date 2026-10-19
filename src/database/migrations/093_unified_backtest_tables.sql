@@ -81,8 +81,4 @@ CREATE TABLE IF NOT EXISTS strategy_backtest_trades (
   PRIMARY KEY (run_id, trade_seq)
 );
 
-CREATE INDEX IF NOT EXISTS idx_backtest_trades_strategy
-  ON strategy_backtest_trades (strategy_id, entry_date DESC);
-
-CREATE INDEX IF NOT EXISTS idx_backtest_trades_regime
-  ON strategy_backtest_trades (entry_regime);
+-- idx_backtest_trades_strategy / _regime removed 2026-10-19 (idx_scan = 0 lifetime); see 164.

@@ -26,7 +26,6 @@ Inventory (D2.1) — current quote-fetching sites in the repo before Phase 2D:
     src/ingestion/pipeline.py                  : _fetch_polygon_options_results
                                                  (chain snapshot — derives quote)
     src/ingestion/fetch_30m_bars.py            : _polygon_aggs (intraday OHLC)
-    src/ingestion/ingest_prices_30m.py         : Polygon /v2/aggs use
     src/ingestion/intraday_features.py         : Polygon snapshot consumption
     src/execution/alpaca_executor.py:485-526   : data.alpaca.markets snapshot
                                                  (latestTrade + latestQuote)

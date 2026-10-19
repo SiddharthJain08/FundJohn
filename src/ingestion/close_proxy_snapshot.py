@@ -175,7 +175,7 @@ def fetch_close_proxy(universe, asof_date, min_coverage: float | None = None) ->
     asof_date: when given, prices must be stamped that date (same-day guard)
     and equity coverage below the floor raises. None = legacy best-effort.
     min_coverage: fraction of the SERVABLE equity subset that must price;
-    default env OPENCLAW_CLOSE_PROXY_MIN_COVERAGE (0.90). Only enforced in
+    default env OPENCLAW_CLOSE_PROXY_MIN_COVERAGE (0.60). Only enforced in
     asof mode.
     """
     equities: dict[str, str] = {}  # alpaca_sym -> engine_ticker
