@@ -187,6 +187,15 @@ class BaseStrategy(ABC):
     # sleeve's tickers from the acting-strategy gate, the S_adj − S_m hurdle
     # and both caps. Mirroring is done at registration (Task 15 runbook).
     benchmark_sleeve: bool = False
+    # Declarative signal DSL (src/strategies/signal_expr.py). A class that
+    # declares SIGNAL gets a compiled formula and, unless it defines its own
+    # generate_signals, the default _signal_dsl_generate. Classes that leave
+    # SIGNAL empty are untouched.
+    SIGNAL:           str = ''
+    SIGNAL_DIRECTION: str = 'long'          # 'long' | 'short' | 'both'
+    SIGNAL_THRESHOLD = 0.0                  # float, or (lo, hi) with lo < hi iff 'both'
+    SIGNAL_COLUMNS:   frozenset = frozenset({'close'})   # must contain 'close'
+    SIGNAL_BASE_SIZE: float = 0.05
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -228,6 +237,45 @@ class BaseStrategy(ABC):
             if cls.should_exit is BaseStrategy.should_exit:
                 raise TypeError(
                     f'{cls.__name__}: exit_hook=True requires overriding should_exit()')
+        if cls.SIGNAL:
+            cls._init_signal_dsl()
+
+    @classmethod
+    def _init_signal_dsl(cls):
+        def bad(reason):
+            return TypeError(f'{cls.__name__}: SIGNAL {cls.SIGNAL!r}: {reason}')
+        direction, thr = cls.SIGNAL_DIRECTION, cls.SIGNAL_THRESHOLD
+        if direction not in ('long', 'short', 'both'):
+            raise bad(f"SIGNAL_DIRECTION must be 'long', 'short' or 'both', got {direction!r}")
+
+        def num(x):
+            return (isinstance(x, (int, float, np.integer, np.floating))
+                    and not isinstance(x, bool) and np.isfinite(x))
+        if direction == 'both':
+            if not (isinstance(thr, tuple) and len(thr) == 2 and all(num(x) for x in thr)
+                    and thr[0] < thr[1]):
+                raise bad("SIGNAL_THRESHOLD must be a (lo, hi) tuple with lo < hi for 'both'")
+        elif not num(thr):
+            raise bad(f"SIGNAL_THRESHOLD must be a finite number for {direction!r}, got {thr!r}")
+        cols = cls.SIGNAL_COLUMNS
+        if not isinstance(cols, (set, frozenset)) or 'close' not in cols:
+            raise bad("SIGNAL_COLUMNS must contain 'close'")
+        if set(cols) != {'close'} and cls.signal_panel is BaseStrategy.signal_panel:
+            raise bad('SIGNAL_COLUMNS beyond close requires overriding signal_panel()')
+        try:  # lazy: non-DSL imports never load sympy
+            try:
+                from strategies import signal_expr as _se
+            except ModuleNotFoundError as e:  # pragma: no cover
+                if e.name not in ('strategies', 'strategies.signal_expr'):
+                    raise
+                import signal_expr as _se
+            compiled = _se.compile_signal(cls.SIGNAL, columns=set(cols))
+        except _se.SignalExprError as e:
+            raise bad(str(e)) from None
+        cls._compiled_signal = compiled
+        cls.min_lookback = max(cls.min_lookback, compiled.required_lookback + 1)
+        if cls.generate_signals is BaseStrategy.generate_signals:
+            cls.generate_signals = BaseStrategy._signal_dsl_generate
 
     def __init__(self, parameters: dict = None):
         # Merge DB overrides on top of code defaults — replacing the dict
@@ -281,6 +329,77 @@ class BaseStrategy(ABC):
         {'state','date','one_hot','transition_probs'}; live passes
         {'state','vix_level','vix_percentile','regime_data','updated_at'}."""
         return None
+
+    # ---- signal DSL defaults (active only for classes that declare SIGNAL) ----
+    def signal_panel(self, prices, universe, aux_data):
+        """(field, ticker) panel the compiled SIGNAL is evaluated on. None or
+        an empty frame means no signals today."""
+        from strategies import signal_expr as _se
+        cols = [t for t in universe if t in prices.columns]
+        return _se.make_panel({'close': prices[cols]})
+
+    def dsl_should_fire(self, prices, regime) -> bool:
+        """Extra date/calendar gate for DSL strategies. Default: always."""
+        return True
+
+    def select_signals(self, values: pd.Series) -> list:
+        """Pick (ticker, 'LONG'|'SHORT', strength) from the last-row formula
+        values. Strict comparisons; strongest first, ties by ticker."""
+        d, thr = self.SIGNAL_DIRECTION, self.SIGNAL_THRESHOLD
+        lo, hi = thr if d == 'both' else (thr, thr)
+        picks = []
+        for t, v in values.items():
+            v = float(v)
+            if d in ('long', 'both') and v > hi:
+                picks.append((t, 'LONG', v - hi))
+            elif d in ('short', 'both') and v < lo:
+                picks.append((t, 'SHORT', lo - v))
+        picks.sort(key=lambda x: (-x[2], x[0]))
+        return picks[:self.MAX_SIGNALS]
+
+    def _signal_dsl_generate(self, prices, regime, universe, aux_data=None) -> List[Signal]:
+        import sys
+        if prices is None or len(prices) == 0:
+            return []
+        compiled = type(self)._compiled_signal
+        h = compiled.formula_hash
+        state = (regime or {}).get('state')
+        rows, nfin, nl, ns = len(prices), 0, 0, 0
+        out: List[Signal] = []
+        skip = None
+        panel = None
+        if not self.should_run(state):
+            skip = 'regime'
+        elif not self.dsl_should_fire(prices, regime):
+            skip = 'gate'
+        elif rows < compiled.required_lookback + 1:
+            skip = 'lookback'
+        else:
+            panel = self.signal_panel(prices, universe, aux_data)
+            if panel is None or panel.empty:
+                skip = 'panel_empty'
+        if skip is None:
+            values = compiled(panel).iloc[-1].replace([np.inf, -np.inf], np.nan).dropna()
+            nfin = len(values)
+            close = panel['close']
+            for t, d, _strength in self.select_signals(values):
+                price = float(close[t].iloc[-1])
+                if not price > 0:
+                    continue
+                st = self.compute_stops_and_targets(close[t].dropna(), d, price, regime_state=state)
+                out.append(Signal(
+                    ticker=t, direction=d, entry_price=price,
+                    stop_loss=st['stop'], target_1=st['t1'], target_2=st['t2'], target_3=st['t3'],
+                    position_size_pct=round(self.SIGNAL_BASE_SIZE * self.position_scale(state), 4),
+                    confidence='MED',
+                    signal_params={'dsl_value': round(float(values[t]), 6),
+                                   'formula_hash': h, 'regime': state}))
+            nl = sum(1 for x in out if x.direction == 'LONG')
+            ns = len(out) - nl
+        print(f'[signal_dsl] id={self.id} hash={h} rows={rows} values={nfin} '
+              f'long={nl} short={ns}' + (f' skip={skip}' if skip else ''), file=sys.stderr)
+        print(f'[debug] signals={len(out)}', file=sys.stderr)
+        return out
 
     @abstractmethod
     def generate_signals(
