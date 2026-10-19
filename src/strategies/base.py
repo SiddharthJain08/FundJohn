@@ -339,8 +339,12 @@ class BaseStrategy(ABC):
         shift, cumulative): never centred windows, full-sample normalisation or
         cross-sectional rank on a future-inclusive frame, since ``fn`` sees the
         whole history. Cross-sectional fns (mean(axis=1), rank(axis=1)) over a
-        per-bar universe change the column tuple and recompute every bar:
-        correct, but no speed-up. Mutating the returned object is safe under
+        per-bar universe change the column tuple and recompute every bar,
+        each time over ALL T rows: correct, but a net LOSS versus a plain
+        call. Only one result is kept per ``name`` (a new column tuple evicts
+        the old one). A ``fn`` whose result is not indexed like the source
+        rows and columns (reductions such as ``.iloc[-1]``, ``tail``, a
+        row-dropping ``dropna``) is uncacheable: correct, no speed-up. Mutating the returned object is safe under
         pandas 3 Copy-on-Write."""
         stats = self.__dict__.setdefault(
             '_bt_cache_stats', {'hit': 0, 'miss': 0, 'recompute': 0, 'bypass': 0,
@@ -351,21 +355,34 @@ class BaseStrategy(ABC):
             return fn(frame)
         n = len(frame)
         cols = list(frame.columns)
-        if (n == 0 or n > len(src) or not frame.index.equals(src.index[:n])
-                or not all(c in src.columns for c in cols)
-                or not frame.equals(src.iloc[:n][cols])):
+        if n == 0 or n > len(src) or not frame.index.equals(src.index[:n]):
             stats['incompatible'] += 1
             return fn(frame)
+        # O(1) fast path: the loop's exact prefix slice of the source (same
+        # data pointer and strides under copy-on-write). Mixed dtypes / column
+        # subsets / transformed frames fall through to the full compare.
+        a, b = frame.to_numpy(), src.to_numpy()[:n]
+        if not (a.shape == b.shape and a.strides == b.strides
+                and a.__array_interface__['data'][0] == b.__array_interface__['data'][0]):
+            if (not all(c in src.columns for c in cols)
+                    or not frame.equals(src.iloc[:n][cols])):
+                stats['incompatible'] += 1
+                return fn(frame)
         store = self.__dict__.setdefault('_bt_cache', {})
         key = (name, tuple(frame.columns))
         ent = store.get(key)
         if ent is None:
             full = fn(src[cols])
-            if not isinstance(full, (pd.DataFrame, pd.Series)):
+            if (not isinstance(full, (pd.DataFrame, pd.Series))
+                    or not full.index.equals(src.index)
+                    or (isinstance(full, pd.DataFrame) and list(full.columns) != cols)):
                 stats['uncacheable'] += 1
                 return fn(frame)
-            if any(k[0] == name for k in store):
+            stale = [k for k in store if k[0] == name]
+            if stale:
                 stats['recompute'] += 1
+            for k in stale:
+                del store[k]
             store[key] = (fn, full)
             stats['miss'] += 1
         else:

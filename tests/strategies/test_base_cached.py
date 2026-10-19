@@ -113,3 +113,37 @@ def test_universe_change_counts_recompute(panel):
     s.cached('sma', fn, panel.iloc[:60][['ZZTEST1', 'ZZTEST2']])
     s.cached('sma', fn, panel.iloc[:61][['ZZTEST1', 'ZZTEST2', 'ZZTEST3']])
     assert s._bt_cache_stats['recompute'] == 1 and s._bt_cache_stats['miss'] == 2
+    assert len(s._bt_cache) == 1
+
+
+@pytest.mark.parametrize('f', [lambda p: p.pct_change(20).iloc[-1],
+                               lambda p: p.tail(60).rolling(20).mean(),
+                               lambda p: p.dropna()])
+def test_non_source_indexed_result_is_uncacheable_and_correct(panel, f):
+    s, fn = _armed(panel), _Fn(f)
+    frame = panel.iloc[:150]
+    out = s.cached('red', fn, frame)
+    exp = f(frame)
+    (pd.testing.assert_series_equal if isinstance(exp, pd.Series)
+     else pd.testing.assert_frame_equal)(out, exp, check_exact=True)
+    assert s._bt_cache_stats['uncacheable'] == 1 and not s._bt_cache
+
+
+def test_fast_path_skips_full_compare_for_exact_prefix(panel, monkeypatch):
+    s, fn = _armed(panel), _Fn()
+    called = []
+    orig = pd.DataFrame.equals
+    monkeypatch.setattr(pd.DataFrame, 'equals', lambda self, o: called.append(1) or orig(self, o))
+    s.cached('sma', fn, panel.loc[:panel.index[80]])
+    assert not called and s._bt_cache_stats['miss'] == 1
+    # column subset: no shared pointer/strides -> full compare runs
+    s.cached('sma2', fn, panel.iloc[:80][['ZZTEST1', 'ZZTEST3']])
+    assert called
+
+
+def test_mixed_dtype_frame_does_not_use_fast_path(panel):
+    s, fn = _armed(panel), _Fn(lambda p: p[['ZZTEST1']].rolling(5).mean())
+    src = panel.assign(tag='x')
+    s._cache_source = src
+    out = s.cached('m', fn, src.iloc[:60])
+    pd.testing.assert_frame_equal(out, fn.f(src.iloc[:60]), check_exact=True)

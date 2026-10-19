@@ -1808,10 +1808,16 @@ def run_backtest(strategy_id: str, *,
                 _log(f'asset gate ({os.environ.get("OPENCLAW_BT_ASSET_GATE", "parity")}): '
                      f'{len(_gate_map)} symbols mapped; {_n_no_long} long-blocked, '
                      f'{_n_no_short} short-blocked')
-    sim = _sim_fn(
-        instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
-        **_sim_kwargs,
-    )
+    try:
+        sim = _sim_fn(
+            instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
+            **_sim_kwargs,
+        )
+    finally:
+        # Abort paths (FinishedBacktest etc.) never reach IndicatorCacheTracker.finalize.
+        instance.__dict__.pop('_cache_source', None)
+        instance.__dict__.pop('_bt_cache', None)
+        instance.__dict__.pop('_bt_cache_stats', None)
     trades         = sim['trades']
     _info          = sim.get('info') or {}      # tracker output; absent on the options path
     universe_sizes = sim['universe_sizes']

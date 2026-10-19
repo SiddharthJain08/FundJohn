@@ -69,8 +69,9 @@ def test_flag_on_sets_source_trades_identical_and_line_once(monkeypatch, capsys)
     txt = capsys.readouterr().out
     assert txt.count('[bt_cache] on hits=') == 1
     assert _trades(on) and _trades(on) == _trades(off)
-    assert inst._bt_cache_stats['miss'] == 1 and inst._bt_cache_stats['hit'] > 0
-    assert on['info']['indicator_cache']['miss'] == 1
+    ic = on['info']['indicator_cache']
+    assert ic['miss'] == 1 and ic['hit'] > 0
+    assert '_bt_cache_stats' not in inst.__dict__
 
 
 def test_source_cleared_after_run(monkeypatch):

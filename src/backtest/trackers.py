@@ -193,7 +193,7 @@ class IndicatorCacheTracker(_Base):
 
     def finalize(self, info: dict) -> None:
         inst = self._ctx.instance
-        stats = dict(inst.__dict__.get('_bt_cache_stats') or {})
+        stats = dict(inst.__dict__.pop('_bt_cache_stats', None) or {})
         names = sorted({k[0] for k in (inst.__dict__.get('_bt_cache') or {})})
         info['indicator_cache'] = stats
         g = stats.get
