@@ -39,7 +39,8 @@ def build_market_cap_lookup(
     sh = sh[sh.ticker.isin(symset) & (sh.asof_date.astype(str) <= iso)]
     latest_shares = (sh.sort_values("asof_date").groupby("ticker")["shares"].last())
 
-    stats = ticker_window_stats(prices_path, cutoff=floor_iso, upto=iso)
+    stats = ticker_window_stats(prices_path, cutoff=floor_iso, upto=iso,
+                                need_volume=False)
     stats = stats[stats["ticker"].isin(symset)]
     latest_close = stats.set_index("ticker")["last_close"]
 

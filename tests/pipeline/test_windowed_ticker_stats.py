@@ -71,7 +71,7 @@ def _same(new, old):
         if np.isnan(b):
             assert np.isnan(a)
         else:
-            assert a == pytest.approx(b, rel=1e-12)
+            assert a == b  # exact: same pandas math, same summation order
 
 
 SYMS = ["ZZTEST1", "ZZTEST2", "ZZTEST3", "ZZTEST4", "ZZTEST_NONE"]
@@ -173,3 +173,41 @@ def test_no_full_read(mod, prices, tmp_path, monkeypatch):
     shares = tmp_path / "sh.parquet"
     pd.DataFrame([{"ticker": "ZZTEST1", "asof_date": "2026-01-01", "shares": 1e6}]).to_parquet(shares, index=False)
     assert build_market_cap_lookup(["ZZTEST1"], AS_OF, shares_path=shares, prices_path=prices)["ZZTEST1"] > 0
+
+
+def test_adv_all_nan_last20_matches_legacy(mod, tmp_path, monkeypatch):
+    df = _frame()
+    idx = df.index[df.ticker == "ZZTEST1"][-20:]
+    df.loc[idx, "close"] = np.nan
+    p = tmp_path / "allnan.parquet"
+    pq.write_table(pa.table({c: pa.array(df[c].to_numpy(), from_pandas=False) for c in df.columns}), p)
+    monkeypatch.setattr(mod, "PRICES_PARQUET", str(p))
+    old = _legacy_adv(p, SYMS)
+    assert np.isnan(old["ZZTEST1"]["adv_usd_20d"]) and old["ZZTEST_NONE"]["adv_usd_20d"] == 0.0
+    _same(mod.adv_usd_from_parquet(SYMS, AS_OF), old)
+
+
+def test_need_volume_branches(tmp_path):
+    p = tmp_path / "novol.parquet"
+    pd.DataFrame([{"ticker": "ZZTEST1", "date": "2026-06-01", "close": 5.0}]).to_parquet(p, index=False)
+    with pytest.raises(KeyError):
+        parquet_store.ticker_window_stats(p, cutoff="2026-05-01")
+    with pytest.raises(KeyError):
+        parquet_store.ticker_window_tail_rows(p, cutoff="2026-05-01")
+    out = parquet_store.ticker_window_stats(p, cutoff="2026-05-01", need_volume=False)
+    assert out["last_close"].iloc[0] == 5.0 and pd.isna(out["adv_usd"].iloc[0])
+
+
+@pytest.mark.parametrize("bad", [None, 20260101, "2026-01-01\n", "2026-1-1"])
+def test_cutoff_must_be_iso_string(prices, bad):
+    with pytest.raises(ValueError):
+        parquet_store.ticker_window_stats(prices, cutoff=bad)
+
+
+def test_missing_file_logs_one_line(mod, monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(mod, "PRICES_PARQUET", str(tmp_path / "nope.parquet"))
+    with caplog.at_level(logging.INFO):
+        out = mod.adv_usd_from_parquet(["ZZTEST1"], AS_OF)
+    assert out == {"ZZTEST1": {"adv_usd_20d": None}}
+    lines = [r.getMessage() for r in caplog.records if "[adv_window]" in r.getMessage()]
+    assert lines == ["[adv_window] adv_window_hits=0 adv_stale_fallback=0 missing_file=1"]

@@ -221,8 +221,63 @@ def read_filtered(
     return duckdb.sql(sql).df()
 
 
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _WINDOW_STATS_COLS = ['ticker', 'last_close', 'last_date', 'adv_usd', 'n_rows']
+
+
+def _window_prep(path, cutoff, upto, need_volume):
+    """Validate dates (ISO only: they are interpolated as SQL literals) and the
+    footer schema. Returns (quoted_path, where_clause, volume_select) or None
+    when the file is missing."""
+    for name, v, optional in (('cutoff', cutoff, False), ('upto', upto, True)):
+        if v is None and optional:
+            continue
+        if not isinstance(v, str) or not _ISO_DATE_RE.fullmatch(v):
+            raise ValueError(f"{name} must be an ISO date YYYY-MM-DD string, got {v!r}")
+    path = Path(path)
+    if not path.exists():
+        return None
+    has_vol = "volume" in pq.read_schema(path).names
+    if need_volume and not has_vol:
+        raise KeyError("volume")
+    vol = "volume" if has_vol else "CAST(NULL AS DOUBLE) AS volume"
+    where = f"date >= '{cutoff}'"
+    if upto is not None:
+        where += f" AND date <= '{upto}'"
+    return str(path).replace("'", "''"), where, vol
+
+
+_TAIL_ROWS_COLS = ['ticker', 'date', 'close', 'volume', 'n_rows']
+
+
+def ticker_window_tail_rows(
+    path: Path | str,
+    *,
+    cutoff: str,
+    upto: Optional[str] = None,
+    last_n: int = 20,
+) -> pd.DataFrame:
+    """
+    The <= last_n most recent (ticker, date, close, volume) rows per ticker in
+    [cutoff, upto], plus per-ticker n_rows (window count(*)). Returns raw rows so
+    callers can run pandas math (identical summation order to a full read).
+    Empty frame if the file is missing; KeyError('volume') if it has no volume.
+    """
+    prep = _window_prep(path, cutoff, upto, True)
+    if prep is None:
+        return pd.DataFrame(columns=_TAIL_ROWS_COLS)
+    qpath, where, vol = prep
+    last_n = int(last_n)
+    sql = f"""
+        WITH w AS (SELECT ticker, date, close, {vol}
+                   FROM read_parquet('{qpath}', hive_partitioning=false)
+                   WHERE {where}),
+             r AS (SELECT *, row_number() OVER (PARTITION BY ticker ORDER BY date DESC) AS rn,
+                          count(*) OVER (PARTITION BY ticker) AS n_rows FROM w)
+        SELECT ticker, date, close, volume, n_rows FROM r WHERE rn <= {last_n}
+        ORDER BY ticker, date
+    """
+    return duckdb.sql(sql).df()[_TAIL_ROWS_COLS]
 
 
 def ticker_window_stats(
@@ -231,6 +286,7 @@ def ticker_window_stats(
     cutoff: str,
     upto: Optional[str] = None,
     last_n: int = 20,
+    need_volume: bool = True,
 ) -> pd.DataFrame:
     """
     Per-ticker windowed aggregate over a prices parquet (DuckDB predicate pushdown).
@@ -241,20 +297,14 @@ def ticker_window_stats(
     included, NaN products skipped, mirroring pandas tail(n).mean()).
     adv_usd equals legacy tail(last_n) only when n_rows >= last_n.
     Empty frame with the columns above if the file is missing.
+    need_volume=True raises KeyError('volume') if the file has no volume column;
+    need_volume=False (last_close-only callers) yields NULL adv_usd instead.
     """
-    path = Path(path)
-    if not path.exists():
+    prep = _window_prep(path, cutoff, upto, need_volume)
+    if prep is None:
         return pd.DataFrame(columns=_WINDOW_STATS_COLS)
-    for name, v in (('cutoff', cutoff), ('upto', upto)):
-        if v is not None and not _ISO_DATE_RE.match(str(v)):
-            raise ValueError(f"{name} must be an ISO date YYYY-MM-DD, got {v!r}")
+    qpath, where, vol = prep
     last_n = int(last_n)
-    # Footer-only schema peek: callers that only need last_close may pass files without volume.
-    vol = "volume" if "volume" in pq.read_schema(path).names else "CAST(NULL AS DOUBLE) AS volume"
-    qpath = str(path).replace("'", "''")
-    where = f"date >= '{cutoff}'"
-    if upto is not None:
-        where += f" AND date <= '{upto}'"
     sql = f"""
         WITH w AS (SELECT ticker, date, close, {vol}
                    FROM read_parquet('{qpath}', hive_partitioning=false)
