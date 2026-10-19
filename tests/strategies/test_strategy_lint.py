@@ -416,6 +416,51 @@ class TestWarnRules(unittest.TestCase):
         self.assertIn('[strategy-lint-warn]', err.getvalue())
 
 
+class TestSignalExprLint(unittest.TestCase):
+    @staticmethod
+    def _src(body):
+        return OK_HEAD + 'class S(BaseStrategy):\n' + ''.join('    ' + b + '\n' for b in body)
+
+    def _kinds(self, body):
+        return [v for v in sl.lint_source(self._src(body)) if v.kind == 'signal_expr']
+
+    def test_bad_signal_is_a_violation(self):
+        for sig in ('"close.__class__"', '"sma(vol, 5)"', '"lag(close, 0)"', '"close > 1"'):
+            self.assertEqual(len(self._kinds([f'SIGNAL = {sig}'])), 1, sig)
+
+    def test_good_signal_is_clean(self):
+        self.assertEqual(self._kinds(['SIGNAL = "sma(close, 20) / close - 1"']), [])
+        self.assertEqual(self._kinds(['SIGNAL: str = "rank_pct(close)"']), [])
+        self.assertEqual(sl.lint_source(self._src(['SIGNAL = "sma(close, 20)"'])), [])
+
+    def test_bad_annotated_signal_is_a_violation(self):
+        self.assertEqual(len(self._kinds(['SIGNAL: str = "exp(close)"'])), 1)
+
+    def test_signal_columns_literal_is_honoured(self):
+        self.assertEqual(self._kinds(["SIGNAL_COLUMNS = frozenset({'close','volume'})",
+                                      'SIGNAL = "sma(close * volume, 5)"']), [])
+        self.assertEqual(self._kinds(["SIGNAL_COLUMNS = ['close', 'high', 'low']",
+                                      'SIGNAL = "atr(14)"']), [])
+        self.assertEqual(len(self._kinds(['SIGNAL = "close * volume"'])), 1)
+        self.assertEqual(len(self._kinds(['SIGNAL_COLUMNS = make()', 'SIGNAL = "close"'])), 1)
+
+    def test_non_literal_signal_is_a_violation(self):
+        for rhs in ('"sma(close, " + "5)"', 'build()', 'f"close"'):
+            v = self._kinds([f'SIGNAL = {rhs}'])
+            self.assertEqual(len(v), 1, rhs)
+            self.assertIn('string literal', v[0].detail)
+
+    def test_lint_never_imports_sympy(self):
+        import subprocess
+        src = self._src(['SIGNAL = "sma(close, 20)"'])
+        r = subprocess.run(
+            [sys.executable, '-c',
+             'import sys; from strategies import strategy_lint as sl; import sys as s2; '
+             f'sl.lint_source({src!r}); print("sympy" in sys.modules)'],
+            cwd=str(ROOT / 'src'), capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.stdout.strip(), 'False', r.stderr)
+
+
 class TestFleetIsClean(unittest.TestCase):
     def test_every_live_strategy_file_lints_clean(self):
         impl = ROOT / 'src' / 'strategies' / 'implementations'

@@ -48,6 +48,7 @@ _SRC_DIR = str(Path(__file__).resolve().parents[1])
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 from strategies.intraday import RTH_BAR_STARTS_ET  # noqa: E402  pure constants; the candidate is never imported
+from strategies.signal_expr import SignalExprError, validate_expr_syntax  # noqa: E402  stdlib-only module: no sympy/pandas in the lint process
 
 Violation = namedtuple('Violation', 'line kind detail')
 
@@ -240,7 +241,64 @@ def lint_source(source: str, filename: str = '<candidate>') -> list:
                                          f'{arg.value!r}'))
 
     out.extend(_lint_intraday(tree))
+    out.extend(_lint_signal_expr(tree))
     out.sort(key=lambda v: (v.line, v.kind, v.detail))
+    return out
+
+
+def _str_literals(node):
+    """set of str from a set/list/tuple/frozenset(...)/set(...) literal, else None."""
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in ('frozenset', 'set') and len(node.args) == 1
+            and not node.keywords):
+        node = node.args[0]
+    if isinstance(node, (ast.Set, ast.List, ast.Tuple)):
+        vals = [e.value for e in node.elts
+                if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+        return set(vals) if len(vals) == len(node.elts) else None
+    return None
+
+
+def _assigned(stmt, name):
+    """value node if `stmt` assigns `name` (Assign / AnnAssign), else None."""
+    if isinstance(stmt, ast.Assign):
+        if any(isinstance(t, ast.Name) and t.id == name for t in stmt.targets):
+            return stmt.value
+    elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+        if isinstance(stmt.target, ast.Name) and stmt.target.id == name:
+            return stmt.value
+    return None
+
+
+def _lint_signal_expr(tree) -> list:
+    """kind='signal_expr': a class-level `SIGNAL` must be a string literal that
+    passes the signal_expr ast whitelist for the columns in the sibling
+    `SIGNAL_COLUMNS` literal (default {'close'}). Pure AST — never compiles."""
+    out = []
+    for cls in ast.walk(tree):
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        columns, cols_bad = {'close'}, None
+        for stmt in cls.body:
+            v = _assigned(stmt, 'SIGNAL_COLUMNS')
+            if v is not None:
+                columns = _str_literals(v)
+                if columns is None:
+                    cols_bad = stmt
+        for stmt in cls.body:
+            v = _assigned(stmt, 'SIGNAL')
+            if v is None:
+                continue
+            if not (isinstance(v, ast.Constant) and isinstance(v.value, str)):
+                out.append(Violation(stmt.lineno, 'signal_expr', 'SIGNAL must be a string literal'))
+            elif cols_bad is not None:
+                out.append(Violation(cols_bad.lineno, 'signal_expr',
+                                     'SIGNAL_COLUMNS must be a set/list/tuple literal of strings'))
+            else:
+                try:
+                    validate_expr_syntax(v.value, columns=columns)
+                except SignalExprError as e:
+                    out.append(Violation(stmt.lineno, 'signal_expr', f'SIGNAL {v.value!r}: {e}'))
     return out
 
 
