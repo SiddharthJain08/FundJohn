@@ -257,7 +257,10 @@ def _load_trade_pool(strategy_id: str, regime_state: str,
 
 
 def derive_seed(strategy_id, regime_state, proposal_id, stop, target, max_hold) -> int:
-    """Deterministic seed from the request fields (spec 2026-10-19 B3)."""
+    """Deterministic seed from the request fields (spec 2026-10-19 B3).
+
+    Two runs with identical request fields and proposal_id=None share a seed and
+    reproduce identical numbers, by design."""
     return zlib.crc32(
         f"{strategy_id}|{regime_state}|{proposal_id}|{stop}|{target}|{max_hold}".encode())
 
@@ -393,7 +396,9 @@ def run_path_mc(strategy_id: str, regime_state: str,
 
 def persist_run(result: dict, proposal_id: Optional[int] = None) -> Optional[int]:
     """INSERT a completed run into strategy_regime_intraday_mc_runs.
-    Returns row id, or None if status != OK."""
+    Returns row id, or None if status != OK.
+
+    Note: requires migration 165; johnbot is restarted immediately after merge so `migrate()` applies it before the :3000 MC routes can INSERT."""
     if result.get('status') != 'OK':
         return None
     with _connect() as conn:

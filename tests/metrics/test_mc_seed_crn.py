@@ -98,3 +98,14 @@ def test_linear_mc_persists_derived_seed(monkeypatch):
     r2 = rpm.bootstrap_size_scalar('S_zz', 'LOW_VOL', 1.0, 1.5, n_iter=50,
                                    seed=None, proposal_id=4)
     assert r1['sharpe_p50'] == r2['sharpe_p50']
+
+
+def test_crn_paths_invariant_to_policy(monkeypatch):
+    rec = _stub(monkeypatch)
+    _run(n_iter=50, seed=123)
+    base = list(rec)
+    for kw in ({'proposed_stop_pct': 0.05},
+               {'proposed_target_pct': 0.10, 'proposed_size': 2.0}):
+        rec.clear()
+        _run(n_iter=50, seed=123, **kw)
+        assert rec == base

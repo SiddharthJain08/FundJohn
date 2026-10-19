@@ -159,7 +159,9 @@ def bootstrap_size_scalar(strategy_id: str, regime_state: str,
                            proposal_id: Optional[int] = None,
                            persist: bool = True) -> dict:
     """End-to-end: load realized PnLs, bootstrap under the size ratio,
-    optionally persist to strategy_regime_mc_runs."""
+    optionally persist to strategy_regime_mc_runs.
+
+    Note: requires migration 165; johnbot is restarted immediately after merge so `migrate()` applies it before the :3000 MC routes can INSERT."""
     pnls = _load_realized_pnls(strategy_id, regime_state, window_days)
     if seed is None:
         seed = zlib.crc32(
