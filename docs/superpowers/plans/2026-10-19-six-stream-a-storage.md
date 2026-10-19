@@ -29,7 +29,7 @@ Stream A specifics:
   - `OPENCLAW_PRICES_TRAILING_WINDOW=1` (A3)
   - `OPENCLAW_OPTIONS_MONTHLY=1` (A6)
   - `OPENCLAW_PRICES_HIVE=1` (A7)
-- No flag needed: A1 writer and check (container-only), A2 (pure fix; see the stale-ticker note in Task 3), A4 (doc/dormant), A5 (DDL).
+- No flag needed: A1 writer and check (container-only), A2 (pure fix, byte-identical via the two-pass read in Task 3), A4 (doc/dormant), A5 (DDL).
 - Log prefixes:
   - `[prices_window]` (A3, once per `load_prices`)
   - `[options_store]` (A6, once per options write)
@@ -72,12 +72,12 @@ No flag: container-only, data byte-identical.
   - `parquet_layout.rowgroup_span_report(path: Path | str, date_col: str = 'date', max_span_days: int = 60) -> dict` with keys:
     - `n_row_groups: int`, `n_tight: int`, `frac_tight: float`
     - `median_span_days: float`, `max_span_days_seen: int`
-    - `page_index: bool` (True iff every column chunk of row group 0 `has_column_index`)
+    - `page_index: bool` (True iff every column chunk of row group 0 `has_column_index`). Informational only: it is printed in the detail and never affects the verdict (controller ruling 1: no page-index WARN, because the daily DuckDB `COPY` append can never write one).
     - `monotone: bool` (every `rg[i].max(date) <= rg[i+1].min(date)`)
     - `missing_stats: int`
   - `parquet_layout.layout_verdict(report: dict, min_frac: float = 0.95) -> tuple[str, str]`
-    - returns `('FAIL'|'WARN'|'PASS', detail)`
-    - FAIL if `frac_tight < min_frac` or `missing_stats > 0`, else WARN if not `page_index`, else PASS
+    - returns `('FAIL'|'PASS', detail)`
+    - FAIL if `frac_tight < min_frac` or `missing_stats > 0`, else PASS. There is no WARN branch.
     - detail ≤ 200 chars
   - Check `prices_rowgroup_span` (tags `['storage']`, requires `['fs']`) reads `$OPENCLAW_MASTER_DIR/prices.parquet` (default `/root/openclaw/data/master`, same env as `master_freshness.py:31`). It maps the verdict onto `Status`. A missing file is `SKIP`.
 
@@ -96,8 +96,8 @@ No flag: container-only, data byte-identical.
   - The replaced day appears once, with the new closes.
 - `test_span_report_ticker_contiguous_vs_date_sorted(tmp_path)`:
   - Fixture 1: 3 tickers × 400 dates written ticker-contiguous with `row_group_size=100` (each row group spans more than 60 days) gives `frac_tight < 0.95`, `monotone False`, and verdict `FAIL`.
-  - Fixture 2: the same rows sorted (date, ticker) gives `frac_tight == 1.0`, `monotone True`, and verdict `PASS` when written with page index.
-  - Fixture 3: written via DuckDB `COPY` gives verdict `WARN` and detail containing `page index`.
+  - Fixture 2: the same rows sorted (date, ticker) gives `frac_tight == 1.0`, `monotone True`, and verdict `PASS`.
+  - Fixture 3: the same sorted rows written via DuckDB `COPY` (no page index) still give verdict `PASS`, `report['page_index'] is False`, and the detail contains `page_index=False`.
 - `test_span_report_reads_footer_only(monkeypatch, tmp_path)`:
   - Monkeypatch `pq.read_table` and `pd.read_parquet` to raise; the report still succeeds.
 
@@ -159,11 +159,15 @@ git commit -m "feat(storage): A1 writer page index + row-group size, footer-only
 - [ ] **Step 1: Write the failing tests** (import via `importlib.util.spec_from_file_location`, as `tests/scripts/test_build_options_surface.py:11-14` does)
 - `test_resort_dry_run_leaves_master_untouched(tmp_path)`:
   - Ticker-contiguous 3×400 fixture.
-  - After `resort(apply=False)`: master bytes are unchanged (sha256), no `*.resort.tmp` is left, `rows_old == rows_new`, all three equality flags are True, and `verdict_new` is `'WARN'` (DuckDB writes no page index; see the spec defect report).
+  - After `resort(apply=False)`: master bytes are unchanged (sha256), no `*.resort.tmp` is left, `rows_old == rows_new`, all three equality flags are True, and `verdict_new` is `'PASS'`.
 - `test_resort_apply_sorts_and_keeps_backup(tmp_path)`:
   - After `apply=True, today=date(2026,10,20)`, `prices.parquet.pre-resort-20261020` exists, has the old sha256, and is a hardlink (`st_ino` equals the old inode).
   - The new file's `rowgroup_span_report(...)['monotone']` is True.
   - The multiset of `(ticker,date,close)` rows is equal to the original.
+- `test_resort_output_has_page_index(tmp_path)` (controller ruling 1):
+  - Small fixture, `row_group_size=256`.
+  - For every row group `i` and column `j` of the output, `pq.ParquetFile(out).metadata.row_group(i).column(j).offset_index_offset is not None`.
+  - `num_row_groups == ceil(rows / 256)`.
 - `test_resort_refuses_on_hash_mismatch(monkeypatch, tmp_path)`:
   - Monkeypatch the script's `_hashes(con, src)` to return a different value for the tmp file.
   - Expect `SystemExit(2)` from `main([...,'--apply'])`, master sha256 unchanged, and no backup created.
@@ -180,7 +184,12 @@ Expected: FAIL (file not found).
 
 Sequence inside `_file_lock(path, timeout=lock_timeout)`:
 1. Open a DuckDB connection with `SET memory_limit`, `SET temp_directory=<spill_dir>` (mkdir), `SET threads`, `SET preserve_insertion_order=true`.
-2. `COPY (SELECT * FROM read_parquet('<p>', hive_partitioning=false) ORDER BY date, ticker) TO '<p>.resort.tmp' (FORMAT PARQUET, COMPRESSION 'snappy', ROW_GROUP_SIZE <n>)`.
+2. Write the sorted file through pyarrow, not `COPY`, so the output carries a page index (controller ruling 1):
+   - `reader = con.execute("SELECT * FROM read_parquet('<p>', hive_partitioning=false) ORDER BY date, ticker").fetch_record_batch(rows_per_batch=row_group_size)`
+   - `pq.ParquetWriter('<p>.resort.tmp', reader.schema, compression='snappy', write_page_index=True)`
+   - For each batch, `writer.write_batch(batch, row_group_size=row_group_size)`; close the writer.
+   - The DuckDB sort spills to `spill_dir`, and only one batch is held in Python at a time.
+   - `append_dedup` stays on DuckDB `COPY`. The page index therefore lasts only until the next daily append; the layout check does not depend on it.
 3. Verify old vs tmp:
    - `DESCRIBE` lists equal (schema)
    - `count(*)` equal
@@ -196,7 +205,7 @@ Print one line:
 [resort_prices] rows=… schema_eq=… colhash_eq=… rowhash_eq=… rg=… frac_tight=… monotone=… page_index=… verdict=… applied=… backup=…
 ```
 
-The script never deletes the backup. It prints `remove <backup> after 2026-10-27 if prices_rowgroup_span is PASS/WARN and the 15:00 ET compute is clean`.
+The script never deletes the backup. It prints `remove <backup> after 2026-10-27 if prices_rowgroup_span is PASS and the 15:00 ET compute is clean`.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -214,7 +223,16 @@ git commit -m "feat(storage): A1 resort_prices_master one-off (locked, hash-veri
 
 ### Task 3: A2 — windowed reads for the daily ADV and market-cap steps
 
-No flag (spec §0 names A2 a pure fix). This task does change one behaviour: a ticker with no bars in the last 60 calendar days now gets `adv_usd_20d = 0.0` instead of its historical 20-bar mean. `universe_default.py:37` gates on `adv_usd_20d >= 5e6`, so such a ticker leaves the default universe. The change is pinned by a test below and reported to the controller as a spec clarification.
+No flag (spec §0 names A2 a pure fix). The output must be byte-identical to the legacy full read (controller ruling 3), using a two-pass read:
+
+- **Pass 1:** the 60-day windowed stats.
+- **Pass 2:** the legacy `tail(20)` math over the full history of the fallback tickers only.
+
+The pass-1 result equals legacy `tail(20)` only for a ticker with at least `last_n` = 20 rows in the window. So the fallback set is every requested symbol with fewer than 20 window rows. That includes tickers with zero window rows (stale), which is the ruling's case, and tickers that are sparse or halted inside the window. The ruling names only the stale case; including the sparse case is my refinement, needed for byte-identity.
+
+Pass 2 is one filtered read: `pq.read_table(path, columns=['ticker','date','close','volume'], filters=[('ticker','in', fallback)])`.
+
+`market_cap_lookup` already cuts at a 10-day floor (`:41-43`), so it needs only pass 1 with the same floor.
 
 **Files:**
 - Modify: `src/data/parquet_store.py` (new helper after `read_filtered`, `:192-214`)
@@ -225,7 +243,7 @@ No flag (spec §0 names A2 a pure fix). This task does change one behaviour: a t
 **Interfaces:**
 - Produces:
   - `parquet_store.ticker_window_stats(path: Path | str, *, cutoff: str, upto: str | None = None, last_n: int = 20) -> pd.DataFrame`
-    - Columns `['ticker', 'last_close', 'last_date', 'adv_usd']`, one row per ticker with any row in `[cutoff, upto]`.
+    - Columns `['ticker', 'last_close', 'last_date', 'adv_usd', 'n_rows']`, one row per ticker with any row in `[cutoff, upto]`. `n_rows` is `count(*)` in the window, NaN rows included.
     - Empty frame with those columns if the file is missing.
   - `run_ticker_metadata_step.adv_usd_from_parquet(symbols, as_of: date | None = None) -> dict[str, dict]` (default `date.today()`)
   - `ADV_WINDOW_CALENDAR_DAYS = 60` (module constant in `run_ticker_metadata_step.py`)
@@ -239,6 +257,7 @@ WITH w AS (SELECT ticker, date, close, volume FROM read_parquet('<p>', hive_part
 SELECT ticker,
        arg_max(close, date) FILTER (WHERE close IS NOT NULL AND NOT isnan(close)) AS last_close,
        max(date) AS last_date,
+       count(*) AS n_rows,
        avg(close*volume) FILTER (WHERE rn <= <last_n> AND close*volume IS NOT NULL
                                    AND NOT isnan(close*volume)) AS adv_usd
 FROM r GROUP BY ticker
@@ -254,12 +273,14 @@ The `FILTER`s reproduce pandas' NaN-skipping in `groupby.last()` and `mean()`. `
 - `test_adv_true_nan_skipped_like_pandas`:
   - Write the fixture with `pa.Table.from_pandas(df, from_pandas=False)` so one `close` is a real IEEE NaN, not null.
   - The result equals `_legacy_adv`.
-- `test_adv_stale_ticker_is_zero` pins the behaviour change: `ZZTEST3`'s last bar is 90 days before as_of, so new = `0.0` and legacy > 0.
+- `test_adv_stale_ticker_matches_legacy` (controller ruling 3): `ZZTEST3`'s last bar is 90 days before as_of. The new `adv_usd_20d` equals `_legacy_adv`, which is non-zero. `build_market_cap_lookup` gives the same result (`None`, outside the 10-day floor) as the legacy pandas path.
+- `test_adv_sparse_in_window_ticker_matches_legacy`: `ZZTEST4` has 5 bars in the window and 100 older bars. The new value equals `_legacy_adv`.
+- `test_adv_log_line(caplog)`: exactly one `[adv_window] adv_window_hits=2 adv_stale_fallback=2` line for the fixture above (`ZZTEST1/2` are hits; `ZZTEST3/4` fall back).
 - `test_market_cap_identical_with_nan_latest_close`:
   - The latest close is NaN (null) for `ZZTEST1`.
   - `build_market_cap_lookup` returns `shares × previous close`, equal to the legacy pandas path copied into the test.
 - `test_ticker_window_stats_rejects_non_iso_cutoff`: `ValueError` on `cutoff="2026-01-01' OR 1=1"`.
-- `test_no_full_read(monkeypatch)`: monkeypatch `pandas.read_parquet` to raise when called on the prices fixture path; both functions still succeed.
+- `test_no_full_read(monkeypatch)`: monkeypatch `pandas.read_parquet` to raise when called on the prices fixture path, and wrap `pq.read_table` to assert that every call carries a `ticker in` filter. Both functions still succeed.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -270,7 +291,10 @@ Expected: FAIL (`AttributeError: ticker_window_stats`).
 
 - `adv_usd_from_parquet`:
   - `cutoff = (as_of - timedelta(days=ADV_WINDOW_CALENDAR_DAYS)).isoformat()`, `upto = as_of.isoformat()`.
-  - Map `adv_usd` onto `symbols` with default `0.0`.
+  - Pass 1: `ticker_window_stats(PRICES_PARQUET, cutoff=…, upto=…)`. Symbols with `n_rows >= 20` take `adv_usd`.
+  - Pass 2: if the fallback list is non-empty, run the filtered `pq.read_table` above, then apply the verbatim legacy `:38-41` math (isin → dollar_volume → sort by date → `groupby.tail(20)` → mean) to that subset.
+  - Missing symbols default to `0.0`, as legacy `last_20.get(s, 0.0)` does.
+  - Log `[adv_window] adv_window_hits=<N> adv_stale_fallback=<M>` once per call.
   - Keep the missing-file branch at `:34-35`.
   - Pass `as_of=today` at `:50`.
 - `market_cap_lookup`: replace `:40-44` with `ticker_window_stats(prices_path, cutoff=floor_iso, upto=iso)` and take `last_close` per ticker. The shares read at `:36-38` is unchanged (small file).
@@ -336,6 +360,8 @@ git commit -m "chore(ingestion): A4 close-proxy docstring 0.60, delete dormant P
 ---
 
 ### Task 5: A5 — migration 164 (idempotent drop of the two zero-scan indexes) + stop 093 re-creating them
+
+**Controller note:** the controller runs `DROP INDEX CONCURRENTLY` by hand, off-hours, BEFORE the first johnbot restart after this merges (the R1 runbook below).
 
 **Why 093 changes:** `postgres.js:42-55 migrate()` re-runs EVERY migration file on each johnbot start (`bot.js:1663`). `093_unified_backtest_tables.sql:84-88` has `CREATE INDEX IF NOT EXISTS` for both indexes. After the drop, every restart would rebuild them on the 31 M-row table (non-concurrently, blocking writes) and 164 would drop them again.
 
