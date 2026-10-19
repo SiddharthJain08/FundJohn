@@ -64,6 +64,14 @@ class Signal:
     target_3:          float
     position_size_pct: float
     confidence:        str          # HIGH | MED | LOW
+    # Engine-recognised signal_params keys (comment only, no behaviour here):
+    #   hold_days    open-book hold cap (exit-hook strategies)
+    #   exit_on      'session_close' opts into the intraday session simulator; needs
+    #   entry_bar_et 'HH:MM' RTH 30-min bar start (fill = that bar's open) — build both
+    #                with strategies.intraday.session_close_params; contract:
+    #                docs/specs/2026-10-19-intraday-session-simulator-spec.md
+    #   strategy_id  provenance tag used by the sizer / ledgers
+    #   confidence   strategy-supplied conviction (free-form; HIGH | MED | LOW or numeric)
     signal_params:     dict = field(default_factory=dict)
     # Phase 5 (2026-04-22): per-signal deterministic features that used to be
     # computed by research_report.py — HV, beta, momentum, EV/p_t1, any
