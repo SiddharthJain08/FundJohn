@@ -211,8 +211,6 @@ def _tangency_side_sharpe_enum(sids: list[str], s: list[float],
     return best, degraded
 
 
-
-
 def _tangency_side_sharpe_nnls(sids: list[str], s: list[float],
                                sim: dict, shrink: float,
                                gamma: float | None = None) -> tuple[float, bool]:
@@ -230,19 +228,26 @@ def _tangency_side_sharpe_nnls(sids: list[str], s: list[float],
     eff_shrink = shrink if gamma is None else float(gamma)
     R = _tangency_R(sids, sim, eff_shrink)
     sv = _np.asarray(s, dtype=float)
+    if not (_np.isfinite(R).all() and _np.isfinite(sv).all()):
+        # NaN/inf similarity: the enumeration path tolerates it (such subsets
+        # fail q > 1e-12 and are skipped) - delegate so the live cycle never raises.
+        return _tangency_side_sharpe_enum(sids, s, sim, shrink, gamma=gamma)
     degraded = False
     try:
-        L = _np.linalg.cholesky(R)
-    except _np.linalg.LinAlgError:
-        w, V = _np.linalg.eigh(R)
-        w = _np.maximum(w, 1e-8)
-        R = V @ _np.diag(w) @ V.T
-        d = _np.sqrt(_np.diag(R))
-        R = R / _np.outer(d, d)
-        L = _np.linalg.cholesky(R)
-        degraded = True
-    b = solve_triangular(L, sv, lower=True)
-    x, _ = nnls(L.T, b)
+        try:
+            L = _np.linalg.cholesky(R)
+        except _np.linalg.LinAlgError:
+            w, V = _np.linalg.eigh(R)
+            w = _np.maximum(w, 1e-8)
+            R = V @ _np.diag(w) @ V.T
+            d = _np.sqrt(_np.diag(R))
+            R = R / _np.outer(d, d)
+            L = _np.linalg.cholesky(R)
+            degraded = True
+        b = solve_triangular(L, sv, lower=True)
+        x, _ = nnls(L.T, b)
+    except (_np.linalg.LinAlgError, ValueError):
+        return _tangency_side_sharpe_enum(sids, s, sim, shrink, gamma=gamma)
     q = float(sv @ x)
     best = float(max(s))
     return (max(best, math.sqrt(q)) if q > 1e-12 else best), degraded

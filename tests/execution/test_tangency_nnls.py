@@ -30,7 +30,7 @@ def test_nnls_non_psd_fallback_floor_and_degraded():
     q, deg = og._tangency_side_sharpe_nnls(["a", "b", "c"], [1.2, 1.1, 1.0], sim, 0.10)
     assert math.isfinite(q) and q >= 1.2 - 1e-9 and deg is True
 
-def test_all_nonpositive_side_returns_max(): 
+def test_all_nonpositive_side_returns_max():
     q, _ = og._tangency_side_sharpe_nnls(["a", "b"], [-0.5, -0.2], {}, 0.10)
     assert q == pytest.approx(-0.2)
 
@@ -75,3 +75,30 @@ def test_diag_token_flag_on_and_error(monkeypatch):
     out, _ = og.tangency_net_sharpe({"ZZTEST1": [("a", 1), ("b", 1)]}, {}, {"a": 1.0, "b": 0.8}, diag=diag)
     assert og.tangency_diag_token(diag) == "tangency_nnls_maxdiff=error:ZeroDivisionError" and out["ZZTEST1"] > 1.0
     assert og.tangency_diag_token({}) == "tangency_nnls_maxdiff=n/a"
+
+
+def test_nnls_nan_sim_falls_back_to_enum_never_raises():
+    sim = {"a": {"b": float("nan"), "c": 0.2}, "b": {"c": 0.1}}
+    s = [1.2, 1.1, 0.9]
+    q = og._tangency_side_sharpe_nnls(["a", "b", "c"], s, sim, 0.10)
+    assert q == og._tangency_side_sharpe_enum(["a", "b", "c"], s, sim, 0.10)
+
+
+def test_nnls_matches_enum_mixed_sign_gamma():
+    rng = np.random.default_rng(11)
+    for _ in range(200):
+        n = int(rng.integers(2, 8)); ids, sim = _pd_sim(rng, n)
+        s = [float(v) for v in rng.uniform(-1.0, 2.0, n)]
+        e, _ = og._tangency_side_sharpe_enum(ids, s, sim, 0.10, gamma=0.3)
+        q, _ = og._tangency_side_sharpe_nnls(ids, s, sim, 0.10, gamma=0.3)
+        assert abs(e - q) < 1e-9
+
+
+def test_diag_flag_off_truncation_gives_positive_maxdiff(monkeypatch):
+    monkeypatch.delenv("OPENCLAW_TANGENCY_NNLS", raising=False)
+    ids = [f"s{i}" for i in range(25)]
+    w = {i: 1.0 for i in ids}
+    diag = {}
+    og.tangency_net_sharpe({"ZZTEST1": [(i, 1) for i in ids]}, {}, w, shrink=0.0, diag=diag)
+    assert diag["maxdiff"] > 0.1
+    assert float(og.tangency_diag_token(diag).split("=")[1]) > 0.1
