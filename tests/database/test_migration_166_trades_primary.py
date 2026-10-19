@@ -53,7 +53,11 @@ def test_166_backfill_is_guarded_locked_and_marked():
     sql = _sql(F166)
     assert "'backfilled:166'" in sql and 'obj_description' in sql
     assert 'LOCK TABLE strategy_backtest_runs IN SHARE MODE' in sql
-    assert "set_config('lock_timeout'" in sql
+    assert 'SET LOCAL statement_timeout = 0;' in sql
+    assert "SET LOCAL lock_timeout = '60s';" in sql
+    assert 'set_config' not in sql
+    assert sql.index('SET LOCAL statement_timeout') < sql.index('DO $$')
+    assert sql.index("SET LOCAL lock_timeout") < sql.index('DO $$')
     assert 'ON CONFLICT (run_id, trade_seq) DO NOTHING' in sql
 
 

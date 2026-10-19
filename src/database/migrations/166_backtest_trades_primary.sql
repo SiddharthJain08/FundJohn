@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS strategy_backtest_trades_primary (
   PRIMARY KEY (run_id, trade_seq)
 );
 
+-- Top-level (not inside the DO): a timeout changed inside a running statement cannot reset
+-- that statement's timer. Transaction-scoped, so they lapse at commit.
+SET LOCAL statement_timeout = 0;
+SET LOCAL lock_timeout = '60s';
+
 DO $$
 DECLARE
   rid     UUID;
@@ -47,8 +52,6 @@ BEGIN
     RETURN;
   END IF;
 
-  PERFORM set_config('lock_timeout', '60s', true);
-  PERFORM set_config('statement_timeout', '0', true);
   -- Blocks a concurrent persist or rename from committing mid-backfill, so the cache
   -- cannot drift on day one.
   LOCK TABLE strategy_backtest_runs IN SHARE MODE;
