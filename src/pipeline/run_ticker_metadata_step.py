@@ -41,7 +41,8 @@ def adv_usd_from_parquet(symbols, as_of: date | None = None):
     window rows (stale/sparse) get the legacy tail(20) math over their full
     history, so output is identical to the legacy full read."""
     if not os.path.exists(PRICES_PARQUET):
-        log.info("[adv_window] adv_window_hits=0 adv_stale_fallback=0 missing_file=1")
+        print("[adv_window] adv_window_hits=0 adv_stale_fallback=0 missing_file=1",
+              file=sys.stderr, flush=True)
         return {s: {"adv_usd_20d": None} for s in symbols}
     as_of = as_of or date.today()
     cutoff = (as_of - timedelta(days=ADV_WINDOW_CALENDAR_DAYS)).isoformat()
@@ -63,7 +64,8 @@ def adv_usd_from_parquet(symbols, as_of: date | None = None):
     df["dollar_volume"] = df["close"] * df["volume"]
     last_20 = (df.sort_values("date").groupby("ticker")
                  .tail(ADV_LAST_N).groupby("ticker")["dollar_volume"].mean())
-    log.info("[adv_window] adv_window_hits=%d adv_stale_fallback=%d", len(hit_set), len(fallback))
+    print(f"[adv_window] adv_window_hits={len(hit_set)} adv_stale_fallback={len(fallback)}",
+          file=sys.stderr, flush=True)
     return {s: {"adv_usd_20d": float(last_20.get(s, 0.0))} for s in symbols}
 
 def main():

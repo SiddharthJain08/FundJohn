@@ -108,10 +108,9 @@ def test_adv_sparse_in_window_ticker_matches_legacy(mod, prices):
     _same(mod.adv_usd_from_parquet(["ZZTEST4"], AS_OF), _legacy_adv(prices, ["ZZTEST4"]))
 
 
-def test_adv_log_line(mod, caplog):
-    with caplog.at_level(logging.INFO):
-        mod.adv_usd_from_parquet(["ZZTEST1", "ZZTEST2", "ZZTEST3", "ZZTEST4"], AS_OF)
-    lines = [r.getMessage() for r in caplog.records if "[adv_window]" in r.getMessage()]
+def test_adv_log_line(mod, capsys):
+    mod.adv_usd_from_parquet(["ZZTEST1", "ZZTEST2", "ZZTEST3", "ZZTEST4"], AS_OF)
+    lines = [l for l in capsys.readouterr().err.splitlines() if "[adv_window]" in l]
     assert lines == ["[adv_window] adv_window_hits=2 adv_stale_fallback=2"]
 
 
@@ -204,10 +203,21 @@ def test_cutoff_must_be_iso_string(prices, bad):
         parquet_store.ticker_window_stats(prices, cutoff=bad)
 
 
-def test_missing_file_logs_one_line(mod, monkeypatch, tmp_path, caplog):
+def test_missing_file_logs_one_line(mod, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(mod, "PRICES_PARQUET", str(tmp_path / "nope.parquet"))
-    with caplog.at_level(logging.INFO):
-        out = mod.adv_usd_from_parquet(["ZZTEST1"], AS_OF)
+    out = mod.adv_usd_from_parquet(["ZZTEST1"], AS_OF)
     assert out == {"ZZTEST1": {"adv_usd_20d": None}}
-    lines = [r.getMessage() for r in caplog.records if "[adv_window]" in r.getMessage()]
+    lines = [l for l in capsys.readouterr().err.splitlines() if "[adv_window]" in l]
     assert lines == ["[adv_window] adv_window_hits=0 adv_stale_fallback=0 missing_file=1"]
+
+
+def test_market_cap_accepts_datetime(tmp_path):
+    from datetime import datetime
+    p = tmp_path / "px.parquet"
+    _frame().to_parquet(p, index=False)
+    shares = tmp_path / "sh.parquet"
+    pd.DataFrame([{"ticker": "ZZTEST1", "asof_date": "2026-01-01", "shares": 1e6}]).to_parquet(shares, index=False)
+    a = build_market_cap_lookup(["ZZTEST1"], AS_OF, shares_path=shares, prices_path=p)
+    b = build_market_cap_lookup(["ZZTEST1"], datetime(AS_OF.year, AS_OF.month, AS_OF.day, 13, 5),
+                                shares_path=shares, prices_path=p)
+    assert a == b

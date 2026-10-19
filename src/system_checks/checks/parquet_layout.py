@@ -10,8 +10,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from data.parquet_layout import layout_verdict, rowgroup_span_report
-
 from ..registry import check
 from ..types import Status
 
@@ -24,5 +22,12 @@ def _prices_rowgroup_span():
     path = _MASTER_DIR / 'prices.parquet'
     if not path.exists():
         return Status.SKIP, f'no {path}'
+    try:
+        from src.data.parquet_layout import layout_verdict, rowgroup_span_report
+    except ImportError:  # run with src/ on the path
+        from data.parquet_layout import layout_verdict, rowgroup_span_report  # type: ignore
     verdict, detail = layout_verdict(rowgroup_span_report(path))
+    if verdict == 'FAIL':
+        detail += ('; fix = controller-run scripts/resort_prices_master.py (R1); '
+                   'do not auto-run')
     return Status[verdict], detail

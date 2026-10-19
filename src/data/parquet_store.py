@@ -128,12 +128,15 @@ def append_dedup(
 
         # NULL-safe key match (mirrors pandas treating NaN==NaN as a duplicate);
         # UNION ALL BY NAME reproduces the column-union-with-NULL-fill of the old
-        # reindex+concat. The file is insertion-ordered: existing rows stream out in
-        # their current file order, then the (same-date) batch appends. Row-group
-        # date pruning therefore holds only once the master has been re-sorted by
-        # (date, ticker) (A1 script), because daily appends are date-monotone and
-        # preserve that order. Ticker-ordering (ORDER BY key_cols) is still avoided:
-        # it makes the file ticker-contiguous and widens every row group's date range.
+        # reindex+concat. Output order = existing rows in file order, then the
+        # (same-date) batch -- but ONLY with a single DuckDB thread: COPY at
+        # default threads does not preserve insertion order (measured: widest row
+        # group 17->34 days over 15 appends), so the merge connection pins threads
+        # (OPENCLAW_PARQUET_MERGE_THREADS, default 1). Row-group date pruning then
+        # holds once the master is re-sorted by (date, ticker) (A1 script), since
+        # daily appends are date-monotone. Ticker-ordering (ORDER BY key_cols) is
+        # still avoided: it makes the file ticker-contiguous and widens every row
+        # group's date range.
         tmp = Path(str(path) + '.tmp')
         existing_lit = str(path).replace("'", "''")
         out_lit = str(tmp).replace("'", "''")
@@ -142,6 +145,7 @@ def append_dedup(
         try:
             con.execute(f"SET memory_limit='{_merge_mem_limit()}'")
             con.execute(f"SET temp_directory='{_merge_spill_dir()}'")
+            con.execute(f"SET threads = {int(os.environ.get('OPENCLAW_PARQUET_MERGE_THREADS', '1'))}")
             # Register the batch as an Arrow table (reliable dtype mapping; the bare
             # pandas replacement scan can choke on object columns) — same pyarrow
             # conversion the master file itself was written through.

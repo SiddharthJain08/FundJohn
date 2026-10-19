@@ -16,14 +16,14 @@ before swapping. Safe by construction:
 Usage:
   python3 scripts/resort_prices_master.py [--dry-run | --apply] [--path P]
       [--spill-dir D] [--memory-limit 1GB] [--row-group-size 122880] [--threads 1]
-Exit: 0 verified, 2 on any mismatch (master untouched).
+Exit: 0 verified, 2 on any mismatch (master untouched), 3 dry-run layout FAIL.
 """
 from __future__ import annotations
 
 import argparse
 import os
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -78,9 +78,10 @@ def resort(path: Path, *, apply: bool, spill_dir: Path, memory_limit: str = '1GB
     today = today or date.today()
     backup = path.with_name(f"{path.name}.pre-resort-{today:%Y%m%d}")
     out = {'rows_old': 0, 'rows_new': 0, 'colhash_equal': False, 'rowhash_equal': False,
-           'schema_equal': False, 'report_new': {}, 'verdict_new': 'FAIL', 'backup': None,
+           'schema_equal': False, 'arrow_schema_equal': False, 'report_new': {}, 'verdict_new': 'FAIL', 'backup': None,
            'applied': False}
     with _file_lock(path, timeout=lock_timeout):
+        print(f"[resort_prices] lock acquired at {datetime.now().isoformat(timespec='seconds')}")
         if apply and backup.exists():
             raise FileExistsError(f'backup already exists: {backup}')
         Path(spill_dir).mkdir(parents=True, exist_ok=True)
@@ -95,6 +96,7 @@ def resort(path: Path, *, apply: bool, spill_dir: Path, memory_limit: str = '1GB
             old, new = _hashes(con, path), _hashes(con, tmp)
             out['rows_old'], out['rows_new'] = old['rows'], new['rows']
             out['schema_equal'] = old['schema'] == new['schema'] and old['rows'] == new['rows']
+            out['arrow_schema_equal'] = pq.read_schema(path).equals(pq.read_schema(tmp))
             out['colhash_equal'] = old['colhash'] == new['colhash']
             out['rowhash_equal'] = old['rowhash'] == new['rowhash']
             out['report_new'] = rowgroup_span_report(tmp)
@@ -108,11 +110,14 @@ def resort(path: Path, *, apply: bool, spill_dir: Path, memory_limit: str = '1GB
             con.close()
             tmp.unlink(missing_ok=True)   # no-op after a successful replace
     r = out['report_new']
-    print(f"[resort_prices] rows={out['rows_new']} schema_eq={out['schema_equal']} "
+    print(f"[resort_prices] rows_old={out['rows_old']} rows={out['rows_new']} "
+          f"schema_eq={out['schema_equal']} arrow_schema_eq={out['arrow_schema_equal']} "
           f"colhash_eq={out['colhash_equal']} rowhash_eq={out['rowhash_equal']} "
           f"rg={r.get('n_row_groups')} frac_tight={r.get('frac_tight', 0):.3f} "
           f"monotone={r.get('monotone')} page_index={r.get('page_index')} "
           f"verdict={out['verdict_new']} applied={out['applied']} backup={out['backup']}")
+    if out['verdict_new'] == 'FAIL':
+        print('[resort_prices] WARN layout verdict FAIL - rerun with a smaller --row-group-size')
     if out['applied']:
         print(f"remove {backup} after 2026-10-27 if prices_rowgroup_span is PASS "
               f"and the 15:00 ET compute is clean")
@@ -135,6 +140,8 @@ def main(argv=None) -> int:
     if not (r['schema_equal'] and r['colhash_equal'] and r['rowhash_equal']):
         print('[resort_prices] VERIFICATION MISMATCH - master untouched', file=sys.stderr)
         raise SystemExit(2)
+    if r['verdict_new'] == 'FAIL' and not a.apply:
+        return 3
     return 0
 
 

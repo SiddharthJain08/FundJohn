@@ -31,6 +31,7 @@ def build_market_cap_lookup(
     shares_path, prices_path = Path(shares_path), Path(prices_path)
     if not shares_path.exists() or not prices_path.exists():
         return out
+    as_of = pd.Timestamp(as_of).date()
     iso = as_of.isoformat()
     floor_iso = (as_of - timedelta(days=PRICE_STALENESS_DAYS)).isoformat()
     symset = set(symbols)
