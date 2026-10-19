@@ -25,6 +25,17 @@ except ModuleNotFoundError as _e:  # pragma: no cover
     import indicators as _indicators
 
 
+def _load_signal_expr():
+    """Lazy (non-DSL imports never load sympy); tolerant of top-level `base`."""
+    try:
+        from strategies import signal_expr as _se
+    except ModuleNotFoundError as _e:
+        if _e.name not in ('strategies', 'strategies.signal_expr'):
+            raise
+        import signal_expr as _se
+    return _se
+
+
 @dataclass
 class OptionSpec:
     """Declarative option contract spec carried on a Signal (SP-4 Phase 0).
@@ -258,17 +269,18 @@ class BaseStrategy(ABC):
         elif not num(thr):
             raise bad(f"SIGNAL_THRESHOLD must be a finite number for {direction!r}, got {thr!r}")
         cols = cls.SIGNAL_COLUMNS
-        if not isinstance(cols, (set, frozenset)) or 'close' not in cols:
+        if (not isinstance(cols, (set, frozenset, list, tuple))
+                or not all(isinstance(c, str) for c in cols)):
+            raise bad(f'SIGNAL_COLUMNS must be a set/frozenset/list/tuple of str, '
+                      f'got {type(cols).__name__}')
+        cols = frozenset(cols)
+        cls.SIGNAL_COLUMNS = cols
+        if 'close' not in cols:
             raise bad("SIGNAL_COLUMNS must contain 'close'")
-        if set(cols) != {'close'} and cls.signal_panel is BaseStrategy.signal_panel:
+        if cols != {'close'} and cls.signal_panel is BaseStrategy.signal_panel:
             raise bad('SIGNAL_COLUMNS beyond close requires overriding signal_panel()')
-        try:  # lazy: non-DSL imports never load sympy
-            try:
-                from strategies import signal_expr as _se
-            except ModuleNotFoundError as e:  # pragma: no cover
-                if e.name not in ('strategies', 'strategies.signal_expr'):
-                    raise
-                import signal_expr as _se
+        _se = _load_signal_expr()
+        try:
             compiled = _se.compile_signal(cls.SIGNAL, columns=set(cols))
         except _se.SignalExprError as e:
             raise bad(str(e)) from None
@@ -334,8 +346,8 @@ class BaseStrategy(ABC):
     def signal_panel(self, prices, universe, aux_data):
         """(field, ticker) panel the compiled SIGNAL is evaluated on. None or
         an empty frame means no signals today."""
-        from strategies import signal_expr as _se
-        cols = [t for t in universe if t in prices.columns]
+        _se = _load_signal_expr()
+        cols = [t for t in dict.fromkeys(universe) if t in prices.columns]
         return _se.make_panel({'close': prices[cols]})
 
     def dsl_should_fire(self, prices, regime) -> bool:

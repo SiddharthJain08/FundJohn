@@ -278,8 +278,14 @@ class CompiledSignal:
     def __call__(self, panel):
         import numpy as np
         import pandas as pd
-        from strategies import indicators as ind
-        from strategies.safe_ops import safe_div
+        try:  # tolerant: a top-level-`base` environment has no `strategies` package
+            from strategies import indicators as ind
+            from strategies.safe_ops import safe_div
+        except ModuleNotFoundError as _e:
+            if _e.name not in ('strategies', 'strategies.indicators', 'strategies.safe_ops'):
+                raise
+            import indicators as ind
+            from safe_ops import safe_div
         import sympy
         from sympy.core.function import AppliedUndef
 

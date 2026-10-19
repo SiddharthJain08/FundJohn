@@ -56,6 +56,7 @@ def test_bad_signal_fails_at_class_definition():
     {'SIGNAL_DIRECTION': 'both', 'SIGNAL_THRESHOLD': (1.0, 1.0)},
     {'SIGNAL_DIRECTION': 'both', 'SIGNAL_THRESHOLD': (2.0, 1.0)},
     {'SIGNAL_COLUMNS': frozenset({'volume'})},
+    {'SIGNAL_COLUMNS': ['volume']},
 ])
 def test_bad_direction_threshold_or_missing_close_fail_at_definition(attrs):
     with pytest.raises(TypeError, match='SIGNAL'):
@@ -172,3 +173,37 @@ def test_no_existing_implementation_declares_signal():
         for v in vars(mod).values():
             if isinstance(v, type) and issubclass(v, BaseStrategy) and v is not BaseStrategy:
                 assert not v.__dict__.get('SIGNAL'), (m.name, v)
+
+
+def test_signal_columns_list_accepted_and_bad_type_reported():
+    cls = _mk(SIGNAL_COLUMNS=['close'])
+    assert cls.SIGNAL_COLUMNS == frozenset({'close'})
+    with pytest.raises(TypeError, match='must be a set/frozenset/list/tuple of str, got int'):
+        _mk(SIGNAL_COLUMNS=5)
+    with pytest.raises(TypeError, match='of str'):
+        _mk(SIGNAL_COLUMNS=['close', 3])
+
+
+def test_duplicate_universe_tickers_do_not_break():
+    p = _prices({'ZZTEST1': 150.0})
+    out = _run(_mk(), p, universe=['ZZTEST1', 'ZZTEST1'])
+    assert [s.ticker for s in out] == ['ZZTEST1']
+
+
+def test_dsl_class_works_with_top_level_base_module():
+    import subprocess, sys, pathlib, textwrap
+    d = pathlib.Path(__file__).resolve().parents[2] / 'src' / 'strategies'
+    code = textwrap.dedent("""
+        import sys, numpy as np, pandas as pd
+        sys.path[:] = [sys.argv[1]] + [p for p in sys.path if 'openclaw' not in p]
+        import base
+        class S(base.BaseStrategy):
+            id = 'ZZTEST_top'
+            SIGNAL = 'close - 100'
+        idx = pd.bdate_range('2024-01-01', periods=30)
+        px = pd.DataFrame({'ZZTEST1': np.r_[np.full(29, 100.0), 120.0]}, index=idx)
+        out = S().generate_signals(px, {'state': 'LOW_VOL'}, ['ZZTEST1'])
+        assert [s.ticker for s in out] == ['ZZTEST1'], out
+    """)
+    r = subprocess.run([sys.executable, '-c', code, str(d)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
