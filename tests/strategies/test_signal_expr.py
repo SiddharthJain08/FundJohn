@@ -229,3 +229,18 @@ def test_non_ascii_rejected():
 def test_sympy_constructor_names_reserved(name):
     with pytest.raises(se.SignalExprError):
         se.validate_expr_syntax('1', columns={name})
+
+
+def test_huge_folded_constants_raise_typed_error_fast():
+    import time
+    probes = ['close + (' + '*'.join(['1000000'] * 150) + ')**64',
+              '*'.join(['(1000000**64)'] * 60) + ' + close']
+    for probe in probes:
+        for fn in (lambda: se.validate_expr_syntax(probe, columns=C),
+                   lambda: se.compile_signal(probe, columns=C),
+                   lambda: se.formula_hash(probe)):
+            t0 = time.monotonic()
+            with pytest.raises(se.SignalExprError):
+                fn()
+            assert time.monotonic() - t0 < 1.0
+    assert se.compile_signal('close * 2 ** 10 + 3 * 4', columns=C).required_lookback == 1

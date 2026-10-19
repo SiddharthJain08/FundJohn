@@ -75,6 +75,28 @@ def _has(node, kind) -> bool:
     return any(isinstance(n, kind) for n in ast.walk(node))
 
 
+def _cbound(node):
+    """Upper bound on |value| of a constant-only subtree (None if it has a Name/Call)."""
+    try:
+        if isinstance(node, ast.Constant):
+            return float(abs(node.value))
+        if isinstance(node, ast.UnaryOp):
+            return _cbound(node.operand)
+        if isinstance(node, ast.BinOp):
+            a, b = _cbound(node.left), _cbound(node.right)
+            if a is None or b is None:
+                return None
+            if isinstance(node.op, (ast.Add, ast.Sub)):
+                return a + b
+            if isinstance(node.op, (ast.Mult, ast.Div)):
+                return a * b
+            e = node.right.operand if isinstance(node.right, ast.UnaryOp) else node.right
+            return a ** abs(e.value) if _is_num(e) else float('inf')
+    except OverflowError:
+        return float('inf')
+    return None
+
+
 def _check_columns(columns, ops) -> None:
     for c in columns:
         if not isinstance(c, str) or not c.isidentifier() or keyword.iskeyword(c):
@@ -113,6 +135,9 @@ def _walk(tree, columns, ops):
                     if not (_is_num(lit) and abs(lit.value) <= MAX_CONST_EXPONENT):
                         raise SignalExprError('constant exponent must be a numeric literal '
                                               f'with |value| <= {MAX_CONST_EXPONENT}')
+            cb = _cbound(node)
+            if cb is not None and cb > MAX_CONST:
+                raise SignalExprError('constant subexpression too large')
             visit(node.left)
             visit(node.right)
         elif isinstance(node, ast.UnaryOp):
@@ -224,8 +249,13 @@ def formula_hash(expr: str, *, columns=None, ops=DEFAULT_OPS) -> str:
     else:
         _check_columns(columns, ops)
         names = _walk(tree, set(columns), ops)
-    canon = _sympy_parse(expr, names, ops, evaluate=True)
-    return hashlib.sha256(sympy.srepr(canon).encode()).hexdigest()[:16]
+    try:
+        canon = _sympy_parse(expr, names, ops, evaluate=True)
+        return hashlib.sha256(sympy.srepr(canon).encode()).hexdigest()[:16]
+    except (ValueError, OverflowError) as e:
+        if isinstance(e, SignalExprError):
+            raise
+        raise SignalExprError('constant too large') from None
 
 
 def make_panel(fields: Mapping):
@@ -369,6 +399,12 @@ def compile_signal(expr: str, *, columns: set, ops=DEFAULT_OPS) -> CompiledSigna
         raise SignalExprError('expression too deeply nested') from None
     if not used:
         raise SignalExprError('expression references no column')
-    st = _sympy_parse(expr, used, ops, evaluate=False)
-    return CompiledSignal(expr, used, _lookback(st),
+    try:
+        st = _sympy_parse(expr, used, ops, evaluate=False)
+        lb = _lookback(st)
+    except (ValueError, OverflowError) as e:
+        if isinstance(e, SignalExprError):
+            raise
+        raise SignalExprError('constant too large') from None
+    return CompiledSignal(expr, used, lb,
                           formula_hash(expr, columns=columns, ops=ops), st)
