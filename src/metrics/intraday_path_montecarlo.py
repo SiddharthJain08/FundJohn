@@ -18,6 +18,14 @@ Dispatch: tickers with ≥20 30m bars in the window get empirical; others
 get GBM. A `path_source` field on the persisted run records which
 generator (or 'hybrid' if a strategy's trade pool mixes both) was used.
 
+Discrete-monitoring bias: checking stops/targets only at 30m bar closes misses
+excursions between closes (the backtest and the broker see highs/lows and
+ticks), so the stop-hit rate is biased low (BGK shift ~ 0.5826*sigma_bar per
+barrier). apply_policy therefore adds a Brownian-bridge crossing test per bar:
+when the close test did not fire and both endpoints are on the safe side, the
+barrier is deemed hit with p = exp(-2*ln(S_prev/B)*ln(S_i/B)/sigma_bar^2).
+Kill switch OPENCLAW_MC_BRIDGE=0 (NOTES-diffrax F1).
+
 Spec: docs/archive/superpowers/specs/2026-05-13-regime-blended-sizer-phase-2e-design.md
 """
 from __future__ import annotations
@@ -29,6 +37,7 @@ import os
 import random
 import statistics
 import sys
+import zlib
 from pathlib import Path
 from typing import Optional
 
@@ -69,6 +78,7 @@ class EmpiricalPathGen:
     """
     def __init__(self, returns: list[float]):
         self._returns = returns                  # log-returns, 30m intervals
+        self.bar_sigma = (statistics.stdev(returns) if len(returns) >= 2 else 0.0)
 
     @classmethod
     def from_parquet(cls, ticker: str, window_days: int = 90) -> Optional['EmpiricalPathGen']:
@@ -118,13 +128,18 @@ class GBMPathGen:
         self.mu = mu_intraday
         self.sigma = sigma_intraday
 
+    @property
+    def bar_sigma(self) -> float:
+        return self.sigma
+
     @classmethod
     def from_parquet(cls, ticker: str, window_days: int = 90) -> Optional['GBMPathGen']:
         import pandas as pd
         if not _PRICES_DAILY_PATH.exists():
             return None
-        df = pd.read_parquet(_PRICES_DAILY_PATH, columns=['ticker', 'date', 'close'])
-        df = df[df.ticker == ticker]
+        import pyarrow.parquet as pq
+        df = pq.read_table(_PRICES_DAILY_PATH, columns=['ticker', 'date', 'close'],
+                           filters=[('ticker', '==', ticker)]).to_pandas()
         if df.empty:
             return None
         df['date'] = pd.to_datetime(df.date)
@@ -183,7 +198,9 @@ def _gen_for_ticker(ticker: str, window_days: int = 90):
 
 def apply_policy(path: list[float], stop_pct: float,
                   target_pct: float, max_hold_bars: int,
-                  direction: str = 'LONG'
+                  direction: str = 'LONG', *,
+                  bridge: bool = True, sigma_bar: Optional[float] = None,
+                  rng: Optional[random.Random] = None
                   ) -> tuple[float, str, float]:
     """Walk a path of log-returns and apply the (stop, target, max_hold)
     policy.
@@ -199,10 +216,21 @@ def apply_policy(path: list[float], stop_pct: float,
     if not path:
         return 0.0, 'max_hold', 0.0
     sign = 1.0 if direction.upper() == 'LONG' else -1.0
+    use_bridge = bool(bridge and rng is not None and sigma_bar and sigma_bar > 0)
+    bridge_bars: list = []
+    if use_bridge:
+        # (kind, log barrier, side) — stop first: stop wins a double touch.
+        if stop_pct is not None and abs(float(stop_pct)) < 1.0:
+            sp = abs(float(stop_pct))
+            bridge_bars.append(('stop', math.log(1 - sp) if sign > 0 else math.log(1 + sp), sign))
+        if target_pct is not None and (sign > 0 or abs(float(target_pct)) < 1.0):
+            tp = abs(float(target_pct))
+            bridge_bars.append(('target', math.log(1 + tp) if sign > 0 else math.log(1 - tp), -sign))
     cum_log = 0.0
     peak = 0.0
     max_dd = 0.0
     for i, r in enumerate(path[:max_hold_bars]):
+        prev = cum_log
         cum_log += r
         # Convert to signed return-from-entry
         ret_pct = sign * (math.exp(cum_log) - 1.0)
@@ -217,6 +245,14 @@ def apply_policy(path: list[float], stop_pct: float,
             return sign * -abs(float(stop_pct)) / sign, 'stop', max_dd
         if target_pct is not None and ret_pct >= abs(float(target_pct)):
             return sign * abs(float(target_pct)) / sign, 'target', max_dd
+        # Brownian-bridge crossing between closes (side=+1: safe above barrier)
+        for kind, b, side in bridge_bars:
+            d_prev, d_cur = side * (prev - b), side * (cum_log - b)
+            if d_prev > 0 and d_cur > 0:
+                if rng.random() < math.exp(-2.0 * d_prev * d_cur / (sigma_bar * sigma_bar)):
+                    if kind == 'stop':
+                        return -abs(float(stop_pct)), 'stop', max_dd
+                    return abs(float(target_pct)), 'target', max_dd
     # Time-out at max_hold
     final_pct = sign * (math.exp(cum_log) - 1.0)
     return final_pct, 'max_hold', max_dd
@@ -254,6 +290,15 @@ def _load_trade_pool(strategy_id: str, regime_state: str,
             return [{'ticker': r[0], 'direction': r[1] or 'LONG'} for r in cur.fetchall()]
 
 
+def derive_seed(strategy_id, regime_state, proposal_id, stop, target, max_hold) -> int:
+    """Deterministic seed from the request fields (spec 2026-10-19 B3).
+
+    Two runs with identical request fields and proposal_id=None share a seed and
+    reproduce identical numbers, by design."""
+    return zlib.crc32(
+        f"{strategy_id}|{regime_state}|{proposal_id}|{stop}|{target}|{max_hold}".encode())
+
+
 def run_path_mc(strategy_id: str, regime_state: str,
                  current_size: float, proposed_size: float,
                  proposed_stop_pct: float,
@@ -262,7 +307,8 @@ def run_path_mc(strategy_id: str, regime_state: str,
                  n_iter: int = DEFAULT_N_ITER,
                  window_days: int = 365,
                  seed: Optional[int] = None,
-                 trade_pool: Optional[list[dict]] = None) -> dict:
+                 trade_pool: Optional[list[dict]] = None,
+                 proposal_id: Optional[int] = None) -> dict:
     """Run path-dependent MC. Returns dict matching migration 085 columns."""
     if trade_pool is None:
         trade_pool = _load_trade_pool(strategy_id, regime_state, window_days)
@@ -278,15 +324,23 @@ def run_path_mc(strategy_id: str, regime_state: str,
     if n_iter <= 0:
         return {'status': 'INSUFFICIENT', 'note': 'n_iter must be positive'}
 
-    rng = random.Random(seed) if seed is not None else random.Random()
+    if seed is None:
+        seed = derive_seed(strategy_id, regime_state, proposal_id,
+                           proposed_stop_pct, proposed_target_pct,
+                           proposed_max_hold_days)
     max_hold_bars = max(1, int(proposed_max_hold_days) * BARS_PER_RTH_DAY)
     ratio = float(proposed_size) / max(float(current_size), 0.001)
 
+    bridge = os.environ.get('OPENCLAW_MC_BRIDGE', '1') != '0'
     sources_used: set[str] = set()
     returns: list[float] = []
     exit_counts = {'stop': 0, 'target': 0, 'max_hold': 0, 'no_gen': 0}
     max_dds: list[float] = []
-    for _ in range(n_iter):
+    for i in range(n_iter):
+        # Per-trade stream (common random numbers): iteration i draws the same
+        # numbers whatever n_iter or the proposed policy is. A str seed is used
+        # because random.Random((seed, i)) raises on Python 3.13.
+        rng = random.Random(f"{seed}:{i}")
         trade = rng.choice(trade_pool)
         gen, source = _gen_for_ticker(trade['ticker'], window_days=min(window_days, 90))
         if gen is None:
@@ -296,7 +350,8 @@ def run_path_mc(strategy_id: str, regime_state: str,
         path = gen.sample_path(max_hold_bars, rng)
         ret, exit_reason, intra_dd = apply_policy(
             path, proposed_stop_pct, proposed_target_pct,
-            max_hold_bars, direction=trade['direction'])
+            max_hold_bars, direction=trade['direction'],
+            bridge=bridge, sigma_bar=getattr(gen, 'bar_sigma', None), rng=rng)
         scaled_ret = ret * ratio
         scaled_dd = intra_dd * ratio
         if not (math.isfinite(scaled_ret) and math.isfinite(scaled_dd)):
@@ -321,7 +376,13 @@ def run_path_mc(strategy_id: str, regime_state: str,
     # history" of the same N trades.
     sharpes: list[float] = []
     boot_means: list[float] = []
-    rng2 = random.Random(rng.random())
+    rng2 = random.Random(f"{seed}:boot")
+    # Each simulated trade is held ~proposed_max_hold_days, so annualise by
+    # sqrt(252 / hold) rather than treating it as a daily observation. NOTE:
+    # the linear MC's _bootstrap_sharpe (regime_param_montecarlo.py:72)
+    # annualises with sqrt(252/n), so the dashboard's sharpe_p50_delta is not
+    # like-for-like (that module is out of scope here).
+    ann = math.sqrt(TRADING_DAYS_PER_YEAR / max(int(proposed_max_hold_days), 1))
     for _ in range(min(n_iter, len(returns))):
         bs = [rng2.choice(returns) for _ in range(len(returns))]
         m = sum(bs) / len(bs)
@@ -329,7 +390,7 @@ def run_path_mc(strategy_id: str, regime_state: str,
         if len(bs) >= 2:
             v = sum((x - m) ** 2 for x in bs) / (len(bs) - 1)
             sd = math.sqrt(v)
-            sharpes.append((m / sd) * math.sqrt(TRADING_DAYS_PER_YEAR) if sd > 0 else 0.0)
+            sharpes.append((m / sd) * ann if sd > 0 else 0.0)
     sharpes.sort()
     boot_means.sort()
     max_dds.sort()
@@ -342,6 +403,8 @@ def run_path_mc(strategy_id: str, regime_state: str,
 
     return {
         'status':                  'OK',
+        'bridge':                  bridge,
+        'seed':                    seed,
         'strategy_id':             strategy_id,
         'regime_state':            regime_state,
         'current_size':            current_size,
@@ -370,7 +433,9 @@ def run_path_mc(strategy_id: str, regime_state: str,
 
 def persist_run(result: dict, proposal_id: Optional[int] = None) -> Optional[int]:
     """INSERT a completed run into strategy_regime_intraday_mc_runs.
-    Returns row id, or None if status != OK."""
+    Returns row id, or None if status != OK.
+
+    Note: requires migration 165; johnbot is restarted immediately after merge so `migrate()` applies it before the :3000 MC routes can INSERT."""
     if result.get('status') != 'OK':
         return None
     with _connect() as conn:
@@ -384,10 +449,10 @@ def persist_run(result: dict, proposal_id: Optional[int] = None) -> Optional[int
                      mean_pnl_p05, mean_pnl_p50, mean_pnl_p95,
                      max_dd_p05, max_dd_p50, max_dd_p95,
                      stop_hit_rate, target_hit_rate, max_hold_hit_rate,
-                     proposal_id)
+                     seed, proposal_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s)
+                        %s, %s, %s, %s, %s)
                 RETURNING id
             """, (result['strategy_id'], result['regime_state'],
                   result['current_size'], result['proposed_size'],
@@ -399,7 +464,7 @@ def persist_run(result: dict, proposal_id: Optional[int] = None) -> Optional[int
                   result['mean_pnl_p05'], result['mean_pnl_p50'], result['mean_pnl_p95'],
                   result['max_dd_p05'], result['max_dd_p50'], result['max_dd_p95'],
                   result['stop_hit_rate'], result['target_hit_rate'],
-                  result['max_hold_hit_rate'], proposal_id))
+                  result['max_hold_hit_rate'], result.get('seed'), proposal_id))
             row_id = cur.fetchone()[0]
         conn.commit()
     return row_id
@@ -427,6 +492,7 @@ def main():
         proposed_target_pct=args.target_pct,
         proposed_max_hold_days=args.max_hold_days,
         n_iter=args.n_iter, window_days=args.window_days, seed=args.seed,
+        proposal_id=args.proposal_id,
     )
     if result.get('status') == 'OK' and not args.no_persist:
         row_id = persist_run(result, proposal_id=args.proposal_id)

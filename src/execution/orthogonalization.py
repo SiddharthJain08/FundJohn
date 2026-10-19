@@ -66,7 +66,7 @@ def fold_active_contributions(active: list[dict], fold_map: dict[str, int],
 
 TANGENCY_SHRINK_DEFAULT = 0.10   # R = (1-γ)R_raw + γI — tames the heuristic,
                                  # non-PSD-guaranteed similarity matrix before inversion
-TANGENCY_MAX_ENUM = 10           # per-side subset-enumeration cap (2^n solves)
+TANGENCY_MAX_ENUM = 10           # enumeration path / test oracle only; the NNLS path has no cap
 
 
 def resolve_tangency_gamma(artifact_gamma: float | None) -> float:
@@ -152,27 +152,30 @@ def resolve_tangency_gamma(artifact_gamma: float | None) -> float:
     return resolved
 
 
-def _tangency_side_sharpe(sids: list[str], s: list[float],
-                          sim: dict, shrink: float,
-                          gamma: float | None = None) -> tuple[float, bool]:
-    """Max attainable combination Sharpe over one SAME-DIRECTION contributor set,
-    with NON-NEGATIVE tangency weights: max over non-empty subsets T of
-    √(s_Tᵀ R_T⁻¹ s_T) where x = R_T⁻¹ s_T has every component >= 0.
+def tangency_nnls_enabled() -> bool:
+    """OPENCLAW_TANGENCY_NNLS=1 selects the NNLS tangency solver (read at call time)."""
+    return os.environ.get('OPENCLAW_TANGENCY_NNLS') == '1'
 
-    The non-negativity constraint is load-bearing: unconstrained R⁻¹ lets the
-    optimizer short a correlated contributor's signal, inflating the score from
-    intra-side spreads that a per-ticker NET position cannot express. Subsets
-    make the quantity monotone (adding a contributor only adds subsets, never
-    removes them) and every singleton is feasible (x = s_i > 0), so the result
-    is always >= max(s_i) — a confirming strategy can never LOWER conviction.
 
-    `gamma`, when not None, overrides `shrink` (task P1b: the resolved
-    Ledoit-Wolf/env shrinkage intensity from resolve_tangency_gamma). Left
-    None, behavior is unchanged — `shrink` alone controls the blend, exactly
-    as before this parameter existed.
+def _tangency_R(sids: list[str], sim: dict, eff_shrink: float):
+    """Shrunk side correlation matrix R = (1-γ)R_raw + γI (SPARSE_DEFAULT fallback)."""
+    import numpy as _np
+    n = len(sids)
+    R = _np.eye(n)
+    for i in range(n):
+        row_i = sim.get(sids[i], {})
+        for j in range(i + 1, n):
+            rho = row_i.get(sids[j])
+            if rho is None:
+                rho = sim.get(sids[j], {}).get(sids[i], SPARSE_DEFAULT)
+            R[i, j] = R[j, i] = float(rho)
+    return (1.0 - eff_shrink) * R + eff_shrink * _np.eye(n)
 
-    Returns (best_sharpe, degraded) — degraded=True when any multi-member solve
-    failed numerically (result fell back to smaller subsets; still valid)."""
+
+def _tangency_side_sharpe_enum(sids: list[str], s: list[float],
+                                sim: dict, shrink: float,
+                                gamma: float | None = None) -> tuple[float, bool]:
+    """Subset-enumeration solver (default path; capped at TANGENCY_MAX_ENUM)."""
     import numpy as _np
     n = len(s)
     if n == 0:
@@ -187,15 +190,7 @@ def _tangency_side_sharpe(sids: list[str], s: list[float],
         sids = [sids[i] for i in order]
         s = [s[i] for i in order]
         n = TANGENCY_MAX_ENUM
-    R = _np.eye(n)
-    for i in range(n):
-        row_i = sim.get(sids[i], {})
-        for j in range(i + 1, n):
-            rho = row_i.get(sids[j])
-            if rho is None:
-                rho = sim.get(sids[j], {}).get(sids[i], SPARSE_DEFAULT)
-            R[i, j] = R[j, i] = float(rho)
-    R = (1.0 - eff_shrink) * R + eff_shrink * _np.eye(n)
+    R = _tangency_R(sids, sim, eff_shrink)
     sv = _np.asarray(s, dtype=float)
     best = float(max(s))                       # singletons always feasible
     degraded = False
@@ -216,17 +211,103 @@ def _tangency_side_sharpe(sids: list[str], s: list[float],
     return best, degraded
 
 
+def _tangency_side_sharpe_nnls(sids: list[str], s: list[float],
+                               sim: dict, shrink: float,
+                               gamma: float | None = None) -> tuple[float, bool]:
+    """NNLS solver for the same quantity as the enumeration path, no contributor
+    cap. R = LLᵀ; x* = argmin_{x>=0}‖Lᵀx − L⁻¹s‖²; Sharpe² = sᵀx*. Non-PSD R is
+    eigen-clipped (1e-8) and re-unit-diagonalised, flagged degraded=True."""
+    import numpy as _np
+    from scipy.linalg import solve_triangular
+    from scipy.optimize import nnls
+    n = len(s)
+    if n == 0:
+        return 0.0, False
+    if n == 1:
+        return float(s[0]), False
+    eff_shrink = shrink if gamma is None else float(gamma)
+    R = _tangency_R(sids, sim, eff_shrink)
+    sv = _np.asarray(s, dtype=float)
+    if not (_np.isfinite(R).all() and _np.isfinite(sv).all()):
+        # NaN/inf similarity: the enumeration path tolerates it (such subsets
+        # fail q > 1e-12 and are skipped) - delegate so the live cycle never raises.
+        return _tangency_side_sharpe_enum(sids, s, sim, shrink, gamma=gamma)
+    degraded = False
+    try:
+        try:
+            L = _np.linalg.cholesky(R)
+        except _np.linalg.LinAlgError:
+            w, V = _np.linalg.eigh(R)
+            w = _np.maximum(w, 1e-8)
+            R = V @ _np.diag(w) @ V.T
+            d = _np.sqrt(_np.diag(R))
+            R = R / _np.outer(d, d)
+            L = _np.linalg.cholesky(R)
+            degraded = True
+        b = solve_triangular(L, sv, lower=True)
+        x, _ = nnls(L.T, b)
+    except (_np.linalg.LinAlgError, ValueError):
+        return _tangency_side_sharpe_enum(sids, s, sim, shrink, gamma=gamma)
+    q = float(sv @ x)
+    best = float(max(s))
+    return (max(best, math.sqrt(q)) if q > 1e-12 else best), degraded
+
+
+def _tangency_side_sharpe(sids: list[str], s: list[float],
+                          sim: dict, shrink: float,
+                          gamma: float | None = None) -> tuple[float, bool]:
+    """Max attainable combination Sharpe over one SAME-DIRECTION contributor set,
+    with NON-NEGATIVE tangency weights: max over non-empty subsets T of
+    √(s_Tᵀ R_T⁻¹ s_T) where x = R_T⁻¹ s_T has every component >= 0.
+
+    The non-negativity constraint is load-bearing: unconstrained R⁻¹ lets the
+    optimizer short a correlated contributor's signal, inflating the score from
+    intra-side spreads that a per-ticker NET position cannot express. Subsets
+    make the quantity monotone (adding a contributor only adds subsets, never
+    removes them) and every singleton is feasible (x = s_i > 0), so the result
+    is always >= max(s_i) — a confirming strategy can never LOWER conviction.
+
+    `gamma`, when not None, overrides `shrink` (task P1b: the resolved
+    Ledoit-Wolf/env shrinkage intensity from resolve_tangency_gamma). Left
+    None, behavior is unchanged — `shrink` alone controls the blend, exactly
+    as before this parameter existed.
+
+    Two equivalent solvers (proved equal to ~1e-14): subset ENUMERATION (default,
+    capped at TANGENCY_MAX_ENUM contributors) and NNLS (R = LLᵀ,
+    min_{x>=0}‖Lᵀx − L⁻¹s‖², Sharpe² = sᵀx*; no cap), selected by
+    OPENCLAW_TANGENCY_NNLS=1 (tangency_nnls_enabled()). Default is enumeration.
+
+    Returns (best_sharpe, degraded) — degraded=True when any multi-member solve
+    failed numerically (result fell back to smaller subsets; still valid)."""
+    if tangency_nnls_enabled():
+        return _tangency_side_sharpe_nnls(sids, s, sim, shrink, gamma=gamma)
+    return _tangency_side_sharpe_enum(sids, s, sim, shrink, gamma=gamma)
+
+
+def tangency_diag_token(diag: dict) -> str:
+    """Render the tangency diagnostic token for the sizer's corr_cumsharpe line."""
+    if diag.get('mode') == 'nnls':
+        return 'tangency_mode=nnls'
+    if diag.get('error'):
+        return 'tangency_nnls_maxdiff=error:%s' % diag['error']
+    if not diag.get('n_sides'):
+        return 'tangency_nnls_maxdiff=n/a'
+    return 'tangency_nnls_maxdiff=%.3g' % diag['maxdiff']
+
+
 def tangency_net_sharpe(contribs_by_ticker: dict[str, list[tuple]],
                         sim: dict[str, dict[str, float]],
                         weight_by_strat: dict[str, float],
                         shrink: float = TANGENCY_SHRINK_DEFAULT,
-                        gamma: float | None = None) -> tuple[dict[str, float], int]:
+                        gamma: float | None = None,
+                        diag: dict | None = None) -> tuple[dict[str, float], int]:
     """Signed per-ticker conviction via the OPTIMAL-weights (tangency) combination
     Sharpe (operator directive 2026-07-27, replaces the fixed-proportional
     corr_adjusted_net_sharpe as the live S_adj).
 
     Per ticker: contributors split by direction; each side combines via
-    _tangency_side_sharpe (non-negative tangency, subset-enumerated, shrunk R);
+    _tangency_side_sharpe (non-negative tangency, shrunk R; subset-enumerated by
+    default, NNLS when OPENCLAW_TANGENCY_NNLS=1);
     S_net = S*_long − S*_short. Properties, by construction:
       • adding a CONFIRMING contributor never lowers |S_net| (monotone) — the
         BE-vs-WW anomaly (weak correlated confirmer diluting a fixed-weight
@@ -245,10 +326,17 @@ def tangency_net_sharpe(contribs_by_ticker: dict[str, list[tuple]],
     unchanged. No math changes — this only plumbs an already-resolved gamma
     through to the two side-solves.
 
+    `diag` (optional dict, never affects the result): flag OFF -> each side with
+    >=2 contributors is also solved by NNLS (own try) and diag['maxdiff'] /
+    ['n_sides'] / ['error'] updated; flag ON -> diag['mode'] = 'nnls'.
+
     Same signature/return shape as corr_adjusted_net_sharpe; the second value
     counts tickers whose multi-member solves degraded to smaller subsets."""
     out: dict[str, float] = {}
     n_degraded = 0
+    _nnls_on = tangency_nnls_enabled()
+    if diag is not None and _nnls_on:
+        diag['mode'] = 'nnls'
     for ticker, contribs in contribs_by_ticker.items():
         longs_s, longs_id, shorts_s, shorts_id = [], [], [], []
         for sid, d in contribs:
@@ -265,6 +353,16 @@ def tangency_net_sharpe(contribs_by_ticker: dict[str, list[tuple]],
             continue
         s_long, deg_l = _tangency_side_sharpe(longs_id, longs_s, sim, shrink, gamma=gamma)
         s_short, deg_s = _tangency_side_sharpe(shorts_id, shorts_s, sim, shrink, gamma=gamma)
+        if diag is not None and not _nnls_on:
+            for _ids, _s, _e in ((longs_id, longs_s, s_long), (shorts_id, shorts_s, s_short)):
+                if len(_s) < 2:
+                    continue
+                try:
+                    _q, _ = _tangency_side_sharpe_nnls(_ids, _s, sim, shrink, gamma=gamma)
+                    diag['maxdiff'] = max(diag.get('maxdiff', 0.0), abs(_e - _q))
+                    diag['n_sides'] = diag.get('n_sides', 0) + 1
+                except Exception as _ex:
+                    diag['error'] = type(_ex).__name__
         if deg_l or deg_s:
             n_degraded += 1
         out[ticker] = s_long - s_short

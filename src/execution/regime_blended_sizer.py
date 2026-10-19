@@ -11,6 +11,7 @@ multiple production cycles. The historical paths and the ticker_consolidator
 module they used live in git history only.
 """
 from __future__ import annotations
+import functools
 import json
 import logging
 import math
@@ -23,6 +24,7 @@ import psycopg2
 
 from execution.signal_cadence_gate import filter_by_cadence, advance_last_fire
 from execution.alpaca_executor import _spot_price
+import execution.qp_shadow_sizer as _qps  # B6: no cvxpy import at import time
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +125,7 @@ def trade_weight_factor_enabled() -> bool:
     return os.environ.get(TRADE_WEIGHT_FACTOR_ENV) == '1'
 
 
-def size_positions(
+def _size_positions_impl(
     signals: list[dict],
     account_state: dict,
     regime: dict,
@@ -181,6 +183,21 @@ def size_positions(
     # `confirmer` param is kept (tests inject stubs) but is None in production.
     return _sharpe_cadence_path(passed, account_state, regime_state,
                                 regime_params, confirmer)
+
+
+@functools.wraps(_size_positions_impl)
+def size_positions(*args, **kwargs):
+    """B6: brackets the sizer so EVERY exit path (empty signals, acting gate,
+    gross <= 0, thin-set abort, flatten) still emits one [qp_shadow] line when
+    OPENCLAW_QP_SHADOW=1. Flag off: begin/end are no-ops."""
+    _qps.begin_cycle()
+    try:
+        return _size_positions_impl(*args, **kwargs)
+    finally:
+        try:
+            _qps.end_cycle()
+        except Exception:  # noqa: BLE001 — shadow must never alter sizing
+            pass
 
 
 def _check_force_fire_flag() -> bool:
@@ -398,7 +415,7 @@ def _tangency_gamma_for_cycle(groups: dict | None) -> float:
         return _og.TANGENCY_SHRINK_DEFAULT
 
 
-def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim, gamma=None):
+def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim, gamma=None, diag=None):
     """Build the correlation-adjusted gate + sizing maps from per-ticker contributors.
     Gate uses RAW daily_weight (size_scalar-exempt — matches the legacy 'gate stays raw'
     intent); sizing uses eff_weight (size_scalar folded in). Identical when all scalars=1.
@@ -415,15 +432,18 @@ def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim, 
     (the legacy corr_adjusted_net_sharpe branch has no shrinkage parameter and
     ignores it). Left at the default None, tangency_net_sharpe falls back to
     its own TANGENCY_SHRINK_DEFAULT — unchanged from before this parameter
-    existed."""
+    existed.
+
+    `diag` (B1): optional dict forwarded to both tangency_net_sharpe calls
+    (NNLS-vs-enumeration diagnostic); the legacy branch ignores it."""
     from execution import orthogonalization as _og
     contribs_by_ticker = {tkr: list(zip(m['strategies'], m['directions']))
                           for tkr, m in ticker_meta.items()}
     if _tangency_sadj_enabled():
         _fn = _og.tangency_net_sharpe
         logger.info('corr_cumsharpe: S_adj basis = tangency (optimal-weights) combination Sharpe')
-        gate_net_sharpe, nb_gate = _fn(contribs_by_ticker, sim, weight_by_strat, gamma=gamma)
-        sizing_weight, nb_size = _fn(contribs_by_ticker, sim, eff_weight_by_strat, gamma=gamma)
+        gate_net_sharpe, nb_gate = _fn(contribs_by_ticker, sim, weight_by_strat, gamma=gamma, diag=diag)
+        sizing_weight, nb_size = _fn(contribs_by_ticker, sim, eff_weight_by_strat, gamma=gamma, diag=diag)
     else:
         _fn = _og.corr_adjusted_net_sharpe
         logger.info('corr_cumsharpe: S_adj basis = legacy fixed-proportional combination Sharpe')
@@ -1670,8 +1690,9 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # gamma entirely, so resolving (and possibly logging would_use_gamma /
     # rejected-gamma) it there would be noise for a value nothing consumes.
     _gamma = _tangency_gamma_for_cycle(_ortho_groups) if _tangency_sadj_enabled() else None
+    _tan_diag: dict = {}
     gate_net_sharpe, _size_adj, _nb_g, _nb_s = _corr_adjusted_maps(
-        ticker_meta, _cw_gate, _cw_size, _sim, gamma=_gamma)
+        ticker_meta, _cw_gate, _cw_size, _sim, gamma=_gamma, diag=_tan_diag)
     # Conviction gate (2026-08-22): per-regime MINIMUM ACTING-STRATEGY COUNT.
     # A ticker is taken only when at least `min_acting` DISTINCT strategies
     # act on it in its net direction. Replaces the S_adj floor
@@ -1693,13 +1714,15 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         for _c in acting_n.values():
             _adist[_c] = _adist.get(_c, 0) + 1
         _akeep = sum(1 for _c in acting_n.values() if _c >= min_acting)
+        from execution import orthogonalization as _og_diag
         _line = ('corr_cumsharpe.live[%s]: dist=%s acting_min=%d acting_dist=%s '
                  'acting_keep=%d/%d rec_floor=%.4f cap_binds=%d gross_after_cap=%.3f '
-                 'sign_flips=%s backstop=%s top_dollar_moves=%s' % (
+                 'sign_flips=%s backstop=%s top_dollar_moves=%s %s' % (
                      regime_state, {k: round(v, 4) for k, v in _m['dist'].items()},
                      min_acting, dict(sorted(_adist.items())), _akeep, len(acting_n),
                      _m['rec_floor'], _m['cap_binds'], _m['gross_after_cap_frac'],
-                     _m['sign_flips'], _m['backstop_fires'], _m['top_dollar_moves']))
+                     _m['sign_flips'], _m['backstop_fires'], _m['top_dollar_moves'],
+                     _og_diag.tangency_diag_token(_tan_diag)))
         logger.info(_line)
         # Post once per daily cycle only (skip the every-5-min intraday redeploy lane
         # to avoid #botjohn-log spam); the post self-expires via pipeline_config.
@@ -1862,6 +1885,12 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # pool. The operator explicitly accepts the concentration trade-off in
     # exchange for honest expression of conviction.
     target_usd: dict[str, float] = {tkr: w * scale for tkr, w in ticker_w.items()}
+    # B6: QP-shadow tracking target h = post-scale PRE-cap snapshot (before dust,
+    # per-ticker cap, cluster cap, bench-corr removal, SPY NAV clamp).
+    try:
+        _qp_h = dict(target_usd) if _qps.qp_shadow_enabled() else None
+    except Exception:  # noqa: BLE001 — shadow must never raise into sizing
+        _qp_h = None
 
     # Hard dust floor (2026-06-08). The per-regime min-notional PARAMETER
     # (regime_sizer_params.min_signal_notional_*, $100-500, regime-varying) was
@@ -2019,10 +2048,47 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                            len(active), SIGNAL_SET_MIN_FLOOR, SIGNAL_SET_MIN_FRAC*100, _baseline)
             return []
 
+    # B6 (R5): SHADOW ONLY — the tracking-QP never routes an order; it logs one
+    # [qp_shadow] line comparing its solution with the cascade. It is a hook, not
+    # a pipeline step, because it needs the cascade's in-memory caps/targets.
+    # h_usd=_qp_h is the post-scale PRE-cap snapshot (the QP's tracking target);
+    # target_usd (positional) is the cascade's FINAL dict handed to
+    # _emit_orders_from_targets, used for the gross/spy/l1_dist cascade tokens.
+    # Option delta-hedge names injected after the snapshot are NOT in h, so they
+    # are outside the shadow tokens (the QP and its comparison cover equity names only).
+    _qp_broker = None
+    if _qps.qp_shadow_enabled():
+        try:
+            _qp_broker = _load_broker_positions_usd()
+            _net_on, _net_frac = _load_net_cap_cfg()
+            # caps over the pre-cap names; names the cascade removed/zeroed
+            # between snapshot and hook enter the QP with cap 0 (l1_dist counts the gap)
+            _qp_base = _qp_h if _qp_h is not None else target_usd
+            _qp_caps = _qps.build_caps(
+                _qp_base, nav=nav, lam_global=lam_global, gate_net_sharpe=gate_net_sharpe,
+                bench_tkrs=_bench_tkrs, bench_exempt=_bench_exempt,
+                bench_frac=_bsz.benchmark_max_nav_frac(),
+                cap_active=(os.environ.get('OPENCLAW_EOD_RECONCILE') == '1'
+                            or os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1'),
+                bench_clamp=bool(_beta_budget_applied))  # cascade clamps SPY only under the budget
+            for _t in _qp_base:
+                if not target_usd.get(_t):
+                    _qp_caps[_t] = 0.0
+            _qps.run_qp_shadow(
+                target_usd, _qp_broker, nav=nav, lam_nav=lam * nav,
+                caps=_qp_caps,
+                bench_tkrs=_bench_tkrs, net_frac=_net_frac if _net_on else None,
+                tau=_qps.resolve_tau(), h_usd=_qp_h)
+        except Exception as _e:          # shadow must never break sizing
+            try:
+                _qps.emit_status(f'error:{type(_e).__name__}')
+            except Exception:  # noqa: BLE001
+                pass
+
     _orders = _emit_orders_from_targets(
         target_usd, ticker_meta, nav, confirmer, _ortho_groups,
         sharpe_by_strat, eff_weight_by_strat, opt_active, weight_by_strat,
-        scale, account_state, gate_net_sharpe=gate_net_sharpe,
+        scale, account_state, broker=_qp_broker, gate_net_sharpe=gate_net_sharpe,
         bench_ids=_bench_ids, bench_tkrs=_bench_tkrs)
 
     # Final fix wave (2026-08-30) #2: under the beta budget the benchmark ticker

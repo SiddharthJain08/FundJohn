@@ -26,6 +26,7 @@ import math
 import os
 import statistics
 import sys
+import zlib
 import random
 from datetime import datetime, timezone
 from pathlib import Path
@@ -158,8 +159,14 @@ def bootstrap_size_scalar(strategy_id: str, regime_state: str,
                            proposal_id: Optional[int] = None,
                            persist: bool = True) -> dict:
     """End-to-end: load realized PnLs, bootstrap under the size ratio,
-    optionally persist to strategy_regime_mc_runs."""
+    optionally persist to strategy_regime_mc_runs.
+
+    Note: requires migration 165; johnbot is restarted immediately after merge so `migrate()` applies it before the :3000 MC routes can INSERT."""
     pnls = _load_realized_pnls(strategy_id, regime_state, window_days)
+    if seed is None:
+        seed = zlib.crc32(
+            f"{strategy_id}|{regime_state}|{proposal_id}|{current_size}|"
+            f"{proposed_size}|{n_iter}|{window_days}".encode())
     ratio = float(proposed_size) / max(float(current_size), 0.001)
     result = bootstrap_pnls(pnls, ratio=ratio, n_iter=n_iter, seed=seed)
     result.update({
@@ -168,6 +175,7 @@ def bootstrap_size_scalar(strategy_id: str, regime_state: str,
         'current_size':  current_size,
         'proposed_size': proposed_size,
         'window_days':   window_days,
+        'seed':          seed,
     })
 
     if persist and result.get('status') == 'OK':
@@ -180,15 +188,15 @@ def bootstrap_size_scalar(strategy_id: str, regime_state: str,
                          sharpe_p05, sharpe_p50, sharpe_p95,
                          mean_pnl_p05, mean_pnl_p50, mean_pnl_p95,
                          max_dd_p05, max_dd_p50, max_dd_p95,
-                         proposal_id)
+                         seed, proposal_id)
                     VALUES (%s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (strategy_id, regime_state, current_size, proposed_size,
                       result['n_trades_sampled'], n_iter,
                       result['sharpe_p05'], result['sharpe_p50'], result['sharpe_p95'],
                       result['mean_pnl_p05'], result['mean_pnl_p50'], result['mean_pnl_p95'],
                       result['max_dd_p05'], result['max_dd_p50'], result['max_dd_p95'],
-                      proposal_id))
+                      seed, proposal_id))
             conn.commit()
     return result
 

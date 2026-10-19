@@ -38,6 +38,7 @@ import logging
 import math
 import os
 import re
+import statistics
 import sys
 import time
 from collections import Counter
@@ -99,6 +100,63 @@ def armed() -> bool:
 
 def nav_ohlc_path() -> Path:
     return Path(os.environ.get(NAV_OHLC_PATH_ENV) or DEFAULT_NAV_OHLC_PATH)
+
+
+# ── B4: advisory first-passage KPI (never gates) ─────────────────────────────
+P_TRIP_HORIZON_DAYS = 21
+P_TRIP_LOOKBACK = 60
+P_TRIP_MIN_POINTS = 20
+
+
+def nav_daily_sigma(path: Path | None = None,
+                    lookback: int = P_TRIP_LOOKBACK) -> float | None:
+    """Sample stdev of the last `lookback` simple daily returns of the OHLC
+    `days[*].close` series. NOTE (controller ruling D5): that file holds TOTAL
+    account equity, not the alpha sleeve, so this is a PROXY for alpha-sleeve
+    volatility. None on < P_TRIP_MIN_POINTS closes, any non-positive/non-finite
+    close, zero/non-finite sigma, or any read/parse error."""
+    try:
+        days = json.loads(Path(path or nav_ohlc_path()).read_text()).get('days') or {}
+        closes = [float(days[k]['close']) for k in sorted(days)
+                  if isinstance(days[k], dict) and days[k].get('close') is not None]
+        closes = closes[-(lookback + 1):]
+        if len(closes) < P_TRIP_MIN_POINTS:
+            return None
+        if any(not math.isfinite(c) or c <= 0 for c in closes):
+            return None
+        sig = statistics.stdev([b / a - 1.0 for a, b in zip(closes, closes[1:])])
+        if not math.isfinite(sig) or sig <= 0:
+            return None
+        return sig
+    except Exception as e:  # noqa: BLE001 — advisory, never fatal
+        logger.debug('[account_breaker] nav_daily_sigma unavailable (%s: %s)',
+                     type(e).__name__, e)
+        return None
+
+
+def p_trip_within(dd: float | None, days: int = P_TRIP_HORIZON_DAYS, *,
+                  path: Path | None = None) -> float | None:
+    """Advisory probability the drawdown limit is touched within `days`
+    (reflection principle, driftless BM: 2*Phi(-a/(sigma*sqrt(days))), headroom
+    a = dd - DD_LIMIT). A GBM approximation with a total-equity sigma proxy.
+    1.0 once a <= 0; None when dd or sigma is unavailable. Never raises."""
+    try:
+        if dd is None:
+            return None
+        if not math.isfinite(float(dd)):
+            return None
+        a = float(dd) - DD_LIMIT
+        if a <= 0:
+            return 1.0
+        sig = nav_daily_sigma(path)
+        if sig is None:
+            return None
+        z = a / (sig * math.sqrt(days))
+        return float(min(1.0, math.erfc(z / math.sqrt(2.0))))
+    except Exception as e:  # noqa: BLE001
+        logger.debug('[account_breaker] p_trip_within failed (%s: %s)',
+                     type(e).__name__, e)
+        return None
 
 
 def alpha_nav(equity: float, positions: dict, bench_tickers) -> tuple[float, float]:
@@ -826,15 +884,22 @@ def _excluded_token(pnl) -> str:
     return ','.join(f'{c}:{int(n)}' for c, n in sorted(by.items()))
 
 
+_NO_P_TRIP = object()
+
+
 def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
-                open_src, halted, flatten=None, pnl=None) -> str:
+                open_src, halted, flatten=None, pnl=None,
+                p_trip=_NO_P_TRIP) -> str:
     """The operator greps `[account_breaker] shadow` / `[account_breaker] armed`.
     Emitted on EVERY tick — a missing line means the process died, which is why
     rule=none exists. Do not reorder or rename existing tokens; `flatten_partial`
     is appended at the END when `flatten` is given (flatten.get, not flatten[] —
     this line must never KeyError on every-tick emission). The `| alpha_pnl=…`
     tail ends with `excluded=… rebased=<n>` (Task 4: rebases performed THIS tick,
-    normally 0; a pnl dict without the key renders rebased=0)."""
+    normally 0; a pnl dict without the key renders rebased=0). B4: when `p_trip`
+    is passed, ` p_trip_21d~=<n/a|0.xx>` is appended at the very END (after the
+    alpha_pnl tail); advisory only, a GBM approximation using a TOTAL-equity
+    sigma proxy. Omitted => line unchanged."""
     daily = 'n/a' if st.get('daily') is None else f"{st['daily']:.4f}"
     # peak/dd render 'n/a' rather than raising on None (supplement item 5):
     # the line must be emitted on EVERY tick — a missing line is the signal
@@ -869,6 +934,8 @@ def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
                  f"recon={int(pnl.get('recon', 0))} "
                  f"excluded={_excluded_token(pnl)} "
                  f"rebased={int(pnl.get('rebased', 0) or 0)}")
+    if p_trip is not _NO_P_TRIP:
+        line += f" p_trip_21d~={'n/a' if p_trip is None else f'{float(p_trip):.2f}'}"
     return line
 
 
@@ -2349,7 +2416,8 @@ def run_once(session_date=None) -> int:
             logger.info(format_line(mode, equity=equity, bench_mv=bench_mv,
                                     alpha=alpha, st=st, open_equity=open_eq,
                                     open_src=open_src, halted=True, flatten=flat,
-                                    pnl=pnl))
+                                    pnl=pnl,
+                                    p_trip=p_trip_within((pnl or {}).get('dd_pnl'))))
 
             if flat is not None and prior_attempts < FLATTEN_ESCALATE_AFTER <= attempts:
                 _post('trade-reports', _flatten_escalation_msg(attempts, flat))
@@ -2482,7 +2550,8 @@ def run_once(session_date=None) -> int:
                                 alpha=alpha, st=st, open_equity=open_eq,
                                 open_src=open_src,
                                 halted=bool(live and st['breach']), flatten=flat,
-                                pnl=line_pnl))
+                                pnl=line_pnl,
+                                p_trip=p_trip_within((line_pnl or {}).get('dd_pnl'))))
         return 0
     except Exception as e:  # noqa: BLE001 — fix round 1 item 3: a crash
         # anywhere in this tick, including psycopg2.connect itself (now

@@ -322,3 +322,24 @@ class TestDailyLaneConvictionCapBypass:
             f'daily lane must remain uncapped (full {_CAP_LAM * _CAP_NAV}); '
             f'got {opens["STX"]["target_usd"]}'
         )
+
+
+def test_qp_shadow_line_intraday_lane(monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger='execution.qp_shadow_sizer')
+    monkeypatch.setattr(_sizer, '_load_net_cap_cfg', lambda *a, **k: (False, 0.6))
+    import execution.benchmark_sizing as _bs
+    monkeypatch.setattr(_bs, 'benchmark_max_nav_frac', lambda *a, **k: 1.0)
+    ids = [f'S_zz_{i}' for i in range(12)]
+    w = [_weights_row_cap(i, eff_sharpe=3.5) for i in ids]
+    sig = [_carried_cap(i, f'ZZTEST{k}') for k, i in enumerate(ids)]
+    monkeypatch.delenv('OPENCLAW_QP_SHADOW', raising=False)
+    off = _run_intraday_path(monkeypatch, w, sig)
+    assert off
+    recs = lambda: [r.getMessage() for r in caplog.records if '[qp_shadow]' in r.getMessage()]  # noqa: E731
+    assert not recs()
+    monkeypatch.setenv('OPENCLAW_QP_SHADOW', '1')
+    on = _run_intraday_path(monkeypatch, w, sig)
+    assert on == off
+    r = recs()
+    assert len(r) == 1 and ' n=12 ' in r[0] and 'status=ok' in r[0]
