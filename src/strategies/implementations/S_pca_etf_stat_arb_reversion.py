@@ -8,6 +8,38 @@ from strategies.base import BaseStrategy, Signal, REGIME_POSITION_SCALE
 __all__ = ['PCAETFStatArbReversion']
 
 
+def _ou_fit_exact(X_w: np.ndarray):
+    """Exact-discretisation OU fit of each column of a (W, N) window.
+
+    Vectorised OLS dX = a + b*X_lag; b = phi - 1, so phi = 1 + b,
+    kappa = -ln(phi) per bar, m = a/(1-phi), sigma_eq = sigma/sqrt(1-phi^2).
+    Returns (kappa, m, sigma_eq); kappa/sigma_eq are NaN (m = 0) where
+    not 0 < phi < 1."""
+    dX   = np.diff(X_w, axis=0)      # (W-1, N)
+    Xlag = X_w[:-1]                  # (W-1, N)
+
+    n = len(dX)
+    sx  = Xlag.sum(axis=0)
+    sy  = dX.sum(axis=0)
+    sxx = (Xlag ** 2).sum(axis=0)
+    sxy = (Xlag * dX).sum(axis=0)
+    det = n * sxx - sx ** 2
+    det = np.where(np.abs(det) < 1e-12, 1e-12, det)
+
+    b = (n * sxy - sx * sy) / det    # slope = phi - 1
+    a = (sy - b * sx) / n
+    phi = 1.0 + b
+    ok = (phi > 0.0) & (phi < 1.0)
+    phi_s = np.where(ok, phi, 0.5)   # mask BEFORE log/sqrt (no RuntimeWarning)
+
+    kappa = np.where(ok, -np.log(phi_s), np.nan)
+    m = np.where(ok, a / (1.0 - phi_s), 0.0)
+    ou_resid = dX - (a[np.newaxis, :] + b[np.newaxis, :] * Xlag)
+    sigma = ou_resid.std(axis=0)
+    sigma_eq = np.where(ok, sigma / np.sqrt(1.0 - phi_s ** 2), np.nan)
+    return kappa, m, sigma_eq
+
+
 class PCAETFStatArbReversion(BaseStrategy):
     """Idiosyncratic OU residuals from PCA factor regression; contrarian s-score signals."""
 
@@ -81,28 +113,8 @@ class PCAETFStatArbReversion(BaseStrategy):
         # Cumulative residuals as OU process proxy
         X_ou = np.cumsum(resid, axis=0)   # (T, N)
 
-        # Fit OU over last OU_WINDOW days (vectorised OLS: dX = a + b*X_lag)
-        X_w  = X_ou[-self.OU_WINDOW:]    # (W, N)
-        dX   = np.diff(X_w, axis=0)      # (W-1, N)
-        Xlag = X_w[:-1]                  # (W-1, N)
-
-        n = len(dX)
-        sx  = Xlag.sum(axis=0)
-        sy  = dX.sum(axis=0)
-        sxx = (Xlag ** 2).sum(axis=0)
-        sxy = (Xlag * dX).sum(axis=0)
-        det = n * sxx - sx ** 2
-        det = np.where(np.abs(det) < 1e-12, 1e-12, det)
-
-        b     = (n * sxy - sx * sy) / det    # slope  ≈ -kappa
-        a     = (sy - b * sx) / n            # intercept ≈ kappa * m
-        kappa = -b
-        m     = np.where(np.abs(kappa) > 1e-8, a / kappa, 0.0)
-
-        ou_resid   = dX - (a[np.newaxis, :] + b[np.newaxis, :] * Xlag)
-        sigma      = ou_resid.std(axis=0)
-        safe_kappa = np.where(kappa > 0, kappa, np.nan)
-        sigma_eq   = sigma / np.sqrt(2.0 * safe_kappa)
+        # Fit OU over last OU_WINDOW days (exact discretisation, spec B2)
+        kappa, m, sigma_eq = _ou_fit_exact(X_ou[-self.OU_WINDOW:])
 
         X_cur  = X_ou[-1]   # (N,)
         s_score = (X_cur - m) / np.where(sigma_eq > 0, sigma_eq, np.nan)
@@ -115,7 +127,7 @@ class PCAETFStatArbReversion(BaseStrategy):
             if len(signals) >= self.MAX_SIGNALS:
                 break
             ss = s_score[idx]
-            if np.isnan(ss) or kappa[idx] <= 0 or np.isnan(sigma_eq[idx]) or sigma_eq[idx] <= 0:
+            if np.isnan(ss) or not (kappa[idx] > 0) or np.isnan(sigma_eq[idx]) or sigma_eq[idx] <= 0:
                 continue
 
             ticker = tickers[idx]

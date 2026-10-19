@@ -202,9 +202,14 @@ def bh_fdr(pvalues):
 
 # ── Pure math: half-life ─────────────────────────────────────────────────────
 def ar1_half_life(spread):
-    """AR(1) half-life of a spread series: regress delta_spread_t on
-    spread_{t-1} (with intercept); theta = -coef; half_life = ln(2)/theta.
-    Hard-fails (returns None) when coef >= 0 (non-mean-reverting: theta<=0)."""
+    """Exact-discretisation OU half-life of a spread series (spec B2).
+
+    Regress delta_spread_t on spread_{t-1} (with intercept); the slope is
+    phi - 1, so phi = 1 + coef is the exact AR(1) coefficient of the sampled
+    OU process and half_life = -ln(2) / ln(phi). (The former Euler form
+    ln(2)/-coef overstated the half-life by ~18 % at 2 bars, ~7 % at 5.)
+    Hard-fails (returns None) unless 0 < phi < 1: phi >= 1 is non-mean-
+    reverting, phi <= 0 is oscillating with no OU half-life."""
     s = np.asarray(spread, dtype=float)
     if len(s) < 3:
         return None
@@ -212,11 +217,10 @@ def ar1_half_life(spread):
     x = s[:-1]
     X = np.column_stack([np.ones_like(x), x])
     coef, *_ = np.linalg.lstsq(X, y, rcond=None)
-    phi_coef = float(coef[1])
-    theta = -phi_coef
-    if theta <= 0:
+    phi = 1.0 + float(coef[1])
+    if not (0.0 < phi < 1.0):
         return None
-    return math.log(2.0) / theta
+    return -math.log(2.0) / math.log(phi)
 
 
 # ── Pure math: OLS hedge ─────────────────────────────────────────────────────

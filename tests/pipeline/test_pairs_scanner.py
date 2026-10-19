@@ -239,9 +239,13 @@ def test_persistence_rule_two_consecutive_passes(tmp_path, monkeypatch):
     _install_fakes(monkeypatch, panel_for, cost_bps={"ZZTA": 1.0, "ZZTB": 1.0, "ZZTC": 1.0, "ZZTD": 1.0, "ZZTE": 1.0})
 
     window = 100
+    # B2: exact-OU half-life of this fixture's window is ~4.7d (Euler read
+    # ~6d, inside the default 5-30 band); widen the band so the test keeps
+    # exercising persistence rather than the band.
     summary1 = ps.run_scan(as_of=as_of_1, window=window, min_corr=0.6,
                             fdr_q_threshold=0.10, cost_k=2.0, out_path=str(out_path),
-                            corr_lookback_days=90, min_obs_frac=0.9)
+                            corr_lookback_days=90, min_obs_frac=0.9,
+                            half_life_band=(3.0, 30.0))
     assert summary1["approved"] == 0, "first-ever appearance must always be approved=False"
 
     df1 = pd.read_parquet(out_path)
@@ -249,7 +253,8 @@ def test_persistence_rule_two_consecutive_passes(tmp_path, monkeypatch):
 
     summary2 = ps.run_scan(as_of=as_of_2, window=window, min_corr=0.6,
                             fdr_q_threshold=0.10, cost_k=2.0, out_path=str(out_path),
-                            corr_lookback_days=90, min_obs_frac=0.9)
+                            corr_lookback_days=90, min_obs_frac=0.9,
+                            half_life_band=(3.0, 30.0))
 
     df2 = pd.read_parquet(out_path)
     df2_latest = df2[df2["as_of"] == as_of_2]
@@ -601,3 +606,19 @@ def test_load_cost_bps_missing_file_logs_warning(monkeypatch, tmp_path, caplog):
         result = ps._load_cost_bps()
     assert result == {}
     assert any("cost-bps file" in r.message and "not found" in r.message for r in caplog.records)
+
+
+def test_half_life_exact_ou_bias_under_3pct_at_hl2():
+    rng = np.random.default_rng(11); n = 50_000; phi = 2 ** -0.5     # true HL = 2.0 bars
+    s = np.zeros(n)
+    for t in range(1, n): s[t] = phi * s[t - 1] + rng.normal()
+    hl = ps.ar1_half_life(s)
+    assert abs(hl - 2.0) / 2.0 < 0.03
+    coef = np.linalg.lstsq(np.column_stack([np.ones(n - 1), s[:-1]]), np.diff(s), rcond=None)[0][1]
+    assert (math.log(2) / -coef - 2.0) / 2.0 > 0.10                  # old Euler form is biased ~ +18 %
+
+
+def test_half_life_none_when_phi_nonpositive():
+    rng = np.random.default_rng(5); s = np.zeros(2000)
+    for t in range(1, 2000): s[t] = -0.5 * s[t - 1] + rng.normal()
+    assert ps.ar1_half_life(s) is None
