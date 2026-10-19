@@ -51,7 +51,7 @@ Stream B flags and defaults:
 
 ## Review Focus
 
-1. **QP flag on must not change a single emitted order.** The broker pre-fetch path must produce exactly the order list of the flag-off path. Pinned: Task 9 `test_qp_flag_on_orders_identical_to_flag_off`.
+1. **QP flag on must not change a single emitted order.** The broker pre-fetch path must produce exactly the order list of the flag-off path. Pinned: Task 9 `test_qp_flag_on_orders_identical_to_flag_off` (EOD lane) and `test_qp_shadow_line_intraday_lane`.
 2. **A one-sided book with the net cap enabled must log `status=infeasible` and never raise.** This is the realistic production book. Pinned: Task 8 `test_net_cap_one_sided_book_reports_infeasible`.
 3. **Every sizer exit path needs a line when the flag is on.** That includes early returns: empty signals, the acting gate, gross ≤ 0, the thin-set abort and the flatten path. Pinned: Task 9 `test_qp_skipped_line_on_early_return`.
 4. **Generators without `bar_sigma` (test stubs, NaN generators) and σ = 0 must skip the bridge, not crash.** Pinned: Task 5 `test_bridge_skipped_without_bar_sigma`.
@@ -142,7 +142,7 @@ def test_invariants_hold_under_nnls(name, monkeypatch):
   - Return `(max(max(s), math.sqrt(q)) if q > 1e-12 else max(s), degraded)`.
   - Update the docstrings of `_tangency_side_sharpe` and `tangency_net_sharpe` (`:229`) to name both paths and the flag.
 
-- [ ] **Step 4: Append the path token to the sizer line.** At `regime_blended_sizer.py:1711-1714`, append ` tangency=%s` to the format string `'corr_cumsharpe: sizing rebuilt from S_adj for %d tickers (non-PSD backstop fires gate=%d size=%d)'`. The new argument is `'nnls' if _og.tangency_nnls_enabled() else 'enum'`. Use the module the sizer already imports orthogonalization as; grep `import.*orthogonalization` in the sizer for its alias.
+- [ ] **Step 4: Append the path token to the sizer line.** At `regime_blended_sizer.py:1711-1714`, append ` tangency=%s` to the format string `'corr_cumsharpe: sizing rebuilt from S_adj for %d tickers (non-PSD backstop fires gate=%d size=%d)'`. The new argument is `'nnls' if _og.tangency_nnls_enabled() else 'enum'`. Use the module the sizer already imports orthogonalization as; grep `import.*orthogonalization` in the sizer for its alias. No test, script or parser matches `sizing rebuilt from S_adj` (grepped 2026-10-19), so appending at the end is safe.
 
 - [ ] **Step 5: Run to verify pass.** Run `nice -n 19 python3 -m pytest tests/execution/test_tangency_nnls.py tests/execution/test_tangency_sadj.py -v -W error`. Expected: all PASS, with `test_tangency_sadj.py` unchanged.
 
@@ -180,12 +180,12 @@ def test_half_life_none_when_phi_nonpositive():
     assert ps.ar1_half_life(s) is None
 ```
 
-Create `tests/strategies/test_pca_ou_exact.py`. It builds four OU columns of length 40 000 with `phi ∈ (0.5, 0.8, 0.9, 0.95)`, unit innovations and mean 0.3, plus a fifth explosive column (`phi = 1.02`, 300 points, padded with its last value). Assertions, for each of the first four columns:
+Create `tests/strategies/test_pca_ou_exact.py`. It builds four OU columns of length 40 000 with `phi ∈ (0.5, 0.8, 0.9, 0.95)`, unit innovations and mean 0.3, Assertions, for each of the four columns:
   - `kappa == approx(-ln(phi), rel=0.05)`
   - `sigma_eq == approx(1/sqrt(1-phi²), rel=0.03)`
   - `abs(m - 0.3) < 0.1·sigma_eq`
 
-For the fifth column, `kappa` and `sigma_eq` must both be NaN. Import with `importlib.import_module('strategies.implementations.S_pca_etf_stat_arb_reversion')._ou_fit_exact`.
+In a separate call, an explosive series (`phi = 1.02`, shape `(300, 1)`, not padded: padding with a constant would make φ land in (0, 1)) must give NaN for both `kappa` and `sigma_eq`. Import with `importlib.import_module('strategies.implementations.S_pca_etf_stat_arb_reversion')._ou_fit_exact`.
 
 - [ ] **Step 2: Run to verify failure.** Run `nice -n 19 python3 -m pytest tests/pipeline/test_pairs_scanner.py -k "exact_ou or phi_nonpositive" tests/strategies/test_pca_ou_exact.py -v`. Expected: the bias test fails at its first assertion (≈ 18 %), the phi test fails (returns ≈ 0.46), and the PCA test fails with `AttributeError: _ou_fit_exact`.
 
@@ -279,7 +279,7 @@ def test_sharpe_annualised_by_hold_days(monkeypatch):
   - The per-iteration RNG is `random.Random(f"{seed}:{i}")`, used for the trade choice and then the path. The bootstrap RNG is `random.Random(f"{seed}:boot")`.
   - In `regime_param_montecarlo.bootstrap_size_scalar`, when `seed is None` it becomes `zlib.crc32(f"{strategy_id}|{regime_state}|{proposal_id}|{current_size}|{proposed_size}|{n_iter}|{window_days}".encode())`. The linear MC has no stop or target, so its key uses its own request fields. The result gains `'seed'`.
 
-- [ ] **Step 1: Write the failing tests.** Create `tests/database/test_migration_165_mc_seed.py`, following `tests/database/test_stream_b_migration_shape.py`. It asserts that the text contains `ALTER TABLE strategy_regime_intraday_mc_runs` and `ALTER TABLE strategy_regime_mc_runs`, each with `ADD COLUMN IF NOT EXISTS seed BIGINT`, and that `re.search(r'\b(DELETE|DROP|TRUNCATE|UPDATE|RENAME)\b', sql, re.I)` is None.
+- [ ] **Step 1: Write the failing tests.** Create `tests/database/test_migration_165_mc_seed.py`, following `tests/database/test_stream_b_migration_shape.py`. It asserts that the text contains `ALTER TABLE strategy_regime_intraday_mc_runs` and `ALTER TABLE strategy_regime_mc_runs`, each with `ADD COLUMN IF NOT EXISTS seed BIGINT`, and that `re.search(r'\b(DELETE|DROP|TRUNCATE|UPDATE|RENAME)\b', code, re.I)` is None, where `code` is the SQL with `--` comments stripped (`re.sub(r'--[^\n]*', '', sql)`), so header prose cannot fail it.
 
 Create `tests/metrics/test_mc_seed_crn.py`. All of its tests stub `_gen_for_ticker` with a recording GBM-like generator (`sigma=0.005`, `sample_path` draws `rng.gauss`) and use pools of 20 `ZZTEST1` rows.
   - `test_default_seed_reproducible`: two `seed=None` runs with identical args return identical dicts, and `r["seed"] == ipm.derive_seed("S_zz", "LOW_VOL", 9, 0.02, 0.05, 5)` (with `proposal_id=9`).
@@ -487,7 +487,7 @@ def test_both_run_once_lines_pass_p_trip():
   - `test_tangency_unconstrained_closed_form`: `long_only=False` gives `allclose(p, solve(Sigma, mu)/sum(solve(Sigma, mu)))`.
   - `test_min_evar_beats_or_ties_slsqp`: `R = default_rng(9).normal(0.0005, 0.01, (250, 5))` and `L = -R`. Let `w_cvx = min_evar_weights(L)` and let `w_ref` be the SLSQP weights from an in-test copy of `_min_evar_weights` (`S_evar_tempered_stable_sector_etf.py:56-73`). Using an in-test oracle `_evar(losses, z)` (bounded `minimize_scalar` over `log t ∈ [−9, 9]`, log-mean form), assert `_evar(L@w_cvx) ≤ _evar(L@w_ref) + 1e-5`, `w_cvx ≥ −1e-9` and `w_cvx.sum() == approx(1)`.
   - `test_requirements_pin_cvxpy_and_clarabel`: `requirements.txt` lines include `cvxpy==1.8.2` and `clarabel==0.11.1`.
-  - `test_helpers_lint_clean_for_strategies`: a strategy-shaped source string `from lib.convex import tangency_weights` passes `strategies.strategy_lint`, using that module's public lint entry point (grep it in `src/strategies/strategy_lint.py`).
+  - `test_helpers_lint_clean_for_strategies`: a strategy-shaped source string `from lib.convex import tangency_weights` passes the lint: `strategies.strategy_lint.lint_source(src) == []` (`strategy_lint.py:164`).
 
 - [ ] **Step 2: Run to verify failure.** Run `nice -n 19 python3 -m pytest tests/lib/test_convex.py -v`. Expected: FAIL with `ModuleNotFoundError: lib.convex`.
 - [ ] **Step 3: Implement `src/lib/convex.py`, the two pins and the StrategyCoder note.** The note text: "If a strategy needs a long-only tangency or minimum-EVaR weight vector, call `from lib.convex import tangency_weights, min_evar_weights`. Never import cvxpy in a strategy file. A `None` return means fall back (e.g. to equal weight). The 3×-observations rule above still applies; a convex solver does not fix an underdetermined Σ."
@@ -512,13 +512,13 @@ def test_both_run_once_lines_pass_p_trip():
     - a ticker in `bench_tkrs` additionally gets `min(cap, bench_frac·nav)`.
     
     Use `PER_TICKER_CAP_SHARPE_FRAC`, imported from the sizer module lazily inside the function to avoid a circular import.
-  - `_build_problem(n: int, with_net: bool) -> tuple[cp.Problem, dict[str, cp.Parameter], cp.Variable]`. It works in NAV units (`x̂ = x/NAV`), with Parameters `h, cur, cap (nonneg), sgn, G (nonneg)` and `netb (nonneg)` when `with_net`. τ is passed as a Python constant (`_build_problem(n, with_net, tau)`) because a parameter multiplying a parameter-bearing term breaks DPP (NOTES-cvxpy §5). The formulation lifted from `qp2.py`:
+  - `_build_problem(n: int, with_net: bool, tau: float) -> tuple[cp.Problem, dict[str, cp.Parameter], cp.Variable]`. It works in NAV units (`x̂ = x/NAV`), with Parameters `h, cur, cap (nonneg), sgn, G (nonneg)` and `netb (nonneg)` when `with_net`. τ is a Python constant (the third argument), not a Parameter, because a parameter multiplying a parameter-bearing term breaks DPP (NOTES-cvxpy §5). The formulation lifted from `qp2.py`:
     - objective `cp.sum_squares(x − h) + tau·cp.norm1(x − cur)`;
     - constraints `sgn @ x == G`, `cp.abs(x) <= cap`, `cp.multiply(sgn, x) >= 0`, plus `cp.sum(x) <= netb` and `cp.sum(x) >= −netb` when `with_net`.
   - `solve_qp(h, cur, cap, sgn, *, nav, gross_usd, net_frac: float | None, tau) -> tuple[np.ndarray | None, str, float]` returns USD `x`, a status and `solve_ms`. It calls `prob.solve(solver=cp.CLARABEL)`. Status mapping: `optimal` gives `ok`, `optimal_inaccurate` gives `ok_inaccurate`, `infeasible`/`infeasible_inaccurate` give `infeasible`, any other status gives the status string, and an exception gives `error:<ExcClassName>`. `netb = net_frac·gross_usd/nav`. Infinite caps are replaced by `gross_usd/nav`.
   - `run_qp_shadow(target_usd, broker, *, nav, lam_nav, caps, bench_tkrs, net_frac, tau) -> str`. It never raises. It keeps names with finite non-zero `h` and sets `sgn = sign(h)`, `cur = broker.get(t, 0.0)` and `G = min(lam_nav, Σ caps[t])` (D4). It solves, emits the line via `logger.info` and `lib.shadow_log.record('qp_shadow', line)`, marks the cycle emitted, and returns the line. Empty names give `status=skipped:no_targets`.
   - `format_line(*, n, l1_dist, gross_qp, gross_cascade, spy_qp, spy_cascade, solve_ms, status, gross_target, net_frac, tau) -> str` renders exactly `[qp_shadow] n=%d l1_dist=%s gross_qp=%s gross_cascade=%.0f spy_qp=%s spy_cascade=%.0f solve_ms=%.1f status=%s gross_target=%.0f net_cap=%s tau=%g`. The QP-derived fields render `%.0f`, or `n/a` when `x is None`; `net_cap` renders `off` or `%.2f`. `l1_dist = Σ|x−h|` over the solved names, `spy_* = Σ` over `bench_tkrs`.
-  - `emit_status(status: str) -> str` emits a line with zeroed counts, `n/a` QP fields and the given status (used for `skipped:*` and `error:*`).
+  - `emit_status(status: str) -> str` emits a line with zeroed counts, `n/a` QP fields and the given status (used for `skipped:*` and `error:*`). Like `run_qp_shadow`, it **marks the cycle as emitted**, so `end_cycle` never adds a second line after an error line.
   - `begin_cycle() -> None` and `end_cycle() -> None`. `end_cycle` emits `emit_status('skipped:no_targets')` when the flag is on and nothing was emitted since `begin_cycle`.
 
 - [ ] **Step 1: Write the failing tests** in `tests/execution/test_qp_shadow_sizer.py` (tickers `ZZTEST1..3`, bench `ZZBENCH`, `nav = 100_000`; `_isolate_shadow_log` from the conftest keeps logs in tmp):
@@ -535,7 +535,7 @@ def test_both_run_once_lines_pass_p_trip():
   - `test_solver_exception_reported`: monkeypatch `cvxpy.Problem.solve` to raise `cvxpy.error.SolverError`. The line ends with `status=error:SolverError` and `run_qp_shadow` returns normally.
   - `test_line_format_exact`: the regex `^\[qp_shadow\] n=\d+ l1_dist=\S+ gross_qp=\S+ gross_cascade=\S+ spy_qp=\S+ spy_cascade=\S+ solve_ms=\S+ status=\S+ gross_target=\S+ net_cap=\S+ tau=\S+$` matches.
   - `test_tau_env_parsing`: `''` and `'abc'` give 0.0, `'-1'` gives 0.0, `'0.02'` gives 0.02.
-  - `test_end_cycle_emits_skipped_once`: with the flag on, `begin_cycle(); end_cycle()` logs exactly one `[qp_shadow]` record containing `status=skipped:no_targets`. `begin_cycle(); run_qp_shadow(...); end_cycle()` also logs exactly one. With the flag off, `end_cycle` logs nothing.
+  - `test_end_cycle_emits_skipped_once`: with the flag on, `begin_cycle(); end_cycle()` logs exactly one `[qp_shadow]` record containing `status=skipped:no_targets`. `begin_cycle(); run_qp_shadow(...); end_cycle()` and `begin_cycle(); emit_status('error:X'); end_cycle()` each log exactly one. With the flag off, `end_cycle` logs nothing.
 
 - [ ] **Step 2: Run to verify failure.** Run `nice -n 19 python3 -m pytest tests/execution/test_qp_shadow_sizer.py -v`. Expected: FAIL with `ModuleNotFoundError: execution.qp_shadow_sizer`.
 - [ ] **Step 3: Implement the module as in Interfaces.** Write a module docstring citing ruling R5, the D4 resolution, and NOTES-cvxpy §5: always pass `solver=cp.CLARABEL`, never `ignore_dpp`, never let the QP choose direction, never route. Do not import cvxpy at module level.
@@ -550,7 +550,8 @@ def test_both_run_once_lines_pass_p_trip():
 **Files:**
 - Modify: `src/execution/regime_blended_sizer.py:126` (`size_positions`). Rename it to `_size_positions_impl` and add the wrapper.
 - Modify: `src/execution/regime_blended_sizer.py:2022-2026` (hook plus `broker=` pass-through)
-- Test: `tests/execution/test_regime_blended_sizer.py` (add `class TestQpShadowWiring`, reusing `_run_intraday_path`, `_carried_cap` and `_weights_row_cap` from that file)
+- Test: `tests/execution/test_sizer_per_ticker_cap.py`. Add `class TestQpShadowWiringEOD`, reusing `_run_eod`, `_carried`, `_weights_row`, `NAV` and `LAM` from that file. This is the production EOD/same-day lane (`OPENCLAW_EOD_RECONCILE=1`), which falls through to the `_sharpe_cadence_path` call at `:182`, and it has no thin-set gate.
+- Test: `tests/execution/test_regime_blended_sizer.py`. Add one intraday-lane test, reusing `_run_intraday_path`, `_carried_cap` and `_weights_row_cap`. It needs **≥ 12 signals**: `_run_intraday_path` stubs the baseline to `len(signals)`, and `is_signal_set_thin` aborts below `SIGNAL_SET_MIN_FLOOR = 10` (`regime_blended_sizer.py:57`), which would return `[]` before the hook.
 
 **Interfaces:**
 - Consumes (Task 8): `qp_shadow_enabled`, `build_caps`, `run_qp_shadow`, `resolve_tau`, `emit_status`, `begin_cycle`, `end_cycle`.
@@ -580,19 +581,26 @@ if _qps.qp_shadow_enabled():
 
   Then add `broker=_qp_broker` to the existing `_emit_orders_from_targets(...)` call. When the flag is off, `_qp_broker is None` and `_emit_orders_from_targets` fetches the broker itself, exactly as today. The `import execution.qp_shadow_sizer as _qps` goes at module top; it imports no cvxpy at import time.
 
-- [ ] **Step 1: Write the failing tests** (`class TestQpShadowWiring`; every test calls `caplog.set_level(logging.INFO, logger='execution.qp_shadow_sizer')`). Each test monkeypatches `_sizer._load_net_cap_cfg` to return `(False, 0.6)` and `execution.benchmark_sizing.benchmark_max_nav_frac` to return `1.0`, so no test reaches Postgres. Signals: three `_carried_cap('S_zz_i', 'ZZTEST<i>')` rows, each with weights `_weights_row_cap('S_zz_i', eff_sharpe=3.5)`.
-  - `test_qp_flag_on_orders_identical_to_flag_off`: run `_run_intraday_path` with the flag unset, then with `OPENCLAW_QP_SHADOW=1`. The two order lists are equal. With the flag on, `caplog` has exactly one record starting `[qp_shadow]`, and its status is not `error:*`.
-  - `test_qp_flag_off_emits_nothing_and_broker_untouched`: spy on `_sizer._emit_orders_from_targets` (a wrapper that records the `broker` kwarg and then calls the original). With the flag off, `broker` is `None` and no `[qp_shadow]` record exists. With the flag on, `broker` is the stubbed dict.
-  - `test_qp_skipped_line_on_early_return`: with the flag on, `_run_intraday_path(monkeypatch, [], [])` returns `[]` and logs exactly one `[qp_shadow]` record containing `status=skipped:`.
-  - `test_qp_error_never_breaks_sizing`: monkeypatch `_qps.build_caps` to raise `RuntimeError`. Orders equal the flag-off orders, and one record contains `status=error:RuntimeError`.
+- [ ] **Step 1: Write the failing tests.** Every test calls `caplog.set_level(logging.INFO, logger='execution.qp_shadow_sizer')`. It monkeypatches `_sizer._load_net_cap_cfg` to return `(False, 0.6)` and `execution.benchmark_sizing.benchmark_max_nav_frac` to return `1.0`, so no test reaches Postgres.
 
-- [ ] **Step 2: Run to verify failure.** Run `nice -n 19 python3 -m pytest tests/execution/test_regime_blended_sizer.py -k QpShadowWiring -v`. Expected: FAIL, because there is no `[qp_shadow]` record.
+  In `TestQpShadowWiringEOD`, the carried rows are three `_carried('S_zz_i', 'ZZTEST<i>')` rows, with weights `_weights_row('S_zz_i', eff_sharpe=3.5)`:
+  - `test_qp_flag_on_orders_identical_to_flag_off`: run `_run_eod` with the flag unset, then with `OPENCLAW_QP_SHADOW=1`.
+    - Orders are non-empty and the two lists are equal.
+    - With the flag on there is exactly one `[qp_shadow]` record, containing `n=3` and `status=ok`.
+  - `test_qp_flag_off_emits_nothing_and_broker_untouched`: spy on `_sizer._emit_orders_from_targets` with a wrapper that records the `broker` kwarg and calls the original. With the flag off, `broker` is `None` and there is no `[qp_shadow]` record. With the flag on, `broker` is the stubbed dict.
+  - `test_qp_skipped_line_on_early_return`: with the flag on, `_run_eod(monkeypatch, [], [])` returns `[]` and logs exactly one `[qp_shadow]` record containing `status=skipped:`.
+  - `test_qp_error_never_breaks_sizing`: monkeypatch `_qps.build_caps` to raise `RuntimeError`. Orders equal the flag-off orders, and there is **exactly one** `[qp_shadow]` record, ending `status=error:RuntimeError`.
+
+  In `test_regime_blended_sizer.py`:
+  - `test_qp_shadow_line_intraday_lane`: 12 `_carried_cap('S_zz_i', 'ZZTEST<i>')` signals with `_weights_row_cap(..., eff_sharpe=3.5)`. With the flag on, orders are non-empty and equal the flag-off orders, and there is exactly one `[qp_shadow]` record, containing `n=12` and `status=ok`.
+
+- [ ] **Step 2: Run to verify failure.** Run `nice -n 19 python3 -m pytest tests/execution/test_sizer_per_ticker_cap.py -k QpShadow tests/execution/test_regime_blended_sizer.py -k qp_shadow -v`. Expected: FAIL, because there is no `[qp_shadow]` record.
 - [ ] **Step 3: Implement the wrapper and the hook exactly as in Interfaces.** Add a one-paragraph comment above the hook stating R5 (shadow, never routes), why it is a hook and not a step, and that `h` is the cascade's final `target_usd` as handed to `_emit_orders_from_targets`.
-- [ ] **Step 4: Run to verify pass.** Run `nice -n 19 python3 -m pytest tests/execution/test_regime_blended_sizer.py -v -W error`, then `nice -n 19 python3 -m pytest tests/execution/test_tangency_sadj.py -v`. Expected: PASS.
+- [ ] **Step 4: Run to verify pass.** Run `nice -n 19 python3 -m pytest tests/execution/test_sizer_per_ticker_cap.py -v -W error`, then `nice -n 19 python3 -m pytest tests/execution/test_regime_blended_sizer.py -v -W error`, then `nice -n 19 python3 -m pytest tests/execution/test_tangency_sadj.py -v`. Expected: PASS.
 - [ ] **Step 5: Add a changelog entry** at the top of `docs/archive/changelog.md` (newest first), in the file's existing format. It records:
   - the B1–B6 flags and defaults;
   - migration 165;
   - spec deviations D1–D7, one line each;
   - the live-watch item "first trade step after merge with `OPENCLAW_QP_SHADOW=1` shows one `[qp_shadow]` line; ≥ 2 weeks of lines before any promotion decision (R5)".
-- [ ] **Step 6: Stage.** `git add src/execution/regime_blended_sizer.py tests/execution/test_regime_blended_sizer.py docs/archive/changelog.md`
+- [ ] **Step 6: Stage.** `git add src/execution/regime_blended_sizer.py tests/execution/test_sizer_per_ticker_cap.py tests/execution/test_regime_blended_sizer.py docs/archive/changelog.md`
 - [ ] **Step 7: Commit.** `git commit -m "feat(sizer): wire [qp_shadow] line into the trade step behind OPENCLAW_QP_SHADOW (B6)"`
