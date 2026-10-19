@@ -12,6 +12,7 @@ Rules:
     statement aborts the caller's transaction). A missing table (migration
     166 rolled back) is a logged no-op.
 """
+import os
 import sys
 
 HOT_TABLE = 'strategy_backtest_trades_primary'
@@ -24,6 +25,14 @@ TRADE_COLUMNS = (
 )
 
 _COLS_SQL = ', '.join(TRADE_COLUMNS)
+
+LEGACY_TABLE = 'strategy_backtest_trades'
+
+
+def trades_source() -> str:
+    """Table the readers select backtest trades from. Read on EVERY call (never
+    cached at import): the hot table only when OPENCLAW_BT_TRADES_HOT == '1'."""
+    return HOT_TABLE if os.environ.get('OPENCLAW_BT_TRADES_HOT') == '1' else LEGACY_TABLE
 
 
 def hot_table_exists(cur) -> bool:

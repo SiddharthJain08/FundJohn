@@ -231,6 +231,7 @@ def _stored_baseline(strategy_id) -> Optional[dict]:
     primary row exists at all."""
     import json
     import psycopg2
+    from backtest.trades_primary import trades_source
     with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
         cur.execute("""
             SELECT run_id, total_sharpe, end_date, config_json
@@ -243,7 +244,7 @@ def _stored_baseline(strategy_id) -> Optional[dict]:
         if row is None:
             return None
         run_id, sharpe, end_date, config_json = row[0], row[1], row[2], row[3]
-        cur.execute("""
+        cur.execute(f"""
             SELECT percentile_cont(0.5) WITHIN GROUP
                      (ORDER BY abs(entry_price - signal_stop) / entry_price)
                      FILTER (WHERE signal_stop IS NOT NULL AND signal_stop <> 0
@@ -252,7 +253,7 @@ def _stored_baseline(strategy_id) -> Optional[dict]:
                      (ORDER BY abs(signal_target - entry_price) / entry_price)
                      FILTER (WHERE signal_target IS NOT NULL AND signal_target <> 0
                                AND entry_price IS NOT NULL AND entry_price <> 0)
-              FROM strategy_backtest_trades
+              FROM {trades_source()}
              WHERE run_id = %s
         """, (run_id,))
         med_stop, med_target = cur.fetchone()

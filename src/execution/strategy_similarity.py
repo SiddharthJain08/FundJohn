@@ -15,6 +15,7 @@ import re
 from typing import Optional
 
 from execution.orthogonalization import _dir_to_int
+from backtest.trades_primary import trades_source
 
 REGIME_STATES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
 DEFAULT_WINDOW_DAYS = 90
@@ -257,9 +258,9 @@ def _returns_by_regime_backtest() -> dict[str, dict[str, dict[str, float]]]:
     is bounded regardless of trade count. entry_regime is the ENTRY stamp, not
     the holding period — the --shadow report measures how often exits cross
     regimes (§3.4(2)) so the mis-bucketing is quantified, not assumed away."""
-    sql = """
+    sql = f"""
         SELECT t.entry_regime, t.strategy_id, t.exit_date::text, AVG(t.pnl_pct)::float
-          FROM strategy_backtest_trades t
+          FROM {trades_source()} t
           JOIN strategy_backtest_runs r ON r.run_id = t.run_id AND r.primary_window
          WHERE t.exit_date IS NOT NULL AND t.entry_regime IS NOT NULL
          GROUP BY 1, 2, 3
@@ -290,10 +291,10 @@ def _cofiring_sets_by_regime_backtest() -> tuple[dict[str, dict[str, set]],
     simulated on different symbol sets. Overlap must be computed on the
     INTERSECTION of the two strategies' traded universes
     (overlap_similarity_restricted below)."""
-    sql = """
+    sql = f"""
         SELECT DISTINCT t.entry_regime, t.strategy_id,
                to_char(t.entry_date, 'IYYY"W"IW'), t.ticker, t.direction
-          FROM strategy_backtest_trades t
+          FROM {trades_source()} t
           JOIN strategy_backtest_runs r ON r.run_id = t.run_id AND r.primary_window
          WHERE t.entry_regime IS NOT NULL AND t.ticker IS NOT NULL
     """
@@ -945,9 +946,9 @@ def _cross_regime_exit_share() -> dict[str, float]:
                            columns=['date', 'regime'])
     by_date = {str(d.date() if hasattr(d, 'date') else d): r
                for d, r in zip(hist['date'], hist['regime'])}
-    sql = """
+    sql = f"""
         SELECT t.entry_regime, t.exit_date::text, count(*)
-          FROM strategy_backtest_trades t
+          FROM {trades_source()} t
           JOIN strategy_backtest_runs r ON r.run_id=t.run_id AND r.primary_window
          WHERE t.exit_date IS NOT NULL AND t.entry_regime IS NOT NULL
          GROUP BY 1, 2
