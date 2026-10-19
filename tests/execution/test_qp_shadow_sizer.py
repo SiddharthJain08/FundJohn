@@ -153,7 +153,26 @@ def test_150_names_solve_time():
     n = 150
     h = {f'ZZ{i}': float(v) for i, v in enumerate(rng.standard_normal(n) * 2000)}
     caps = {t: 4000.0 for t in h}
-    _run(h, caps)  # compile
+    _run(h, caps, net=0.6)  # compile, same net as the timed call
+    key = next(iter(q._cache))
+    obj = q._cache[key]
     t = time.time(); line = _run(h, caps, net=0.6)
+    assert q._cache[key] is obj          # re-solve reuses the compiled problem
     assert 'status=ok' in line and time.time() - t < 5
     print('150-name solve_ms', _f(line, 'solve_ms'))
+
+
+def test_caps_sanitised_and_gross_strictly_interior():
+    # nan / negative caps must not poison G; binding sum(cap) stays strictly interior
+    line = _run({T1: 30e3, T2: 20e3}, {T1: float('nan'), T2: -5.0}, lam_nav=50e3)
+    assert 'status=' in line and 'error' not in line
+    line = _run({T1: 30e3, T2: 20e3}, {T1: 10e3, T2: 10e3}, lam_nav=50e3)
+    assert 'status=ok' in line
+    seen = {}
+    orig = q.solve_qp
+    q.solve_qp = lambda *a, **k: (seen.update(g=k['gross_usd']), orig(*a, **k))[1]
+    try:
+        _run({T1: 30e3, T2: 20e3}, {T1: 10e3, T2: 10e3}, lam_nav=50e3)
+    finally:
+        q.solve_qp = orig
+    assert seen['g'] < 20e3

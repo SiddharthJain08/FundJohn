@@ -298,3 +298,76 @@ def test_corr_cumsharpe_line_carries_tangency_token(monkeypatch, caplog):
     monkeypatch.setenv('OPENCLAW_TANGENCY_NNLS', '1')
     lines = _lines()
     assert len(lines) == 1 and lines[0].endswith('tangency_mode=nnls')
+
+
+class TestQpShadowWiringEOD:
+    """B6b: OPENCLAW_QP_SHADOW wiring on the production EOD lane. Shadow only:
+    flag on must not change one emitted order."""
+
+    @staticmethod
+    def _setup(monkeypatch, caplog):
+        import logging
+        caplog.set_level(logging.INFO, logger='execution.qp_shadow_sizer')
+        monkeypatch.setattr(_sizer, '_load_net_cap_cfg', lambda *a, **k: (False, 0.6))
+        import execution.benchmark_sizing as _bs
+        monkeypatch.setattr(_bs, 'benchmark_max_nav_frac', lambda *a, **k: 1.0)
+        import execution.qp_shadow_sizer as _q
+        monkeypatch.setattr(_q, '_emit', lambda line, _o=_q._emit: (
+            _q.logger.info(line), setattr(_q, '_emitted', True), line)[2])
+
+    @staticmethod
+    def _rows():
+        ids = [f'S_zz_{i}' for i in range(3)]
+        return ([_weights_row(i, eff_sharpe=3.5) for i in ids],
+                [_carried(i, f'ZZTEST{k}') for k, i in enumerate(ids)])
+
+    @staticmethod
+    def _recs(caplog):
+        return [r.getMessage() for r in caplog.records if '[qp_shadow]' in r.getMessage()]
+
+    def test_qp_flag_on_orders_identical_to_flag_off(self, monkeypatch, caplog):
+        self._setup(monkeypatch, caplog)
+        w, c = self._rows()
+        monkeypatch.delenv('OPENCLAW_QP_SHADOW', raising=False)
+        off = _run_eod(monkeypatch, w, c)
+        assert off and not self._recs(caplog)
+        monkeypatch.setenv('OPENCLAW_QP_SHADOW', '1')
+        on = _run_eod(monkeypatch, w, c)
+        assert on == off
+        recs = self._recs(caplog)
+        assert len(recs) == 1 and ' n=3 ' in recs[0] and 'status=ok' in recs[0]
+
+    def test_qp_flag_off_emits_nothing_and_broker_untouched(self, monkeypatch, caplog):
+        self._setup(monkeypatch, caplog)
+        w, c = self._rows()
+        seen = []
+        orig = _sizer._emit_orders_from_targets
+        monkeypatch.setattr(_sizer, '_emit_orders_from_targets',
+                            lambda *a, **k: (seen.append(k.get('broker')), orig(*a, **k))[1])
+        monkeypatch.delenv('OPENCLAW_QP_SHADOW', raising=False)
+        _run_eod(monkeypatch, w, c, broker={'ZZHELD': 500.0})
+        assert seen == [None] and not self._recs(caplog)
+        monkeypatch.setenv('OPENCLAW_QP_SHADOW', '1')
+        _run_eod(monkeypatch, w, c, broker={'ZZHELD': 500.0})
+        assert seen[1] == {'ZZHELD': 500.0}
+
+    def test_qp_skipped_line_on_early_return(self, monkeypatch, caplog):
+        self._setup(monkeypatch, caplog)
+        monkeypatch.setenv('OPENCLAW_QP_SHADOW', '1')
+        assert _run_eod(monkeypatch, [], []) == []
+        recs = self._recs(caplog)
+        assert len(recs) == 1 and 'status=skipped:' in recs[0]
+
+    def test_qp_error_never_breaks_sizing(self, monkeypatch, caplog):
+        self._setup(monkeypatch, caplog)
+        w, c = self._rows()
+        monkeypatch.delenv('OPENCLAW_QP_SHADOW', raising=False)
+        off = _run_eod(monkeypatch, w, c)
+        monkeypatch.setenv('OPENCLAW_QP_SHADOW', '1')
+        import execution.qp_shadow_sizer as _q
+        def _boom(*a, **k):
+            raise RuntimeError('x')
+        monkeypatch.setattr(_q, 'build_caps', _boom)
+        assert _run_eod(monkeypatch, w, c) == off
+        recs = self._recs(caplog)
+        assert len(recs) == 1 and recs[0].rstrip().split(' status=')[1].split()[0] == 'error:RuntimeError'

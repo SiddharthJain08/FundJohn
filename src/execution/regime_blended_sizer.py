@@ -11,6 +11,7 @@ multiple production cycles. The historical paths and the ticker_consolidator
 module they used live in git history only.
 """
 from __future__ import annotations
+import functools
 import json
 import logging
 import math
@@ -23,6 +24,7 @@ import psycopg2
 
 from execution.signal_cadence_gate import filter_by_cadence, advance_last_fire
 from execution.alpaca_executor import _spot_price
+import execution.qp_shadow_sizer as _qps  # B6: no cvxpy import at import time
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +125,7 @@ def trade_weight_factor_enabled() -> bool:
     return os.environ.get(TRADE_WEIGHT_FACTOR_ENV) == '1'
 
 
-def size_positions(
+def _size_positions_impl(
     signals: list[dict],
     account_state: dict,
     regime: dict,
@@ -181,6 +183,21 @@ def size_positions(
     # `confirmer` param is kept (tests inject stubs) but is None in production.
     return _sharpe_cadence_path(passed, account_state, regime_state,
                                 regime_params, confirmer)
+
+
+@functools.wraps(_size_positions_impl)
+def size_positions(*args, **kwargs):
+    """B6: brackets the sizer so EVERY exit path (empty signals, acting gate,
+    gross <= 0, thin-set abort, flatten) still emits one [qp_shadow] line when
+    OPENCLAW_QP_SHADOW=1. Flag off: begin/end are no-ops."""
+    _qps.begin_cycle()
+    try:
+        return _size_positions_impl(*args, **kwargs)
+    finally:
+        try:
+            _qps.end_cycle()
+        except Exception:  # noqa: BLE001 — shadow must never alter sizing
+            pass
 
 
 def _check_force_fire_flag() -> bool:
@@ -1868,6 +1885,9 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # pool. The operator explicitly accepts the concentration trade-off in
     # exchange for honest expression of conviction.
     target_usd: dict[str, float] = {tkr: w * scale for tkr, w in ticker_w.items()}
+    # B6: QP-shadow tracking target h = post-scale PRE-cap snapshot (before dust,
+    # per-ticker cap, cluster cap, bench-corr removal, SPY NAV clamp).
+    _qp_h = dict(target_usd) if _qps.qp_shadow_enabled() else None
 
     # Hard dust floor (2026-06-08). The per-regime min-notional PARAMETER
     # (regime_sizer_params.min_signal_notional_*, $100-500, regime-varying) was
@@ -2025,10 +2045,37 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                            len(active), SIGNAL_SET_MIN_FLOOR, SIGNAL_SET_MIN_FRAC*100, _baseline)
             return []
 
+    # B6 (R5): SHADOW ONLY — the tracking-QP never routes an order; it logs one
+    # [qp_shadow] line comparing its solution with the cascade. It is a hook, not
+    # a pipeline step, because it needs the cascade's in-memory caps/targets.
+    # h_usd=_qp_h is the post-scale PRE-cap snapshot (the QP's tracking target);
+    # target_usd (positional) is the cascade's FINAL dict handed to
+    # _emit_orders_from_targets, used for the gross/spy/l1_dist cascade tokens.
+    _qp_broker = None
+    if _qps.qp_shadow_enabled():
+        try:
+            _qp_broker = _load_broker_positions_usd()
+            _net_on, _net_frac = _load_net_cap_cfg()
+            _qps.run_qp_shadow(
+                target_usd, _qp_broker, nav=nav, lam_nav=lam * nav,
+                caps=_qps.build_caps(
+                    target_usd, nav=nav, lam_global=lam_global, gate_net_sharpe=gate_net_sharpe,
+                    bench_tkrs=_bench_tkrs, bench_exempt=_bench_exempt,
+                    bench_frac=_bsz.benchmark_max_nav_frac(),
+                    cap_active=(os.environ.get('OPENCLAW_EOD_RECONCILE') == '1'
+                                or os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1')),
+                bench_tkrs=_bench_tkrs, net_frac=_net_frac if _net_on else None,
+                tau=_qps.resolve_tau(), h_usd=_qp_h)
+        except Exception as _e:          # shadow must never break sizing
+            try:
+                _qps.emit_status(f'error:{type(_e).__name__}')
+            except Exception:  # noqa: BLE001
+                pass
+
     _orders = _emit_orders_from_targets(
         target_usd, ticker_meta, nav, confirmer, _ortho_groups,
         sharpe_by_strat, eff_weight_by_strat, opt_active, weight_by_strat,
-        scale, account_state, gate_net_sharpe=gate_net_sharpe,
+        scale, account_state, broker=_qp_broker, gate_net_sharpe=gate_net_sharpe,
         bench_ids=_bench_ids, bench_tkrs=_bench_tkrs)
 
     # Final fix wave (2026-08-30) #2: under the beta budget the benchmark ticker

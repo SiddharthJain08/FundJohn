@@ -106,7 +106,9 @@ def solve_qp(h, cur, cap, sgn, *, nav, gross_usd, net_frac, tau):
         P['G'].value = max(g, 0.0)
         if with_net:
             P['netb'].value = max(net_frac * g, 0.0)
-        prob.solve(solver=cp.CLARABEL)
+        # bounded: a runaway solve must not stall the live trade step; a hit
+        # limit surfaces as a non-optimal status / SolverError (status path).
+        prob.solve(solver=cp.CLARABEL, max_iter=200, time_limit=2.0)
         st = prob.status
         ms = (time.perf_counter() - t0) * 1000.0
         if st == 'optimal':
@@ -155,29 +157,37 @@ def emit_status(status):
 
 
 def run_qp_shadow(target_usd, broker, *, nav, lam_nav, caps, bench_tkrs,
-                  net_frac, tau):
+                  net_frac, tau, h_usd=None):
+    """``h_usd`` = the QP's tracking target (the cascade's post-scale PRE-cap
+    dict); ``target_usd`` = the cascade's FINAL targets, used only for the
+    gross_cascade / spy_cascade / l1_dist tokens. Default: h_usd = target_usd."""
     try:
-        names = [t for t, v in target_usd.items()
+        if h_usd is None:
+            h_usd = target_usd
+        names = [t for t, v in h_usd.items()
                  if v is not None and math.isfinite(v) and v != 0.0]
         if not names or not nav or nav <= 0:
             return emit_status('skipped:no_targets')
-        h = np.array([target_usd[t] for t in names], float)
+        h = np.array([h_usd[t] for t in names], float)
+        c = np.array([float(target_usd.get(t) or 0.0) for t in names], float)
         cur = np.array([broker.get(t, 0.0) for t in names], float)
         cap = np.array([caps.get(t, math.inf) for t in names], float)
+        cap = np.where(np.isfinite(cap), np.maximum(cap, 0.0), np.inf)
         sgn = np.sign(h)
-        G = min(float(lam_nav), float(cap.sum()))
+        # (1 - 1e-9): keep the gross equality strictly interior to sum(cap)
+        G = min(float(lam_nav), float(cap.sum()) * (1.0 - 1e-9))
         x, status, ms = solve_qp(h, cur, cap, sgn, nav=nav, gross_usd=G,
                                  net_frac=net_frac, tau=tau)
         isb = np.array([t in bench_tkrs for t in names])
         if x is None:
             l1 = gq = sq = None
         else:
-            l1, gq, sq = (float(np.abs(x - h).sum()), float(np.abs(x).sum()),
+            l1, gq, sq = (float(np.abs(x - c).sum()), float(np.abs(x).sum()),
                           float(np.abs(x[isb]).sum()))
         return _emit(format_line(
             n=len(names), l1_dist=l1, gross_qp=gq,
-            gross_cascade=float(np.abs(h).sum()), spy_qp=sq,
-            spy_cascade=float(np.abs(h[isb]).sum()), solve_ms=ms, status=status,
+            gross_cascade=float(np.abs(c).sum()), spy_qp=sq,
+            spy_cascade=float(np.abs(c[isb]).sum()), solve_ms=ms, status=status,
             gross_target=G, net_frac=net_frac, tau=tau))
     except Exception as exc:  # noqa: BLE001
         try:
