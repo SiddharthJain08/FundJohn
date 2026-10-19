@@ -50,7 +50,7 @@ def test_compare_identical_ok(capsys):
     m = _mod()
     ok, lines = m.compare({'runs': {'r1': _run()}}, {'runs': {'r1': _run()}})
     assert ok
-    assert lines == ['[tracker_parity] run=r1 sid=S_a trades=IDENTICAL '
+    assert lines == ['[tracker_parity] run=r1 sid=S_a trades=IDENTICAL regimes=IDENTICAL '
                      'config_json=IDENTICAL run_row=IDENTICAL']
     assert lines[0] in capsys.readouterr().out
 
@@ -61,8 +61,8 @@ def test_compare_reports_first_diff_index_and_config_keys():
     b = _run(trades=[[1], [9]], cfg='{"a": 1, "b": 5, "d": 3}', row='["y"]')
     ok, lines = m.compare({'runs': {'r1': a}}, {'runs': {'r1': b}})
     assert not ok
-    assert lines[0] == ('[tracker_parity] run=r1 sid=S_a trades=DIFF(n=3/2 first=1) '
-                        'config_json=DIFF(keys=b,c,d) run_row=DIFF')
+    assert lines[0] == ('[tracker_parity] run=r1 sid=S_a trades=DIFF(n=3/2 first=1 '
+                        'a=[2] b=[9]) regimes=IDENTICAL config_json=DIFF(keys=b,c,d) run_row=DIFF')
 
 
 def test_compare_missing_run_is_diff():
@@ -82,13 +82,16 @@ def test_capture_one_strips_run_id_and_code_sha():
         cur.execute('INSERT INTO strategy_backtest_runs …',
                     ['RUNID', sid, 'SHA', 0.5, cfg])
         ub.psycopg2.extras.execute_values(
+            cur, 'INSERT INTO strategy_backtest_regimes …', [['RUNID', 'LOW_VOL', 2]])
+        ub.psycopg2.extras.execute_values(
             cur, 'INSERT INTO strategy_backtest_trades …', [['RUNID', 'AAA', 1.0]])
     ub = SimpleNamespace(psycopg2=SimpleNamespace(extras=SimpleNamespace(execute_values=None)),
                          run_backtest=fake, _resolve_instrument_class=lambda s: 'equity')
     out = m.capture_one(ub, 'S_a', {'fill_model': 'f'}, {'OPENCLAW_X': '1'})
     assert out['trade_rows'] == [['AAA', 1.0]]
     assert out['config_json'] == cfg
-    assert json.loads(out['run_row']) == ['S_a', 0.5, cfg]
+    assert out['regime_rows'] == [['LOW_VOL', 2]]
+    assert json.loads(out['run_row']) == ['S_a', 0.5, {'max_hold_days': 5}]
     assert ub.psycopg2.extras.execute_values is None  # patch restored
 
 
@@ -104,3 +107,50 @@ def test_rows_json_seam_never_touches_db(tmp_path, monkeypatch):
                              ['r2', 'S_b', '{"x": 1}']]))
     assert m.load_rows(rows_json=str(p)) == [('r1', 'S_a', {'gap_fill': 'open'}),
                                              ('r2', 'S_b', {'x': 1})]
+
+
+def test_config_key_order_is_not_a_diff_and_changed_value_lists_key():
+    m = _mod()
+    a = _run(cfg='{"a": 1, "b": 2}', row='["S_a", {"a": 1, "b": 2}]')
+    b = _run(cfg='{"b": 2, "a": 1}', row='["S_a", {"b": 2, "a": 1}]')
+    ok, lines = m.compare({'runs': {'r': a}}, {'runs': {'r': b}})
+    assert ok and 'config_json=IDENTICAL' in lines[0]
+    c = _run(cfg='{"a": 1, "b": 3}', row='["S_a", {"a": 1, "b": 3}]')
+    ok, lines = m.compare({'runs': {'r': a}}, {'runs': {'r': c}})
+    assert not ok and 'config_json=DIFF(keys=b)' in lines[0]
+
+
+def test_nan_in_trade_rows_normalised_and_regimes_compared():
+    m = _mod()
+    nan = float('nan')
+    assert m._clean([[nan, 1.0]]) == [[None, 1.0]]
+    a = _run(trades=[[nan]])
+    b = _run(trades=[[float('nan')]])
+    assert m.compare({'runs': {'r': a}}, {'runs': {'r': b}})[0]
+    ra = dict(_run(), regime_rows=[['LOW_VOL', 1]])
+    rb = dict(_run(), regime_rows=[['LOW_VOL', 2]])
+    ok, lines = m.compare({'runs': {'r': ra}}, {'runs': {'r': rb}})
+    assert not ok and 'regimes=DIFF' in lines[0]
+
+
+def test_capture_one_raises_without_config_json():
+    m = _mod()
+
+    def fake(sid, conn, commit, instrument_class, **kw):
+        conn.cursor().execute('INSERT INTO strategy_backtest_runs …', ['R', sid, 'SHA', 1])
+    ub = SimpleNamespace(psycopg2=SimpleNamespace(extras=SimpleNamespace(execute_values=None)),
+                         run_backtest=fake, _resolve_instrument_class=lambda s: 'equity')
+    with pytest.raises(RuntimeError):
+        m.capture_one(ub, 'S_a', {}, {})
+
+
+def test_main_exit_codes_for_bad_inputs(tmp_path, capsys):
+    m = _mod()
+    good = tmp_path / 'g.json'
+    good.write_text(json.dumps({'runs': {'r': _run()}}))
+    bad = tmp_path / 'bad.json'
+    bad.write_text('{not json')
+    assert m.main(['compare', str(good), str(tmp_path / 'missing.json')]) == 2
+    assert m.main(['compare', str(good), str(bad)]) == 2
+    assert 'ERROR' in capsys.readouterr().err
+    assert m.main(['compare', str(good), str(good)]) == 0

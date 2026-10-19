@@ -2,7 +2,8 @@
 """measure_tracker_parity.py — two-checkout replay parity for the D3 tracker refactor.
 
   capture --out PATH [--repo PATH] [--run-ids a,b,c | --rows-json PATH] [--env-file F]
-  compare A.json B.json            (rc 0 iff every run is IDENTICAL on all fields)
+  compare A.json B.json            (rc 0 iff every run is IDENTICAL on all fields;
+                                    1 = mismatch, 2 = tool/IO error)
 
 `capture` replays stored backtest runs (strategy + the provenance flags recorded in
 their config_json) through `backtest.unified_backtest.run_backtest` with a MagicMock
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -59,8 +61,37 @@ def replay_kwargs(config: dict) -> tuple[dict, dict]:
     return kw, env
 
 
+def _clean(v):
+    """JSON-safe, NaN -> None (nan != nan would false-DIFF), recursively."""
+    if isinstance(v, float) and math.isnan(v):
+        return None
+    if isinstance(v, (list, tuple)):
+        return [_clean(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _clean(x) for k, x in v.items()}
+    return json.loads(json.dumps(v, default=str))
+
+
+def _norm_cfg(cfg):
+    """config_json (str or dict) -> dict, so key order never matters."""
+    return json.loads(cfg) if isinstance(cfg, str) else dict(cfg)
+
+
+def _norm_run_row(row):
+    """run_row JSON str -> list with any embedded config JSON string parsed."""
+    out = []
+    for p in json.loads(row):
+        if isinstance(p, str) and p.startswith('{'):
+            try:
+                p = json.loads(p)
+            except ValueError:
+                pass
+        out.append(p)
+    return out
+
+
 def capture_one(ub, strategy_id: str, kwargs: dict, env: dict) -> dict:
-    seen = {'run': None, 'trades': []}
+    seen = {'run': None, 'trades': [], 'regimes': []}
     cur = MagicMock()
 
     def exec_spy(sql, params=None):
@@ -75,6 +106,8 @@ def capture_one(ub, strategy_id: str, kwargs: dict, env: dict) -> dict:
     def spy(c, sql, rows, *a, **k):
         if 'strategy_backtest_trades' in str(sql):
             seen['trades'].extend(list(r) for r in rows)
+        elif 'strategy_backtest_regimes' in str(sql):
+            seen['regimes'].extend(list(r) for r in rows)
 
     with patch.object(ub.psycopg2.extras, 'execute_values', spy), \
             patch.dict(os.environ, env):
@@ -85,10 +118,14 @@ def capture_one(ub, strategy_id: str, kwargs: dict, env: dict) -> dict:
         raise RuntimeError(f'{strategy_id}: no strategy_backtest_runs INSERT observed')
     cfg = next((p for p in run if isinstance(p, str) and p.startswith('{')
                 and 'max_hold_days' in p), None)
-    return {'trade_rows': json.loads(json.dumps([r[1:] for r in seen['trades']], default=str)),
-            'config_json': cfg,
-            'run_row': json.dumps([p for i, p in enumerate(run) if i not in (0, 2)],
-                                  default=str)}
+    if cfg is None:
+        raise RuntimeError(f'{strategy_id}: no config_json string among run-row params')
+    cfg_d = json.loads(cfg)
+    row = [cfg_d if p is cfg else p for i, p in enumerate(run) if i not in (0, 2)]
+    return {'trade_rows': _clean([r[1:] for r in seen['trades']]),
+            'regime_rows': _clean([r[1:] for r in seen['regimes']]),
+            'config_json': json.dumps(cfg_d, sort_keys=True, default=str),
+            'run_row': json.dumps(_clean(row), sort_keys=True, default=str)}
 
 
 def _first_diff(a, b):
@@ -99,11 +136,18 @@ def _first_diff(a, b):
 
 
 def _cfg_keys(a, b):
-    try:
-        da, db = json.loads(a), json.loads(b)
-    except (TypeError, ValueError):
-        return ['<unparseable>']
+    da, db = _norm_cfg(a), _norm_cfg(b)
     return sorted(k for k in set(da) | set(db) if da.get(k) != db.get(k))
+
+
+def _seq_diff(name, xa, xb):
+    if xa == xb:
+        return True, 'IDENTICAL'
+    i = _first_diff(xa, xb)
+    ra = xa[i] if i < len(xa) else '<absent>'
+    rb = xb[i] if i < len(xb) else '<absent>'
+    return False, (f'DIFF(n={len(xa)}/{len(xb)} first={i} '
+                   f'a={json.dumps(ra, default=str)} b={json.dumps(rb, default=str)})')
 
 
 def compare(a: dict, b: dict) -> tuple[bool, list[str]]:
@@ -117,17 +161,17 @@ def compare(a: dict, b: dict) -> tuple[bool, list[str]]:
                          f"{'A' if x is None else 'B'})")
             ok = False
             continue
-        ta, tb = x['trade_rows'], y['trade_rows']
-        t_ok = ta == tb
-        tr = 'IDENTICAL' if t_ok else f'DIFF(n={len(ta)}/{len(tb)} first={_first_diff(ta, tb)})'
-        c_ok = x['config_json'] == y['config_json']
-        cf = 'IDENTICAL' if c_ok else \
-            f"DIFF(keys={','.join(_cfg_keys(x['config_json'], y['config_json']))})"
-        r_ok = x['run_row'] == y['run_row']
+        t_ok, tr = _seq_diff('trades', _clean(x['trade_rows']), _clean(y['trade_rows']))
+        g_ok, rg = _seq_diff('regimes', _clean(x.get('regime_rows', [])),
+                             _clean(y.get('regime_rows', [])))
+        keys = _cfg_keys(x['config_json'], y['config_json'])
+        c_ok = not keys
+        cf = 'IDENTICAL' if c_ok else f"DIFF(keys={','.join(keys)})"
+        r_ok = _norm_run_row(x['run_row']) == _norm_run_row(y['run_row'])
         rr = 'IDENTICAL' if r_ok else 'DIFF'
-        ok = ok and t_ok and c_ok and r_ok
+        ok = ok and t_ok and g_ok and c_ok and r_ok
         lines.append(f"[tracker_parity] run={rid} sid={x.get('strategy_id')} "
-                     f"trades={tr} config_json={cf} run_row={rr}")
+                     f"trades={tr} regimes={rg} config_json={cf} run_row={rr}")
     for ln in lines:
         print(ln)
     return ok, lines
@@ -210,14 +254,18 @@ def main(argv=None) -> int:
     d.add_argument('a')
     d.add_argument('b')
     a = ap.parse_args(argv)
-    if a.cmd == 'capture':
-        return cmd_capture(a)
-    docs = []
-    for pth in (a.a, a.b):
-        with open(pth) as f:
-            docs.append(json.load(f))
-    ok, _ = compare(*docs)
-    return 0 if ok else 1
+    try:
+        if a.cmd == 'capture':
+            return cmd_capture(a)
+        docs = []
+        for pth in (a.a, a.b):
+            with open(pth) as f:
+                docs.append(json.load(f))
+        ok, _ = compare(*docs)
+        return 0 if ok else 1
+    except (OSError, ValueError, KeyError, RuntimeError) as e:
+        print(f'[tracker_parity] ERROR {type(e).__name__}: {e}', file=sys.stderr)
+        return 2
 
 
 if __name__ == '__main__':
