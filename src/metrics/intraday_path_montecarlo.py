@@ -29,6 +29,7 @@ import os
 import random
 import statistics
 import sys
+import zlib
 from pathlib import Path
 from typing import Optional
 
@@ -255,6 +256,12 @@ def _load_trade_pool(strategy_id: str, regime_state: str,
             return [{'ticker': r[0], 'direction': r[1] or 'LONG'} for r in cur.fetchall()]
 
 
+def derive_seed(strategy_id, regime_state, proposal_id, stop, target, max_hold) -> int:
+    """Deterministic seed from the request fields (spec 2026-10-19 B3)."""
+    return zlib.crc32(
+        f"{strategy_id}|{regime_state}|{proposal_id}|{stop}|{target}|{max_hold}".encode())
+
+
 def run_path_mc(strategy_id: str, regime_state: str,
                  current_size: float, proposed_size: float,
                  proposed_stop_pct: float,
@@ -263,7 +270,8 @@ def run_path_mc(strategy_id: str, regime_state: str,
                  n_iter: int = DEFAULT_N_ITER,
                  window_days: int = 365,
                  seed: Optional[int] = None,
-                 trade_pool: Optional[list[dict]] = None) -> dict:
+                 trade_pool: Optional[list[dict]] = None,
+                 proposal_id: Optional[int] = None) -> dict:
     """Run path-dependent MC. Returns dict matching migration 085 columns."""
     if trade_pool is None:
         trade_pool = _load_trade_pool(strategy_id, regime_state, window_days)
@@ -279,7 +287,10 @@ def run_path_mc(strategy_id: str, regime_state: str,
     if n_iter <= 0:
         return {'status': 'INSUFFICIENT', 'note': 'n_iter must be positive'}
 
-    rng = random.Random(seed) if seed is not None else random.Random()
+    if seed is None:
+        seed = derive_seed(strategy_id, regime_state, proposal_id,
+                           proposed_stop_pct, proposed_target_pct,
+                           proposed_max_hold_days)
     max_hold_bars = max(1, int(proposed_max_hold_days) * BARS_PER_RTH_DAY)
     ratio = float(proposed_size) / max(float(current_size), 0.001)
 
@@ -287,7 +298,11 @@ def run_path_mc(strategy_id: str, regime_state: str,
     returns: list[float] = []
     exit_counts = {'stop': 0, 'target': 0, 'max_hold': 0, 'no_gen': 0}
     max_dds: list[float] = []
-    for _ in range(n_iter):
+    for i in range(n_iter):
+        # Per-trade stream (common random numbers): iteration i draws the same
+        # numbers whatever n_iter or the proposed policy is. A str seed is used
+        # because random.Random((seed, i)) raises on Python 3.13.
+        rng = random.Random(f"{seed}:{i}")
         trade = rng.choice(trade_pool)
         gen, source = _gen_for_ticker(trade['ticker'], window_days=min(window_days, 90))
         if gen is None:
@@ -322,7 +337,7 @@ def run_path_mc(strategy_id: str, regime_state: str,
     # history" of the same N trades.
     sharpes: list[float] = []
     boot_means: list[float] = []
-    rng2 = random.Random(rng.random())
+    rng2 = random.Random(f"{seed}:boot")
     # Each simulated trade is held ~proposed_max_hold_days, so annualise by
     # sqrt(252 / hold) rather than treating it as a daily observation. NOTE:
     # the linear MC's _bootstrap_sharpe (regime_param_montecarlo.py:72)
@@ -349,6 +364,7 @@ def run_path_mc(strategy_id: str, regime_state: str,
 
     return {
         'status':                  'OK',
+        'seed':                    seed,
         'strategy_id':             strategy_id,
         'regime_state':            regime_state,
         'current_size':            current_size,
@@ -391,10 +407,10 @@ def persist_run(result: dict, proposal_id: Optional[int] = None) -> Optional[int
                      mean_pnl_p05, mean_pnl_p50, mean_pnl_p95,
                      max_dd_p05, max_dd_p50, max_dd_p95,
                      stop_hit_rate, target_hit_rate, max_hold_hit_rate,
-                     proposal_id)
+                     seed, proposal_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s)
+                        %s, %s, %s, %s, %s)
                 RETURNING id
             """, (result['strategy_id'], result['regime_state'],
                   result['current_size'], result['proposed_size'],
@@ -406,7 +422,7 @@ def persist_run(result: dict, proposal_id: Optional[int] = None) -> Optional[int
                   result['mean_pnl_p05'], result['mean_pnl_p50'], result['mean_pnl_p95'],
                   result['max_dd_p05'], result['max_dd_p50'], result['max_dd_p95'],
                   result['stop_hit_rate'], result['target_hit_rate'],
-                  result['max_hold_hit_rate'], proposal_id))
+                  result['max_hold_hit_rate'], result.get('seed'), proposal_id))
             row_id = cur.fetchone()[0]
         conn.commit()
     return row_id
@@ -434,6 +450,7 @@ def main():
         proposed_target_pct=args.target_pct,
         proposed_max_hold_days=args.max_hold_days,
         n_iter=args.n_iter, window_days=args.window_days, seed=args.seed,
+        proposal_id=args.proposal_id,
     )
     if result.get('status') == 'OK' and not args.no_persist:
         row_id = persist_run(result, proposal_id=args.proposal_id)
