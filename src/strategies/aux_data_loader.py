@@ -27,6 +27,7 @@ from __future__ import annotations
 import bisect
 import logging
 import os
+import sys
 from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
@@ -448,15 +449,132 @@ def _load_macro_series() -> dict:
     return _MACRO_SERIES
 
 
+# ── Macro point-in-time availability (six-repo D1b) ──────────────────────────
+# macro.parquet's `date` is the OBSERVATION date. Several series are published
+# well after it (INDPRO is stamped the 1st of its month, released ~6 weeks
+# later), so cutting at the observation date is look-ahead. `available_at =
+# date + MACRO_RELEASE_LAG_DAYS[series]` (calendar days); a row is visible iff
+# available_at <= as_of. Served Series keep their observation-date index.
+# Rationale (coordinator ruling 1, amending the spec's INDPRO 45 / daily FRED 1):
+#  - DEXUSEU/DEXJPUS/DTWEXBGS (Fed H.10) come out in a weekly Monday release:
+#    a Friday obs is public ~3 d later, a Monday obs ~7 d later; 7 is the
+#    conservative bound. DCOILWTICO is the EIA spot series, published weekly.
+#  - INDPRO (Fed G.17) is released ~45-47 d after its 1st-of-month obs date;
+#    48 is a safe upper bound.
+#  - VIX family is 0: same-bar close, the same convention as the price bar.
+#  - Unmapped series get MACRO_DEFAULT_LAG_DAYS (0) plus a one-time WARN.
+MACRO_RELEASE_LAG_DAYS: dict[str, int] = {
+    # CBOE vol-index closes: same-bar close, like the price bar (spec silent)
+    'VIX': 0, 'VIX3M': 0, 'VIX9D': 0, 'VVIX': 0,
+    # FRED daily (spec: "daily FRED series: 1")
+    'DGS1MO': 1, 'DGS3MO': 1, 'DGS6MO': 1, 'DGS1': 1, 'DGS2': 1, 'DGS5': 1,
+    'DGS10': 1, 'DGS30': 1, 'DTB3': 1, 'T10Y2Y': 1, 'T10Y3M': 1, 'DFF': 1,
+    'SOFR': 1, 'BAMLH0A0HYM2': 1, 'BAMLC0A0CM': 1,
+    # Daily observations published WEEKLY (coordinator ruling 1)
+    'DEXUSEU': 7, 'DEXJPUS': 7, 'DTWEXBGS': 7,   # Fed H.10: weekly Monday release
+    'DCOILWTICO': 7,                              # EIA spot prices: weekly release
+    # NY Fed reference rates: published ~08:00 ET next business day
+    'NYFED_SOFR': 1, 'NYFED_EFFR': 1, 'NYFED_OBFR': 1, 'NYFED_TGCR': 1, 'NYFED_BGCR': 1,
+    # Monthly, observation dated the 1st
+    'INDPRO': 48,   # Fed G.17 ~ 45-47 d after the 1st-of-month obs date (ruling 1; spec said 45)
+    'CPIAUCSL': 45, 'UNRATE': 40, 'PAYEMS': 40, 'GDP': 90,   # spec values; not ingested today
+}
+MACRO_DEFAULT_LAG_DAYS = 0
+
+_MACRO_PIT_ANNOUNCED = False
+_AVAIL_FRAMES: dict = {}
+
+
+def _macro_pit_enabled() -> bool:
+    """OPENCLAW_MACRO_PIT=1 selects the availability-date macro cut. Unset (or
+    any other value) keeps the legacy observation-date cut, byte-identical."""
+    return os.environ.get('OPENCLAW_MACRO_PIT', '0') == '1'
+
+
+def macro_release_lag(series: str) -> int:
+    """Release lag in calendar days for a macro series (unmapped => 0)."""
+    return MACRO_RELEASE_LAG_DAYS.get(series, MACRO_DEFAULT_LAG_DAYS)
+
+
+def _announce_macro_pit(full: dict) -> None:
+    global _MACRO_PIT_ANNOUNCED
+    if _MACRO_PIT_ANNOUNCED:
+        return
+    _MACRO_PIT_ANNOUNCED = True
+    unmapped = sorted(n for n in full if n not in MACRO_RELEASE_LAG_DAYS)
+    if unmapped:
+        print(f"[macro_pit] WARN unmapped={','.join(unmapped)} lag={MACRO_DEFAULT_LAG_DAYS}",
+              file=sys.stderr)
+    else:
+        print(f"[macro_pit] on series={len(full)} mapped={len(full)} unmapped=-",
+              file=sys.stderr)
+
+
+def available_at_frame(kind: str) -> pd.DataFrame:
+    """Availability frame for an aux kind, module-cached.
+
+    'macro': long date, series, value, available_at (= date + release lag).
+    'financials': ``_financials_with_availability()``.
+    'insider': ticker, date, available_at (= filing date = date).
+    'options': aggregates panel + available_at (= build date = date).
+    The per-ticker dicts strategies receive never carry ``available_at``."""
+    if kind not in ('macro', 'financials', 'insider', 'options'):
+        raise ValueError(f'unknown available_at kind: {kind!r}')
+    if kind == 'financials':
+        return _financials_with_availability()
+    if kind in _AVAIL_FRAMES:
+        return _AVAIL_FRAMES[kind]
+    if kind == 'macro':
+        parts = []
+        for name, ser in _load_macro_series().items():
+            f = ser.rename('value').rename_axis('date').reset_index()
+            f['series'] = name
+            f['available_at'] = f['date'] + pd.Timedelta(days=macro_release_lag(name))
+            parts.append(f[['date', 'series', 'value', 'available_at']])
+        df = (pd.concat(parts, ignore_index=True) if parts else
+              pd.DataFrame({'date': pd.Series(dtype='datetime64[ns]'),
+                            'series': pd.Series(dtype=object),
+                            'value': pd.Series(dtype=float),
+                            'available_at': pd.Series(dtype='datetime64[ns]')}))
+    elif kind == 'insider':
+        if INSIDER_PATH.exists():
+            ins = pd.read_parquet(INSIDER_PATH, columns=['ticker', 'date'])
+            ins['date'] = pd.to_datetime(ins['date'], errors='coerce')
+            df = ins.dropna(subset=['date']).reset_index(drop=True)
+        else:
+            df = pd.DataFrame({'ticker': pd.Series(dtype=object),
+                               'date': pd.Series(dtype='datetime64[ns]')})
+        df['available_at'] = df['date']
+    else:  # options
+        df = _load_panel().copy()
+        if 'date' in df.columns:
+            df['available_at'] = df['date']
+        else:
+            df['available_at'] = pd.Series(dtype='datetime64[ns]')
+    _AVAIL_FRAMES[kind] = df
+    return df
+
+
 def _macro_slice(date_str: str) -> dict:
     """Point-in-time macro: each series truncated to rows <= date (no
     look-ahead). Empty dict when macro.parquet is absent (fail-open —
-    strategies already guard on missing macro)."""
+    strategies already guard on missing macro).
+
+    OPENCLAW_MACRO_PIT=1 cuts on the AVAILABILITY date instead: rows with
+    observation date <= date - MACRO_RELEASE_LAG_DAYS[series] (see the table
+    above). The served Series keep their observation-date index."""
     full = _load_macro_series()
     if not full:
         return {}
     ts = pd.to_datetime(date_str)
     out = {}
+    if _macro_pit_enabled():
+        _announce_macro_pit(full)
+        for name, s in full.items():
+            cut = s.loc[:ts - pd.Timedelta(days=macro_release_lag(name))]
+            if len(cut):
+                out[name] = cut
+        return out
     for name, s in full.items():
         cut = s.loc[:ts]
         if len(cut):
@@ -491,6 +609,8 @@ def _reset_financials_caches() -> None:
     `FINANCIALS_PATH`/`EARNINGS_PATH`, since `_FIN_AVAIL_DF` is derived from
     the other two."""
     global _FIN_DF, _EARNINGS_DF, _FIN_AVAIL_DF
+    _AVAIL_FRAMES.pop('financials', None)
+    _AVAIL_FRAMES.pop('options', None)
     _FIN_DF = None
     _EARNINGS_DF = None
     _FIN_AVAIL_DF = None
@@ -740,8 +860,9 @@ def load_aux_data(
         'options':              {ticker: {...fields...}},
         'vol_indices':          {vix_close, vvix_close, vix9d_close},
         'macro':                {series_name: pd.Series(date → value)},
-                                # point-in-time (rows <= date); mirrors the
-                                # live engine.py aux['macro'] format exactly
+                                # point-in-time on observation date; on
+                                # availability date under OPENCLAW_MACRO_PIT=1;
+                                # mirrors the live engine.py aux['macro'] format exactly
                                 # (VIX / VIX3M / VIX9D / VVIX from macro.parquet)
         'financials':           {ticker: {field: value, +camelCase aliases}},
                                 # point-in-time latest report per ticker
