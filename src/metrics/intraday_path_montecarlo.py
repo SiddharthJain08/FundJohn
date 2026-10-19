@@ -18,6 +18,14 @@ Dispatch: tickers with ≥20 30m bars in the window get empirical; others
 get GBM. A `path_source` field on the persisted run records which
 generator (or 'hybrid' if a strategy's trade pool mixes both) was used.
 
+Discrete-monitoring bias: checking stops/targets only at 30m bar closes misses
+excursions between closes (the backtest and the broker see highs/lows and
+ticks), so the stop-hit rate is biased low (BGK shift ~ 0.5826*sigma_bar per
+barrier). apply_policy therefore adds a Brownian-bridge crossing test per bar:
+when the close test did not fire and both endpoints are on the safe side, the
+barrier is deemed hit with p = exp(-2*ln(S_prev/B)*ln(S_i/B)/sigma_bar^2).
+Kill switch OPENCLAW_MC_BRIDGE=0 (NOTES-diffrax F1).
+
 Spec: docs/archive/superpowers/specs/2026-05-13-regime-blended-sizer-phase-2e-design.md
 """
 from __future__ import annotations
@@ -70,6 +78,7 @@ class EmpiricalPathGen:
     """
     def __init__(self, returns: list[float]):
         self._returns = returns                  # log-returns, 30m intervals
+        self.bar_sigma = (statistics.stdev(returns) if len(returns) >= 2 else 0.0)
 
     @classmethod
     def from_parquet(cls, ticker: str, window_days: int = 90) -> Optional['EmpiricalPathGen']:
@@ -118,6 +127,10 @@ class GBMPathGen:
     def __init__(self, mu_intraday: float, sigma_intraday: float):
         self.mu = mu_intraday
         self.sigma = sigma_intraday
+
+    @property
+    def bar_sigma(self) -> float:
+        return self.sigma
 
     @classmethod
     def from_parquet(cls, ticker: str, window_days: int = 90) -> Optional['GBMPathGen']:
@@ -185,7 +198,9 @@ def _gen_for_ticker(ticker: str, window_days: int = 90):
 
 def apply_policy(path: list[float], stop_pct: float,
                   target_pct: float, max_hold_bars: int,
-                  direction: str = 'LONG'
+                  direction: str = 'LONG', *,
+                  bridge: bool = True, sigma_bar: Optional[float] = None,
+                  rng: Optional[random.Random] = None
                   ) -> tuple[float, str, float]:
     """Walk a path of log-returns and apply the (stop, target, max_hold)
     policy.
@@ -201,10 +216,21 @@ def apply_policy(path: list[float], stop_pct: float,
     if not path:
         return 0.0, 'max_hold', 0.0
     sign = 1.0 if direction.upper() == 'LONG' else -1.0
+    use_bridge = bool(bridge and rng is not None and sigma_bar and sigma_bar > 0)
+    bridge_bars: list = []
+    if use_bridge:
+        # (kind, log barrier, side) — stop first: stop wins a double touch.
+        if stop_pct is not None and abs(float(stop_pct)) < 1.0:
+            sp = abs(float(stop_pct))
+            bridge_bars.append(('stop', math.log(1 - sp) if sign > 0 else math.log(1 + sp), sign))
+        if target_pct is not None and (sign > 0 or abs(float(target_pct)) < 1.0):
+            tp = abs(float(target_pct))
+            bridge_bars.append(('target', math.log(1 + tp) if sign > 0 else math.log(1 - tp), -sign))
     cum_log = 0.0
     peak = 0.0
     max_dd = 0.0
     for i, r in enumerate(path[:max_hold_bars]):
+        prev = cum_log
         cum_log += r
         # Convert to signed return-from-entry
         ret_pct = sign * (math.exp(cum_log) - 1.0)
@@ -219,6 +245,14 @@ def apply_policy(path: list[float], stop_pct: float,
             return sign * -abs(float(stop_pct)) / sign, 'stop', max_dd
         if target_pct is not None and ret_pct >= abs(float(target_pct)):
             return sign * abs(float(target_pct)) / sign, 'target', max_dd
+        # Brownian-bridge crossing between closes (side=+1: safe above barrier)
+        for kind, b, side in bridge_bars:
+            d_prev, d_cur = side * (prev - b), side * (cum_log - b)
+            if d_prev > 0 and d_cur > 0:
+                if rng.random() < math.exp(-2.0 * d_prev * d_cur / (sigma_bar * sigma_bar)):
+                    if kind == 'stop':
+                        return -abs(float(stop_pct)), 'stop', max_dd
+                    return abs(float(target_pct)), 'target', max_dd
     # Time-out at max_hold
     final_pct = sign * (math.exp(cum_log) - 1.0)
     return final_pct, 'max_hold', max_dd
@@ -297,6 +331,7 @@ def run_path_mc(strategy_id: str, regime_state: str,
     max_hold_bars = max(1, int(proposed_max_hold_days) * BARS_PER_RTH_DAY)
     ratio = float(proposed_size) / max(float(current_size), 0.001)
 
+    bridge = os.environ.get('OPENCLAW_MC_BRIDGE', '1') != '0'
     sources_used: set[str] = set()
     returns: list[float] = []
     exit_counts = {'stop': 0, 'target': 0, 'max_hold': 0, 'no_gen': 0}
@@ -315,7 +350,8 @@ def run_path_mc(strategy_id: str, regime_state: str,
         path = gen.sample_path(max_hold_bars, rng)
         ret, exit_reason, intra_dd = apply_policy(
             path, proposed_stop_pct, proposed_target_pct,
-            max_hold_bars, direction=trade['direction'])
+            max_hold_bars, direction=trade['direction'],
+            bridge=bridge, sigma_bar=getattr(gen, 'bar_sigma', None), rng=rng)
         scaled_ret = ret * ratio
         scaled_dd = intra_dd * ratio
         if not (math.isfinite(scaled_ret) and math.isfinite(scaled_dd)):
@@ -367,6 +403,7 @@ def run_path_mc(strategy_id: str, regime_state: str,
 
     return {
         'status':                  'OK',
+        'bridge':                  bridge,
         'seed':                    seed,
         'strategy_id':             strategy_id,
         'regime_state':            regime_state,
