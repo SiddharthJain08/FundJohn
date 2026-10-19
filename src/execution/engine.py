@@ -836,8 +836,12 @@ def trailing_window_days(strategies):
     def _need(s):
         declared = int(getattr(s, 'max_lookback_days', 0) or 0)
         bars = int(getattr(s, 'min_lookback', 0) or 0)
-        return max(declared, math.ceil(bars * 1.6))
+        return max(declared, math.ceil(bars * LOOKBACK_CALENDAR_FACTOR))
     return max([PRICES_TRAILING_FLOOR_DAYS] + [_need(s) for s in strategies])
+
+
+# min_lookback bars -> calendar days (audited by scripts/audit_strategy_lookbacks.py).
+LOOKBACK_CALENDAR_FACTOR = 1.6
 
 
 def load_prices(universe: list, *, lookback_days: int | None = None,
