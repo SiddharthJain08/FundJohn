@@ -29,3 +29,4 @@ from . import master_freshness  # noqa: F401
 from . import acting_ingest_coverage  # noqa: F401
 from . import macro_events_freshness  # noqa: F401
 from . import parquet_layout  # noqa: F401
+from . import backtest_trades_primary  # noqa: F401

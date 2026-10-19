@@ -93,3 +93,99 @@ def sync_primary_trades_safe(cur, strategy_id, run_id, trade_rows):
         print(f'[bt_trades_primary] skipped: {type(e).__name__} '
               f'strategy={strategy_id} run_id={run_id}', file=sys.stderr, flush=True)
         return None
+
+
+# ── drift detection (shared by the system check and the --resync CLI) ──────
+_Q_COUNTS = f"""
+    WITH p AS (SELECT run_id, strategy_id FROM strategy_backtest_runs WHERE primary_window),
+         b AS (SELECT t.run_id, count(*) AS n FROM {LEGACY_TABLE} t
+                 JOIN p ON p.run_id = t.run_id GROUP BY t.run_id),
+         h AS (SELECT run_id, count(*) AS n FROM {HOT_TABLE} GROUP BY run_id)
+    SELECT p.run_id, p.strategy_id, coalesce(b.n, 0), coalesce(h.n, 0)
+      FROM p LEFT JOIN b ON b.run_id = p.run_id LEFT JOIN h ON h.run_id = p.run_id
+     WHERE coalesce(b.n, 0) <> coalesce(h.n, 0)
+     ORDER BY p.strategy_id, p.run_id
+"""
+_Q_ORPHANS = f"""
+    SELECT count(DISTINCT h.run_id) FROM {HOT_TABLE} h
+      LEFT JOIN strategy_backtest_runs r ON r.run_id = h.run_id
+     WHERE r.run_id IS NULL OR NOT r.primary_window
+"""
+_Q_IDMIS = f"""
+    SELECT count(*) FROM (SELECT DISTINCT h.run_id, h.strategy_id FROM {HOT_TABLE} h
+      JOIN strategy_backtest_runs r ON r.run_id = h.run_id
+     WHERE h.strategy_id <> r.strategy_id) x
+"""
+_Q_NPRIMARY = 'SELECT count(*) FROM strategy_backtest_runs WHERE primary_window'
+
+
+def drift_report(cur):
+    """(count_mismatches, orphan_runs, id_mismatches, n_primary_runs); hot table must exist."""
+    cur.execute(_Q_COUNTS)
+    mism = [tuple(r) for r in cur.fetchall()]
+    cur.execute(_Q_ORPHANS)
+    orphans = int(cur.fetchone()[0])
+    cur.execute(_Q_IDMIS)
+    idm = int(cur.fetchone()[0])
+    cur.execute(_Q_NPRIMARY)
+    n = int(cur.fetchone()[0])
+    return mism, orphans, idm, n
+
+
+def _drifted_strategy_ids(cur) -> list:
+    """Strategies needing a resync: count mismatches, plus those owning orphan /
+    mis-attributed hot rows (the hot rows' own strategy_id is wrong or its run is
+    no longer primary, so both the stale hot strategy and the run's strategy)."""
+    sids = {m[1] for m in drift_report(cur)[0]}
+    cur.execute(f"""
+        SELECT DISTINCT h.strategy_id FROM {HOT_TABLE} h
+          LEFT JOIN strategy_backtest_runs r ON r.run_id = h.run_id
+         WHERE r.run_id IS NULL OR NOT r.primary_window OR h.strategy_id <> r.strategy_id
+        UNION
+        SELECT DISTINCT r.strategy_id FROM {HOT_TABLE} h
+          JOIN strategy_backtest_runs r ON r.run_id = h.run_id
+         WHERE h.strategy_id <> r.strategy_id""")
+    sids.update(r[0] for r in cur.fetchall())
+    return sorted(sids)
+
+
+def main(argv=None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(prog='backtest.trades_primary',
+                                 description='Repair strategy_backtest_trades_primary')
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument('--resync', metavar='STRATEGY_ID')
+    g.add_argument('--resync-drifted', action='store_true')
+    args = ap.parse_args(argv)
+    import psycopg2
+    uri = os.environ.get('POSTGRES_URI') or os.environ.get('DATABASE_URL', '')
+    if not uri:
+        print('[bt_trades_primary] POSTGRES_URI not set', file=sys.stderr)
+        return 2
+    conn = psycopg2.connect(uri, connect_timeout=5)
+    try:
+        cur = conn.cursor()
+        if not hot_table_exists(cur):
+            print('[bt_trades_primary] table absent (migration 166 not applied)',
+                  file=sys.stderr)
+            conn.rollback()
+            return 2
+        sids = [args.resync] if args.resync else _drifted_strategy_ids(cur)
+        conn.commit()   # end the read txn before per-strategy write txns
+        for sid in sids:
+            try:
+                n = resync_strategy(cur, sid)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            print(f'[bt_trades_primary] resync strategy={sid} inserted={n}')
+        if not sids:
+            print('[bt_trades_primary] nothing drifted')
+        return 0
+    finally:
+        conn.close()
+
+
+if __name__ == '__main__':
+    sys.exit(main())

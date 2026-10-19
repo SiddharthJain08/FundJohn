@@ -87,7 +87,8 @@ src/system_checks/
     ├── regime.py
     ├── strategies.py
     ├── agents.py
-    └── storage.py
+    ├── storage.py
+    └── backtest_trades_primary.py  # hot-table parity vs strategy_backtest_trades (mig 166)
 ```
 
 The framework is exercised by `tests/test_system_checks_framework.py`. Individual checks are exercised by running them against live state (`python3 -m system_checks`).
