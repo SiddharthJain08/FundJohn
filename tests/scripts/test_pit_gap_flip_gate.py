@@ -22,9 +22,9 @@ LIVE = ['S_a', 'S_b', 'S_c']
 
 def test_all_live_rows_on_the_new_config_is_ok():
     m = _mod()
-    rows = [['S_a', 'open', True, '2026-09-20T01:00:00'],
-            ['S_b', 'open', True, '2026-09-20T02:00:00'],
-            ['S_c', 'open', True, '2026-09-20T03:00:00']]
+    rows = [['S_a', 'open', True, '2026-09-20T01:00:00', True],
+            ['S_b', 'open', True, '2026-09-20T02:00:00', True],
+            ['S_c', 'open', True, '2026-09-20T03:00:00', True]]
     ok, detail = m.verdict(LIVE, rows, max_lagging=0)
     assert ok is True
     assert any('on_new=3' in line for line in detail)
@@ -32,9 +32,9 @@ def test_all_live_rows_on_the_new_config_is_ok():
 
 def test_a_row_missing_gap_fill_lags():
     m = _mod()
-    rows = [['S_a', 'level', True, '2026-09-20T01:00:00'],
-            ['S_b', 'open', True, '2026-09-20T02:00:00'],
-            ['S_c', 'open', True, '2026-09-20T03:00:00']]
+    rows = [['S_a', 'level', True, '2026-09-20T01:00:00', True],
+            ['S_b', 'open', True, '2026-09-20T02:00:00', True],
+            ['S_c', 'open', True, '2026-09-20T03:00:00', True]]
     ok, detail = m.verdict(LIVE, rows, max_lagging=0)
     assert ok is False
     assert any('S_a' in line for line in detail)
@@ -42,15 +42,15 @@ def test_a_row_missing_gap_fill_lags():
 
 def test_a_row_missing_financials_pit_lags():
     m = _mod()
-    rows = [['S_a', 'open', False, '2026-09-20T01:00:00'],
-            ['S_b', 'open', True, '2026-09-20T02:00:00'],
-            ['S_c', 'open', True, '2026-09-20T03:00:00']]
+    rows = [['S_a', 'open', False, '2026-09-20T01:00:00', True],
+            ['S_b', 'open', True, '2026-09-20T02:00:00', True],
+            ['S_c', 'open', True, '2026-09-20T03:00:00', True]]
     assert m.verdict(LIVE, rows, max_lagging=0)[0] is False
 
 
 def test_a_live_strategy_with_no_row_at_all_lags():
     m = _mod()
-    rows = [['S_a', 'open', True, '2026-09-20T01:00:00']]
+    rows = [['S_a', 'open', True, '2026-09-20T01:00:00', True]]
     ok, detail = m.verdict(LIVE, rows, max_lagging=0)
     assert ok is False
     assert any('S_b' in line and 'S_c' in line for line in detail)
@@ -58,16 +58,43 @@ def test_a_live_strategy_with_no_row_at_all_lags():
 
 def test_max_lagging_tolerance_admits_a_stuck_strategy():
     m = _mod()
-    rows = [['S_a', 'level', True, '2026-09-20T01:00:00'],
-            ['S_b', 'open', True, '2026-09-20T02:00:00'],
-            ['S_c', 'open', True, '2026-09-20T03:00:00']]
+    rows = [['S_a', 'level', True, '2026-09-20T01:00:00', True],
+            ['S_b', 'open', True, '2026-09-20T02:00:00', True],
+            ['S_c', 'open', True, '2026-09-20T03:00:00', True]]
     assert m.verdict(LIVE, rows, max_lagging=1)[0] is True
 
 
 def test_non_live_rows_are_ignored():
     m = _mod()
-    rows = [['S_a', 'open', True, '2026-09-20T01:00:00'],
-            ['S_b', 'open', True, '2026-09-20T02:00:00'],
-            ['S_c', 'open', True, '2026-09-20T03:00:00'],
-            ['S_candidate', 'level', False, '2026-09-20T04:00:00']]
+    rows = [['S_a', 'open', True, '2026-09-20T01:00:00', True],
+            ['S_b', 'open', True, '2026-09-20T02:00:00', True],
+            ['S_c', 'open', True, '2026-09-20T03:00:00', True],
+            ['S_candidate', 'level', False, '2026-09-20T04:00:00', True]]
     assert m.verdict(LIVE, rows, max_lagging=0)[0] is True
+
+
+def test_a_row_missing_macro_pit_lags():
+    m = _mod()
+    rows = [['S_a', 'open', True, '2026-09-20T01:00:00', False],
+            ['S_b', 'open', True, '2026-09-20T02:00:00', True],
+            ['S_c', 'open', True, '2026-09-20T03:00:00', True]]
+    ok, detail = m.verdict(LIVE, rows, max_lagging=0)
+    assert ok is False
+    assert any('lagging:' in line and 'S_a' in line for line in detail)
+
+
+def test_legacy_four_column_row_lags_not_crashes():
+    m = _mod()
+    rows = [['S_a', 'open', True, '2026-09-20T01:00:00'],
+            ['S_b', 'open', True, '2026-09-20T02:00:00', True],
+            ['S_c', 'open', True, '2026-09-20T03:00:00', True]]
+    ok, detail = m.verdict(LIVE, rows, max_lagging=0)
+    assert ok is False
+    assert any('lagging:' in line and 'S_a' in line for line in detail)
+
+
+def test_detail_names_all_three_keys():
+    m = _mod()
+    rows = [[s, 'open', True, '2026-09-20T01:00:00', True] for s in LIVE]
+    line = m.verdict(LIVE, rows, max_lagging=0)[1][0]
+    assert 'gap_fill' in line and 'financials_pit' in line and 'macro_pit' in line

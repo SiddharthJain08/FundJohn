@@ -1878,6 +1878,8 @@ def run_backtest(strategy_id: str, *,
                 # straight from the env at persist time rather than importing
                 # aux_data_loader — no new cross-module dependency here.
                 'financials_pit': os.environ.get('OPENCLAW_FINANCIALS_PIT', '0') == '1',
+                # six-repo D1: macro point-in-time flag; scripts/pit_gap_flip_gate.py G1 requires it.
+                'macro_pit': os.environ.get('OPENCLAW_MACRO_PIT', '0') == '1',
                 # Exit-reason census + modelled cost drag (2026-09-12 §A3).
                 # Provenance only — never a Sharpe, never a gate input. Hook
                 # exits appear as 'strategy_exit:<reason>'.
