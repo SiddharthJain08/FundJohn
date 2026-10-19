@@ -4,7 +4,7 @@
 
 **Goal:** Land spec §2 Stream B: exact NNLS tangency (B1), exact OU estimators (B2), a reproducible and unbiased intraday Monte Carlo (B3), an advisory breaker first-passage KPI (B4), convex helpers (B5) and a shadow QP sizer that never routes (B6).
 
-**Architecture:** These are pure-math swaps inside existing modules, plus one new pure module per new capability (`src/lib/convex.py`, `src/execution/qp_shadow_sizer.py`). The live sizer gets three small edits: one appended log token (B1), a `size_positions` wrapper and a hook just before `_emit_orders_from_targets` (B6). The QP shadow runs as a **hook in `_sharpe_cadence_path`**, not as a new orchestrator step. A step would need edits in three places (orchestrator `STEPS`, `daily-cycle.js`, `cron-schedule.js`, per repo CLAUDE.md). It would also need `h`, the caps and λ persisted, and nothing persists them today. The hook needs about 15 lines in `regime_blended_sizer.py`, and it reuses the existing `broker=` parameter of `_emit_orders_from_targets` so the broker is fetched only once.
+**Architecture:** These are pure-math swaps inside existing modules, plus one new pure module per new capability (`src/lib/convex.py`, `src/execution/qp_shadow_sizer.py`). The live sizer gets three small edits: one B1 diagnostic token on the existing `corr_cumsharpe.live[...]` line, a `size_positions` wrapper and a hook just before `_emit_orders_from_targets` (B6). The QP shadow runs as a **hook in `_sharpe_cadence_path`**, not as a new orchestrator step. A step would need edits in three places (orchestrator `STEPS`, `daily-cycle.js`, `cron-schedule.js`, per repo CLAUDE.md). It would also need `h`, the caps and λ persisted, and nothing persists them today. The hook needs about 15 lines in `regime_blended_sizer.py`, and it reuses the existing `broker=` parameter of `_emit_orders_from_targets` so the broker is fetched only once.
 
 **Tech Stack:** Python 3.13, numpy 2.4.4, scipy 1.15.3 (`optimize.nnls`, `linalg`), cvxpy 1.8.2 + clarabel 0.11.1 (already installed transitively; pinned in B5), pyarrow 23, pytest 9.
 
@@ -28,13 +28,15 @@ Stream B flags and defaults:
 
 | Item | Flag | Default (unset) | Notes |
 |---|---|---|---|
-| B1 | `OPENCLAW_TANGENCY_NNLS` | enumeration (today's code, byte-identical) | `=1` uses NNLS. B1 changes the live S_adj (exactly when n>10 or R is not PD, and at float level everywhere), so it is gated under §0. See spec defect D3. |
+| B1 | `OPENCLAW_TANGENCY_NNLS` | enumeration (today's code, byte-identical S_adj) | `=1` uses NNLS. B1 changes the live S_adj (exactly when n>10 or R is not PD, and at float level everywhere), so it is gated under §0 (D3, accepted). While the flag is OFF, every cycle also computes the NNLS value for each side, as a diagnostic only, and logs `tangency_nnls_maxdiff=` so the flip decision rests on evidence. When ON, the token reads `tangency_mode=nnls`. |
 | B2 | none | — | Pure bug fix. Consumers: `pairs_scanner` ledger (X1 is PARKED) and the deprecated `S_pca_etf_stat_arb_reversion`. |
 | B3 | `OPENCLAW_MC_BRIDGE` | bridge ON | Bug fix; `=0` is a kill switch. Seed derivation and the parquet read need no flag. |
 | B4 | none | — | Advisory log token only; never gates. |
 | B5 | none | — | No consumer; strategies are NOT edited. |
 | B6 | `OPENCLAW_QP_SHADOW`, `OPENCLAW_QP_SHADOW_TAU` | off; τ = 0.0 | Shadow only (ruling R5); never routes. |
 
+- **B6 ruling (D4, controller 2026-10-19):** the gross target is `G = min(λ_blended·NAV, Σcap_i)`, where `λ_blended` is the regime-blended `lam` the cascade actually scales gross by (`scale = lam·NAV/Σ|w|`, `regime_blended_sizer.py:1857`). Per-ticker caps use `lam_global`, exactly as the cascade computes them (`:1931`). The net constraint applies only when `_load_net_cap_cfg()` says the cascade's net cap is enabled, and then uses that cap's fraction. The extra tokens `gross_target= net_cap= tau=` follow the spec's fixed tokens.
+- **B4 ruling (D5, controller 2026-10-19):** the token is labelled `p_trip_21d~=` (the tilde marks a total-equity σ proxy).
 - Migration numbering: **165** (`165_mc_runs_seed.sql`). Stream A owns 164. `src/database/postgres.js:43` applies migrations idempotently at johnbot start, so the column exists before the :3000 MC route serves.
 - Test commands run from the worktree root: `nice -n 19 python3 -m pytest <file>[::<test>] -v`. A task's final pass also adds `-W error`. Never run `tests/metrics/test_intraday_path_montecarlo.py` before Task 3 Step 1 has landed: today it reads the real masters.
 - Never `git push`. The controller merges the stream.
@@ -55,7 +57,7 @@ Stream B flags and defaults:
 2. **A one-sided book with the net cap enabled must log `status=infeasible` and never raise.** This is the realistic production book. Pinned: Task 8 `test_net_cap_one_sided_book_reports_infeasible`.
 3. **Every sizer exit path needs a line when the flag is on.** That includes early returns: empty signals, the acting gate, gross ≤ 0, the thin-set abort and the flatten path. Pinned: Task 9 `test_qp_skipped_line_on_early_return`.
 4. **Generators without `bar_sigma` (test stubs, NaN generators) and σ = 0 must skip the bridge, not crash.** Pinned: Task 5 `test_bridge_skipped_without_bar_sigma`.
-5. **Breaker tick with fewer than 20 NAV points, an unreadable OHLC file, σ = 0 or `dd=None`.** The line must render `p_trip_21d=n/a` and the tick must never raise. Pinned: Task 6 `test_p_trip_degrades_to_none`.
+5. **Breaker tick with fewer than 20 NAV points, an unreadable OHLC file, σ = 0 or `dd=None`.** The line must render `p_trip_21d~=n/a` and the tick must never raise. Pinned: Task 6 `test_p_trip_degrades_to_none`.
 
 ---
 
@@ -63,7 +65,8 @@ Stream B flags and defaults:
 
 **Files:**
 - Modify: `src/execution/orthogonalization.py:66-69` (constants), `:155-216` (`_tangency_side_sharpe`)
-- Modify: `src/execution/regime_blended_sizer.py:1711-1714` (append token to the `corr_cumsharpe: sizing rebuilt` line)
+- Modify: `src/execution/regime_blended_sizer.py:401-430` (`_corr_adjusted_maps` gains a `diag` kwarg), `:1673-1674` (pass a cycle dict), `:1696-1703` (append the token to the existing `corr_cumsharpe.live[%s]` line, which is built in the same function, so no new line is needed)
+- Test: `tests/execution/test_sizer_per_ticker_cap.py` (one sizer-line test via `_run_eod`)
 - Create: `tests/execution/test_tangency_nnls.py`
 - Unchanged and must stay green: `tests/execution/test_tangency_sadj.py`
 
@@ -73,7 +76,16 @@ Stream B flags and defaults:
   - `_tangency_R(sids: list[str], sim: dict, eff_shrink: float) -> np.ndarray` builds the shrunk R. The body is today's `:190-198` lifted verbatim (SPARSE_DEFAULT fallback, `(1-γ)R + γI`).
   - `_tangency_side_sharpe_enum(sids, s, sim, shrink, gamma=None) -> tuple[float, bool]` is today's function body unchanged, including the `TANGENCY_MAX_ENUM` truncation. It now calls `_tangency_R`.
   - `_tangency_side_sharpe_nnls(sids, s, sim, shrink, gamma=None) -> tuple[float, bool]`.
-  - `_tangency_side_sharpe(...)` keeps its signature and dispatches on `tangency_nnls_enabled()`. `tangency_net_sharpe` is untouched.
+  - `_tangency_side_sharpe(...)` keeps its signature and dispatches on `tangency_nnls_enabled()`.
+  - `tangency_net_sharpe(contribs_by_ticker, sim, weight_by_strat, shrink=..., gamma=None, diag: dict | None = None)`. The return value is unchanged and byte-identical whether or not `diag` is passed.
+    - When `diag` is a dict and the flag is OFF: after each side's enumeration result, it also computes `_tangency_side_sharpe_nnls` for the same side and sets `diag['maxdiff'] = max(diag.get('maxdiff', 0.0), abs(enum - nnls))` and `diag['n_sides'] = diag.get('n_sides', 0) + 1`. This applies only to sides with at least 2 contributors; singletons are trivially equal and are not counted. The NNLS call sits in its own `try`; on exception it sets `diag['error'] = type(e).__name__` and S_adj is unaffected.
+    - When the flag is ON it sets `diag['mode'] = 'nnls'`.
+  - `tangency_diag_token(diag: dict) -> str` renders:
+    - `tangency_mode=nnls` when `diag.get('mode') == 'nnls'`;
+    - else `tangency_nnls_maxdiff=error:<cls>` when an error was recorded;
+    - else `tangency_nnls_maxdiff=n/a` when `n_sides == 0`;
+    - else `tangency_nnls_maxdiff=%.3g`.
+  - In the sizer: `_corr_adjusted_maps(..., gamma=None, diag=None)` forwards `diag` to both `tangency_net_sharpe` calls (the legacy branch ignores it). Its 4-tuple return is unchanged; `test_tangency_sadj.py` unpacks it.
 
 - [ ] **Step 1: Write the failing tests** in `tests/execution/test_tangency_nnls.py`
 
@@ -132,6 +144,36 @@ def test_invariants_hold_under_nnls(name, monkeypatch):
     fn(monkeypatch) if fn.__code__.co_argcount else fn()
 ```
 
+Also add to `tests/execution/test_tangency_nnls.py`:
+
+```python
+def test_diag_maxdiff_tiny_and_sadj_unchanged(monkeypatch):
+    monkeypatch.delenv("OPENCLAW_TANGENCY_NNLS", raising=False)
+    w = {"a": 1.43, "b": 1.27, "c": 0.78, "d": 0.9}
+    sim = {"a": {"b": 0.29, "c": 0.33, "d": 0.1}, "b": {"c": 0.58, "d": 0.2}, "c": {"d": 0.4}}
+    contribs = {"ZZTEST1": [("a", 1), ("b", 1), ("c", 1)], "ZZTEST2": [("a", 1), ("d", -1), ("c", -1)]}
+    diag = {}
+    out_d, nb_d = og.tangency_net_sharpe(contribs, sim, w, diag=diag)
+    assert (out_d, nb_d) == og.tangency_net_sharpe(contribs, sim, w)
+    assert diag["n_sides"] == 2 and diag["maxdiff"] < 1e-9      # ZZTEST1 long (3), ZZTEST2 short (2)
+    assert og.tangency_diag_token(diag).startswith("tangency_nnls_maxdiff=")
+    assert float(og.tangency_diag_token(diag).split("=")[1]) < 1e-9
+
+def test_diag_token_flag_on_and_error(monkeypatch):
+    monkeypatch.setenv("OPENCLAW_TANGENCY_NNLS", "1")
+    diag = {}
+    og.tangency_net_sharpe({"ZZTEST1": [("a", 1), ("b", 1)]}, {}, {"a": 1.0, "b": 0.8}, diag=diag)
+    assert og.tangency_diag_token(diag) == "tangency_mode=nnls"
+    monkeypatch.delenv("OPENCLAW_TANGENCY_NNLS")
+    monkeypatch.setattr(og, "_tangency_side_sharpe_nnls", lambda *a, **k: 1 / 0)
+    diag = {}
+    out, _ = og.tangency_net_sharpe({"ZZTEST1": [("a", 1), ("b", 1)]}, {}, {"a": 1.0, "b": 0.8}, diag=diag)
+    assert og.tangency_diag_token(diag) == "tangency_nnls_maxdiff=error:ZeroDivisionError" and out["ZZTEST1"] > 1.0
+    assert og.tangency_diag_token({}) == "tangency_nnls_maxdiff=n/a"
+```
+
+Add to `tests/execution/test_sizer_per_ticker_cap.py`: `test_corr_cumsharpe_line_carries_tangency_token(monkeypatch, caplog)`. It sets the caplog level to INFO for the sizer logger, then runs `_run_eod` with three `_carried('S_zz_i', 'ZZTEST1')` rows on ONE ticker, so there is a multi-member side. It asserts that exactly one record starting `corr_cumsharpe.live[` ends with a `tangency_nnls_maxdiff=<v>` token where `float(v) < 1e-9`. It then reruns with `OPENCLAW_TANGENCY_NNLS=1` and asserts the line ends with `tangency_mode=nnls`. Before running `_run_eod`, stub `_sizer._load_net_cap_cfg` to return `(False, 0.6)`, and stub `_sizer._post_corr_cumsharpe_log` to a no-op so nothing posts to Discord.
+
 - [ ] **Step 2: Run to verify failure.** Run `nice -n 19 python3 -m pytest tests/execution/test_tangency_nnls.py -v`. Expected: FAIL with `AttributeError: ... '_tangency_side_sharpe_enum'`.
 
 - [ ] **Step 3: Implement the four functions above in `orthogonalization.py`.** Keep `TANGENCY_MAX_ENUM = 10`, and update its comment to "enumeration path / test oracle only; the NNLS path has no cap". `_tangency_side_sharpe_nnls`:
@@ -142,11 +184,16 @@ def test_invariants_hold_under_nnls(name, monkeypatch):
   - Return `(max(max(s), math.sqrt(q)) if q > 1e-12 else max(s), degraded)`.
   - Update the docstrings of `_tangency_side_sharpe` and `tangency_net_sharpe` (`:229`) to name both paths and the flag.
 
-- [ ] **Step 4: Append the path token to the sizer line.** At `regime_blended_sizer.py:1711-1714`, append ` tangency=%s` to the format string `'corr_cumsharpe: sizing rebuilt from S_adj for %d tickers (non-PSD backstop fires gate=%d size=%d)'`. The new argument is `'nnls' if _og.tangency_nnls_enabled() else 'enum'`. Use the module the sizer already imports orthogonalization as; grep `import.*orthogonalization` in the sizer for its alias. No test, script or parser matches `sizing rebuilt from S_adj` (grepped 2026-10-19), so appending at the end is safe.
+- [ ] **Step 4: Wire the diagnostic into the sizer.**
+  - At `:1673` create `_tan_diag: dict = {}` and pass `diag=_tan_diag` to `_corr_adjusted_maps`.
+  - At `:1696-1703`, append ` %s` to the end of the `corr_cumsharpe.live[%s]: …` format string, with the argument `_og.tangency_diag_token(_tan_diag)` (import `execution.orthogonalization as _og` locally, as `_corr_adjusted_maps` does).
+  - Both the line and the Discord post (`_post_corr_cumsharpe_log`) therefore carry the token once per cycle.
+  - Under `OPENCLAW_TANGENCY_SADJ=0` the dict stays empty and the token reads `n/a`.
+  - No test, script or parser matches the line's tail (grep `corr_cumsharpe.live` in `tests/` and `scripts/` before editing; if a parser exists, append after its last parsed token).
 
-- [ ] **Step 5: Run to verify pass.** Run `nice -n 19 python3 -m pytest tests/execution/test_tangency_nnls.py tests/execution/test_tangency_sadj.py -v -W error`. Expected: all PASS, with `test_tangency_sadj.py` unchanged.
+- [ ] **Step 5: Run to verify pass.** Run `nice -n 19 python3 -m pytest tests/execution/test_tangency_nnls.py tests/execution/test_tangency_sadj.py -v -W error`, then `nice -n 19 python3 -m pytest tests/execution/test_sizer_per_ticker_cap.py -v -W error`. Expected: all PASS, with `test_tangency_sadj.py` unchanged.
 
-- [ ] **Step 6: Stage.** `git add src/execution/orthogonalization.py src/execution/regime_blended_sizer.py tests/execution/test_tangency_nnls.py`
+- [ ] **Step 6: Stage.** `git add src/execution/orthogonalization.py src/execution/regime_blended_sizer.py tests/execution/test_tangency_nnls.py tests/execution/test_sizer_per_ticker_cap.py`
 - [ ] **Step 7: Commit.** `git commit -m "feat(sizer): NNLS tangency S_adj behind OPENCLAW_TANGENCY_NNLS (B1)"`
 
 ---
@@ -410,7 +457,7 @@ Update the module docstring with one paragraph on the discrete-monitoring bias a
   - `P_TRIP_HORIZON_DAYS = 21`, `P_TRIP_LOOKBACK = 60`, `P_TRIP_MIN_POINTS = 20`.
   - `nav_daily_sigma(path: Path | None = None, lookback: int = P_TRIP_LOOKBACK) -> float | None`. It reads `days[*].close` from the OHLC JSON (sorted by date key) and keeps the last `lookback + 1` closes. It returns `None` when there are fewer than `P_TRIP_MIN_POINTS` closes, when any close is ≤ 0 or non-finite, when σ is 0 or non-finite, or on any read or parse error. Otherwise it returns `statistics.stdev` of the simple returns. The docstring says this is a TOTAL-equity proxy (D5).
   - `p_trip_within(dd: float | None, days: int = P_TRIP_HORIZON_DAYS, *, path: Path | None = None) -> float | None`. With μ = 0, headroom `a = dd − DD_LIMIT` and `σ = nav_daily_sigma(path)`, it returns `2·Φ(−a/(σ·√days))` (with Φ via `math.erfc`). It returns `1.0` when `a ≤ 0` and `None` when `dd` or σ is None. It never raises: wrap the body and on exception log at debug and return `None`.
-  - `format_line(..., pnl=None, p_trip=_NO_P_TRIP)`, where `_NO_P_TRIP = object()`. When `p_trip` is passed, append ` p_trip_21d=<n/a | f'{p:.2f}'>` at the very END of the line, after the `| alpha_pnl=…` tail. When it is omitted the line is unchanged, so the existing `endswith(...)` assertions in `test_account_breaker_rebase.py:739-740`, `test_account_breaker_state.py:208` and `test_account_breaker_alpha_pnl.py:335` stay green.
+  - `format_line(..., pnl=None, p_trip=_NO_P_TRIP)`, where `_NO_P_TRIP = object()`. When `p_trip` is passed, append ` p_trip_21d~=<n/a | f'{p:.2f}'>` at the very END of the line, after the `| alpha_pnl=…` tail. When it is omitted the line is unchanged, so the existing `endswith(...)` assertions in `test_account_breaker_rebase.py:739-740`, `test_account_breaker_state.py:208` and `test_account_breaker_alpha_pnl.py:335` stay green.
 
 - [ ] **Step 1: Write the failing tests:**
 
@@ -449,8 +496,8 @@ def test_format_line_token_only_when_passed():
     st = {"dd": -0.05, "daily": None, "rule": "none", "breach": False, "peak": 1.0}
     kw = dict(equity=1.0, bench_mv=0.0, alpha=1.0, st=st, open_equity=1.0, open_src="stored", halted=False)
     assert "p_trip" not in ab.format_line("shadow", **kw)
-    assert ab.format_line("shadow", p_trip=None, **kw).endswith(" p_trip_21d=n/a")
-    assert ab.format_line("shadow", p_trip=0.3812, **kw).endswith(" p_trip_21d=0.38")
+    assert ab.format_line("shadow", p_trip=None, **kw).endswith(" p_trip_21d~=n/a")
+    assert ab.format_line("shadow", p_trip=0.3812, **kw).endswith(" p_trip_21d~=0.38")
 
 def test_both_run_once_lines_pass_p_trip():
     import inspect
@@ -461,7 +508,7 @@ def test_both_run_once_lines_pass_p_trip():
 - [ ] **Step 3: Implement as in Interfaces.** The halted-path call site (`:2349`) passes `p_trip=p_trip_within((pnl or {}).get('dd_pnl'))`. The normal call site (`:2481`) passes `p_trip=p_trip_within((line_pnl or {}).get('dd_pnl'))`. Add a docstring line to `format_line` naming the new tail token and that it is advisory, a GBM approximation and a total-equity σ proxy.
 - [ ] **Step 4: Run to verify pass.** Run `nice -n 19 python3 -m pytest tests/execution/test_account_breaker_p_trip.py tests/execution/test_account_breaker_state.py tests/execution/test_account_breaker_rebase.py tests/execution/test_account_breaker_alpha_pnl.py -v -W error`. Expected: PASS.
 - [ ] **Step 5: Stage.** `git add src/execution/account_breaker.py tests/execution/test_account_breaker_p_trip.py`
-- [ ] **Step 6: Commit.** `git commit -m "feat(breaker): advisory p_trip_21d first-passage token (B4)"`
+- [ ] **Step 6: Commit.** `git commit -m "feat(breaker): advisory p_trip_21d~ first-passage token (B4)"`
 
 ---
 
