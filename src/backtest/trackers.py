@@ -3,6 +3,12 @@
 Pure module (stdlib + pandas/math only).  Trackers observe the loop through a
 ``BacktestContext`` and fold their diagnostics into one ``info`` dict at the
 end; ``FinishedBacktest`` raised from ``handle`` aborts the loop cleanly.
+
+Wiring contract for the engine (Task 5):
+- Register ConsistencyTracker BEFORE MaxRuntimeTracker (a non-finite abort
+  must win over a simultaneous runtime abort).
+- ``intraday_*`` counters must be written into ``ctx.counters`` by the loop
+  (they are plain locals at unified_backtest.py:1043-1045 today).
 """
 from __future__ import annotations
 
@@ -112,6 +118,8 @@ class IntradayBarTracker(_Base):
 
 
 class MaxRuntimeTracker(_Base):
+    """Abort when the budget is exceeded.  ``elapsed_s`` is measured at the
+    last ``handle`` call and excludes drain/finalize time."""
     name = 'max_runtime'
 
     def __init__(self, seconds: float, clock: Callable[[], float] = time.monotonic):
@@ -133,6 +141,7 @@ class MaxRuntimeTracker(_Base):
 
 
 def _nonfinite(x) -> bool:
+    """True when x cannot be read as a finite float (only used on present values)."""
     try:
         return not math.isfinite(float(x))
     except (TypeError, ValueError):
@@ -149,11 +158,18 @@ class ConsistencyTracker(_Base):
         trades = ctx.trades
         for tr in trades[self._seen:]:
             bad = None
-            if _nonfinite(tr.get('pnl_pct')):
+            # Absent / None pnl_pct is tolerated (as exit_reason_census does);
+            # only a present-but-non-finite value aborts.
+            if tr.get('pnl_pct') is not None and _nonfinite(tr['pnl_pct']):
                 bad = 'pnl_pct'
             else:
                 for i, m in enumerate(tr.get('daily_marks') or ()):
-                    if _nonfinite(m[1]):
+                    try:
+                        v = m[1]
+                    except (IndexError, TypeError, KeyError):
+                        bad = f'daily_marks[{i}]'
+                        break
+                    if _nonfinite(v):
                         bad = f'daily_marks[{i}]'
                         break
             if bad:

@@ -138,3 +138,22 @@ def test_consistency_scans_each_trade_once():
     info = {}
     t.finalize(info)
     assert info['consistency_checked'] == 2
+
+
+def test_consistency_tolerates_missing_or_none_pnl():
+    ctx = _ctx(trades=[{'ticker': 'A', 'entry_date': 'e'},
+                       {'ticker': 'B', 'entry_date': 'e', 'pnl_pct': None}])
+    t = ConsistencyTracker()
+    t.initialize(ctx)
+    t.handle(ctx, 0)
+    assert t._seen == 2
+
+
+def test_consistency_malformed_mark_is_inconsistent_not_typeerror():
+    for bad in (5, (), ('d',), ('d', 'x')):
+        ctx = _ctx(trades=[{'ticker': 'A', 'entry_date': 'e', 'pnl_pct': 0.1,
+                            'daily_marks': [bad]}])
+        t = ConsistencyTracker()
+        t.initialize(ctx)
+        with pytest.raises(InconsistentBacktest):
+            t.handle(ctx, 0)
