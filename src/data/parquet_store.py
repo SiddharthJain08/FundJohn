@@ -59,13 +59,19 @@ def _file_lock(path: Path, timeout: float = 30.0):
 
 # ── Write helpers ────────────────────────────────────────────────────────────
 
-def _atomic_write(path: Path, df: pd.DataFrame) -> None:
-    """Write to path.tmp then os.replace → atomic on POSIX."""
+def _atomic_write(path: Path, df: pd.DataFrame, *, write_page_index: bool = True,
+                  row_group_size: int | None = 131072) -> None:
+    """Write to path.tmp then os.replace → atomic on POSIX.
+
+    Writes a page index and bounded row groups (131072 rows) so date-sorted
+    files prune on row-group min/max. Container-only: data is unchanged."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(path) + '.tmp')
     # Use pyarrow directly to preserve types and compression consistent with existing files.
     table = pa.Table.from_pandas(df, preserve_index=False)
-    pq.write_table(table, tmp, compression='snappy')
+    pq.write_table(table, tmp, compression='snappy',
+                   write_page_index=write_page_index,
+                   row_group_size=row_group_size)
     os.replace(tmp, path)
 
 
@@ -121,12 +127,12 @@ def append_dedup(
 
         # NULL-safe key match (mirrors pandas treating NaN==NaN as a duplicate);
         # UNION ALL BY NAME reproduces the column-union-with-NULL-fill of the old
-        # reindex+concat. Insertion order is preserved (DuckDB default): existing rows
-        # stream out in their current file order, then the (same-date) batch appends —
-        # identical physical locality to the old pandas concat, so the row-group
-        # min/max date pruning the sliced pyarrow reads rely on is unchanged. (An
-        # ORDER BY key_cols was measured to make the file ticker-contiguous, which
-        # widened every row group's date range and broke date pruning — avoided.)
+        # reindex+concat. The file is insertion-ordered: existing rows stream out in
+        # their current file order, then the (same-date) batch appends. Row-group
+        # date pruning therefore holds only once the master has been re-sorted by
+        # (date, ticker) (A1 script), because daily appends are date-monotone and
+        # preserve that order. Ticker-ordering (ORDER BY key_cols) is still avoided:
+        # it makes the file ticker-contiguous and widens every row group's date range.
         tmp = Path(str(path) + '.tmp')
         existing_lit = str(path).replace("'", "''")
         out_lit = str(tmp).replace("'", "''")
