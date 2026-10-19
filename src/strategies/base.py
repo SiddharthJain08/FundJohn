@@ -17,6 +17,11 @@ from typing import List, Optional
 from dataclasses import dataclass, field
 import os
 
+try:  # tolerant: S23/S24 load this file as top-level module `base`
+    from strategies import indicators as _indicators
+except ImportError:  # pragma: no cover
+    import indicators as _indicators
+
 
 @dataclass
 class OptionSpec:
@@ -140,6 +145,9 @@ def target_mode() -> str:
 
 class BaseStrategy(ABC):
     """All hardcoded strategies inherit from this."""
+
+    # Shared indicator library (atr / realized_vol / zscore / rsi / ...).
+    ind = _indicators
 
     # Subclasses must define these
     id:               str = ''
@@ -297,8 +305,8 @@ class BaseStrategy(ABC):
         regime_state:   str   = 'LOW_VOL',
     ) -> dict:
         """Standard stop/target computation. Reusable across strategies."""
-        diff = prices_series.diff().abs()
-        _atr_raw = diff.rolling(14).mean().iloc[-1] if len(diff) >= 14 else float('nan')
+        _atr_raw = (self.ind.atr(prices_series, 14, method='close_diff', fallback_pct=None).iloc[-1]
+                    if len(prices_series) >= 14 else float('nan'))
         # Treat ATR=0 (e.g. stale/ffilled constant series) same as NaN — use 2% fallback.
         atr  = float(_atr_raw) if (pd.notna(_atr_raw) and float(_atr_raw) > 0) else current_price * 0.02
 
