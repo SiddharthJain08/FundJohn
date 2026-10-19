@@ -234,7 +234,7 @@ git -C /root/openclaw/.claude/worktrees/six-c commit -m "feat(strategies): C3 sa
   - `csum(s)`: `s.cumsum()`.
   - `diff(s, *, ignore_negative=False)`: `s.diff()`; with `ignore_negative`, negative values become NaN.
   - `rsi(close, n=14)`: Wilder (`ewm(alpha=1/n, adjust=False)` on gains and losses); 100 where losses ≤ `EPS`.
-- `BaseStrategy.ind = indicators`, a class attribute (module alias).
+- `BaseStrategy.ind = indicators`, a class attribute (module alias). `S23_regime_momentum.py:12` and `S24_52wk_high_proximity.py:13` import `from base import BaseStrategy`, which loads `base.py` as the top-level module `base`, possibly with only `src/strategies` on `sys.path`. So `base.py` imports the module tolerantly: `try: from strategies import indicators as _indicators` / `except ImportError: import indicators as _indicators`. Task 9's lazy `signal_expr` import uses the same pattern.
 
 - [ ] **Step 1: Write the failing tests**
 - `test_atr_close_diff_equals_old_base_formula`.
@@ -248,6 +248,7 @@ git -C /root/openclaw/.claude/worktrees/six-c commit -m "feat(strategies): C3 sa
 - `test_diff_ignore_negative`, `test_csum_mavg_sma`.
 - `test_short_and_empty_inputs_return_nan_series`. Every function on `pd.Series([], dtype=float)` and on a 3-point series returns the same index and raises nothing.
 - `test_base_exposes_ind`. `BaseStrategy.ind is indicators`, and an instance's `.ind.sma` exists.
+- `test_base_importable_as_top_level_module`. A subprocess runs `env -u PYTHONPATH python3 -c "import sys; sys.path[:0]=['<abs>/src/strategies']; import base; print(base.BaseStrategy.ind.sma.__name__)"` with `cwd='/'` and prints `sma`.
 - `test_compute_stops_and_targets_byte_identical`. 300 seeded random cases:
   - lengths drawn from {0, 1, 13, 14, 15, 40}, plus constant series and series with an interior NaN
   - `current_price != series.iloc[-1]`
@@ -333,7 +334,7 @@ Loop-parity fixtures. Copy each loop body into the test as a plain function; nev
   - Assert the lists of `(signal_date, regime_state, pnl)` are equal, with pnl to 1e-12.
   - Assert the quirks are exercised (choose the series phase so these hold): the unmasked `start` is True at position `slow-1`, so entry lands on position `slow`, not `slow-1`; the raw state is bullish on the last bar, so the unfinished episode is dropped; and there are at least 3 trades.
 - `test_parity_czar_loop`
-  - Fixture: `_czar_loop(prices_s, dir_at, min_lb, regime_s, step=5)` copies `S_czar_loss_btc_directional.py:195-206`. `_fit_and_predict` is replaced by a precomputed per-position `dir_at` ('LONG' / 'SHORT' / None), and the regime asof lookup by `regime_s`.
+  - Fixture: `_czar_loop(prices_s, dir_at, min_lb, regime_s, step=5)` copies `S_czar_loss_btc_directional.py:185-206` (loop `:186-202`, force-close `:203-206`). `_fit_and_predict` is replaced by a precomputed per-position `dir_at` ('LONG' / 'SHORT' / None), and the regime asof lookup by `regime_s`.
   - Helper path: sample positions `range(min_lb, len, 5)`; `key` = `dir_at` at those positions (None → NaN); append the true final bar with the last sampled key (the czar force-close uses `prices_s.iloc[-1]`); `state_window(key)`; `episodes_to_trades(..., direction=key, regime=...)`.
   - Assert the lists of `(signal_date, regime_state, pnl)` are equal.
   - Assert the quirks are exercised: `(len(prices_s) - 1 - min_lb) % 5 != 0`; `dir_at` contains a same-bar LONG→SHORT flip on a sampled position, a flat gap, and a run still open at the end.
@@ -374,7 +375,7 @@ git -C /root/openclaw/.claude/worktrees/six-c commit -m "feat(strategies): C2 wi
   - `'down'`: `(a.shift(1) >= b_prev) & (a < b)`
   - `'any'`: either
   - `b` may be a scalar. Any NaN in the current or previous pair gives False. The first bar is False. Any other `direction` raises ValueError.
-- The two `should_exit` hooks (`S_coint_pairs_sector_v2.py:397`, `S_beta_spy.py:103`) are NOT edited.
+- The two `should_exit` hooks (`S_coint_pairs_sector_v2.py:360`, `S_beta_spy.py:91`) are NOT edited.
 
 - [ ] **Step 1: Write the failing tests**
 - `test_crossing_up_down_any`. Hand-built a/b with a touch-then-cross (`prev == b` counts as up) and a touch-without-cross (`now == b` does not).
@@ -423,7 +424,7 @@ git -C /root/openclaw/.claude/worktrees/six-c commit -m "feat(strategies): C4 wi
 
 - [ ] **Step 1: Write the failing tests**
 
-Fixture: copy the `_write_master` pattern from `tests/lib/test_trading_calendar.py:14-25`. Sessions are business days 2026-06-01 → 2026-09-30 with 2026-07-03 and 2026-07-31 inactive. Monkeypatch `tc._alpaca_sessions` to `lambda s, e: None`, so the alpaca binary is never spawned.
+Fixture: copy the `_write_master` pattern from `tests/lib/test_trading_calendar.py:14-25`. Sessions are business days 2026-04-01 → 2026-09-30 with 2026-07-03 and 2026-07-31 inactive, and data rows start on 2026-04-01. Each bucket's session query is clamped to `max(bucket_start, wide.index.min())`, so the calendar is never queried outside the data and never falls through to the weekday fallback. Monkeypatch `tc._alpaca_sessions` to `lambda s, e: None`, so the alpaca binary is never spawned.
 
 Tests:
 - `test_month_label_skips_month_end_holiday`. The July label is `2026-07-30`.
@@ -470,7 +471,7 @@ git -C /root/openclaw/.claude/worktrees/six-c commit -m "feat(strategies): C5 se
   - A missing price at the anchor or the target excludes that observation. Duplicate (ticker, anchor) pairs count once. Tickers absent from `prices_wide` are excluded.
   - `event_date` may be str, date or datetime.
   - Implementation: one shared `_markout_sql(con, events_view, prices_view, sessions_view, offsets) -> pd.DataFrame`. `markout` registers a long melt of `prices_wide` (event tickers only). The connection runs `SET memory_limit='1GB'`.
-- CLI: `python -m research.event_study --master {earnings,insider} --since YYYY-MM-DD [--offsets -5:20] [--events-path P] [--prices-path P] [--calendar-path P]`.
+- CLI: `python -m research.event_study --master {earnings,insider} --since YYYY-MM-DD [--offsets=-5:20] [--events-path P] [--prices-path P] [--calendar-path P]`.
   - Defaults: `data/master/earnings.parquet` (event date column = the first present of `date`, `report_date`, `earnings_date`, found via DuckDB `DESCRIBE`, footer only), `data/master/insider.parquet` (`date` = filing date), and `parquet_store.PRICES_PATH`.
   - The prices read is a DuckDB view: `ticker IN (SELECT DISTINCT ticker FROM events) AND CAST(date AS DATE) >= since - 40 days`. Prices are never materialised in pandas, and the master is never read whole.
   - Prints JSON `{'master', 'since', 'events', 'rows': [...]}` to stdout and one stderr line `[event_study] master=… events=… offsets=…`. Exit 0.
@@ -486,7 +487,7 @@ Tests:
 - `test_offsets_beyond_panel_reduce_n`
 - `test_duplicates_and_unpriced_events` (Review Focus 5). The same (ZZTEST1, date) twice, plus `ZZMISSING`, gives n equal to the deduplicated priced count.
 - `test_string_and_datetime_event_dates_equivalent`
-- `test_cli_on_tmp_parquets`. Write tmp `earnings.parquet` (`ticker`, `report_date`), a long tmp `prices.parquet` (`ticker`, `date` as str, `close`) and the calendar. Call `event_study.main([...all paths...])` with capsys. Assert the JSON has `rows` of length 26 and that stderr starts with `[event_study]`.
+- `test_cli_on_tmp_parquets`. Write tmp `earnings.parquet` (`ticker`, `report_date`), a long tmp `prices.parquet` (`ticker`, `date` as str, `close`) and the calendar. Call `event_study.main([...all paths...])` with capsys. Assert the JSON has `rows` of length 26 and that stderr starts with `[event_study]`. Also pass `--offsets=-2:3` (the `=` form is required: argparse treats a bare `-2:3` as a flag), which gives 6 rows; the docstring documents the `=` form.
 
 - [ ] **Step 2: Run and confirm failure**
 
@@ -510,6 +511,7 @@ git -C /root/openclaw/.claude/worktrees/six-c commit -m "feat(research): C6 even
 **Files:**
 - Create: `src/strategies/signal_expr.py`
 - Modify: `src/strategies/strategy_lint.py` (new error kind `signal_expr` inside `lint_source`)
+- Modify: `requirements.txt` (pin `sympy==1.14.0`; it is installed but unpinned, and requirements.txt is the fresh-clone path)
 - Test: `tests/strategies/test_signal_expr.py`; `tests/strategies/test_strategy_lint.py` (append `TestSignalExprLint`)
 
 **Interfaces:**
@@ -550,7 +552,7 @@ Pinned behaviour:
   - `rsi`/`pct_change`/`lag`: `lb(x) + n`.
   - `atr(n)`: `n + 1`. `rank_pct`: `lb(x)`.
   - Arithmetic takes the max of its operands.
-- **Lint.** For every `ClassDef` body `Assign` to `SIGNAL`, the value must be a str `Constant`, else a `signal_expr` violation `SIGNAL must be a string literal`. `validate_expr_syntax` runs with columns from a sibling `SIGNAL_COLUMNS` literal (set, list, tuple, or `frozenset({...})` of str constants; default `{'close'}`). A `SignalExprError` becomes a `signal_expr` violation. The lint never calls `compile_signal`.
+- **Lint.** For every `ClassDef` body `Assign` or `AnnAssign` to `SIGNAL`, the value must be a str `Constant`, else a `signal_expr` violation `SIGNAL must be a string literal`. `validate_expr_syntax` runs with columns from a sibling `SIGNAL_COLUMNS` literal (set, list, tuple, or `frozenset({...})` of str constants; default `{'close'}`). A `SignalExprError` becomes a `signal_expr` violation. The lint never calls `compile_signal`.
 
 - [ ] **Step 1: Write the failing tests** (`tests/strategies/test_signal_expr.py`; panels use `ZZTEST*` columns)
 - `test_rejects_unknown_symbol`. `'sma(vol, 5)'` with `columns={'close'}` raises, matching `unknown symbol 'vol'`.
@@ -587,16 +589,20 @@ In `test_strategy_lint.py`, add `TestSignalExprLint`:
 Run: `nice -n 19 python3 -m pytest /root/openclaw/.claude/worktrees/six-c/tests/strategies/test_signal_expr.py -q -W error`
 Expected: FAIL (`ModuleNotFoundError: strategies.signal_expr`).
 
-- [ ] **Step 3: Implement `signal_expr.py` (import sympy lazily inside `compile_signal`/`formula_hash`) and the lint kind**
+- [ ] **Step 3: Implement `signal_expr.py` and the lint kind.** Module-level imports are stdlib only (`ast`, `keyword`, `hashlib`, `dataclasses`, `typing`). sympy, pandas, numpy, `indicators` and `safe_ops` are imported lazily inside `compile_signal` / `formula_hash` / `CompiledSignal.__call__`, so the lint process loads neither pandas nor sympy. Match `ast.AnnAssign` (`SIGNAL: str = "..."`) as well as `ast.Assign`.
 - [ ] **Step 4: Run both files**
 
 Run: `nice -n 19 python3 -m pytest /root/openclaw/.claude/worktrees/six-c/tests/strategies/test_signal_expr.py -q -W error`
 Then: `nice -n 19 python3 -m pytest /root/openclaw/.claude/worktrees/six-c/tests/strategies/test_strategy_lint.py -q -W error`
 Expected: both PASS (`TestFleetIsClean` included; no fleet file declares `SIGNAL`).
 
+Then check the orchestrator's bare-script spawn path (precedent: controller fix `42eef5f9`):
+- `env -u PYTHONPATH nice -n 19 python3 /root/openclaw/.claude/worktrees/six-c/src/strategies/strategy_lint.py /root/openclaw/.claude/worktrees/six-c/src/strategies/implementations/oxf_bollinger_momentum.py` — expected: JSON with `"ok": true`, rc 0.
+- `nice -n 19 node --test /root/openclaw/.claude/worktrees/six-c/tests/agent/test_zero_signal_gate.test.js /root/openclaw/.claude/worktrees/six-c/tests/agent/test_ic_screen_gate.test.js` — expected: PASS.
+
 - [ ] **Step 5: Commit**
 ```bash
-git -C /root/openclaw/.claude/worktrees/six-c add src/strategies/signal_expr.py src/strategies/strategy_lint.py tests/strategies/test_signal_expr.py tests/strategies/test_strategy_lint.py
+git -C /root/openclaw/.claude/worktrees/six-c add src/strategies/signal_expr.py src/strategies/strategy_lint.py requirements.txt tests/strategies/test_signal_expr.py tests/strategies/test_strategy_lint.py
 ```
 ```bash
 git -C /root/openclaw/.claude/worktrees/six-c commit -m "feat(strategies): C7 signal_expr compiler (ast whitelist + sympy parse_expr, formula_hash) + lint kind signal_expr"
@@ -607,7 +613,7 @@ git -C /root/openclaw/.claude/worktrees/six-c commit -m "feat(strategies): C7 si
 ### Task 9: C7b — `BaseStrategy` SIGNAL integration
 
 **Files:**
-- Modify: `src/strategies/base.py` (class attributes near `:150-187`; `__init_subclass__` `:189-227`; new methods after `should_exit` `:257-273`)
+- Modify: `src/strategies/base.py` (class attributes after `benchmark_sleeve` `:179`; `__init_subclass__` `:181-220`; new methods after `should_exit` `:257-273`)
 - Test: `tests/strategies/test_base_signal_dsl.py`
 
 **Interfaces:**
@@ -684,7 +690,13 @@ git -C /root/openclaw/.claude/worktrees/six-c commit -m "feat(strategies): C7 Ba
 - Create: `src/strategies/implementations/S_golden_cross_trend_signal_tv2_dsl.py`, `S_amihud_illiquidity_premium_dsl.py`, `oxf_bollinger_momentum_dsl.py`, and a `.requirements.json` for each (copy the parent's `required`/`optional`; `strategy_id` = new id).
 - Modify: `src/strategies/registry.py` (three `_IMPL_MAP` entries before the closing `}` at `:471`)
 - Modify: `src/strategies/generate_signatures.py:53-77` (extract `signature_for_source`)
-- Create: `scripts/register_dsl_pilots.py` (modelled on `scripts/register_low_volatility_us_gk63.py`: `--manifest`, `--dry-run` default, `--apply`, `POSTGRES_URI` popped, `_manifest_lock` write, inserts only the three new `candidate` keys with `eligible_regimes` absent, never touches another key)
+- Create: `scripts/register_dsl_pilots.py`, modelled on `scripts/register_low_volatility_us_gk63.py` (`_new_entry` `:113-125`):
+  - `--manifest`, `--dry-run` (default), `--apply`; `POSTGRES_URI` popped; writes through `_manifest_lock`.
+  - Inserts only the three new `candidate` keys, with `eligible_regimes` absent, and never touches another key.
+  - Every entry carries `universe_filter_ref`. An unbound candidate gets the full ~12.5k-column panel, and the DSL builds several full-prefix wide intermediates per bar; `S_first_candle_ema12_breakout` was OOM-killed three nights running for this reason. The values:
+    - Amihud copies its parent: `src.strategies.universe_default:stocks_liquid` plus `backtest_universe_cap: tier_liquid` and the parent's `backtest_universe_cap_reason`.
+    - Bollinger copies its parent: `src.strategies.universe_default:tier_liquid`.
+    - Golden cross: the tv2 parent has no manifest entry, so use `src.strategies.universe_default:tier_liquid` (the modal fleet predicate). This is an owed operator decision; say so in the script docstring.
 - Modify: `src/agent/prompts/subagents/strategycoder.md` (two new sections between "### Artifact 4 — Data requirements JSON" and "## Intraday (single-session) strategies", `:162-194`)
 - Test: `tests/strategies/test_dsl_pilots.py`, `tests/strategies/test_generate_signatures_formula_hash.py`, `tests/scripts/test_register_dsl_pilots.py`
 
@@ -702,7 +714,8 @@ git -C /root/openclaw/.claude/worktrees/six-c commit -m "feat(strategies): C7 Ba
     - `min_lookback=100`, `MAX_SIGNALS=25`, `active_in_regimes=['LOW_VOL','TRANSITIONING']`.
     - `signal_panel` builds `close` from `self.basket_ohlc(prices)` and ignores `universe`.
   - Each pilot's docstring cites its original and lists the divergences: a ticker absent on the evaluation row emits nothing (the original uses its stale last value); Amihud averages the last 60 valid observations (the original takes valid cells among the last 60 rows, needing ≥ 40); Bollinger reads the union basket calendar.
-  - `generate_signatures.signature_for_source(source: str) -> dict`: the existing per-file dict. When the source has a class-body `SIGNAL = "<literal>"` (found via `ast`, never imported), it adds `'formula_hash': signal_expr.formula_hash(expr)` and sets `formula_tokens` to the sorted op names and column names used. `main()` calls it and is otherwise unchanged.
+  - `generate_signatures.signature_for_source(source: str) -> dict`: the existing per-file dict. When the source has a class-body `SIGNAL = "<literal>"` or `SIGNAL: str = "<literal>"` (found via `ast`, never imported), it adds `'formula_hash': signal_expr.formula_hash(expr)` and sets `formula_tokens` to the sorted op names and column names used. `main()` calls it and is otherwise unchanged.
+  - `cron-schedule.js:870` runs `generate_signatures.py` as a bare script. The file therefore gains the same `sys.path` shim as `strategy_lint.py:47-49`, and imports `signal_expr` lazily, only when a `SIGNAL` literal is found.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -721,10 +734,11 @@ git -C /root/openclaw/.claude/worktrees/six-c commit -m "feat(strategies): C7 Ba
 - `test_signature_for_source_prefers_formula_hash`. The DSL source entry has `formula_hash == signal_expr.formula_hash(expr)` and `formula_tokens == ['close', 'sma']` for `"sma(close, 20) - close"`.
 - `test_non_dsl_source_unchanged`. Same output as the old substring path for a source containing `'zscore'` and `'LONG'`.
 - `test_main_not_called`. Monkeypatch `SIG_OUT` to `tmp_path` and assert the real file's mtime is untouched.
+- `test_bare_script_import_path`. A subprocess runs `env -u PYTHONPATH python3 -c "import sys; sys.path[:0]=['<abs>/src/strategies']; import generate_signatures as g; print(g.signature_for_source(SRC)['formula_hash'])"` with `cwd='/'` and `SRC` a DSL source. It prints a 16-hex hash, reproducing the cron's `sys.path`.
 
 `tests/scripts/test_register_dsl_pilots.py`, against a `tmp_path` copy of a minimal manifest only:
 - `test_dry_run_writes_nothing`
-- `test_apply_inserts_three_candidates_only`. The diff outside the three keys is empty; `state == 'candidate'`; no `eligible_regimes`.
+- `test_apply_inserts_three_candidates_only`. The diff outside the three keys is empty; `state == 'candidate'`; no `eligible_regimes`; every entry's `metadata.universe_filter_ref` equals the value pinned above.
 - `test_apply_is_idempotent`
 
 - [ ] **Step 2: Run and confirm failure**
