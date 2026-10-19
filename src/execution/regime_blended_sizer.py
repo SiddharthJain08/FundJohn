@@ -398,7 +398,7 @@ def _tangency_gamma_for_cycle(groups: dict | None) -> float:
         return _og.TANGENCY_SHRINK_DEFAULT
 
 
-def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim, gamma=None):
+def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim, gamma=None, diag=None):
     """Build the correlation-adjusted gate + sizing maps from per-ticker contributors.
     Gate uses RAW daily_weight (size_scalar-exempt — matches the legacy 'gate stays raw'
     intent); sizing uses eff_weight (size_scalar folded in). Identical when all scalars=1.
@@ -415,15 +415,18 @@ def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim, 
     (the legacy corr_adjusted_net_sharpe branch has no shrinkage parameter and
     ignores it). Left at the default None, tangency_net_sharpe falls back to
     its own TANGENCY_SHRINK_DEFAULT — unchanged from before this parameter
-    existed."""
+    existed.
+
+    `diag` (B1): optional dict forwarded to both tangency_net_sharpe calls
+    (NNLS-vs-enumeration diagnostic); the legacy branch ignores it."""
     from execution import orthogonalization as _og
     contribs_by_ticker = {tkr: list(zip(m['strategies'], m['directions']))
                           for tkr, m in ticker_meta.items()}
     if _tangency_sadj_enabled():
         _fn = _og.tangency_net_sharpe
         logger.info('corr_cumsharpe: S_adj basis = tangency (optimal-weights) combination Sharpe')
-        gate_net_sharpe, nb_gate = _fn(contribs_by_ticker, sim, weight_by_strat, gamma=gamma)
-        sizing_weight, nb_size = _fn(contribs_by_ticker, sim, eff_weight_by_strat, gamma=gamma)
+        gate_net_sharpe, nb_gate = _fn(contribs_by_ticker, sim, weight_by_strat, gamma=gamma, diag=diag)
+        sizing_weight, nb_size = _fn(contribs_by_ticker, sim, eff_weight_by_strat, gamma=gamma, diag=diag)
     else:
         _fn = _og.corr_adjusted_net_sharpe
         logger.info('corr_cumsharpe: S_adj basis = legacy fixed-proportional combination Sharpe')
@@ -1670,8 +1673,9 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # gamma entirely, so resolving (and possibly logging would_use_gamma /
     # rejected-gamma) it there would be noise for a value nothing consumes.
     _gamma = _tangency_gamma_for_cycle(_ortho_groups) if _tangency_sadj_enabled() else None
+    _tan_diag: dict = {}
     gate_net_sharpe, _size_adj, _nb_g, _nb_s = _corr_adjusted_maps(
-        ticker_meta, _cw_gate, _cw_size, _sim, gamma=_gamma)
+        ticker_meta, _cw_gate, _cw_size, _sim, gamma=_gamma, diag=_tan_diag)
     # Conviction gate (2026-08-22): per-regime MINIMUM ACTING-STRATEGY COUNT.
     # A ticker is taken only when at least `min_acting` DISTINCT strategies
     # act on it in its net direction. Replaces the S_adj floor
@@ -1693,13 +1697,15 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         for _c in acting_n.values():
             _adist[_c] = _adist.get(_c, 0) + 1
         _akeep = sum(1 for _c in acting_n.values() if _c >= min_acting)
+        from execution import orthogonalization as _og_diag
         _line = ('corr_cumsharpe.live[%s]: dist=%s acting_min=%d acting_dist=%s '
                  'acting_keep=%d/%d rec_floor=%.4f cap_binds=%d gross_after_cap=%.3f '
-                 'sign_flips=%s backstop=%s top_dollar_moves=%s' % (
+                 'sign_flips=%s backstop=%s top_dollar_moves=%s %s' % (
                      regime_state, {k: round(v, 4) for k, v in _m['dist'].items()},
                      min_acting, dict(sorted(_adist.items())), _akeep, len(acting_n),
                      _m['rec_floor'], _m['cap_binds'], _m['gross_after_cap_frac'],
-                     _m['sign_flips'], _m['backstop_fires'], _m['top_dollar_moves']))
+                     _m['sign_flips'], _m['backstop_fires'], _m['top_dollar_moves'],
+                     _og_diag.tangency_diag_token(_tan_diag)))
         logger.info(_line)
         # Post once per daily cycle only (skip the every-5-min intraday redeploy lane
         # to avoid #botjohn-log spam); the post self-expires via pipeline_config.

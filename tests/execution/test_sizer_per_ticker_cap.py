@@ -273,3 +273,28 @@ class TestPerTickerCapGlobalLambda:
             f'cap must use global lambda: expected {expected}, got {got} '
             f'(blended-lam cap would be {blended})'
         )
+
+
+def test_corr_cumsharpe_line_carries_tangency_token(monkeypatch, caplog):
+    """B1: the corr_cumsharpe.live line ends with the tangency diagnostic token."""
+    import logging
+    monkeypatch.setattr(_sizer, '_load_net_cap_cfg', lambda *a, **k: (False, 0.6))
+    monkeypatch.setattr(_sizer, '_post_corr_cumsharpe_log', lambda *a, **k: None)
+
+    def _lines():
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=_sizer.logger.name):
+            _run_eod(monkeypatch,
+                     weights_rows=[_weights_row(f'S_zz_{i}', eff_sharpe=1.0) for i in range(3)],
+                     carried_rows=[_carried(f'S_zz_{i}', 'ZZTEST1') for i in range(3)])
+        return [r.getMessage() for r in caplog.records
+                if r.getMessage().startswith('corr_cumsharpe.live[')]
+
+    monkeypatch.delenv('OPENCLAW_TANGENCY_NNLS', raising=False)
+    lines = _lines()
+    assert len(lines) == 1
+    tok = lines[0].rsplit(' ', 1)[1]
+    assert tok.startswith('tangency_nnls_maxdiff=') and float(tok.split('=')[1]) < 1e-9
+    monkeypatch.setenv('OPENCLAW_TANGENCY_NNLS', '1')
+    lines = _lines()
+    assert len(lines) == 1 and lines[0].endswith('tangency_mode=nnls')
