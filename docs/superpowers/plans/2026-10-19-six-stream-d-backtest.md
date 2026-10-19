@@ -4,7 +4,7 @@
 
 **Goal:** Close the monthly-macro look-ahead behind a flag that joins the pit/gap epoch (D1), make backtest diagnostics additive trackers with a wall-clock budget (D3), and add an opt-in, parity-checked indicator cache with a measurement path (D2).
 
-**Architecture:** D1 adds a shared as-of helper (`strategies/asof.py`), a per-series macro release-lag table, and a flag-gated availability cut in `aux_data_loader._macro_slice`. It also records `macro_pit` in `config_json` and extends the existing pit/gap flip gate and flip script to three flags. D3 moves the loose counters in `unified_backtest._per_bar_simulate` into `src/backtest/trackers.py` objects driven once per bar. The persisted `config_json` is then built from `run.info`, and is proven byte-identical by a golden synthetic fixture recorded before the refactor plus a two-checkout replay script. D2 adds `BaseStrategy.cached`, fed by an `IndicatorCacheTracker` that sets `_cache_source` before the OOS loop when `OPENCLAW_BT_INDICATOR_CACHE=1`. It also adds a parity assert in `validate_strategy`, a synthetic-panel measurement script, and three NEW `_cached` strategy files.
+**Architecture:** D1 adds a shared as-of helper (`strategies/asof.py`), a per-series macro release-lag table, and a flag-gated availability cut in `aux_data_loader._macro_slice`. It also records `macro_pit` in `config_json` and extends the existing pit/gap flip gate and flip script to three flags. D3 moves the loose counters in `unified_backtest._per_bar_simulate` into `src/backtest/trackers.py` objects driven once per bar. The persisted `config_json` is then built from `run.info`, and is proven byte-identical by a golden synthetic fixture recorded before the refactor plus a two-checkout replay script. D2 adds `BaseStrategy.cached`, fed by an `IndicatorCacheTracker` that sets `_cache_source` before the OOS loop when `OPENCLAW_BT_INDICATOR_CACHE=1`. It also adds a parity assert in `validate_strategy`, a synthetic-panel measurement script, and three never-registered `_cached` measurement files (coordinator ruling 2).
 
 **Tech Stack:** Python 3.13, pandas 3 (Copy-on-Write), pytest, bash. No new dependencies.
 
@@ -54,6 +54,7 @@ Rules for every task in this plan:
 | File | Responsibility | Task |
 |---|---|---|
 | `src/strategies/asof.py` (create) | `asof_align` — the one backward as-of join with an explicit same-day rule | 1 |
+| `src/agent/prompts/subagents/strategycoder.md` (modify) | data-dependency paragraph pointing authors at `strategies.asof` (ruling 3) | 1 |
 | `src/strategies/aux_data_loader.py` (modify) | `MACRO_RELEASE_LAG_DAYS`, `available_at_frame`, flag-gated `_macro_slice` | 2 |
 | `src/backtest/unified_backtest.py` (modify) | `config_json['macro_pit']` (3); tracker wiring + persist from `run.info` (5); cache tracker registration (7) | 3, 5, 7 |
 | `scripts/pit_gap_flip_gate.py`, `scripts/pit_gap_flip_after_fleet.sh` (modify) | G1 requires three keys; flip sets three flags | 3 |
@@ -73,6 +74,7 @@ Ordering: D1 (Tasks 1–3), then D3 (Tasks 4–6), then D2 (Tasks 7–10). D3 pr
 
 **Files:**
 - Create: `src/strategies/asof.py`
+- Modify: `src/agent/prompts/subagents/strategycoder.md`. Add one paragraph at the end of the `### Data dependency declaration` rules list (`:99-117`). Stream C edits this file in a different section (its DSL section), so the hunks do not overlap. Coordinator ruling 3.
 - Test: `tests/strategies/test_asof.py`
 
 **Interfaces:**
@@ -94,13 +96,20 @@ Ordering: D1 (Tasks 1–3), then D3 (Tasks 4–6), then D2 (Tasks 7–10). D3 pr
   - `test_tie_on_available_at_last_input_row_wins`: two right rows with the same `available_at`; the later row in input order wins (stable mergesort).
   - `test_bad_same_day_raises`: `same_day='x'` gives `ValueError`; missing `on` column gives `KeyError`.
   - `test_tz_mismatch_raises_typeerror`: tz-aware `right[on]` with a naive `left_index` raises `TypeError` whose message names both dtypes.
+  - `test_strategycoder_prompt_names_asof_helper`: `src/agent/prompts/subagents/strategycoder.md` contains `strategies.asof`. It also contains `unguarded_parquet_read`, the lint rule name the paragraph explains.
 
 - [ ] **Step 2: Run to verify failure**
 
 Run: `nice -n 19 python3 -m pytest tests/strategies/test_asof.py -q -W error`
-Expected: FAIL (`ModuleNotFoundError: strategies.asof`)
+Expected: FAIL (`ModuleNotFoundError: strategies.asof`; the prompt test fails on the missing string)
 
 - [ ] **Step 3: Implement `asof_align` in `src/strategies/asof.py`.** Build a left frame with a positional `_asof_pos` column. Drop NaT keys on both sides. Sort both by the date key with `kind='mergesort'`. Call `pd.merge_asof(direction='backward', by=by, tolerance=tolerance, allow_exact_matches=…)`, then restore the input order by `_asof_pos` and reinsert the NaT-left rows as NaN. The module docstring states the same-day contract: an after-close publication (earnings, a macro print) is NOT usable on its own bar. It imports only pandas.
+
+  Then add the StrategyCoder prompt paragraph as one new bullet at the end of the data-dependency rules list. It must say:
+  - Align any self-loaded or aux series (macro, fundamentals, insider, options) onto the price index with `from strategies.asof import asof_align` and `asof_align(series_frame, prices.index, on='available_at')`, instead of `reindex(..., method='ffill')`, `.ffill()` or `searchsorted`.
+  - The default `same_day='after_close'` keeps an after-close print off its own bar.
+  - `aux_data_loader.available_at_frame(kind)` supplies the `available_at` column.
+  - Importing `strategies.asof` clears the `unguarded_parquet_read` lint WARN.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -110,7 +119,7 @@ Expected: PASS (10 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/strategies/asof.py tests/strategies/test_asof.py
+git add src/strategies/asof.py src/agent/prompts/subagents/strategycoder.md tests/strategies/test_asof.py
 git commit -m "feat(asof): shared asof_align helper with explicit same-day rule (six-repo D1a)"
 ```
 
@@ -146,15 +155,24 @@ MACRO_RELEASE_LAG_DAYS: dict[str, int] = {
     # FRED daily (spec: "daily FRED series: 1")
     'DGS1MO': 1, 'DGS3MO': 1, 'DGS6MO': 1, 'DGS1': 1, 'DGS2': 1, 'DGS5': 1,
     'DGS10': 1, 'DGS30': 1, 'DTB3': 1, 'T10Y2Y': 1, 'T10Y3M': 1, 'DFF': 1,
-    'SOFR': 1, 'BAMLH0A0HYM2': 1, 'BAMLC0A0CM': 1, 'DTWEXBGS': 1,
-    'DCOILWTICO': 1, 'DEXUSEU': 1, 'DEXJPUS': 1,
+    'SOFR': 1, 'BAMLH0A0HYM2': 1, 'BAMLC0A0CM': 1,
+    # Daily observations published WEEKLY (coordinator ruling 1)
+    'DEXUSEU': 7, 'DEXJPUS': 7, 'DTWEXBGS': 7,   # Fed H.10: weekly Monday release
+    'DCOILWTICO': 7,                              # EIA spot prices: weekly release
     # NY Fed reference rates: published ~08:00 ET next business day
     'NYFED_SOFR': 1, 'NYFED_EFFR': 1, 'NYFED_OBFR': 1, 'NYFED_TGCR': 1, 'NYFED_BGCR': 1,
-    # Monthly, observation dated the 1st (spec values)
-    'INDPRO': 45,
-    'CPIAUCSL': 45, 'UNRATE': 40, 'PAYEMS': 40, 'GDP': 90,   # not ingested today
+    # Monthly, observation dated the 1st
+    'INDPRO': 48,   # Fed G.17 ≈ 45–47 d after the 1st-of-month obs date (ruling 1; spec said 45)
+    'CPIAUCSL': 45, 'UNRATE': 40, 'PAYEMS': 40, 'GDP': 90,   # spec values; not ingested today
 }
 ```
+
+Rationale (carry it as a comment beside the dict). Coordinator ruling 1 amends the spec's "INDPRO: 45" and "daily FRED: 1":
+- The H.10 FX and broad-dollar series (DEXUSEU, DEXJPUS, DTWEXBGS) come out in a weekly Monday release, so a Friday observation is public about 3 days later and a Monday observation about 7 days later. 7 is the conservative bound.
+- DCOILWTICO is the EIA spot series, published weekly.
+- INDPRO (Fed G.17) is released about 45–47 days after its 1st-of-month observation date, so 48 is a safe upper bound.
+- The VIX family is 0, because it is the same-bar close, the same convention as the price bar.
+- Unmapped series get 0 plus the one-time `[macro_pit] WARN`.
 
 Cut semantics (pinned): visible iff `available_at <= as_of`, i.e. `s.loc[:ts - pd.Timedelta(days=lag)]`. Each served Series keeps its observation-date index; only the cut moves. With the flag on, the first `_macro_slice` call in the process prints exactly one stderr line:
 
@@ -172,7 +190,9 @@ With the flag unset, the body is the existing loop, byte-identical, and nothing 
 
 - [ ] **Step 1: Write the failing tests in `tests/strategies/test_aux_macro_pit.py`.** Each test writes a tiny `macro.parquet` to `tmp_path`, monkeypatches `adl.MACRO_PATH`, resets `adl._MACRO_SERIES = None` and the PIT-announce module flag, and uses `monkeypatch.setenv`/`delenv('OPENCLAW_MACRO_PIT')`. Tests:
   - `test_flag_unset_is_legacy_observation_cut`: INDPRO obs `2026-09-01` is visible on `2026-09-05` with the flag unset.
-  - `test_monthly_boundary_indpro`: flag=1, INDPRO obs `2026-09-01`. It is hidden on `2026-10-15` (09-01 + 45 = 10-16) and visible on `2026-10-16`. The served Series index max stays the observation date `2026-09-01`.
+  - `test_monthly_boundary_indpro`: flag=1, INDPRO obs `2026-09-01`. It is hidden on `2026-10-18` (09-01 + 48 = 10-19) and visible on `2026-10-19`. The served Series index max stays the observation date `2026-09-01`.
+  - `test_weekly_release_boundary_dexuseu`: flag=1, DEXUSEU obs Friday `2026-10-09`. It is hidden on `2026-10-15` and visible on `2026-10-16` (+7). The same rule applies to DTWEXBGS and DCOILWTICO via `macro_release_lag`, which returns 7 for each.
+  - `test_lag_table_ruling_values`: `MACRO_RELEASE_LAG_DAYS` has `INDPRO` = 48; `DEXUSEU`, `DEXJPUS`, `DTWEXBGS`, `DCOILWTICO` = 7; `DGS10` = 1; `NYFED_SOFR` = 1; `VIX` = 0; and `MACRO_DEFAULT_LAG_DAYS == 0`.
   - `test_daily_boundary_dgs10`: flag=1, DGS10 obs Monday `2026-10-12`. It is not visible on the `2026-10-12` bar and is visible on `2026-10-13`.
   - `test_vix_identical_both_states`: the VIX Series is equal under flag 0 and 1 (`pd.testing.assert_series_equal`).
   - `test_unmapped_series_lag0_and_warned_once` (Review Focus 1): series `ZZMACRO` with flag=1 is served with the legacy cut. capsys stderr has exactly one `[macro_pit] WARN unmapped=ZZMACRO` after two `_macro_slice` calls.
@@ -183,7 +203,7 @@ With the flag unset, the body is the existing loop, byte-identical, and nothing 
   - Also re-run the existing `tests/strategies/test_aux_macro_slice.py` unchanged in Step 4.
 
 - [ ] **Step 2: Write the parity test `tests/strategies/test_macro_pit_parity.py`** (spec D1 parity, both flag states). Use the fixture pattern of `tests/strategies/test_financials_pit_parity.py:41-55`, with `engine.ROOT` monkeypatched to `tmp_path`. Call `engine.load_aux_data(['ZZTEST1'], as_of=T, needed_kinds={'macro'})`; `needed_kinds` is mandatory because without it the sentiment block queries Postgres. Set `T = 2026-10-15`. Build two frames:
-  - `PUB`: only rows already published by T. VIX through 10-15, DGS10 through 10-14, INDPRO through 08-01.
+  - `PUB`: only rows already published by T. VIX through 10-15, DGS10 through 10-14, INDPRO through 08-01 (08-01 + 48 = 09-18 ≤ T; 09-01 + 48 = 10-19 > T).
   - `FULL`: `PUB` plus the unpublished rows. DGS10 10-15 and INDPRO 09-01.
 
   Tests:
@@ -600,10 +620,10 @@ git commit -m "feat(scripts): measure_indicator_cache synthetic-panel wall time 
 
 ---
 
-### Task 10: D2d — three `_cached` measurement twins
+### Task 10: D2d — three `_cached` measurement twins (never registered)
 
 **Files:**
-- Create: `src/strategies/implementations/S_ast_trend_following_effect_in_stocks_cached.py`, `S_tr_02_hurst_regime_flip_cached.py`, `S_two_day_pullback_atr_uptrend_cached.py`, and a `.requirements.json` for each (copy the parent's, `strategy_id` = new id).
+- Create: `src/strategies/implementations/S_ast_trend_following_effect_in_stocks_cached.py`, `S_tr_02_hurst_regime_flip_cached.py`, `S_two_day_pullback_atr_uptrend_cached.py`. There are no `.requirements.json` sidecars: those feed `staging_approver.js` and lifecycle unstacking, which are registration paths.
 - Modify: `docs/archive/changelog.md`
 - Test: `tests/strategies/test_cached_twins_parity.py`
 
@@ -632,20 +652,24 @@ git commit -m "feat(scripts): measure_indicator_cache synthetic-panel wall time 
     - `sma_200 = float(self.cached('sma200', lambda p: p.apply(lambda c: c.dropna().rolling(trend_p).mean()), prices)[ticker].loc[series.index[-1]])`
 
     The per-column `dropna` inside `fn` reproduces the parent's dropna-then-roll semantics across NaN gaps.
-- No manifest, `_IMPL_MAP` or register-script edit (see the report: promotion risk). Measurement needs none of them: `find_strategy_file` resolves `<id>.py` by filename (`unified_backtest.py:228-231`), and `python3 -m backtest.unified_backtest --strategy-file <path>` / `scripts/measure_indicator_cache.py --strategy <id>_cached --compare-to <id>` both work unregistered.
+- **Coordinator ruling 2 (amends spec §4 D2 "NEW candidate id" and §6.5 "D2 `_cached` ids registered as candidates"): the twins are NEVER registered.** They are measurement-only files: no `_IMPL_MAP` entry, no manifest entry, no register script. The reason: they emit their parent's signals byte-for-byte, so an auto-promotion would double those signals live.
+  - Each twin's module docstring carries the line `measurement twin — never register; emits the parent's signals`.
+  - Measurement needs no registration: `find_strategy_file` resolves `<id>.py` by filename (`unified_backtest.py:228-231`), and `python3 -m backtest.unified_backtest --strategy-file <path>` / `scripts/measure_indicator_cache.py --strategy <id>_cached --compare-to <id>` both work unregistered.
 
 - [ ] **Step 1: Write the failing tests** `tests/strategies/test_cached_twins_parity.py`. Use `measure_indicator_cache.make_panel(days=330, tickers=30, seed=s)` for seeds 0 and 1, regime = the parent's first active regime, and universe = all non-SPY/QQQ columns (for the pullback, its own tickers). Tests:
   - `test_twin_signals_identical_to_parent[<sid>]` (parametrized ×3): over every bar from `min_lookback + 5`, the parent's `generate_signals(prefix)` records equal the twin's with `_cache_source = panel`, and equal the twin's without a source.
   - `test_twin_validates_with_parity_flag[<sid>]`: `validate_strategy.validate(path)` under `OPENCLAW_BT_CACHE_PARITY=1` gives `ok is True` with no `cache_parity_vacuous`.
   - `test_twin_class_is_the_one_validate_picks[<sid>]` (the selected class `id` ends with `_cached`).
   - `test_twin_cache_hits_dominate`: after the loop, `stats['hit'] > stats['miss']`.
+  - `test_twins_never_registered`: none of `S_ast_trend_following_effect_in_stocks_cached`, `S_tr_02_hurst_regime_flip_cached`, `S_two_day_pullback_atr_uptrend_cached` is a key of `strategies.registry._IMPL_MAP` or of `json.load(open('src/strategies/manifest.json'))['strategies']`. This is a read-only file read; importing `strategies.registry` touches no DB.
+  - `test_twin_docstring_marks_measurement_only[<sid>]`: the module `__doc__` contains `measurement twin — never register; emits the parent's signals`.
 - [ ] **Step 2: Run** `nice -n 19 python3 -m pytest tests/strategies/test_cached_twins_parity.py -q -W error`. Expected: FAIL (files absent)
-- [ ] **Step 3: Implement the three files and sidecars.** Add a changelog entry naming the twins and the controller measurement commands.
+- [ ] **Step 3: Implement the three files.** Add a changelog entry naming the twins and the controller measurement commands.
 - [ ] **Step 4: Run** the same. Expected: PASS. Also run `python3 -m strategies.strategy_lint src/strategies/implementations/<id>_cached.py` for each and expect no violations.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/strategies/implementations/S_ast_trend_following_effect_in_stocks_cached.py src/strategies/implementations/S_ast_trend_following_effect_in_stocks_cached.requirements.json src/strategies/implementations/S_tr_02_hurst_regime_flip_cached.py src/strategies/implementations/S_tr_02_hurst_regime_flip_cached.requirements.json src/strategies/implementations/S_two_day_pullback_atr_uptrend_cached.py src/strategies/implementations/S_two_day_pullback_atr_uptrend_cached.requirements.json docs/archive/changelog.md tests/strategies/test_cached_twins_parity.py
+git add src/strategies/implementations/S_ast_trend_following_effect_in_stocks_cached.py src/strategies/implementations/S_tr_02_hurst_regime_flip_cached.py src/strategies/implementations/S_two_day_pullback_atr_uptrend_cached.py docs/archive/changelog.md tests/strategies/test_cached_twins_parity.py
 git commit -m "feat(strategies): three _cached measurement twins using BaseStrategy.cached (six-repo D2d)"
 ```
 
@@ -656,7 +680,7 @@ git commit -m "feat(strategies): three _cached measurement twins using BaseStrat
 1. After D merges: `scripts/measure_tracker_parity.py capture --repo <pre-D3 checkout at the Task 4 parent commit> --out before.json`, then the same with `--repo <D3 checkout> --out after.json`, then `compare before.json after.json`. Use `PYTHONHASHSEED=0` and a transient unit, outside 18:45–20:45Z, with no fleet unit active.
 2. `scripts/measure_indicator_cache.py --strategy <id>_cached --compare-to <id>` for each twin (full size).
 3. R2 epoch: the `pit-gap.conf` fleet drop-in carries `OPENCLAW_FINANCIALS_PIT=1`, `OPENCLAW_BT_GAP_FILL=open` and `OPENCLAW_MACRO_PIT=1`. The flip script then flips all three.
-4. §6.5 registration of the `_cached` ids: an operator decision (see the report).
+4. §6.5: the `_cached` ids are NOT registered (coordinator ruling 2). Only the C7 `_dsl` pilots are registered at the final step.
 
 ## Self-review notes
 
