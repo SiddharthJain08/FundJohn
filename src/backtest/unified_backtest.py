@@ -1088,6 +1088,8 @@ def _per_bar_simulate(
               _trk.IntradayBarTracker()]
     if os.environ.get('OPENCLAW_BT_CONSISTENCY_ABORT') == '1':
         _tlist.append(_trk.ConsistencyTracker())        # BEFORE MaxRuntime: a non-finite abort wins
+    if os.environ.get('OPENCLAW_BT_INDICATOR_CACHE') == '1':
+        _tlist.append(_trk.IndicatorCacheTracker())
     _max_rt = float(os.environ.get('OPENCLAW_BT_MAX_RUNTIME_S', '0') or 0)
     if _max_rt > 0:
         _tlist.append(_trk.MaxRuntimeTracker(_max_rt))

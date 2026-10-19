@@ -179,3 +179,27 @@ class ConsistencyTracker(_Base):
 
     def finalize(self, info: dict) -> None:
         info['consistency_checked'] = self._seen
+
+
+class IndicatorCacheTracker(_Base):
+    """Supplies ``BaseStrategy.cached`` with the full close panel
+    (OPENCLAW_BT_INDICATOR_CACHE=1).  Output goes to ``info['indicator_cache']``
+    only (persist never reads it, so config_json is unchanged)."""
+    name = 'indicator_cache'
+
+    def initialize(self, ctx: BacktestContext) -> None:
+        super().initialize(ctx)
+        ctx.instance._cache_source = ctx.close_wide
+
+    def finalize(self, info: dict) -> None:
+        inst = self._ctx.instance
+        stats = dict(inst.__dict__.get('_bt_cache_stats') or {})
+        names = sorted({k[0] for k in (inst.__dict__.get('_bt_cache') or {})})
+        info['indicator_cache'] = stats
+        g = stats.get
+        print(f'[unified_backtest] [bt_cache] on hits={g("hit", 0)} misses={g("miss", 0)} '
+              f'recomputes={g("recompute", 0)} bypass={g("bypass", 0)} '
+              f'incompatible={g("incompatible", 0)} uncacheable={g("uncacheable", 0)} '
+              f'names={names}', flush=True)
+        inst._cache_source = None
+        inst.__dict__.pop('_bt_cache', None)
