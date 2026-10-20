@@ -15,6 +15,7 @@ Atomicity: write to {path}.tmp + os.replace ensures readers never see partial st
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
 import re
 import sys
@@ -27,10 +28,12 @@ from typing import Iterable, List, Optional, Sequence
 import duckdb
 import pandas as pd
 import pyarrow as pa
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 MASTER_DIR = ROOT / 'data' / 'master'
+log = logging.getLogger(__name__)
 
 
 # ── Locking ──────────────────────────────────────────────────────────────────
@@ -193,6 +196,32 @@ def append_insert_only(path: Path | str, new_df: pd.DataFrame, key_cols: Sequenc
     return append_dedup(path, new_df, key_cols, mode='keep-first')
 
 
+# ── Path-or-directory source (per-month options layout) ─────────────────────
+
+_MONTH_GLOB = '[0-9][0-9][0-9][0-9]-[0-9][0-9].parquet'
+
+
+def _dir_files(path: Path) -> List[Path]:
+    return sorted(path.glob(_MONTH_GLOB))
+
+
+def _has_data(path: Path) -> bool:
+    """True when path is a file, or a directory holding at least one month file."""
+    if path.is_dir():
+        return bool(_dir_files(path))
+    return path.exists()
+
+
+def _sql_source(path: Path) -> str:
+    """DuckDB table-function source for a parquet file or a per-month directory."""
+    path = Path(path)
+    if path.is_dir():
+        files = ", ".join("'" + str(f).replace("'", "''") + "'" for f in _dir_files(path))
+        return f"read_parquet([{files}], union_by_name=true, hive_partitioning=false)"
+    lit = str(path).replace("'", "''")
+    return f"read_parquet('{lit}', hive_partitioning=false)"
+
+
 # ── Read helpers ─────────────────────────────────────────────────────────────
 
 def read_latest_per_ticker(
@@ -203,13 +232,13 @@ def read_latest_per_ticker(
 ) -> pd.DataFrame:
     """Return one row per ticker — the row with max(date_col)."""
     path = Path(path)
-    if not path.exists():
+    if not _has_data(path):
         return pd.DataFrame()
     q_cols = ', '.join(cols) if cols else '*'
     sql = f"""
         SELECT {q_cols} FROM (
             SELECT *, ROW_NUMBER() OVER (PARTITION BY {ticker_col} ORDER BY {date_col} DESC) AS _rn
-            FROM read_parquet('{path}')
+            FROM {_sql_source(path)}
         ) WHERE _rn = 1
     """
     return duckdb.sql(sql).df().drop(columns=['_rn'], errors='ignore')
@@ -227,10 +256,10 @@ def read_filtered(
     Example: read_filtered('prices.parquet', where="ticker='AAPL' AND date >= '2026-01-01'")
     """
     path = Path(path)
-    if not path.exists():
+    if not _has_data(path):
         return pd.DataFrame()
     q_cols = ', '.join(cols) if cols else '*'
-    sql = f"SELECT {q_cols} FROM read_parquet('{path}')"
+    sql = f"SELECT {q_cols} FROM {_sql_source(path)}"
     if where:
         sql += f" WHERE {where}"
     if order_by:
@@ -343,9 +372,9 @@ def ticker_window_stats(
 def max_date(path: Path | str, date_col: str = 'date') -> Optional[str]:
     """Return ISO date string of the latest row, or None if empty."""
     path = Path(path)
-    if not path.exists():
+    if not _has_data(path):
         return None
-    result = duckdb.sql(f"SELECT MAX({date_col}) AS d FROM read_parquet('{path}')").fetchone()
+    result = duckdb.sql(f"SELECT MAX({date_col}) AS d FROM {_sql_source(path)}").fetchone()
     if result is None or result[0] is None:
         return None
     d = result[0]
@@ -354,6 +383,8 @@ def max_date(path: Path | str, date_col: str = 'date') -> Optional[str]:
 
 def row_count(path: Path | str) -> int:
     path = Path(path)
+    if path.is_dir():
+        return sum(pq.read_metadata(f).num_rows for f in _dir_files(path))
     if not path.exists():
         return 0
     return pq.read_metadata(path).num_rows
@@ -363,6 +394,7 @@ def row_count(path: Path | str) -> int:
 
 PRICES_PATH    = MASTER_DIR / 'prices.parquet'
 OPTIONS_PATH   = MASTER_DIR / 'options_eod.parquet'
+OPTIONS_DIR    = MASTER_DIR / 'options_eod'
 FUNDAMENTALS_PATH = MASTER_DIR / 'financials.parquet'
 INSIDER_PATH   = MASTER_DIR / 'insider.parquet'
 MACRO_PATH     = MASTER_DIR / 'macro.parquet'
@@ -385,11 +417,82 @@ def write_prices(rows: Iterable[dict]) -> int:
     return append_dedup(PRICES_PATH, df, PRICES_KEYS, mode='replace')
 
 
+def options_monthly_enabled() -> bool:
+    """Per-month options layout flag (read at call time)."""
+    return os.environ.get('OPENCLAW_OPTIONS_MONTHLY') == '1'
+
+
+def options_path() -> Path:
+    return OPTIONS_DIR if options_monthly_enabled() else OPTIONS_PATH
+
+
+def options_month_files(root: Path | None = None) -> List[Path]:
+    return _dir_files(Path(root) if root is not None else OPTIONS_DIR)
+
+
+def options_dataset() -> ds.Dataset:
+    """The options store as a pyarrow dataset: the single file, or (flag on) the
+    month files with a permissively unified schema (all-null month vs double)."""
+    if not options_monthly_enabled():
+        return ds.dataset(str(OPTIONS_PATH), format='parquet')
+    files = options_month_files()
+    if not files:
+        raise FileNotFoundError(f'no options month files under {OPTIONS_DIR}')
+    schema = pa.unify_schemas([pq.read_schema(f) for f in files],
+                              promote_options='permissive')
+    return ds.dataset([str(f) for f in files], schema=schema, format='parquet')
+
+
+def options_read_table(columns: Sequence[str], filters=None,
+                       read_dictionary: Sequence[str] | None = None) -> pa.Table:
+    """Read options columns; filters = DNF list or pc.Expression."""
+    columns = list(columns)
+    rd = list(read_dictionary) if read_dictionary else None
+    if not options_monthly_enabled():
+        return pq.read_table(OPTIONS_PATH, columns=columns, filters=filters,
+                             read_dictionary=rd)
+    if isinstance(filters, list):
+        filters = pq.filters_to_expression(filters)
+    dataset = options_dataset()
+    if rd:
+        fmt = ds.ParquetFileFormat(read_options=ds.ParquetReadOptions(dictionary_columns=rd))
+        dataset = ds.dataset(list(dataset.files), schema=dataset.schema, format=fmt)
+    return dataset.to_table(columns=columns, filter=filters)
+
+
+def _options_log(mode: str, months: List[str], rows_in: int, total: int) -> None:
+    line = (f"[options_store] mode={mode} months={','.join(months) or '-'} "
+            f"rows_in={rows_in} total={total}")
+    log.info(line)
+    print(line, file=sys.stderr, flush=True)
+
+
+def append_options(df: pd.DataFrame, key_cols: Sequence[str] = OPTIONS_KEYS,
+                   mode: str = 'replace') -> int:
+    """Upsert options rows. Flag off: one append_dedup on the single file.
+    Flag on: split by month of `date`, append_dedup into each month's file."""
+    key_cols = list(key_cols)
+    if not options_monthly_enabled():
+        total = append_dedup(OPTIONS_PATH, df, key_cols, mode)
+        _options_log('file', [], len(df), total)
+        return total
+    months: List[str] = []
+    if not df.empty:
+        keys = pd.to_datetime(df['date']).dt.strftime('%Y-%m')
+        for m, part in df.groupby(keys, sort=True):
+            append_dedup(OPTIONS_DIR / f'{m}.parquet', part.reset_index(drop=True),
+                         key_cols, mode)
+            months.append(str(m))
+    total = row_count(OPTIONS_DIR)
+    _options_log('monthly', months, len(df), total)
+    return total
+
+
 def write_options(rows: Iterable[dict]) -> int:
     df = pd.DataFrame(list(rows))
     if df.empty:
-        return row_count(OPTIONS_PATH)
-    return append_dedup(OPTIONS_PATH, df, OPTIONS_KEYS, mode='replace')
+        return row_count(options_path())
+    return append_options(df)
 
 
 def write_fundamentals(rows: Iterable[dict]) -> int:

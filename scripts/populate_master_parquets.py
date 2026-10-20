@@ -11,6 +11,11 @@ import os, sys
 import pandas as pd
 import psycopg2
 
+if os.environ.get('OPENCLAW_OPTIONS_MONTHLY') == '1':
+    print('refusing: OPENCLAW_OPTIONS_MONTHLY=1 (this legacy bootstrap overwrites '
+          'the whole single options_eod.parquet)', file=sys.stderr)
+    sys.exit(2)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'workspaces', 'default'))
 
 MASTER_DIR   = os.path.join(os.path.dirname(__file__), '..', 'data', 'master')

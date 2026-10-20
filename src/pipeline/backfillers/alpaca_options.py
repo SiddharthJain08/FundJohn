@@ -231,6 +231,18 @@ def _flatten_snapshot(contract_symbol: str, snap: dict, *, date: str, underlying
     }
 
 
+def _parquet_store():
+    try:
+        from src.data import parquet_store as ps
+    except ModuleNotFoundError:
+        # The systemd unit execs this file directly (no PYTHONPATH); the
+        # repo root is three levels up from src/pipeline/backfillers/.
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+        from src.data import parquet_store as ps
+    return ps
+
+
 def _master_readable(parquet_path: Path | None = None) -> bool:
     """Cheap footer/metadata validation before a run touches anything.
 
@@ -239,10 +251,16 @@ def _master_readable(parquet_path: Path | None = None) -> bool:
     abort up-front with one actionable error instead.
     """
     parquet_path = parquet_path or PARQUET_PATH
-    if not parquet_path.exists():
-        return True
     try:
         import pyarrow.parquet as pq
+        ps = _parquet_store()
+        if ps.options_monthly_enabled() and \
+                Path(parquet_path).resolve() == ps.OPTIONS_PATH.resolve():
+            for f in ps.options_month_files():
+                pq.ParquetFile(f)
+            return True
+        if not parquet_path.exists():
+            return True
         pq.ParquetFile(parquet_path)
         return True
     except Exception as e:  # noqa: BLE001 — any unreadable state must abort
@@ -261,18 +279,16 @@ def _merge_write(new_df: pd.DataFrame, *, parquet_path: Path = PARQUET_PATH) -> 
     loaded the whole 6M-row master (pd.read_parquet + concat) and was
     OOM-killed daily at 3.6-6.2G peaks on the 8GB no-swap box.
     """
-    try:
-        from src.data.parquet_store import append_dedup
-    except ModuleNotFoundError:
-        # The systemd unit execs this file directly (no PYTHONPATH); the
-        # repo root is three levels up from src/pipeline/backfillers/.
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-        from src.data.parquet_store import append_dedup
+    ps = _parquet_store()
     with _PARQUET_LOCK:
+        if ps.options_monthly_enabled() and \
+                Path(parquet_path).resolve() == ps.OPTIONS_PATH.resolve():
+            ps.append_options(new_df, key_cols=['date', 'contract_symbol'],
+                              mode='replace')
+            return
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
-        append_dedup(parquet_path, new_df,
-                     key_cols=['date', 'contract_symbol'], mode='replace')
+        ps.append_dedup(parquet_path, new_df,
+                        key_cols=['date', 'contract_symbol'], mode='replace')
 
 
 def _append_parquet(rows: list[dict], *, parquet_path: Path = PARQUET_PATH) -> None:
