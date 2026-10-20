@@ -1,0 +1,16 @@
+[Unit]
+Description=Guarded OPENCLAW_FINANCIALS_PIT=1 + OPENCLAW_BT_GAP_FILL=open + OPENCLAW_MACRO_PIT=1 flip (scripts/pit_gap_flip_after_fleet.sh --apply; gates: live tier re-backtested under all three flags, outside the compute window; no Sharpe gate by ruling R1)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/openclaw
+ExecStart=/bin/bash /root/openclaw/scripts/pit_gap_flip_after_fleet.sh --apply --timer-unit openclaw-pit-gap-flip.timer
+StandardOutput=append:/var/log/openclaw-pit-gap-flip.log
+StandardError=append:/var/log/openclaw-pit-gap-flip.log
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
