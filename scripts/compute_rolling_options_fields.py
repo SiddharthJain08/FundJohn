@@ -29,6 +29,8 @@ import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'src'))
+sys.path.insert(0, str(ROOT))
+from src.data.parquet_store import to_datetime_safe  # noqa: E402
 from strategies.options_surface import SCALAR_KEYS, SERIES_KEYS, series_frame, rv_series_from_closes  # noqa: E402
 from strategies.options_oi import OI_KEYS  # noqa: E402 — Part B (task 13); landed, no longer optional
 
@@ -57,7 +59,7 @@ def load_closes(tickers: set, floor: pd.Timestamp) -> pd.DataFrame:
     px = tbl.to_pandas(); del tbl
     px['ticker'] = px['ticker'].astype(str)
     px = px[px['ticker'].isin(tickers)]
-    px['date'] = pd.to_datetime(px['date'])
+    px['date'] = to_datetime_safe(px['date'])
     return px[['ticker', 'date', 'close']]
 
 
@@ -65,7 +67,7 @@ def build_panel(surface: pd.DataFrame, closes: pd.DataFrame) -> pd.DataFrame:
     """Enriched backtest panel: surface scalars + series features + legacy aliases."""
     surf = surface.copy()
     surf['date'] = pd.to_datetime(surf['date'])
-    closes = closes.copy(); closes['date'] = pd.to_datetime(closes['date'])
+    closes = closes.copy(); closes['date'] = to_datetime_safe(closes['date'])
     rv_parts = []
     for ticker, g in closes.sort_values(['ticker', 'date']).groupby('ticker'):
         rv_parts.append(pd.DataFrame({'ticker': g['ticker'].values, 'date': g['date'].values,

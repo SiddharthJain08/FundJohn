@@ -40,7 +40,6 @@ import numpy as np
 import pandas as pd
 
 DATA_DIR = Path("/root/openclaw/data/master")
-OPTS_EOD = DATA_DIR / "options_eod.parquet"
 OUT_PATH = DATA_DIR / "iv_history.parquet"
 
 
@@ -82,8 +81,12 @@ def main():
     p.add_argument('--dry-run', action='store_true')
     args = p.parse_args()
 
-    if not OPTS_EOD.exists():
-        print(f"ERROR: {OPTS_EOD} not found — run ingest_options first.",
+    _root = str(Path(__file__).resolve().parents[2])
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+    from src.data import parquet_store as ps
+    if not ps.options_path().exists():
+        print(f"ERROR: {ps.options_path()} not found — run ingest_options first.",
               file=sys.stderr)
         sys.exit(2)
 
@@ -120,14 +123,14 @@ def main():
     if since_d is not None:
         try:
             _dflt = pc.field('date') > pc.scalar(since_d.to_pydatetime())
-            tbl = pq.read_table(OPTS_EOD, columns=_cols, filters=flt & _dflt)
+            tbl = ps.options_read_table(_cols, filters=flt & _dflt)
         except Exception:
             # date stored as string in some vintages — string bounds compare
             # correctly for ISO dates (same fallback as build_options_aggregates).
             _dflt = pc.field('date') > pc.scalar(since_d.strftime('%Y-%m-%d'))
-            tbl = pq.read_table(OPTS_EOD, columns=_cols, filters=flt & _dflt)
+            tbl = ps.options_read_table(_cols, filters=flt & _dflt)
     else:
-        tbl = pq.read_table(OPTS_EOD, columns=_cols, filters=flt)
+        tbl = ps.options_read_table(_cols, filters=flt)
     opts = tbl.to_pandas()
     del tbl
     opts['date'] = pd.to_datetime(opts['date'])

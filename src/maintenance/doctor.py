@@ -137,6 +137,12 @@ def _parquet_last_date(path: str):
     p = Path(path)
     if not p.exists():
         return None
+    if p.is_dir():
+        # A6 per-month store: newest footer across the month files (stats only).
+        from src.data import parquet_store as _ps
+        days = [_parquet_last_date(str(f)) for f in _ps.options_month_files(p)]
+        days = [d for d in days if d is not None]
+        return max(days) if days else None
     pf = pq.ParquetFile(p)
     md = pf.metadata
     if md.num_rows == 0:
@@ -256,7 +262,10 @@ def _check_alpaca_aat_plus_tier():
 def _check_options_archive_freshness():
     """options_eod.parquet last row should be ≤ 2 trading days old (warn) / 4 (fail)."""
     from datetime import date
-    last = _parquet_last_date(str(ROOT / 'data' / 'master' / 'options_eod.parquet'))
+    from src.data import parquet_store as _ps
+    _master = ROOT / 'data' / 'master'
+    last = _parquet_last_date(str(_master / ('options_eod' if _ps.options_monthly_enabled()
+                                             else 'options_eod.parquet')))
     if last is None:
         return _fail('options_archive_freshness', 'parquet missing')
     days = (date.today() - last).days

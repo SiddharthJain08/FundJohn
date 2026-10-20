@@ -235,13 +235,12 @@ def load_prices(tickers=None) -> pd.DataFrame:
     research finisher's 5 GB cgroup cap — four OOM kills on 2026-08-29, all
     AFTER `wrote run_id`. Filtered, the same rebuild peaks ~0.3 GB.
     """
-    import pyarrow.parquet as pq
+    from src.data import parquet_store as _ps
     cols = ['ticker', 'date', 'close']
     wanted = sorted({str(t) for t in (tickers or ()) if t})
-    if not wanted:
-        return pd.read_parquet(PRICES_PARQUET, columns=cols)
-    return pq.read_table(str(PRICES_PARQUET), columns=cols,
-                         filters=[('ticker', 'in', wanted)]).to_pandas()
+    return _ps.prices_read_table(
+        cols, filters=[('ticker', 'in', wanted)] if wanted else None,
+        path=PRICES_PARQUET).to_pandas()
 
 
 def _trade_tickers(conn, strategy_id: str) -> set[str]:

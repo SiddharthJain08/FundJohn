@@ -46,8 +46,9 @@ def run_iv_gate(dte_lo=20, dte_hi=45, atm_band=0.05):
     from backtest.synthetic_iv import synthetic_iv
     from backtest.vol_index import VALID_OPTION_UNDERLYINGS
     closes = _load_underlying_closes()
-    op = pq.read_table('data/master/options_eod.parquet',
-                       columns=['ticker','date','expiry','strike','option_type','implied_volatility']).to_pandas()
+    from src.data import parquet_store as ps
+    op = ps.options_read_table(
+        ['ticker','date','expiry','strike','option_type','implied_volatility']).to_pandas()
     op = op.dropna(subset=['implied_volatility'])
     op = op[op['implied_volatility'] > 0.01]
     op['date'] = pd.to_datetime(op['date']); op['expiry'] = pd.to_datetime(op['expiry'])
@@ -108,9 +109,10 @@ def synth_price_for_row(row, closes, vrp_factor, window):
 
 
 def run(sample=4000):
-    opt = pq.read_table('data/master/options_eod.parquet',
-                        columns=['ticker', 'date', 'expiry', 'strike', 'option_type',
-                                 'market_price', 'implied_volatility']).to_pandas()
+    from src.data import parquet_store as ps
+    opt = ps.options_read_table(
+        ['ticker', 'date', 'expiry', 'strike', 'option_type',
+         'market_price', 'implied_volatility']).to_pandas()
     opt = opt.dropna(subset=['market_price', 'strike', 'expiry'])
     opt = opt[opt['market_price'] > 0.05]
     if len(opt) > sample:

@@ -17,6 +17,8 @@ from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:  # `src.data.parquet_store` (A6 options dir)
+    sys.path.append(str(ROOT))
 DATA_DIR = ROOT / 'data' / 'master'
 
 # Map parquet filename stem → canonical column_name used in strategy data_requirements
@@ -102,9 +104,22 @@ def _stats(parquet_path: Path) -> dict:
     """
     try:
         import pyarrow.parquet as pq
-        pf = pq.ParquetFile(parquet_path)
-        schema_names = set(pf.schema_arrow.names)
-        row_count = int(pf.metadata.num_rows)
+        if Path(parquet_path).is_dir():
+            # A6 per-month options store: footers only (no data read).
+            from src.data import parquet_store as _ps
+            _files = _ps.options_month_files(Path(parquet_path))
+            if not _files:
+                raise FileNotFoundError(f'no month files under {parquet_path}')
+            schema_names = set()
+            row_count = 0
+            for _f in _files:
+                _pf = pq.ParquetFile(_f)
+                schema_names |= set(_pf.schema_arrow.names)
+                row_count += int(_pf.metadata.num_rows)
+        else:
+            pf = pq.ParquetFile(parquet_path)
+            schema_names = set(pf.schema_arrow.names)
+            row_count = int(pf.metadata.num_rows)
     except Exception as e:  # noqa: BLE001
         return {'min_date': None, 'max_date': None, 'row_count': 0, 'ticker_count': 0, 'error': str(e)}
     if row_count == 0:
@@ -124,7 +139,11 @@ def _stats(parquet_path: Path) -> dict:
         con = duckdb.connect()
         con.execute("SET threads TO 1")
         con.execute("SET memory_limit = '512MB'")
-        src = f"read_parquet('{str(parquet_path).replace(chr(39), chr(39) * 2)}')"
+        if Path(parquet_path).is_dir():
+            from src.data import parquet_store as _ps
+            src = _ps._sql_source(Path(parquet_path))
+        else:
+            src = f"read_parquet('{str(parquet_path).replace(chr(39), chr(39) * 2)}')"
         if date_col is not None:
             q = (f"SELECT min(d), max(d) FROM (SELECT TRY_CAST(\"{date_col}\" AS TIMESTAMP) AS d FROM {src}) "
                  f"WHERE d IS NOT NULL AND d <= TIMESTAMP '{_date.today().isoformat()} 23:59:59'")
@@ -170,6 +189,10 @@ def sync() -> dict:
 
         for stem, col_name in PARQUET_MAP.items():
             parquet = DATA_DIR / f'{stem}.parquet'
+            if stem == 'options_eod':
+                from src.data import parquet_store as _ps
+                if _ps.options_monthly_enabled():
+                    parquet = DATA_DIR / 'options_eod'
             if not parquet.exists():
                 continue
 

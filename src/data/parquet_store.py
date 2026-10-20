@@ -27,6 +27,7 @@ from typing import Iterable, List, Optional, Sequence
 import duckdb
 import pandas as pd
 import pyarrow as pa
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -107,6 +108,7 @@ def append_dedup(
     new_df: pd.DataFrame,
     key_cols: Sequence[str],
     mode: str = 'replace',
+    lock_path: Path | str | None = None,
 ) -> int:
     """
     Append new_df to the parquet at path, deduplicating on key_cols.
@@ -136,7 +138,9 @@ def append_dedup(
     # are existing-vs-batch, resolved by `mode` in the merge below.
     new_df = new_df.drop_duplicates(subset=key_cols, keep=keep)
 
-    with _file_lock(path):
+    # lock_path lets a dataset directory keep its lock sentinel OUTSIDE the tree
+    # (a stray *.lock inside prices/ breaks pyarrow.dataset discovery).
+    with _file_lock(Path(lock_path) if lock_path is not None else path):
         if not path.exists():
             _atomic_write(path, new_df)
             return len(new_df)
@@ -168,16 +172,16 @@ def append_dedup(
             if mode == 'replace':
                 # batch wins: existing rows with no batch-key match, then all batch rows.
                 merge = (
-                    f"SELECT e.* FROM read_parquet('{existing_lit}') e "
+                    f"SELECT e.* FROM read_parquet('{existing_lit}', hive_partitioning=false) e "
                     f"WHERE NOT EXISTS (SELECT 1 FROM n WHERE {keymatch}) "
                     f"UNION ALL BY NAME SELECT * FROM n"
                 )
             else:  # keep-first: existing wins on conflict.
                 merge = (
-                    f"SELECT * FROM read_parquet('{existing_lit}') "
+                    f"SELECT * FROM read_parquet('{existing_lit}', hive_partitioning=false) "
                     f"UNION ALL BY NAME "
                     f"SELECT n.* FROM n WHERE NOT EXISTS "
-                    f"(SELECT 1 FROM read_parquet('{existing_lit}') e WHERE {keymatch})"
+                    f"(SELECT 1 FROM read_parquet('{existing_lit}', hive_partitioning=false) e WHERE {keymatch})"
                 )
             cnt = con.execute(
                 f"COPY ({merge}) TO '{out_lit}' (FORMAT PARQUET, COMPRESSION 'snappy')"
@@ -193,6 +197,32 @@ def append_insert_only(path: Path | str, new_df: pd.DataFrame, key_cols: Sequenc
     return append_dedup(path, new_df, key_cols, mode='keep-first')
 
 
+# ── Path-or-directory source (per-month options layout) ─────────────────────
+
+_MONTH_GLOB = '[0-9][0-9][0-9][0-9]-[0-9][0-9].parquet'
+
+
+def _dir_files(path: Path) -> List[Path]:
+    return sorted(path.glob(_MONTH_GLOB))
+
+
+def _has_data(path: Path) -> bool:
+    """True when path is a file, or a directory holding at least one month file."""
+    if path.is_dir():
+        return bool(_dir_files(path))
+    return path.exists()
+
+
+def _sql_source(path: Path) -> str:
+    """DuckDB table-function source for a parquet file or a per-month directory."""
+    path = Path(path)
+    if path.is_dir():
+        files = ", ".join("'" + str(f).replace("'", "''") + "'" for f in _dir_files(path))
+        return f"read_parquet([{files}], union_by_name=true, hive_partitioning=false)"
+    lit = str(path).replace("'", "''")
+    return f"read_parquet('{lit}', hive_partitioning=false)"
+
+
 # ── Read helpers ─────────────────────────────────────────────────────────────
 
 def read_latest_per_ticker(
@@ -203,13 +233,13 @@ def read_latest_per_ticker(
 ) -> pd.DataFrame:
     """Return one row per ticker — the row with max(date_col)."""
     path = Path(path)
-    if not path.exists():
+    if not _has_data(path):
         return pd.DataFrame()
     q_cols = ', '.join(cols) if cols else '*'
     sql = f"""
         SELECT {q_cols} FROM (
             SELECT *, ROW_NUMBER() OVER (PARTITION BY {ticker_col} ORDER BY {date_col} DESC) AS _rn
-            FROM read_parquet('{path}')
+            FROM {_sql_source(path)}
         ) WHERE _rn = 1
     """
     return duckdb.sql(sql).df().drop(columns=['_rn'], errors='ignore')
@@ -227,10 +257,10 @@ def read_filtered(
     Example: read_filtered('prices.parquet', where="ticker='AAPL' AND date >= '2026-01-01'")
     """
     path = Path(path)
-    if not path.exists():
+    if not _has_data(path):
         return pd.DataFrame()
     q_cols = ', '.join(cols) if cols else '*'
-    sql = f"SELECT {q_cols} FROM read_parquet('{path}')"
+    sql = f"SELECT {q_cols} FROM {_sql_source(path)}"
     if where:
         sql += f" WHERE {where}"
     if order_by:
@@ -343,9 +373,9 @@ def ticker_window_stats(
 def max_date(path: Path | str, date_col: str = 'date') -> Optional[str]:
     """Return ISO date string of the latest row, or None if empty."""
     path = Path(path)
-    if not path.exists():
+    if not _has_data(path):
         return None
-    result = duckdb.sql(f"SELECT MAX({date_col}) AS d FROM read_parquet('{path}')").fetchone()
+    result = duckdb.sql(f"SELECT MAX({date_col}) AS d FROM {_sql_source(path)}").fetchone()
     if result is None or result[0] is None:
         return None
     d = result[0]
@@ -354,6 +384,8 @@ def max_date(path: Path | str, date_col: str = 'date') -> Optional[str]:
 
 def row_count(path: Path | str) -> int:
     path = Path(path)
+    if path.is_dir():
+        return sum(pq.read_metadata(f).num_rows for f in _dir_files(path))
     if not path.exists():
         return 0
     return pq.read_metadata(path).num_rows
@@ -362,7 +394,9 @@ def row_count(path: Path | str) -> int:
 # ── Named writers (called from Node via parquet_reader.py CLI) ───────────────
 
 PRICES_PATH    = MASTER_DIR / 'prices.parquet'
+PRICES_HIVE_DIR = MASTER_DIR / 'prices'
 OPTIONS_PATH   = MASTER_DIR / 'options_eod.parquet'
+OPTIONS_DIR    = MASTER_DIR / 'options_eod'
 FUNDAMENTALS_PATH = MASTER_DIR / 'financials.parquet'
 INSIDER_PATH   = MASTER_DIR / 'insider.parquet'
 MACRO_PATH     = MASTER_DIR / 'macro.parquet'
@@ -378,18 +412,235 @@ SURFACE_PATH      = MASTER_DIR / 'options_surface.parquet'
 SURFACE_KEYS      = ['ticker', 'date']
 
 
+def prices_hive_enabled() -> bool:
+    """Hive dual-WRITE flag (read at call time). Gates only `write_prices`; the single
+    file stays authoritative. Readers use `prices_hive_read_enabled` (separate flag)."""
+    return os.environ.get('OPENCLAW_PRICES_HIVE') == '1'
+
+
+def prices_hive_read_enabled() -> bool:
+    """Hive READ flag: `OPENCLAW_PRICES_HIVE_READ=1` AND at least one committed year
+    part exists. Independent of the write flag, so the dual-write can soak (and the
+    tree be built) before any reader trusts it."""
+    return os.environ.get('OPENCLAW_PRICES_HIVE_READ') == '1' and bool(prices_hive_files())
+
+
+def to_datetime_safe(s: pd.Series) -> pd.Series:
+    """pd.to_datetime that never leaves a Categorical: on a dictionary-read `date`
+    column whose dictionary is sorted (hive / date-major file) the to_datetime cache
+    path keeps the Categorical wrapper, and a later merge raises datetime64 vs category."""
+    out = pd.to_datetime(s)
+    if isinstance(out.dtype, pd.CategoricalDtype):
+        out = out.astype(out.cat.categories.dtype)
+    return out
+
+
+def _max_date_from_footers(files) -> str | None:
+    """Max of the `date` string column from row-group footer stats; None if any
+    footer lacks usable stats (caller treats unknown as stale)."""
+    best = None
+    for f in files:
+        md = pq.ParquetFile(f).metadata
+        if md.num_row_groups == 0:
+            continue
+        idx = md.schema.to_arrow_schema().get_field_index('date')
+        for g in range(md.num_row_groups):
+            st = md.row_group(g).column(idx).statistics
+            if st is None or not st.has_min_max:
+                return None
+            m = str(st.max)
+            if best is None or m > best:
+                best = m
+    return best
+
+
+def prices_hive_part(year: int) -> Path:
+    return PRICES_HIVE_DIR / f'year={int(year)}' / 'part-0.parquet'
+
+
+def prices_hive_lock_base(year: int, hive_dir: Path | str | None = None) -> Path:
+    """Per-year hive lock base (`_file_lock` appends '.lock'); kept beside the tree,
+    never inside it. Shared by the dual-write and scripts/build_prices_hive.py."""
+    root = Path(PRICES_HIVE_DIR if hive_dir is None else hive_dir)
+    return root.parent / f'.prices_hive_y{int(year)}'
+
+
+def _write_prices_hive(df: pd.DataFrame) -> None:
+    """Best-effort dual-write; never raises. One part file per year, deduped in place."""
+    years: List[int] = []
+    detail = ''
+    try:
+        d = pd.to_datetime(df['date'])
+        df2 = df.assign(date_d=d.dt.date)
+        yrs = d.dt.year
+        for y, part in df2.groupby(yrs, sort=True):
+            append_dedup(prices_hive_part(int(y)), part.reset_index(drop=True),
+                         PRICES_KEYS, 'replace',
+                         lock_path=prices_hive_lock_base(int(y)))
+            years.append(int(y))
+        status = 'ok'
+        total = sum(pq.read_metadata(f).num_rows
+                    for f in PRICES_HIVE_DIR.glob('year=*/part-0.parquet'))
+    except Exception as e:  # noqa: BLE001 - hive must never break the collector
+        status = f'error:{type(e).__name__}'
+        detail = ' detail=' + ' '.join(repr(e).split())
+        total = -1
+    print(f"[prices_hive] status={status} years={','.join(map(str, years)) or '-'} "
+          f"rows_in={len(df)} total_hive={total}"
+          f"{detail}", file=sys.stderr, flush=True)
+
+
 def write_prices(rows: Iterable[dict]) -> int:
     df = pd.DataFrame(list(rows))
     if df.empty:
         return row_count(PRICES_PATH)
-    return append_dedup(PRICES_PATH, df, PRICES_KEYS, mode='replace')
+    total = append_dedup(PRICES_PATH, df, PRICES_KEYS, mode='replace')
+    if prices_hive_enabled():
+        _write_prices_hive(df)
+    return total
+
+
+def prices_hive_files() -> List[Path]:
+    """Committed hive part files only (never a directory glob: a writer's
+    part-0.parquet.tmp / .lock must not be picked up)."""
+    return sorted(PRICES_HIVE_DIR.glob('year=*/part-0.parquet'))
+
+
+def prices_read_table(columns: Sequence[str], filters=None,
+                      read_dictionary: Sequence[str] | None = None, *,
+                      path: Path | str | None = None) -> pa.Table:
+    """Read prices columns; filters = DNF list or pc.Expression.
+
+    `OPENCLAW_PRICES_HIVE_READ` unset: the same pq.read_table call as before, no log
+    line (the write flag `OPENCLAW_PRICES_HIVE` does not affect readers). READ on with
+    `path` naming some other file: that file, logged `reason=path_override`. READ on
+    and no committed year part: file, `reason=hive_empty`. READ on and the hive's
+    newest `date` (footer stats) older than the single file's: file,
+    `reason=hive_stale`. Otherwise a pyarrow dataset over the explicit part files.
+    One `[prices_source]` line per call while READ is on."""
+    columns = list(columns)
+    rd = list(read_dictionary) if read_dictionary else None
+    target = PRICES_PATH if path is None else path
+    if os.environ.get('OPENCLAW_PRICES_HIVE_READ') != '1':
+        return pq.read_table(target, columns=columns, filters=filters,
+                             read_dictionary=rd)
+    if Path(target) != Path(PRICES_PATH):
+        print('[prices_source] layout=file reason=path_override', file=sys.stderr, flush=True)
+        return pq.read_table(target, columns=columns, filters=filters,
+                             read_dictionary=rd)
+    files = prices_hive_files()
+    if not files:
+        print('[prices_source] layout=file reason=hive_empty', file=sys.stderr, flush=True)
+        return pq.read_table(target, columns=columns, filters=filters,
+                             read_dictionary=rd)
+    try:
+        hive_max = _max_date_from_footers(files)
+        file_max = _max_date_from_footers([target])
+    except Exception:  # noqa: BLE001 - unreadable footer = unproven tree
+        hive_max = file_max = None
+    if hive_max is None or file_max is None or hive_max < file_max:
+        print('[prices_source] layout=file reason=hive_stale', file=sys.stderr, flush=True)
+        return pq.read_table(target, columns=columns, filters=filters,
+                             read_dictionary=rd)
+    if isinstance(filters, list):
+        filters = pq.filters_to_expression(filters)
+    fmt = ds.ParquetFileFormat(
+        read_options=ds.ParquetReadOptions(dictionary_columns=rd or []))
+    dataset = ds.dataset([str(f) for f in files], format=fmt, partitioning='hive',
+                         partition_base_dir=str(PRICES_HIVE_DIR))
+    print('[prices_source] layout=hive', file=sys.stderr, flush=True)
+    return dataset.to_table(columns=columns, filter=filters)
+
+
+def options_monthly_enabled() -> bool:
+    """Per-month options layout flag (read at call time)."""
+    return os.environ.get('OPENCLAW_OPTIONS_MONTHLY') == '1'
+
+
+def options_path() -> Path:
+    return OPTIONS_DIR if options_monthly_enabled() else OPTIONS_PATH
+
+
+def options_month_files(root: Path | None = None) -> List[Path]:
+    return _dir_files(Path(root) if root is not None else OPTIONS_DIR)
+
+
+def options_dataset() -> ds.Dataset:
+    """The options store as a pyarrow dataset: the single file, or (flag on) the
+    month files with a permissively unified schema (all-null month vs double)."""
+    if not options_monthly_enabled():
+        return ds.dataset(str(OPTIONS_PATH), format='parquet')
+    files = options_month_files()
+    if not files:
+        raise FileNotFoundError(f'no options month files under {OPTIONS_DIR}')
+    schema = pa.unify_schemas([pq.read_schema(f) for f in files],
+                              promote_options='permissive')
+    return ds.dataset([str(f) for f in files], schema=schema, format='parquet')
+
+
+def options_read_table(columns: Sequence[str], filters=None,
+                       read_dictionary: Sequence[str] | None = None) -> pa.Table:
+    """Read options columns; filters = DNF list or pc.Expression."""
+    columns = list(columns)
+    rd = list(read_dictionary) if read_dictionary else None
+    if not options_monthly_enabled():
+        return pq.read_table(OPTIONS_PATH, columns=columns, filters=filters,
+                             read_dictionary=rd)
+    if isinstance(filters, list):
+        filters = pq.filters_to_expression(filters)
+    dataset = options_dataset()
+    if rd:
+        fmt = ds.ParquetFileFormat(read_options=ds.ParquetReadOptions(dictionary_columns=rd))
+        # An explicit schema overrides dictionary_columns (they come back as plain
+        # strings), so the unified schema must declare the dictionary types itself.
+        schema = dataset.schema
+        for name in rd:
+            i = schema.get_field_index(name)
+            if i >= 0 and not pa.types.is_dictionary(schema.field(i).type):
+                schema = schema.set(i, schema.field(i).with_type(
+                    pa.dictionary(pa.int32(), schema.field(i).type)))
+        dataset = ds.dataset(list(dataset.files), schema=schema, format=fmt)
+    return dataset.to_table(columns=columns, filter=filters)
+
+
+def _options_log(mode: str, months: List[str], rows_in: int, total: int) -> None:
+    line = (f"[options_store] mode={mode} months={','.join(months) or '-'} "
+            f"rows_in={rows_in} total={total}")
+    print(line, file=sys.stderr, flush=True)
+
+
+def append_options(df: pd.DataFrame, key_cols: Sequence[str] = OPTIONS_KEYS,
+                   mode: str = 'replace') -> int:
+    """Upsert options rows. Flag off: one append_dedup on the single file.
+    Flag on: split by month of `date`, append_dedup into each month's file."""
+    key_cols = list(key_cols)
+    if not options_monthly_enabled():
+        total = append_dedup(OPTIONS_PATH, df, key_cols, mode)
+        _options_log('file', [], len(df), total)
+        return total
+    months: List[str] = []
+    if not df.empty:
+        # Same month rule as split_options_master (substr(CAST(date AS VARCHAR),1,7)).
+        keys = df['date'].astype(str).str[:7]
+        bad = int((~keys.str.fullmatch(r'\d{4}-\d{2}') | df['date'].isna()).sum())
+        if bad:
+            raise ValueError(f'[options_store] {bad} rows with NULL/unparseable date')
+        # NOTE: a multi-month batch is not atomic across months; a retry is
+        # idempotent in replace mode (each month is its own upsert).
+        for m, part in df.groupby(keys, sort=True):
+            append_dedup(OPTIONS_DIR / f'{m}.parquet', part.reset_index(drop=True),
+                         key_cols, mode)
+            months.append(str(m))
+    total = row_count(OPTIONS_DIR)
+    _options_log('monthly', months, len(df), total)
+    return total
 
 
 def write_options(rows: Iterable[dict]) -> int:
     df = pd.DataFrame(list(rows))
     if df.empty:
-        return row_count(OPTIONS_PATH)
-    return append_dedup(OPTIONS_PATH, df, OPTIONS_KEYS, mode='replace')
+        return row_count(options_path())
+    return append_options(df)
 
 
 def write_fundamentals(rows: Iterable[dict]) -> int:

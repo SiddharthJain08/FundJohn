@@ -88,7 +88,7 @@ def op_options(args):
     if otype:
         where += f" AND option_type='{otype}'"
     # Match legacy DB behavior: most recent snapshot first, then highest open interest.
-    df = ps.read_filtered(ps.OPTIONS_PATH, where=where,
+    df = ps.read_filtered(ps.options_path(), where=where,
                           order_by='date DESC, open_interest DESC NULLS LAST',
                           limit=limit)
     return _df_to_records(df)
@@ -188,7 +188,7 @@ def op_freshness_per_ticker(args):
         ),
         opt AS (
             SELECT ticker, MAX(date) AS latest_options
-            FROM read_parquet('{ps.OPTIONS_PATH}')
+            FROM {ps._sql_source(ps.options_path())}
             WHERE ticker IN ({tickers_sql}) GROUP BY ticker
         )
         SELECT COALESCE(px.ticker, opt.ticker) AS ticker,
@@ -229,7 +229,7 @@ def op_freshness(args):
     # (dataset, parquet_path, date_col, fresh_max_d, stale_max_d)
     datasets = [
         ('price_data',     ps.PRICES_PATH,       'date',             1,   3),
-        ('options_data',   ps.OPTIONS_PATH,      'date',             1,   3),
+        ('options_data',   ps.options_path(),      'date',             1,   3),
         ('macro_data',     ps.MACRO_PATH,        'date',             1,   5),
         ('insider',        ps.INSIDER_PATH,      'transaction_date', 7,  30),
         ('fundamentals',   ps.FUNDAMENTALS_PATH, 'date',            95, 180),

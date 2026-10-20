@@ -14,6 +14,7 @@ Daily run sequence:
   9. Log execution run metrics
 """
 
+import math
 import os
 import sys
 import gc as _gc
@@ -334,12 +335,19 @@ def _load_options_window(path, columns, window_days, today):
     except Exception:  # noqa: BLE001 — same default as intraday_options.py
         _max_dte = int(os.environ.get('OPENCLAW_INTRADAY_OPTIONS_MAX_DTE', '100'))
     cutoff = (today - pd.Timedelta(days=window_days)).strftime('%Y-%m-%d')
-    tbl = _pq.read_table(
-        path, columns=list(columns),
-        filters=[('date', '>=', cutoff),
-                 ('expiry', '>', today.strftime('%Y-%m-%d')),
-                 ('expiry', '<=', (today + pd.Timedelta(days=_max_dte)).strftime('%Y-%m-%d'))],
-        read_dictionary=['ticker', 'date', 'expiry', 'option_type'])
+    _filters = [('date', '>=', cutoff),
+                ('expiry', '>', today.strftime('%Y-%m-%d')),
+                ('expiry', '<=', (today + pd.Timedelta(days=_max_dte)).strftime('%Y-%m-%d'))]
+    _rdict = ['ticker', 'date', 'expiry', 'option_type']
+    from src.data import parquet_store as _ps
+    if _ps.options_monthly_enabled() or Path(path) == _ps.options_path():
+        # A6: the resolver reads the single file (flag off, identical call) or
+        # the per-month directory (flag on).
+        tbl = _ps.options_read_table(list(columns), filters=_filters,
+                                     read_dictionary=_rdict)
+    else:  # explicit non-store path (tests / ad-hoc callers): unchanged read
+        tbl = _pq.read_table(path, columns=list(columns), filters=_filters,
+                             read_dictionary=_rdict)
     total = tbl.num_rows
     greeks = [c for c in ('delta', 'gamma', 'theta', 'vega')
               if c in tbl.column_names]
@@ -783,7 +791,7 @@ def _memory_footprint() -> str:
         return ''
 
 
-def _parquet_date_axis(path, date_col: str = 'date'):
+def _parquet_date_axis(path, date_col: str = 'date', cutoff: str | None = None):
     """Every distinct value of `date_col` in the parquet, as a sorted DatetimeIndex.
 
     Reads ONE column via Arrow and dedupes in Arrow (no pandas materialisation):
@@ -798,13 +806,18 @@ def _parquet_date_axis(path, date_col: str = 'date'):
     all-NaN rows, but it is gated (OPENCLAW_EQUITY_TRADING_CALENDAR) and crypto
     ALWAYS gets the full union calendar, so the difference would be live-visible.
 
+    With `cutoff` (A3 trailing window) only dates >= cutoff are read, so the axis
+    stays windowed instead of re-expanding the frame to the full history.
+
     Returns None on any structural surprise; the caller then keeps the filtered
     frame's own index rather than guessing.
     """
     try:
         import pyarrow.parquet as _pq
         import pyarrow.compute as _pc
-        tab = _pq.read_table(path, columns=[date_col])
+        _f = [(date_col, '>=', cutoff)] if cutoff else None
+        from src.data import parquet_store as _ps_ax
+        tab = _ps_ax.prices_read_table([date_col], filters=_f, path=path)
         vals = _pc.unique(tab.column(date_col).combine_chunks()).to_pylist()
         del tab
         _gc.collect()
@@ -813,7 +826,34 @@ def _parquet_date_axis(path, date_col: str = 'date'):
         return None
 
 
-def load_prices(universe: list) -> pd.DataFrame:
+PRICES_TRAILING_FLOOR_DAYS = 1095   # A3: floor 3 years (calendar days)
+
+
+def trailing_window_days(strategies):
+    """Calendar-day price window for the live load, or None (full read).
+
+    None unless OPENCLAW_PRICES_TRAILING_WINDOW=1; otherwise the max of the
+    floor and every strategy's declared `max_lookback_days` (0 = undeclared).
+    """
+    if os.environ.get('OPENCLAW_PRICES_TRAILING_WINDOW') != '1':
+        return None
+    # Per strategy: the declared calendar-day lookback, else a fallback derived
+    # from min_lookback (bars): ceil(bars * 1.6) calendar days (1 bar ~ 1.45 cal
+    # days; 1.6 leaves holiday margin). Strategies that declare nothing must not
+    # be silently truncated to the floor.
+    def _need(s):
+        declared = int(getattr(s, 'max_lookback_days', 0) or 0)
+        bars = int(getattr(s, 'min_lookback', 0) or 0)
+        return max(declared, math.ceil(bars * LOOKBACK_CALENDAR_FACTOR))
+    return max([PRICES_TRAILING_FLOOR_DAYS] + [_need(s) for s in strategies])
+
+
+# min_lookback bars -> calendar days (audited by scripts/audit_strategy_lookbacks.py).
+LOOKBACK_CALENDAR_FACTOR = 1.6
+
+
+def load_prices(universe: list, *, lookback_days: int | None = None,
+                as_of=None) -> pd.DataFrame:
     """Load master price parquet; pivot to wide format (date index × ticker columns, close prices).
 
     When OPENCLAW_CLOSE_PROXY_SNAPSHOT=1, append a today-dated (ET) row from a
@@ -857,10 +897,23 @@ def load_prices(universe: list) -> pd.DataFrame:
         # Take the full date axis BEFORE the panel read (and release it) so the
         # transient does not stack onto the peak; needed to restore any date the
         # universe filter drops. Skipped entirely when we aren't filtering.
-        _date_axis = _parquet_date_axis(master_path) if _uni else None
+        _cutoff = None
+        if lookback_days is not None:
+            _anchor = (pd.Timestamp(as_of).normalize() if as_of is not None
+                       else pd.Timestamp.today().normalize())
+            _cutoff = (_anchor - pd.Timedelta(days=lookback_days)).strftime('%Y-%m-%d')
+        _date_axis = _parquet_date_axis(master_path, cutoff=_cutoff) if _uni else None
+        _filters = []
         if _uni:
-            _read_kwargs['filters'] = [('ticker', 'in', _uni)]
-        df = pd.read_parquet(master_path, **_read_kwargs)
+            _filters.append(('ticker', 'in', _uni))
+        if _cutoff is not None:
+            _filters.append(('date', '>=', _cutoff))
+        if _filters:
+            _read_kwargs['filters'] = _filters
+        from src.data import parquet_store as _ps_ld
+        df = _ps_ld.prices_read_table(
+            _read_kwargs['columns'], filters=_read_kwargs.get('filters'),
+            path=master_path).to_pandas()
 
         if df.empty:
             wide = pd.DataFrame()
@@ -897,6 +950,10 @@ def load_prices(universe: list) -> pd.DataFrame:
     except (OSError, ValueError, KeyError) as e:   # narrow: parquet read/pivot only
         logger.error(f"Failed to load prices: {e}")
         return pd.DataFrame()
+
+    if lookback_days is not None:
+        logger.info(f"[prices_window] mode=trailing days={lookback_days} "
+                    f"cutoff={_cutoff} n_dates={len(wide)}")
 
     # close[t]-proxy injection — OUTSIDE the try so CloseProxyError propagates.
     if os.environ.get('OPENCLAW_CLOSE_PROXY_SNAPSHOT') == '1':
@@ -1097,7 +1154,9 @@ def load_aux_data(universe: list, as_of=None, needed_kinds: set | None = None) -
     # Options: {ticker: {iv_rank, open_interest_by_strike: {strike: oi}, expiry_date}}
     # Picks nearest future expiry per ticker; sums call+put OI per strike.
     # iv_rank = percentile of current ATM IV vs trailing 30-day history of that ticker's ATM IV.
-    opts_path = master_dir / 'options_eod.parquet'
+    from src.data import parquet_store as _ps_opts
+    opts_path = (_ps_opts.options_path() if _ps_opts.options_monthly_enabled()
+                 else master_dir / 'options_eod.parquet')
     # M3: this gate also covers the nested earnings-calendar read (used only
     # to enrich opts_dict[ticker]['earnings_dte']) and the last_price read
     # below (engine.py:1313-1323 pre-M2/M3 numbering) — both live entirely
@@ -3018,7 +3077,8 @@ def main():
         _aux_needed_kinds, _aux_running_ids, _aux_needed = \
             _resolve_aux_load_plan_safe(strategies, regime_state)
 
-        prices   = load_prices(universe)
+        prices   = load_prices(universe, lookback_days=trailing_window_days(strategies),
+                                as_of=run_date)
         aux_data = load_aux_data(universe, as_of=run_date,
                                  needed_kinds=_aux_needed_kinds)
 

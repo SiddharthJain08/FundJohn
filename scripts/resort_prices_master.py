@@ -8,15 +8,17 @@ script proves it (schema, count, per-column hash sums, whole-row hash sum)
 before swapping. Safe by construction:
   * holds the master lock for the whole run (parquet_store._file_lock)
   * DuckDB sort is memory-capped and spills to --spill-dir (default is on disk,
-    NOT tmpfs /tmp); pyarrow ParquetWriter streams one batch at a time
-  * the output carries a page index (DuckDB COPY would not)
+    NOT tmpfs /tmp); one DuckDB COPY ... ORDER BY writes the output
+  * the output carries no page index (DuckDB COPY does not write one; the
+    row-group layout check never depended on it)
   * --apply: hardlink backup, then atomic os.replace -> master never absent
   * tmp is removed on any failure; the backup is never deleted here
 
 Usage:
   python3 scripts/resort_prices_master.py [--dry-run | --apply] [--path P]
-      [--spill-dir D] [--memory-limit 1GB] [--row-group-size 122880] [--threads 1]
+      [--spill-dir D] [--memory-limit 2GB] [--row-group-size 122880] [--threads 1]
 Exit: 0 verified, 2 on any mismatch (master untouched), 3 dry-run layout FAIL.
+RUNBOOK: --apply holds the prices.parquet lock up to 600 s while collect's append_dedup times out after 30 s — run only outside 19:00–20:30Z.
 """
 from __future__ import annotations
 
@@ -59,18 +61,15 @@ def _hashes(con, src) -> dict:
 
 
 def _write_sorted(con, src: Path, tmp: Path, row_group_size: int) -> None:
-    reader = con.execute(
-        f"SELECT * FROM read_parquet('{_q(src)}', hive_partitioning=false) ORDER BY date, ticker"
-    ).fetch_record_batch(rows_per_batch=row_group_size)
-    writer = pq.ParquetWriter(str(tmp), reader.schema, compression='snappy', write_page_index=True)
-    try:
-        for batch in reader:
-            writer.write_batch(batch, row_group_size=row_group_size)
-    finally:
-        writer.close()
+    # One DuckDB COPY: the sort is memory-capped and spills (a pyarrow streaming
+    # writer could not sort the 19.5 M-row master within the cgroup cap).
+    con.execute(
+        f"COPY (SELECT * FROM read_parquet('{_q(src)}', hive_partitioning=false) "
+        f"ORDER BY date, ticker) TO '{_q(tmp)}' "
+        f"(FORMAT PARQUET, COMPRESSION snappy, ROW_GROUP_SIZE {int(row_group_size)})")
 
 
-def resort(path: Path, *, apply: bool, spill_dir: Path, memory_limit: str = '1GB',
+def resort(path: Path, *, apply: bool, spill_dir: Path, memory_limit: str = '2GB',
            row_group_size: int = 122880, threads: int = 1, lock_timeout: float = 600.0,
            today: date | None = None) -> dict:
     path = Path(path)
@@ -114,7 +113,7 @@ def resort(path: Path, *, apply: bool, spill_dir: Path, memory_limit: str = '1GB
           f"schema_eq={out['schema_equal']} arrow_schema_eq={out['arrow_schema_equal']} "
           f"colhash_eq={out['colhash_equal']} rowhash_eq={out['rowhash_equal']} "
           f"rg={r.get('n_row_groups')} frac_tight={r.get('frac_tight', 0):.3f} "
-          f"monotone={r.get('monotone')} page_index={r.get('page_index')} "
+          f"monotone={r.get('monotone')} page_index=False "
           f"verdict={out['verdict_new']} applied={out['applied']} backup={out['backup']}")
     if out['verdict_new'] == 'FAIL':
         print('[resort_prices] WARN layout verdict FAIL - rerun with a smaller --row-group-size')
@@ -131,7 +130,7 @@ def main(argv=None) -> int:
     g.add_argument('--apply', action='store_true')
     ap.add_argument('--path', default=str(DEFAULT_PATH))
     ap.add_argument('--spill-dir', default=str(DEFAULT_SPILL))
-    ap.add_argument('--memory-limit', default='1GB')
+    ap.add_argument('--memory-limit', default='2GB')
     ap.add_argument('--row-group-size', type=int, default=122880)
     ap.add_argument('--threads', type=int, default=1)
     a = ap.parse_args(argv)

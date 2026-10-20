@@ -157,11 +157,18 @@ def _master_coverage(category: str, wanted) -> dict | None:
     if not name or not wanted:
         return None
     path = ROOT / 'data' / 'master' / f'{name}.parquet'
+    _opts = name == 'options_eod'
+    if _opts:
+        from src.data import parquet_store as ps
+        path = ps.options_path()
     if not path.exists():
         return {'in_master': 0, 'wanted': len(wanted), 'frac': 0.0}
     try:
         import pyarrow.parquet as pq
-        have = set(pq.read_table(path, columns=['ticker']).column('ticker').to_pylist())
+        if _opts:
+            have = set(ps.options_read_table(['ticker']).column('ticker').to_pylist())
+        else:
+            have = set(pq.read_table(path, columns=['ticker']).column('ticker').to_pylist())
     except Exception as exc:  # noqa: BLE001
         logger.warning('coverage probe failed for %s: %s', category, exc)
         return None

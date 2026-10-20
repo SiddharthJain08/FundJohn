@@ -326,8 +326,9 @@ def load_prices_panels(calendar: str = 'union', tickers=None) -> tuple[pd.DataFr
     if tickers:
         _wanted = sorted({str(t) for t in tickers if t})
         _filters = [('ticker', 'in', _wanted)] if _wanted else None
-    _tbl = pq.read_table(PRICES_PARQUET, columns=_COLS, read_dictionary=['ticker', 'date'],
-                         filters=_filters)
+    from src.data import parquet_store as _ps
+    _tbl = _ps.prices_read_table(_COLS, filters=_filters,
+                                 read_dictionary=['ticker', 'date'], path=PRICES_PARQUET)
     for _c in ('open', 'high', 'low', 'close'):
         _i = _tbl.schema.get_field_index(_c)
         _tbl = _tbl.set_column(_i, _c, _tbl.column(_c).cast(pa.float32()))
@@ -350,7 +351,8 @@ def load_prices_panels(calendar: str = 'union', tickers=None) -> tuple[pd.DataFr
     if str(p['ticker'].dtype) == 'category':
         p['ticker'] = p['ticker'].cat.remove_unused_categories()
         p['ticker'] = p['ticker'].cat.reorder_categories(sorted(p['ticker'].cat.categories))
-    p['date'] = pd.to_datetime(p['date'])
+    # A7: to_datetime_safe — sorted (hive / date-major) dictionaries keep the Categorical.
+    p['date'] = _ps.to_datetime_safe(p['date'])
     p = p.sort_values(['ticker', 'date'])
     # Close panel (wide). Strategies expect index = date, columns = ticker, values = close.
     close_wide = p.pivot(index='date', columns='ticker', values='close')
