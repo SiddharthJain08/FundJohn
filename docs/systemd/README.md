@@ -29,3 +29,25 @@ would be harmful.
 
 To refresh this snapshot after changing a deployed unit, copy the installed
 file back here byte-for-byte and commit.
+
+## Job-stat drop-in (not installed)
+
+`job-stat/job-stat.conf` adds run accounting (`scheduled_job_runs`, migration 167)
+to systemd units: `ExecStartPre=-` records the start, `ExecStopPost=-` records the
+result. `ExecStartPre` (not `ExecStartPost`) because the timer services are
+`Type=oneshot`, where `ExecStartPost` runs only after the main process exits. The
+leading `-` means a hook failure never fails the unit; `%n` keeps template
+instances (`openclaw-edgar-8k@0715.service`) distinct.
+
+It deliberately lives in `docs/systemd/job-stat/`, NOT in a `*.service.d/`
+directory: `scripts/install_systemd.sh` installs every `*.service.d/*.conf`
+verbatim, so a drop-in there would be applied fleet-wide by the next install.
+Installing it is an operator decision. For each `docs/systemd/*.timer`, the target
+is its `Unit=` value, else the same-stem `.service` (template instances use
+`<name>@.service.d`). Copy the file to
+`/etc/systemd/system/<target>.d/job-stat.conf`, then `systemctl daemon-reload`.
+
+Units without `EnvironmentFile=/root/openclaw/.env` log
+`[job_stat] skipped: POSTGRES_URI unset` and record nothing. Until the drop-in is
+installed only in-process cron rows exist; the `scheduled_jobs_overdue` system
+check (`src/system_checks/checks/scheduled_jobs.py`) judges whatever it sees.
