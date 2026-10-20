@@ -126,9 +126,32 @@ def test_master_readable_checks_month_files(store, monkeypatch):
     assert not ao._master_readable(ps.OPTIONS_PATH)
 
 
-def test_options_store_log_line(store, monkeypatch, caplog):
+def test_options_store_log_line(store, monkeypatch, capsys):
     monkeypatch.setenv('OPENCLAW_OPTIONS_MONTHLY', '1')
-    with caplog.at_level(logging.INFO, logger=ps.log.name):
-        ps.write_options(_rows(['2026-09-30', '2026-10-01']))
-    lines = [r.message for r in caplog.records if r.message.startswith('[options_store]')]
+    ps.write_options(_rows(['2026-09-30', '2026-10-01']))
+    lines = [l for l in capsys.readouterr().err.splitlines() if l.startswith('[options_store]')]
     assert lines == ['[options_store] mode=monthly months=2026-09,2026-10 rows_in=4 total=4']
+
+
+def test_null_or_unparseable_date_raises(store, monkeypatch):
+    monkeypatch.setenv('OPENCLAW_OPTIONS_MONTHLY', '1')
+    rows = _rows(['2026-09-30', '2026-10-01'])
+    rows[1]['date'] = None
+    with pytest.raises(ValueError, match=r'1 rows with NULL/unparseable date'):
+        ps.write_options(rows)
+    assert not ps.OPTIONS_DIR.exists()
+
+
+def test_mixed_date_formats_split_by_text_month(store, monkeypatch):
+    monkeypatch.setenv('OPENCLAW_OPTIONS_MONTHLY', '1')
+    ps.write_options(_rows(['2026-09-30']) + _rows(['2026-10-01T00:00:00']))
+    assert [f.name for f in ps.options_month_files()] == ['2026-09.parquet', '2026-10.parquet']
+
+
+def test_empty_dir_reads_with_flag_on(store, monkeypatch):
+    monkeypatch.setenv('OPENCLAW_OPTIONS_MONTHLY', '1')
+    ps.OPTIONS_DIR.mkdir()
+    p = ps.options_path()
+    assert ps.read_filtered(p, where="ticker='ZZTEST1'").empty
+    assert ps.max_date(p) is None
+    assert ps.row_count(p) == 0

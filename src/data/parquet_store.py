@@ -15,7 +15,6 @@ Atomicity: write to {path}.tmp + os.replace ensures readers never see partial st
 from __future__ import annotations
 
 import fcntl
-import logging
 import os
 import re
 import sys
@@ -33,7 +32,6 @@ import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 MASTER_DIR = ROOT / 'data' / 'master'
-log = logging.getLogger(__name__)
 
 
 # ── Locking ──────────────────────────────────────────────────────────────────
@@ -463,7 +461,6 @@ def options_read_table(columns: Sequence[str], filters=None,
 def _options_log(mode: str, months: List[str], rows_in: int, total: int) -> None:
     line = (f"[options_store] mode={mode} months={','.join(months) or '-'} "
             f"rows_in={rows_in} total={total}")
-    log.info(line)
     print(line, file=sys.stderr, flush=True)
 
 
@@ -478,7 +475,13 @@ def append_options(df: pd.DataFrame, key_cols: Sequence[str] = OPTIONS_KEYS,
         return total
     months: List[str] = []
     if not df.empty:
-        keys = pd.to_datetime(df['date']).dt.strftime('%Y-%m')
+        # Same month rule as split_options_master (substr(CAST(date AS VARCHAR),1,7)).
+        keys = df['date'].astype(str).str[:7]
+        bad = int((~keys.str.fullmatch(r'\d{4}-\d{2}') | df['date'].isna()).sum())
+        if bad:
+            raise ValueError(f'[options_store] {bad} rows with NULL/unparseable date')
+        # NOTE: a multi-month batch is not atomic across months; a retry is
+        # idempotent in replace mode (each month is its own upsert).
         for m, part in df.groupby(keys, sort=True):
             append_dedup(OPTIONS_DIR / f'{m}.parquet', part.reset_index(drop=True),
                          key_cols, mode)

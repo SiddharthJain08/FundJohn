@@ -76,3 +76,34 @@ def test_verify_detects_mismatch(env):
         sp.main(['--verify', '--src', str(src), '--out-dir', str(out),
                  '--spill-dir', str(spill)])
     assert e.value.code == 2
+
+
+def test_apply_refuses_when_flag_on(env, monkeypatch):
+    src, out, spill = env
+    monkeypatch.setenv('OPENCLAW_OPTIONS_MONTHLY', '1')
+    with pytest.raises(SystemExit) as e:
+        sp.split(src, out, **_kw(spill))
+    assert 'refusing' in str(e.value.code)
+    assert not out.exists()
+
+
+def test_apply_refuses_to_shrink(env):
+    src, out, spill = env
+    sp.split(src, out, **_kw(spill))
+    f = out / '2026-09.parquet'
+    pd.concat([pd.read_parquet(f), _df(['2026-09-20'])]).to_parquet(f, index=False)
+    before = f.stat().st_mtime_ns
+    with pytest.raises(SystemExit) as e:
+        sp.split(src, out, **_kw(spill))
+    assert 'shrink' in str(e.value.code)
+    assert f.stat().st_mtime_ns == before
+
+
+def test_null_month_in_source_errors(tmp_path):
+    src = tmp_path / 's.parquet'
+    d = _df(['2026-09-15'])
+    d.loc[0, 'date'] = None
+    d.to_parquet(src, index=False)
+    with pytest.raises(SystemExit) as e:
+        sp.split(src, tmp_path / 'o', **_kw(tmp_path / 'sp'))
+    assert 'NULL' in str(e.value.code)

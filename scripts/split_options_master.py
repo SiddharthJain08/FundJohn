@@ -8,6 +8,12 @@ then os.replace'd. The source is never modified or deleted (append-only
 invariant). `--months 2026-10` re-splits only that month (pre-flip refresh).
 `--verify` writes nothing: per-month src_rows vs dir_rows, exit 2 on mismatch.
 Controller-run; do not run against the 5 GB master from tests.
+
+WARNING: split() holds the SOURCE lock for the whole multi-month scan, and the
+source is rescanned once per month (O(months x size)). Run outside the 16:15 ET
+collect/flush window and never while a backfill runs. --apply refuses (exit 2)
+when OPENCLAW_OPTIONS_MONTHLY=1 (post-flip the month files are the master) or
+when an existing month file already has more rows than the source (never shrink).
 """
 from __future__ import annotations
 
@@ -22,7 +28,8 @@ sys.path.insert(0, str(ROOT))
 import duckdb  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
 
-from src.data.parquet_store import MASTER_DIR, _file_lock  # noqa: E402
+from src.data.parquet_store import (  # noqa: E402
+    MASTER_DIR, _file_lock, options_monthly_enabled)
 
 DEFAULT_SPILL = '/root/openclaw/data/.duckdb_spill'
 _MONTH = "substr(CAST(date AS VARCHAR),1,7)"
@@ -45,6 +52,9 @@ def _src_counts(con, src: Path, months) -> dict:
     rows = con.execute(
         f"SELECT {_MONTH} AS m, count(*) FROM read_parquet('{_lit(src)}', "
         f"hive_partitioning=false) GROUP BY 1 ORDER BY 1").fetchall()
+    if any(m is None or len(m) != 7 for m, _ in rows):
+        raise SystemExit('[split_options] source has rows with NULL/unparseable date; '
+                         'refusing (fix the source first)')
     out = {m: int(n) for m, n in rows}
     if months:
         out = {m: n for m, n in out.items() if m in months}
@@ -71,6 +81,10 @@ def split(src: Path, out_dir: Path, *, months: list[str] | None, apply: bool,
           spill_dir: Path, memory_limit: str = '1GB', threads: int = 1) -> dict:
     src, out_dir, spill_dir = Path(src), Path(out_dir), Path(spill_dir)
     want = set(months) if months else None
+    print('[split_options] WARN holding source lock for the whole scan: run outside '
+          'the 16:15 ET collect window, never during a backfill', file=sys.stderr, flush=True)
+    if apply and options_monthly_enabled():
+        raise SystemExit('[split_options] refusing --apply: OPENCLAW_OPTIONS_MONTHLY=1')
     with _file_lock(src):
         con = _connect(spill_dir, memory_limit, threads)
         try:
@@ -83,6 +97,11 @@ def split(src: Path, out_dir: Path, *, months: list[str] | None, apply: bool,
             if apply:
                 out_dir.mkdir(parents=True, exist_ok=True)
                 for m, n in counts.items():
+                    ex = out_dir / f'{m}.parquet'
+                    if ex.exists() and pq.read_metadata(ex).num_rows > n:
+                        raise SystemExit(f'[split_options] refusing to shrink {ex.name}: '
+                                         f'{pq.read_metadata(ex).num_rows} rows > source {n}')
+                for m, n in counts.items():
                     tmp = out_dir / f'{m}.parquet.tmp'
                     con.execute(
                         f"COPY (SELECT * FROM read_parquet('{_lit(src)}', "
@@ -93,7 +112,8 @@ def split(src: Path, out_dir: Path, *, months: list[str] | None, apply: bool,
                         tmp.unlink()
                         mism.append((m, n, got))
                         continue
-                    os.replace(tmp, out_dir / f'{m}.parquet')
+                    with _file_lock(out_dir / f'{m}.parquet'):
+                        os.replace(tmp, out_dir / f'{m}.parquet')
         finally:
             con.close()
     dir_counts = _dir_counts(out_dir, want) if out_dir.exists() else {}
