@@ -85,7 +85,12 @@ def _capture(scenario: str) -> dict:
     cls = _stub()
     aux = {'options': {}}
     env = {'OPENCLAW_BT_ASSET_GATE': 'off', 'OPENCLAW_BT_SPREAD_COSTS': '0',
-           'OPENCLAW_BACKTEST_COUPLED_RECS': '0'}
+           'OPENCLAW_BACKTEST_COUPLED_RECS': '0',
+           # The golden fixture was recorded without a macro master: pin the
+           # rf shadow to the const fallback so the real DGS3MO series on the
+           # production checkout cannot change config_json['rf']['macro'].
+           'OPENCLAW_RF_SOURCE': 'const',
+           'OPENCLAW_MACRO_PARQUET': '/nonexistent/golden-no-macro.parquet'}
     extra = []
     kw = {}
     if scenario == 'hook_exits':
