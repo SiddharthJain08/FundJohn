@@ -67,6 +67,43 @@ _DATE_COL_CANDIDATES = ['datetime', 'date', 'next_earnings_date',
                         'timestamp', 'Date', 'Datetime']
 
 
+def _options_eod_stats(master_dir: Path) -> dict:
+    """options_eod stats WITHOUT a full read (A6): row_count from footers, min/max
+    date from a bounded DuckDB aggregate over the single file or (flag on) the
+    per-month directory. max is capped at today like the generic path."""
+    try:
+        from src.data import parquet_store as ps
+    except ImportError:  # pragma: no cover — sys.path without the repo root
+        from data import parquet_store as ps
+    path = master_dir / ('options_eod' if ps.options_monthly_enabled()
+                         else 'options_eod.parquet')
+    if not ps._has_data(path):
+        return {'min_date': None, 'max_date': None, 'row_count': None}
+    try:
+        n = ps.row_count(path)
+        if n == 0:
+            return {'min_date': None, 'max_date': None, 'row_count': 0}
+        import duckdb
+        con = duckdb.connect()
+        con.execute("SET threads TO 1")
+        con.execute("SET memory_limit = '512MB'")
+        try:
+            today = date.today().isoformat()
+            lo, hi, hi_hist = con.execute(
+                "SELECT min(d), max(d), max(d) FILTER (WHERE d <= TIMESTAMP '"
+                f"{today} 23:59:59') FROM (SELECT TRY_CAST(\"date\" AS TIMESTAMP) AS d "
+                f"FROM {ps._sql_source(path)}) WHERE d IS NOT NULL").fetchone()
+        finally:
+            con.close()
+        if lo is None:
+            return {'min_date': None, 'max_date': None, 'row_count': n}
+        top = hi_hist if hi_hist is not None else hi
+        return {'min_date': lo.date().isoformat(), 'max_date': top.date().isoformat(),
+                'row_count': n}
+    except Exception:
+        return {'min_date': None, 'max_date': None, 'row_count': None}
+
+
 def _parquet_stats(column_name: str) -> dict:
     """Read the master parquet for *column_name* and return
     {'min_date': iso|None, 'max_date': iso|None, 'row_count': int}. Returns
@@ -75,6 +112,8 @@ def _parquet_stats(column_name: str) -> dict:
     stem = _COLUMN_TO_PARQUET_STEM.get(column_name, column_name)
     parquet = (Path(os.environ.get('OPENCLAW_DIR', '/root/openclaw'))
                / 'data' / 'master' / f'{stem}.parquet')
+    if stem == 'options_eod':
+        return _options_eod_stats(parquet.parent)
     if not parquet.exists():
         return {'min_date': None, 'max_date': None, 'row_count': None}
     try:

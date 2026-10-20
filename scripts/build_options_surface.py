@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 for p in (ROOT, ROOT / 'src'):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
+from src.data import parquet_store as ps  # noqa: E402
 from src.data.parquet_store import SURFACE_KEYS, SURFACE_PATH, append_dedup  # noqa: E402
 from strategies.options_surface import (SCALAR_KEYS, OPTIONS_FEATURES_VERSION,  # noqa: E402
                                         features_for_day, prepare_chain)
@@ -45,7 +46,7 @@ def _read_range(start: pd.Timestamp, end: pd.Timestamp, tickers=None) -> pd.Data
           (pc.field('date') <= pc.scalar(end.strftime('%Y-%m-%d')))
     if tickers:
         flt = flt & pc.field('ticker').isin(list(tickers))
-    tbl = pq.read_table(OPTS_PATH, columns=COLS, filters=flt, read_dictionary=['ticker', 'option_type'])
+    tbl = ps.options_read_table(COLS, filters=flt, read_dictionary=['ticker', 'option_type'])
     df = tbl.to_pandas()
     del tbl
     if df.empty:

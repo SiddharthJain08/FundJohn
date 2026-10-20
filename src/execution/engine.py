@@ -335,12 +335,19 @@ def _load_options_window(path, columns, window_days, today):
     except Exception:  # noqa: BLE001 — same default as intraday_options.py
         _max_dte = int(os.environ.get('OPENCLAW_INTRADAY_OPTIONS_MAX_DTE', '100'))
     cutoff = (today - pd.Timedelta(days=window_days)).strftime('%Y-%m-%d')
-    tbl = _pq.read_table(
-        path, columns=list(columns),
-        filters=[('date', '>=', cutoff),
-                 ('expiry', '>', today.strftime('%Y-%m-%d')),
-                 ('expiry', '<=', (today + pd.Timedelta(days=_max_dte)).strftime('%Y-%m-%d'))],
-        read_dictionary=['ticker', 'date', 'expiry', 'option_type'])
+    _filters = [('date', '>=', cutoff),
+                ('expiry', '>', today.strftime('%Y-%m-%d')),
+                ('expiry', '<=', (today + pd.Timedelta(days=_max_dte)).strftime('%Y-%m-%d'))]
+    _rdict = ['ticker', 'date', 'expiry', 'option_type']
+    from src.data import parquet_store as _ps
+    if _ps.options_monthly_enabled() or Path(path) == _ps.options_path():
+        # A6: the resolver reads the single file (flag off, identical call) or
+        # the per-month directory (flag on).
+        tbl = _ps.options_read_table(list(columns), filters=_filters,
+                                     read_dictionary=_rdict)
+    else:  # explicit non-store path (tests / ad-hoc callers): unchanged read
+        tbl = _pq.read_table(path, columns=list(columns), filters=_filters,
+                             read_dictionary=_rdict)
     total = tbl.num_rows
     greeks = [c for c in ('delta', 'gamma', 'theta', 'vega')
               if c in tbl.column_names]
@@ -1143,7 +1150,9 @@ def load_aux_data(universe: list, as_of=None, needed_kinds: set | None = None) -
     # Options: {ticker: {iv_rank, open_interest_by_strike: {strike: oi}, expiry_date}}
     # Picks nearest future expiry per ticker; sums call+put OI per strike.
     # iv_rank = percentile of current ATM IV vs trailing 30-day history of that ticker's ATM IV.
-    opts_path = master_dir / 'options_eod.parquet'
+    from src.data import parquet_store as _ps_opts
+    opts_path = (_ps_opts.options_path() if _ps_opts.options_monthly_enabled()
+                 else master_dir / 'options_eod.parquet')
     # M3: this gate also covers the nested earnings-calendar read (used only
     # to enrich opts_dict[ticker]['earnings_dte']) and the last_price read
     # below (engine.py:1313-1323 pre-M2/M3 numbering) — both live entirely

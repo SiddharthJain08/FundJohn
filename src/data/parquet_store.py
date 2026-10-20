@@ -454,7 +454,15 @@ def options_read_table(columns: Sequence[str], filters=None,
     dataset = options_dataset()
     if rd:
         fmt = ds.ParquetFileFormat(read_options=ds.ParquetReadOptions(dictionary_columns=rd))
-        dataset = ds.dataset(list(dataset.files), schema=dataset.schema, format=fmt)
+        # An explicit schema overrides dictionary_columns (they come back as plain
+        # strings), so the unified schema must declare the dictionary types itself.
+        schema = dataset.schema
+        for name in rd:
+            i = schema.get_field_index(name)
+            if i >= 0 and not pa.types.is_dictionary(schema.field(i).type):
+                schema = schema.set(i, schema.field(i).with_type(
+                    pa.dictionary(pa.int32(), schema.field(i).type)))
+        dataset = ds.dataset(list(dataset.files), schema=schema, format=fmt)
     return dataset.to_table(columns=columns, filter=filters)
 
 

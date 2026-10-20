@@ -45,6 +45,9 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from src.data import parquet_store as ps  # noqa: E402
 OPTS_PATH = ROOT / 'data' / 'master' / 'options_eod.parquet'
 OUT_DIR = ROOT / 'data' / 'master' / 'options_aggregates'
 
@@ -70,12 +73,12 @@ def _read_range(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     flt = (pc.field('date') >= pc.scalar(start.to_pydatetime())) & \
           (pc.field('date') <= pc.scalar(end.to_pydatetime()))
     try:
-        tbl = pq.read_table(OPTS_PATH, columns=COLS, filters=flt)
+        tbl = ps.options_read_table(COLS, filters=flt)
     except Exception:
         # date stored as string in some vintages — fall back to string bounds.
         flt = (pc.field('date') >= pc.scalar(start.strftime('%Y-%m-%d'))) & \
               (pc.field('date') <= pc.scalar(end.strftime('%Y-%m-%d')))
-        tbl = pq.read_table(OPTS_PATH, columns=COLS, filters=flt)
+        tbl = ps.options_read_table(COLS, filters=flt)
     df = tbl.to_pandas()
     del tbl
     if df.empty:

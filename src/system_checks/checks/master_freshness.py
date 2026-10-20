@@ -86,6 +86,14 @@ _COVERED_ELSEWHERE = {
 _SMALL_ENOUGH_FOR_COLUMN_READ = 100 * 1024 * 1024  # bytes
 
 
+def _options_monthly() -> bool:
+    return os.environ.get('OPENCLAW_OPTIONS_MONTHLY') == '1'
+
+
+def _month_files(root: Path) -> list[Path]:
+    return sorted(root.glob('[0-9][0-9][0-9][0-9]-[0-9][0-9].parquet'))
+
+
 def _coerce(v):
     """Row-group stat / cell → date, best effort. None when unparseable."""
     if v is None:
@@ -139,6 +147,14 @@ def _master_freshness():
 
     for fname, (column, max_lag) in _CADENCES.items():
         path = _MASTER_DIR / fname
+        if fname == 'options_eod.parquet' and _options_monthly():
+            # A6: the single file is frozen once the per-month store is live;
+            # judge freshness by the newest month file's footer stats.
+            months = _month_files(_MASTER_DIR / 'options_eod')
+            if not months:
+                missing.append(fname)
+                continue
+            path = months[-1]
         if not path.exists():
             missing.append(fname)
             continue
