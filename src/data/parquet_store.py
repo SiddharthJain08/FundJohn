@@ -108,6 +108,7 @@ def append_dedup(
     new_df: pd.DataFrame,
     key_cols: Sequence[str],
     mode: str = 'replace',
+    lock_path: Path | str | None = None,
 ) -> int:
     """
     Append new_df to the parquet at path, deduplicating on key_cols.
@@ -137,7 +138,9 @@ def append_dedup(
     # are existing-vs-batch, resolved by `mode` in the merge below.
     new_df = new_df.drop_duplicates(subset=key_cols, keep=keep)
 
-    with _file_lock(path):
+    # lock_path lets a dataset directory keep its lock sentinel OUTSIDE the tree
+    # (a stray *.lock inside prices/ breaks pyarrow.dataset discovery).
+    with _file_lock(Path(lock_path) if lock_path is not None else path):
         if not path.exists():
             _atomic_write(path, new_df)
             return len(new_df)
@@ -169,16 +172,16 @@ def append_dedup(
             if mode == 'replace':
                 # batch wins: existing rows with no batch-key match, then all batch rows.
                 merge = (
-                    f"SELECT e.* FROM read_parquet('{existing_lit}') e "
+                    f"SELECT e.* FROM read_parquet('{existing_lit}', hive_partitioning=false) e "
                     f"WHERE NOT EXISTS (SELECT 1 FROM n WHERE {keymatch}) "
                     f"UNION ALL BY NAME SELECT * FROM n"
                 )
             else:  # keep-first: existing wins on conflict.
                 merge = (
-                    f"SELECT * FROM read_parquet('{existing_lit}') "
+                    f"SELECT * FROM read_parquet('{existing_lit}', hive_partitioning=false) "
                     f"UNION ALL BY NAME "
                     f"SELECT n.* FROM n WHERE NOT EXISTS "
-                    f"(SELECT 1 FROM read_parquet('{existing_lit}') e WHERE {keymatch})"
+                    f"(SELECT 1 FROM read_parquet('{existing_lit}', hive_partitioning=false) e WHERE {keymatch})"
                 )
             cnt = con.execute(
                 f"COPY ({merge}) TO '{out_lit}' (FORMAT PARQUET, COMPRESSION 'snappy')"
@@ -391,6 +394,7 @@ def row_count(path: Path | str) -> int:
 # ── Named writers (called from Node via parquet_reader.py CLI) ───────────────
 
 PRICES_PATH    = MASTER_DIR / 'prices.parquet'
+PRICES_HIVE_DIR = MASTER_DIR / 'prices'
 OPTIONS_PATH   = MASTER_DIR / 'options_eod.parquet'
 OPTIONS_DIR    = MASTER_DIR / 'options_eod'
 FUNDAMENTALS_PATH = MASTER_DIR / 'financials.parquet'
@@ -408,11 +412,48 @@ SURFACE_PATH      = MASTER_DIR / 'options_surface.parquet'
 SURFACE_KEYS      = ['ticker', 'date']
 
 
+def prices_hive_enabled() -> bool:
+    """Hive dual-write flag (read at call time). Single file stays authoritative."""
+    return os.environ.get('OPENCLAW_PRICES_HIVE') == '1'
+
+
+def prices_hive_part(year: int) -> Path:
+    return PRICES_HIVE_DIR / f'year={int(year)}' / 'part-0.parquet'
+
+
+def _write_prices_hive(df: pd.DataFrame) -> None:
+    """Best-effort dual-write; never raises. One part file per year, deduped in place."""
+    years: List[int] = []
+    detail = ''
+    try:
+        d = pd.to_datetime(df['date'])
+        df2 = df.assign(date_d=d.dt.date)
+        yrs = d.dt.year
+        for y, part in df2.groupby(yrs, sort=True):
+            append_dedup(prices_hive_part(int(y)), part.reset_index(drop=True),
+                         PRICES_KEYS, 'replace',
+                         lock_path=PRICES_HIVE_DIR.parent / f'.prices_hive_y{int(y)}')
+            years.append(int(y))
+        status = 'ok'
+        total = sum(pq.read_metadata(f).num_rows
+                    for f in PRICES_HIVE_DIR.glob('year=*/part-0.parquet'))
+    except Exception as e:  # noqa: BLE001 - hive must never break the collector
+        status = f'error:{type(e).__name__}'
+        detail = f' detail={e}'
+        total = -1
+    print(f"[prices_hive] status={status} years={','.join(map(str, years)) or '-'} "
+          f"rows_in={len(df)} total_hive={total}"
+          f"{detail}", file=sys.stderr, flush=True)
+
+
 def write_prices(rows: Iterable[dict]) -> int:
     df = pd.DataFrame(list(rows))
     if df.empty:
         return row_count(PRICES_PATH)
-    return append_dedup(PRICES_PATH, df, PRICES_KEYS, mode='replace')
+    total = append_dedup(PRICES_PATH, df, PRICES_KEYS, mode='replace')
+    if prices_hive_enabled():
+        _write_prices_hive(df)
+    return total
 
 
 def options_monthly_enabled() -> bool:
