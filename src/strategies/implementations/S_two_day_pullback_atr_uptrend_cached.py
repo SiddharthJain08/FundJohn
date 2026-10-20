@@ -4,8 +4,8 @@
 diff().abs().rolling(20) and rolling(200) over full history are replaced by
 BaseStrategy.cached() slices; gates, sizing and prints are the parent's. Fixed
 SPY/QQQ tickers, so the gain is small: this is the control case. Used solely by
-scripts/measure_indicator_cache.py and backtest.unified_backtest --strategy-file;
-registering it would double the parent's signals live.
+scripts/measure_indicator_cache.py; registering it would double the parent's signals live.
+The ONLY sanctioned measurement command is `scripts/measure_indicator_cache.py --strategy <id>_cached --compare-to <id>`: `unified_backtest --strategy-file` derives the sid from the file stem, so no manifest tier cap applies and the run is not comparable to the parent (full static universe, heavy on the 8 GB box).
 """
 from __future__ import annotations
 

@@ -103,7 +103,7 @@ def test_main_prints_one_line_rc0(tmp_path, capsys):
     assert len(out) == 1 and out[0].startswith('[bt_cache_measure] strategy=')
     assert 'signals_identical=true' in out[0] and 'trades_identical=true' in out[0]
     assert 'orig=' not in out[0]
-    for k in ('uncached_s=', 'cached_s=', 'speedup=', 'n_signals=', 'sha=', 'peak_rss_mb='):
+    for k in ('uncached_s=', 'cached_s=', 'speedup=', 'n_signals=', 'sha=', 'peak_rss_mb_process='):
         assert k in out[0]
 
 
@@ -144,3 +144,13 @@ def test_never_reads_real_aux(tmp_path):
         assert adl.load_aux_data is trap
     assert recs
     trap.assert_not_called()
+
+
+def test_bad_strategy_file_rc2(tmp_path, capsys):
+    bad = tmp_path / 'bad_syntax.py'
+    bad.write_text('def (:\n')
+    assert mic.main(['--strategy-file', str(bad), '--days', DAYS, '--tickers', TICKERS]) == 2
+    imp = tmp_path / 'bad_import.py'
+    imp.write_text('import zz_no_such_module_xyz\n')
+    assert mic.main(['--strategy-file', str(imp), '--days', DAYS, '--tickers', TICKERS]) == 2
+    assert 'ERROR' in capsys.readouterr().err

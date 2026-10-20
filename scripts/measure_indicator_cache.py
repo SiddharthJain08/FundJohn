@@ -8,7 +8,8 @@ Drives ``unified_backtest._per_bar_simulate`` over a SYNTHETIC panel (GBM closes
 late listings, interior NaN gaps, bars derived from closes) twice: with
 OPENCLAW_BT_INDICATOR_CACHE unset and =1. Compares every generated signal and the
 simulated trades byte-for-byte, prints one ``[bt_cache_measure]`` line and exits 0
-iff every identity is true. ``--compare-to SID`` additionally runs that (original,
+iff every identity is true. ``peak_rss_mb_process`` is the PROCESS-wide
+``ru_maxrss`` read after the second run (not per-mode). ``--compare-to SID`` additionally runs that (original,
 non-cached) strategy with the cache off and compares its signals to the cached run.
 
 Never reads data/master/* nor Postgres: ``load_aux_data`` is patched to
@@ -151,7 +152,7 @@ def main(argv=None) -> int:
         line = (f'[bt_cache_measure] strategy={sid} days={a.days} tickers={a.tickers} '
                 f'uncached_s={s0:.2f} cached_s={s1:.2f} speedup={s0 / max(s1, 1e-9):.2f}x '
                 f'signals_identical={_b(sig_ok)} trades_identical={_b(trd_ok)} '
-                f'n_signals={len(r1)} sha={sha} peak_rss_mb={rss}')
+                f'n_signals={len(r1)} sha={sha} peak_rss_mb_process={rss}')
         ok = sig_ok and trd_ok
         if a.compare_to:
             ocls, _ = _load(a.compare_to, None)
@@ -159,7 +160,7 @@ def main(argv=None) -> int:
             o_ok = ro == r1
             line += f' orig={a.compare_to} orig_identical={_b(o_ok)}'
             ok = ok and o_ok
-    except (OSError, ValueError, KeyError, RuntimeError) as e:
+    except (OSError, ValueError, KeyError, RuntimeError, ImportError, SyntaxError) as e:
         print(f'[bt_cache_measure] ERROR {type(e).__name__}: {e}', file=sys.stderr)
         return 2
     print(line)

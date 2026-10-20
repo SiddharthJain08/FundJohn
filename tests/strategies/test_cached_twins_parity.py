@@ -128,3 +128,58 @@ def test_twins_never_registered():
 def test_twin_docstring_marks_measurement_only(sid):
     _p, twin_m = _mods(sid)
     assert MARK in (twin_m.__doc__ or '')
+
+
+def _gate_panel(start_i):
+    """Tiny panel hitting the parents' length/min-bars gates and NaN handling."""
+    panel, _b, _r = make_panel(days=330, tickers=12, seed=3)
+    tick = [c for c in panel.columns if c not in ('SPY', 'QQQ')]
+    panel = panel.copy()
+    panel.loc[panel.index[:start_i - 3], tick[0]] = float('nan')   # lists 3 bars before start
+    panel.loc[panel.index[start_i + 20], :] = float('nan')         # fully-NaN row mid-run
+    panel.loc[panel.index[start_i + 40], ['SPY', 'QQQ']] = float('nan')
+    return panel
+
+
+@pytest.mark.parametrize('sid', SIDS)
+def test_twin_parity_on_gate_coverage_panel(sid):
+    parent_m, twin_m = _mods(sid)
+    pcls, tcls = getattr(parent_m, PAIRS[sid]), getattr(twin_m, PAIRS[sid])
+    start_i = pcls.min_lookback + 5
+    panel = _gate_panel(start_i)
+    regime = {'state': pcls.active_in_regimes[0]}
+    uni = _universe(sid, panel)
+    with open(os.devnull, 'w') as dn, patch.object(sys, 'stderr', dn):
+        ref = _records(pcls(), panel, regime, uni, start_i)
+        cached = _records(tcls(), panel, regime, uni, start_i, source=panel)
+        plain = _records(tcls(), panel, regime, uni, start_i)
+    assert ref, 'parent emitted no signals: test would be vacuous'
+    assert cached == ref
+    assert plain == ref
+
+
+def _twin_stub_dir(tmp_path):
+    d = tmp_path / 'implementations'
+    d.mkdir()
+    twin = next(IMPL.glob('S_*_cached.py'))
+    (d / twin.name).write_text(twin.read_text())
+    (d / 'S_normal_stub.py').write_text('"""normal"""\nx = 1\n')
+    return d, twin.stem
+
+
+def test_generate_sidecars_skips_twin(tmp_path, monkeypatch):
+    import strategies.generate_sidecars as gs
+    d, tid = _twin_stub_dir(tmp_path)
+    monkeypatch.setattr(gs, 'IMPL_DIR', d)
+    gs.main()
+    assert not (d / f'{tid}.requirements.json').exists()
+    assert (d / 'S_normal_stub.requirements.json').exists()
+
+
+def test_generate_missing_requirements_skips_twin(tmp_path, monkeypatch):
+    import scripts.generate_missing_requirements as gm
+    d, tid = _twin_stub_dir(tmp_path)
+    monkeypatch.setattr(gm, 'IMPL_DIR', d)
+    gm.process(dry_run=False)
+    assert not (d / f'{tid}.requirements.json').exists()
+    assert (d / 'S_normal_stub.requirements.json').exists()

@@ -3,9 +3,8 @@
 `_cached` twin of S_ast_trend_following_effect_in_stocks (six-repo D2d). Only the
 per-bar full-history scans (dropna / max / diff.abs.rolling per ticker) are
 replaced by BaseStrategy.cached() slices; every gate, rounding and print is the
-parent's. Used solely by scripts/measure_indicator_cache.py and
-backtest.unified_backtest --strategy-file; registering it would double the
-parent's signals live.
+parent's. Used solely by scripts/measure_indicator_cache.py; registering it would double the
+parent's signals live. The ONLY sanctioned measurement command is `scripts/measure_indicator_cache.py --strategy <id>_cached --compare-to <id>`: `unified_backtest --strategy-file` derives the sid from the file stem, so no manifest tier cap applies and the run is not comparable to the parent (full static universe, heavy on the 8 GB box).
 """
 from __future__ import annotations
 import sys

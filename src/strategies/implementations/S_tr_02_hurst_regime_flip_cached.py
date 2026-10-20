@@ -2,9 +2,8 @@
 
 `_cached` twin of S_tr_02_hurst_regime_flip (six-repo D2d). The per-bar
 ffill().pct_change() over the growing prefix is replaced by BaseStrategy.cached()
-slices; the Hurst gate, sizing and prints are the parent's. Used solely by
-scripts/measure_indicator_cache.py and backtest.unified_backtest --strategy-file;
-registering it would double the parent's signals live.
+slices; the Hurst gate, sizing and prints are the parent's. Used solely by scripts/measure_indicator_cache.py; registering it would double the
+parent's signals live. The ONLY sanctioned measurement command is `scripts/measure_indicator_cache.py --strategy <id>_cached --compare-to <id>`: `unified_backtest --strategy-file` derives the sid from the file stem, so no manifest tier cap applies and the run is not comparable to the parent (full static universe, heavy on the 8 GB box).
 """
 from __future__ import annotations
 import sys
