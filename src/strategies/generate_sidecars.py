@@ -38,6 +38,16 @@ def stem_to_id(stem: str) -> str:
     return stem  # keep as-is; matches manifest canonical_file stem
 
 
+def is_measurement_twin(path) -> bool:
+    """True if the file's head carries the `measurement twin — never register` marker."""
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            head = ''.join(fh.readline() for _ in range(40))
+    except OSError:
+        return False
+    return 'measurement twin — never register' in head
+
+
 def detect_datasets(source: str) -> tuple[list[str], list[str]]:
     required: set[str] = set()
     optional: set[str] = set()
@@ -60,7 +70,8 @@ def main() -> None:
     py_files = sorted(IMPL_DIR.glob('*.py'))
     # Skip __init__.py and underscore-prefixed files (templates / reference examples;
     # see src/strategies/implementations/_template_example.py — Phase 2E).
-    py_files = [f for f in py_files if f.name != '__init__.py' and not f.name.startswith('_')]
+    py_files = [f for f in py_files if f.name != '__init__.py' and not f.name.startswith('_')
+                and not is_measurement_twin(f)]
 
     written = 0
     for path in py_files:

@@ -6,8 +6,8 @@ Prints 'OK' or 'NOT_YET' on the first line, then the per-gate detail — the sam
 contract scripts/target_mode_flip_after_fleet.sh parses.
 
   G1 fleet uniformity: every manifest state=live strategy's LATEST primary
-     backtest row carries BOTH config_json.gap_fill='open' and
-     config_json.financials_pit=true (at most --max-lagging exceptions, default
+     backtest row carries config_json.gap_fill='open',
+     config_json.financials_pit=true AND config_json.macro_pit=true (at most --max-lagging exceptions, default
      3 — a strategy whose backtest OOMs every night must not hold the flip
      hostage; exceptions are listed).
 
@@ -21,7 +21,8 @@ rows are a mix of target_mode 'flat' and 'atr_r'. Do not add one back.
 Usage: python3 scripts/pit_gap_flip_gate.py [--max-lagging N] [--env-file PATH]
                                             [--manifest PATH] [--rows-json PATH]
 --rows-json is the test seam: a JSON list of
-[strategy_id, gap_fill, financials_pit, run_at_iso] used INSTEAD of the DB.
+[strategy_id, gap_fill, financials_pit, run_at_iso, macro_pit] used INSTEAD of the DB.
+A legacy 4-element row (no macro_pit) counts as lagging.
 """
 from __future__ import annotations
 
@@ -36,19 +37,21 @@ def verdict(live, rows, max_lagging: int):
     """(ok, detail_lines). `rows` is newest-first-agnostic: the newest run_at
     per strategy wins. A live strategy with no row at all lags."""
     latest: dict = {}
-    for sid, gap_fill, fin_pit, run_at in rows:
+    for row in rows:
+        sid, gap_fill, fin_pit, run_at = row[:4]
+        macro = bool(row[4]) if len(row) > 4 else False
         if sid not in live:
             continue
         prev = latest.get(sid)
         if prev is None or str(run_at) > str(prev[2]):
-            latest[sid] = (gap_fill, bool(fin_pit), run_at)
+            latest[sid] = (gap_fill, bool(fin_pit), run_at, macro)
     lagging = []
     for sid in live:
         row = latest.get(sid)
-        if row is None or row[0] != 'open' or row[1] is not True:
+        if row is None or row[0] != 'open' or row[1] is not True or row[3] is not True:
             lagging.append(sid)
     ok = len(lagging) <= max_lagging
-    detail = [f"  G1 fleet: live={len(live)} on_new={len(live) - len(lagging)} "
+    detail = [f"  G1 fleet (gap_fill=open, financials_pit, macro_pit): live={len(live)} on_new={len(live) - len(lagging)} "
               f"lagging={len(lagging)} (max {max_lagging}) -> {'OK' if ok else 'NOT_YET'}"]
     if lagging:
         detail.append('    lagging: ' + ', '.join(lagging[:12]) + (' …' if len(lagging) > 12 else ''))
@@ -63,11 +66,13 @@ def _rows_from_db(uri):
         cur.execute("""SELECT strategy_id,
                               COALESCE(config_json->>'gap_fill', 'level'),
                               COALESCE((config_json->>'financials_pit')::boolean, false),
-                              run_at
+                              run_at,
+                              COALESCE((config_json->>'macro_pit')::boolean, false)
                          FROM strategy_backtest_runs
                         WHERE primary_window = true
                         ORDER BY strategy_id, run_at DESC""")
-        return [[r[0], r[1], bool(r[2]), r[3].isoformat() if hasattr(r[3], 'isoformat') else str(r[3])]
+        return [[r[0], r[1], bool(r[2]), r[3].isoformat() if hasattr(r[3], 'isoformat') else str(r[3]),
+                 bool(r[4])]
                 for r in cur.fetchall()]
 
 

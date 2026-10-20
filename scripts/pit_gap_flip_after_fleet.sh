@@ -1,13 +1,15 @@
 #!/bin/bash
-# pit_gap_flip_after_fleet.sh — guarded one-shot flip of OPENCLAW_FINANCIALS_PIT=1
-# and OPENCLAW_BT_GAP_FILL=open (spec docs/specs/2026-09-12-quantdinger-adoptions-spec.md
-# §A1/§A2, epoch §A4). Modelled line-for-line on scripts/target_mode_flip_after_fleet.sh.
+# pit_gap_flip_after_fleet.sh — guarded one-shot flip of OPENCLAW_FINANCIALS_PIT=1,
+# OPENCLAW_BT_GAP_FILL=open and OPENCLAW_MACRO_PIT=1 (spec
+# docs/specs/2026-09-12-quantdinger-adoptions-spec.md §A1/§A2, epoch §A4; macro_pit
+# added by spec 2026-10-19 R2). Modelled line-for-line on scripts/target_mode_flip_after_fleet.sh.
 #
-# Flips BOTH flags in .env, removes the fleet unit's temporary pit-gap drop-in
+# Flips all THREE flags in .env, removes the fleet unit's temporary pit-gap drop-in
 # (so .env is the single source of truth again) and restarts the user-scope
 # johnbot ONLY IF all gates hold:
 #   G1 fleet: every manifest state=live strategy's LATEST primary backtest row
-#      carries config_json.gap_fill='open' AND config_json.financials_pit=true
+#      carries config_json.gap_fill='open' AND config_json.financials_pit=true AND
+#      config_json.macro_pit=true
 #      (<= --max-lagging exceptions) — scripts/pit_gap_flip_gate.py.
 #   G3 never inside the weekday 13:00–20:15 UTC compute window.
 # There is no Sharpe gate on purpose: ruling R1 accepts PIT-driven Sharpe
@@ -55,8 +57,8 @@ PY
 }
 
 # --- already applied? ---------------------------------------------------------
-if grep -qE '^OPENCLAW_BT_GAP_FILL=open' "$ENVF" && grep -qE '^OPENCLAW_FINANCIALS_PIT=1' "$ENVF"; then
-  say "already applied (both flags set in $ENVF) — nothing to do"
+if grep -qE '^OPENCLAW_BT_GAP_FILL=open' "$ENVF" && grep -qE '^OPENCLAW_FINANCIALS_PIT=1' "$ENVF" && grep -qE '^OPENCLAW_MACRO_PIT=1' "$ENVF"; then
+  say "already applied (all three flags set in $ENVF) — nothing to do"
   systemctl disable --now "$TIMER_UNIT" 2>/dev/null || systemctl stop "$TIMER_UNIT" 2>/dev/null || true
   exit 0
 fi
@@ -85,7 +87,9 @@ if grep -qE '^OPENCLAW_FINANCIALS_PIT=' "$ENVF"; then sed -i -E 's|^OPENCLAW_FIN
 else printf '\nOPENCLAW_FINANCIALS_PIT=1\n' >> "$ENVF"; fi
 if grep -qE '^OPENCLAW_BT_GAP_FILL=' "$ENVF"; then sed -i -E 's|^OPENCLAW_BT_GAP_FILL=.*|OPENCLAW_BT_GAP_FILL=open|' "$ENVF"
 else printf 'OPENCLAW_BT_GAP_FILL=open\n' >> "$ENVF"; fi
-say "flags set: $(grep -E '^OPENCLAW_(FINANCIALS_PIT|BT_GAP_FILL)=' "$ENVF" | tr '\n' ' ')"
+if grep -qE '^OPENCLAW_MACRO_PIT=' "$ENVF"; then sed -i -E 's|^OPENCLAW_MACRO_PIT=.*|OPENCLAW_MACRO_PIT=1|' "$ENVF"
+else printf 'OPENCLAW_MACRO_PIT=1\n' >> "$ENVF"; fi
+say "flags set: $(grep -E '^OPENCLAW_(FINANCIALS_PIT|BT_GAP_FILL|MACRO_PIT)=' "$ENVF" | tr '\n' ' ')"
 if [ -f "$DROPIN" ]; then
   rm -f "$DROPIN" && systemctl daemon-reload && say "removed fleet drop-in $DROPIN (.env is now the single source)"
 fi
@@ -101,7 +105,7 @@ if [ "$RESTART" = 1 ]; then
 fi
 say "$RESULT"
 systemctl disable --now "$TIMER_UNIT" 2>/dev/null || systemctl stop "$TIMER_UNIT" 2>/dev/null || true
-post_discord "[pit-gap-flip] APPLIED — OPENCLAW_FINANCIALS_PIT=1 + OPENCLAW_BT_GAP_FILL=open ($RESULT). Gate:
+post_discord "[pit-gap-flip] APPLIED — OPENCLAW_FINANCIALS_PIT=1 + OPENCLAW_BT_GAP_FILL=open + OPENCLAW_MACRO_PIT=1 ($RESULT). Gate:
 $(echo "$VERDICT" | tail -n +2 | head -8)
-Next: live aux['financials'] is unchanged (engine.py already sees filed data only); the backtest stops reading unfiled quarters and stops protecting stops against gaps. OWED: canonical sequence (weights rebuild -> floor recheck -> activation). Kill switch: OPENCLAW_FINANCIALS_PIT=0 + OPENCLAW_BT_GAP_FILL=level + user-scope johnbot restart."
+Next: live aux['financials'] is unchanged (engine.py already sees filed data only); the backtest stops reading unfiled quarters, stops protecting stops against gaps, and reads macro series only after their release lag. OWED: canonical sequence (weights rebuild -> floor recheck -> activation). Kill switch: OPENCLAW_FINANCIALS_PIT=0 + OPENCLAW_BT_GAP_FILL=level + OPENCLAW_MACRO_PIT=0 + user-scope johnbot restart."
 exit 0

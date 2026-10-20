@@ -14,6 +14,7 @@ import json
 import importlib.util
 import traceback
 import inspect
+import random
 
 import pandas as pd
 import numpy as np
@@ -116,6 +117,85 @@ def _zero_signal_exempt(cls) -> bool:
     except (TypeError, ValueError):
         pass
     return _manifest_regime_gated(getattr(cls, 'id', None))
+
+
+def _sig_tuple(s):
+    return tuple(repr(getattr(s, f, None)) for f in
+                 ('ticker', 'direction', 'entry_price', 'stop_loss', 'target_1', 'signal_params'))
+
+
+def _cache_parity_check(cls, *, seed: int = 0, n_dates: int = 3):
+    """Cached-vs-fresh parity for BaseStrategy.cached (six-repo D2b).
+
+    Runs the strategy on a synthetic panel of min_lookback + 60 bars (the
+    default 60-bar panel would make this vacuous for long-lookback strategies)
+    with the full-panel cache source set, then checks that every cached slice
+    equals a fresh prefix compute (a non-causal fn differs) and that the signals
+    equal those of an uncached instance. Returns (errors, warnings)."""
+    errors: list = []
+    warns: list = []
+    min_lb = int(getattr(cls, 'min_lookback', 20) or 20)
+    tickers = [f'ZZTEST{i}' for i in range(25)] + ['SPY', 'QQQ']
+    panel = _make_synthetic_prices(tickers=tickers, n_days=max(SYNTHETIC_DAYS, min_lb + 60))
+    regime = _make_synthetic_regime()
+    regs = getattr(cls, 'active_in_regimes', None) or []
+    if regs:
+        regime['state'] = regs[0]
+    universe = list(panel.columns)
+    pool = list(panel.index[min_lb + 5:])
+    dates = random.Random(seed).sample(pool, k=min(n_dates, len(pool)))
+
+    def _run(inst, frame):
+        try:
+            return inst.generate_signals(frame, regime, universe, aux_data={'options': {}})
+        except TypeError:
+            return inst.generate_signals(frame, regime, universe)
+
+    names_checked = set()
+    for d in dates:
+        ds = d.strftime('%Y-%m-%d')
+        sub = panel.loc[:d]
+        try:
+            a = cls()
+            a._cache_source = panel
+            sig_a = _run(a, sub)
+            b = cls()
+            sig_b = _run(b, sub)
+        except Exception as e:
+            errors.append(f'cache_parity: generate_signals raised at {ds}: {e}')
+            continue
+        for key, ent in (getattr(a, '_bt_cache', None) or {}).items():
+            if not ent:
+                continue
+            name, cols = key
+            fn, full = ent
+            names_checked.add(name)
+            try:
+                fresh = fn(panel.loc[:d, list(cols)])
+                got = full.loc[:d]
+                if isinstance(got, pd.DataFrame):
+                    pd.testing.assert_frame_equal(got, fresh, check_exact=True)
+                else:
+                    pd.testing.assert_series_equal(got, fresh, check_exact=True)
+            except Exception:
+                errors.append(f'cache_parity: {name} differs at {ds}')
+        if [_sig_tuple(x) for x in (sig_a or [])] != [_sig_tuple(x) for x in (sig_b or [])]:
+            errors.append(f'cache_parity: signals differ at {ds}')
+    try:
+        src_text = inspect.getsource(cls)
+    except Exception:
+        # Module loaded by spec_from_file_location is not in sys.modules, so
+        # getsource fails: read the file the method was compiled from.
+        try:
+            with open(cls.generate_signals.__code__.co_filename) as fh:
+                src_text = fh.read()
+        except Exception:
+            src_text = ''
+    if 'self.cached(' in src_text and not names_checked:
+        warns.append('cache_parity_vacuous')
+    print(f'[cache_parity] checked={len(names_checked)} dates={len(dates)} errors={len(errors)}',
+          file=sys.stderr)
+    return errors, warns
 
 
 def validate(filepath: str) -> dict:
@@ -278,6 +358,12 @@ def validate(filepath: str) -> dict:
     warnings_out: list = []
     if signal_count == 0 and not _zero_signal_exempt(cls):
         warnings_out.append('zero_signals_synthetic')
+
+    # ── 6c. Cached-vs-fresh parity (six-repo D2b; flag-gated, default off) ────
+    if os.environ.get('OPENCLAW_BT_CACHE_PARITY') == '1':
+        _perr, _pwarn = _cache_parity_check(cls)
+        errors.extend(_perr)
+        warnings_out.extend(_pwarn)
 
     # ── 7. Signal field type checks ───────────────────────────────────────────
     VALID_DIRECTIONS  = {'LONG', 'SHORT', 'SELL_VOL', 'BUY_VOL', 'FLAT'}

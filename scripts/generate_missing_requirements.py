@@ -46,6 +46,16 @@ DETECTION_RULES = [
 ALWAYS_REQUIRED = {'prices'}
 
 
+def is_measurement_twin(path) -> bool:
+    """True if the file's head carries the `measurement twin — never register` marker."""
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            head = ''.join(fh.readline() for _ in range(40))
+    except OSError:
+        return False
+    return 'measurement twin — never register' in head
+
+
 def detect_columns(py_path: Path) -> set[str]:
     text = py_path.read_text(encoding='utf-8', errors='ignore')
     found: set[str] = set(ALWAYS_REQUIRED)
@@ -67,7 +77,8 @@ def load_existing(json_path: Path) -> dict | None:
 def process(dry_run: bool) -> int:
     # Skip __init__.py and underscore-prefixed files (templates / reference examples;
     # see src/strategies/implementations/_template_example.py — Phase 2E).
-    impls = sorted(p for p in IMPL_DIR.glob('*.py') if p.stem != '__init__' and not p.name.startswith('_'))
+    impls = sorted(p for p in IMPL_DIR.glob('*.py') if p.stem != '__init__' and not p.name.startswith('_')
+                  and not is_measurement_twin(p))
     missing = [p for p in impls if not (p.with_suffix('.requirements.json')).exists()]
     if not missing:
         print(f'[gen_reqs] no missing requirements.json — {len(impls)} strategies are already covered.')

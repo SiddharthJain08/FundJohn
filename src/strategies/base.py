@@ -320,6 +320,84 @@ class BaseStrategy(ABC):
         calendar IS the signal, not a rebalance schedule."""
         return bool(isinstance(regime, dict) and regime.get('cadence_reset'))
 
+    def cached(self, name: 'str', fn: 'Callable[[pd.DataFrame], pd.DataFrame | pd.Series]',
+               frame: 'pd.DataFrame') -> 'pd.DataFrame | pd.Series':
+        """Materialise-once / slice-per-date indicator cache (backtest only).
+
+        Computes ``fn(full_frame)`` once per (instance, name, column tuple) and
+        returns ``.loc[:frame.index[-1]]`` of it on every later bar, replacing
+        the O(T^2) pattern of re-running ``.rolling()`` over the growing prefix.
+        The full frame comes from ``self._cache_source``, set only by the
+        backtest ``IndicatorCacheTracker`` under OPENCLAW_BT_INDICATOR_CACHE=1.
+        Without it (live engine, validate, unflagged backtests) this is a plain
+        ``fn(frame)`` call.
+
+        Contract: ``frame`` is the ``prices`` argument as received, or a column
+        subset of it. Every transform (dropna, ffill, pct_change) goes INSIDE
+        ``fn``; a pre-transformed frame is detected (it differs from the
+        source prefix, NaN-aware, e.g. after ffill) and bypasses the cache. ``fn`` MUST be causal (rolling, ewm,
+        shift, cumulative): never centred windows, full-sample normalisation or
+        cross-sectional rank on a future-inclusive frame, since ``fn`` sees the
+        whole history. Cross-sectional fns (mean(axis=1), rank(axis=1)) over a
+        per-bar universe change the column tuple and recompute every bar,
+        each time over ALL T rows: correct, but a net LOSS versus a plain
+        call. Only one result is kept per ``name`` (a new column tuple evicts
+        the old one). A ``fn`` whose result is not indexed like the source
+        rows and columns (reductions such as ``.iloc[-1]``, ``tail``, a
+        row-dropping ``dropna``) is uncacheable (remembered per name and column tuple): correct, no
+        speed-up. A fn that selects a column subset is uncacheable by design. Mutating the returned object is safe under
+        pandas 3 Copy-on-Write."""
+        stats = self.__dict__.setdefault(
+            '_bt_cache_stats', {'hit': 0, 'miss': 0, 'recompute': 0, 'bypass': 0,
+                                'incompatible': 0, 'uncacheable': 0})
+        src = getattr(self, '_cache_source', None)
+        if src is None:
+            stats['bypass'] += 1
+            return fn(frame)
+        n = len(frame)
+        cols = list(frame.columns)
+        if n == 0 or n > len(src) or not frame.index.equals(src.index[:n]):
+            stats['incompatible'] += 1
+            return fn(frame)
+        # O(1) fast path: the loop's exact prefix slice of the source (same
+        # data pointer and strides under copy-on-write). Mixed dtypes / column
+        # subsets / transformed frames fall through to the full compare.
+        a, b = frame.to_numpy(), src.to_numpy()[:n]
+        if not (frame.columns.equals(src.columns) and a.shape == b.shape
+                and a.strides == b.strides
+                and a.__array_interface__['data'][0] == b.__array_interface__['data'][0]):
+            if (not all(c in src.columns for c in cols)
+                    or not frame.equals(src.iloc[:n][cols])):
+                stats['incompatible'] += 1
+                return fn(frame)
+        store = self.__dict__.setdefault('_bt_cache', {})
+        key = (name, tuple(frame.columns))
+        ent = store.get(key)
+        if ent is False:        # remembered uncacheable key: skip the wasted full compute
+            stats['uncacheable'] += 1
+            return fn(frame)
+        if ent is None:
+            full = fn(src[cols])
+            if (not isinstance(full, (pd.DataFrame, pd.Series))
+                    or not full.index.equals(src.index)
+                    or (isinstance(full, pd.DataFrame) and list(full.columns) != cols)):
+                stats['uncacheable'] += 1
+                for k in [k for k in store if k[0] == name]:
+                    del store[k]
+                store[key] = False
+                return fn(frame)
+            stale = [k for k in store if k[0] == name]
+            if stale:
+                stats['recompute'] += 1
+            for k in stale:
+                del store[k]
+            store[key] = (fn, full)
+            stats['miss'] += 1
+        else:
+            full = ent[1]
+            stats['hit'] += 1
+        return full.loc[:frame.index[-1]]
+
     def position_scale(self, regime_state: str) -> float:
         """Regime-adjusted position scale."""
         return REGIME_POSITION_SCALE.get(regime_state, 0.35)
