@@ -2029,6 +2029,7 @@ def run_backtest(strategy_id: str, *,
                    benchmark_sharpe)
                 VALUES %s
             """, regime_rows)
+        trade_rows = []
         if trades:
             trade_rows = [(
                 run_id, i + 1, strategy_id, t['ticker'], t['direction'],
@@ -2055,6 +2056,11 @@ def run_backtest(strategy_id: str, *,
             SET primary_window = FALSE
             WHERE strategy_id = %s AND run_id <> %s
         """, (strategy_id, run_id))
+
+        # Hot-cache sync (migration 166): same transaction as the demotion, so
+        # it commits/rolls back with it (also for commit=False ephemeral runs).
+        from backtest.trades_primary import sync_primary_trades_safe
+        sync_primary_trades_safe(cur, strategy_id, run_id, trade_rows)
 
         if commit:
             conn.commit()

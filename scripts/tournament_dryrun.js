@@ -160,6 +160,8 @@ async function scenarioWinner() {
   const winnerRight    = !!(result.ok && result.btResult && result.btResult.sharpe === 1.9 && result.btResult.trade_count === 120);
   const reattributed   = dbCalls.some(c => c.sql.startsWith('UPDATE strategy_backtest_runs SET strategy_id')
     && c.params[0] === STRAT_ID && c.params[1] === 'dryrun-run-2');
+  const hotReattributed = dbCalls.some(c => c.sql.startsWith('UPDATE strategy_backtest_trades_primary SET strategy_id')
+    && c.params[0] === STRAT_ID && c.params[1] === 'dryrun-run-2');
   const winnerDecision = decisions.find(d => d.gateName === 'tournament' && d.outcome === 'pass');
   const loserDecisions = decisions.filter(d => d.gateName === 'tournament' && d.outcome === 'reject');
   const winnerDecisionOk = !!(winnerDecision
@@ -176,6 +178,7 @@ async function scenarioWinner() {
     'winner is variant 2 (Sharpe 1.9/120 trades, beats':  winnerRight,
     "  tv3's 5.0/40<floor and tv1's 0.8)":                winnerRight,
     "winner's backtest run re-attributed to canonical id": reattributed,
+    'hot table re-attributed':                           hotReattributed,
     "winner decision: reasonCode='tournament_winner', winner_variant=2, winner_loadable=true": winnerDecisionOk,
     '2 tournament_loser decisions, each carrying sharpe+trade_count metrics': loserDecisionsOk,
   };

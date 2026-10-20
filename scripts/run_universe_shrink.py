@@ -47,6 +47,7 @@ from backtest import universe_ladder_recs as recs  # noqa: E402
 from backtest.universe_shrink import (  # noqa: E402
     FULL_TIER, load_membership, mean_tier_sizes, shrink_and_select, db_rows,
 )
+from backtest.trades_primary import trades_source  # noqa: E402
 
 MANIFEST = ROOT / 'src' / 'strategies' / 'manifest.json'
 REGIMES_PARQUET = ROOT / 'data' / 'master' / 'historical_regimes.parquet'
@@ -187,9 +188,9 @@ def main() -> int:
                 pg.commit()
                 skipped += 1
                 continue
-            cur.execute("""
+            cur.execute(f"""
                 SELECT ticker, entry_date, pnl_pct, holding_days, entry_regime
-                  FROM strategy_backtest_trades WHERE run_id=%s""",
+                  FROM {trades_source()} WHERE run_id=%s""",
                         (run['run_id'],))
             trades = [dict(zip(('ticker', 'entry_date', 'pnl_pct',
                                 'holding_days', 'entry_regime'), r))

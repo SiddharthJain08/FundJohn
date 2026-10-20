@@ -34,6 +34,7 @@ sys.path.insert(0, str(ROOT / 'src'))
 from execution.oue_classifier import classify          # noqa: E402
 from execution.strategy_weights import CADENCE_WEIGHT_NORM_ENV  # noqa: E402
 from strategies import historical_regimes               # noqa: E402
+from backtest.trades_primary import trades_source       # noqa: E402
 
 PRICES_PARQUET = ROOT / 'data' / 'master' / 'prices.parquet'
 
@@ -247,8 +248,8 @@ def _trade_tickers(conn, strategy_id: str) -> set[str]:
     """Distinct tickers traded in the strategy's latest primary_window run
     (empty when it has no run — build_panel then returns None as before)."""
     with conn.cursor() as cur:
-        cur.execute("""
-            SELECT DISTINCT ticker FROM strategy_backtest_trades
+        cur.execute(f"""
+            SELECT DISTINCT ticker FROM {trades_source()}
              WHERE run_id = (SELECT run_id FROM strategy_backtest_runs
                               WHERE strategy_id=%s AND primary_window=TRUE
                               ORDER BY run_at DESC LIMIT 1)
@@ -323,9 +324,9 @@ def build_panel(strategy_id: str, conn, prices: pd.DataFrame,
         run = cur.fetchone()
         if not run:
             return None
-        cur.execute("""
+        cur.execute(f"""
             SELECT ticker, direction, entry_date, exit_date, pnl_pct, holding_days, entry_regime
-              FROM strategy_backtest_trades WHERE run_id=%s ORDER BY exit_date
+              FROM {trades_source()} WHERE run_id=%s ORDER BY exit_date
         """, (run['run_id'],))
         trades = [dict(r) for r in cur.fetchall()]
         gate = _sigma_gate(cur)

@@ -11,6 +11,7 @@ const { runAlpaca } = require('./alpaca_cli');
 const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
 const { buildStrategyRow } = require('./strategy_row');
 const { blendScope } = require('./blend_scope');
+const { btTradesTable } = require('../../lib/bt_trades_source');
 const { parseActivationDryRun, benchCardPayload, minSharpeGone,
        clampExcessValue, excessCardPayload } = require('./activation_preview');
 const { isRegimeEligibleNow, regimeForStrategy } = require('./regime_active');
@@ -1887,7 +1888,7 @@ app.get('/api/strategies', async (req, res) => {
     const bwRows = (await dbQuery(`
       SELECT t.strategy_id, MAX(t.pnl_pct) AS best, MIN(t.pnl_pct) AS worst,
              AVG(t.pnl_pct) AS avg_pnl
-        FROM strategy_backtest_trades t
+        FROM ${btTradesTable()} t
         JOIN (SELECT DISTINCT ON (strategy_id) strategy_id, run_id
                 FROM strategy_backtest_runs WHERE primary_window=TRUE
                 ORDER BY strategy_id, run_at DESC) r ON r.run_id=t.run_id

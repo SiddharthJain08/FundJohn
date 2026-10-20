@@ -2013,6 +2013,14 @@ class ResearchOrchestrator {
         [stratId, winner.btResult.run_id]);
       await this._query(`UPDATE strategy_backtest_trades SET strategy_id = $1 WHERE run_id = $2`,
         [stratId, winner.btResult.run_id]);
+      // Hot cache (migration 166) mirrors the rename. Never throws: a missing table
+      // (migration not yet applied) or any failure is repaired by --resync.
+      try {
+        await this._query(`UPDATE strategy_backtest_trades_primary SET strategy_id = $1 WHERE run_id = $2`,
+          [stratId, winner.btResult.run_id]);
+      } catch (e) {
+        notify?.(`  ⚠️ tournament: hot-table re-attribution failed (${e.message}) — run python3 -m backtest.trades_primary --resync ${stratId}`);
+      }
     }
 
     // Verify (never mutate) that the winner resolves under its canonical id
