@@ -57,6 +57,7 @@ def env(tmp_path, monkeypatch, request):
     monkeypatch.setattr(ac, 'PARQUET', str(single))
     monkeypatch.setattr(qf, '_cached', lambda master_table: set())
     monkeypatch.delenv('OPENCLAW_PRICES_HIVE', raising=False)
+    monkeypatch.delenv('OPENCLAW_PRICES_HIVE_READ', raising=False)
     monkeypatch.delenv('OPENCLAW_CLOSE_PROXY_SNAPSHOT', raising=False)
     monkeypatch.delenv('OPENCLAW_PRICES_TRAILING_WINDOW', raising=False)
     for p in (single, hive, ps.PRICES_PATH, ps.PRICES_HIVE_DIR):
@@ -65,9 +66,9 @@ def env(tmp_path, monkeypatch, request):
 
 
 def _both(monkeypatch, fn):
-    monkeypatch.delenv('OPENCLAW_PRICES_HIVE', raising=False)
+    monkeypatch.delenv('OPENCLAW_PRICES_HIVE_READ', raising=False)
     a = fn()
-    monkeypatch.setenv('OPENCLAW_PRICES_HIVE', '1')
+    monkeypatch.setenv('OPENCLAW_PRICES_HIVE_READ', '1')
     b = fn()
     return a, b
 
@@ -112,11 +113,11 @@ def test_backtest_panel_and_asset_corr_hive_equals_file(env, monkeypatch):
 def test_prices_source_log_and_empty_fallback(env, monkeypatch, capsys, caplog):
     single, hive = env
     caplog.set_level(logging.INFO)
-    monkeypatch.delenv('OPENCLAW_PRICES_HIVE', raising=False)
+    monkeypatch.delenv('OPENCLAW_PRICES_HIVE_READ', raising=False)
     ps.prices_read_table(['ticker'], path=single)
     out = capsys.readouterr()
     assert '[prices_source]' not in out.err + out.out + caplog.text
-    monkeypatch.setenv('OPENCLAW_PRICES_HIVE', '1')
+    monkeypatch.setenv('OPENCLAW_PRICES_HIVE_READ', '1')
     ps.prices_read_table(['ticker'], path=single)
     assert 'layout=hive' in capsys.readouterr().err
     # an in-flight writer's .tmp / .lock beside committed parts is never read
@@ -136,12 +137,55 @@ def test_path_override_logged_while_flag_on(env, monkeypatch, capsys, tmp_path):
     single, hive = env
     other = tmp_path / 'other.parquet'
     pq.write_table(pa.table({'ticker': ['ZZTEST1']}), other)
-    monkeypatch.delenv('OPENCLAW_PRICES_HIVE', raising=False)
+    monkeypatch.delenv('OPENCLAW_PRICES_HIVE_READ', raising=False)
     ps.prices_read_table(['ticker'], path=other)
     cap = capsys.readouterr()
     assert '[prices_source]' not in cap.err + cap.out
-    monkeypatch.setenv('OPENCLAW_PRICES_HIVE', '1')
+    monkeypatch.setenv('OPENCLAW_PRICES_HIVE_READ', '1')
     for _ in range(2):   # one line per call
         assert ps.prices_read_table(['ticker'], path=other).num_rows == 1
     err = capsys.readouterr().err
     assert err.count('[prices_source] layout=file reason=path_override') == 2
+
+
+def _line(capsys):
+    cap = capsys.readouterr()
+    return cap.err + cap.out
+
+
+def test_read_flag_matrix(env, monkeypatch, capsys):
+    single, hive = env
+    n = pq.read_metadata(single).num_rows
+    # WRITE flag only: readers stay on the file, silently
+    monkeypatch.setenv('OPENCLAW_PRICES_HIVE', '1')
+    assert not ps.prices_hive_read_enabled()
+    assert ps.prices_read_table(['ticker']).num_rows == n
+    assert '[prices_source]' not in _line(capsys)
+    # READ flag only, built tree: hive
+    monkeypatch.delenv('OPENCLAW_PRICES_HIVE')
+    monkeypatch.setenv('OPENCLAW_PRICES_HIVE_READ', '1')
+    assert ps.prices_hive_read_enabled()
+    assert ps.prices_read_table(['ticker']).num_rows == n
+    assert 'layout=hive' in _line(capsys)
+    # READ with a stale tree (newest year's part lacks the latest dates): file
+    part = hive / 'year=2026' / 'part-0.parquet'
+    t = pq.read_table(part)
+    pq.write_table(t.slice(0, t.num_rows // 2) if False else
+                   t.filter(pa.compute.less(t['date'], pa.scalar('2026-01-20'))), part)
+    assert ps.prices_read_table(['ticker']).num_rows == n
+    assert 'layout=file reason=hive_stale' in _line(capsys)
+    # READ with an empty tree: hive_empty
+    for f in hive.glob('year=*/part-0.parquet'):
+        f.rename(f.with_name('part-0.parquet.tmp'))
+    assert not ps.prices_hive_read_enabled()
+    assert ps.prices_read_table(['ticker']).num_rows == n
+    assert 'layout=file reason=hive_empty' in _line(capsys)
+
+
+def test_to_datetime_safe_categorical_repeated_dates():
+    dates = pd.bdate_range('2020-01-01', periods=200).strftime('%Y-%m-%d')
+    vals = np.repeat(dates.values, 50)[:10000]    # date-major: 1 unique date in first 50 rows
+    s = pd.Series(pd.Categorical(vals))
+    out = ps.to_datetime_safe(s)
+    assert len(out) == 10000 and str(out.dtype).startswith('datetime64')
+    assert out.iloc[0] == pd.Timestamp('2020-01-01')

@@ -6,8 +6,10 @@ single authoritative prices.parquet (stream A, A7). The single file is never mod
 Usage: python3 scripts/build_prices_hive.py [--apply] [--years 2024,2025] [--src P]
        [--out-dir D] [--spill-dir D] [--memory-limit 1GB]
 Exit: 0 ok, 2 count mismatch.
-Run `build --apply` BEFORE setting OPENCLAW_PRICES_HIVE=1; parity FAILs until built.
+Run `build --apply` BEFORE setting OPENCLAW_PRICES_HIVE_READ=1; parity FAILs until built.
 Each year's verify+replace holds the same per-year lock as the dual-write.
+RUNBOOK: holds the prices.parquet lock up to 600 s while collect's append_dedup times out after 30 s — run only outside 19:00–20:30Z.
+Readers flip separately: set OPENCLAW_PRICES_HIVE_READ=1 (OPENCLAW_PRICES_HIVE only gates the dual-write).
 """
 from __future__ import annotations
 
@@ -65,8 +67,8 @@ def build(src: Path, out_dir: Path, *, years: list[int] | None, apply: bool,
                 part = out_dir / f'year={y}' / 'part-0.parquet'
                 part.parent.mkdir(parents=True, exist_ok=True)
                 tmp = Path(str(part) + '.tmp')
-                tmp.unlink(missing_ok=True)
                 with _file_lock(prices_hive_lock_base(y, out_dir), timeout=600.0):
+                    tmp.unlink(missing_ok=True)   # under the lock: a concurrent dual-write owns .tmp
                     try:
                         con.execute(f"COPY ({body} ORDER BY date, ticker) TO '{_q(tmp)}' "
                                     f"(FORMAT PARQUET, COMPRESSION 'snappy', "

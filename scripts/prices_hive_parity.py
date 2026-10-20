@@ -18,6 +18,7 @@ import pyarrow.parquet as pq  # noqa: E402
 
 DEFAULT_SRC = ROOT / 'data' / 'master' / 'prices.parquet'
 DEFAULT_HIVE = ROOT / 'data' / 'master' / 'prices'
+DEFAULT_SPILL = Path('/root/openclaw/data/.duckdb_spill')   # same convention as build_prices_hive
 
 
 def _q(p) -> str:
@@ -25,7 +26,7 @@ def _q(p) -> str:
 
 
 def parity(src: Path, hive_dir: Path, *, sample: int = 2000, seed: int = 0,
-           memory_limit: str = '1GB') -> dict:
+           memory_limit: str = '1GB', spill_dir: Path | str | None = None) -> dict:
     src, hive_dir = Path(src), Path(hive_dir)
     parts = sorted(hive_dir.glob('*/*.parquet'))
     out = {'rows_file': pq.read_metadata(src).num_rows,
@@ -40,6 +41,9 @@ def parity(src: Path, hive_dir: Path, *, sample: int = 2000, seed: int = 0,
         try:
             con.execute(f"SET memory_limit='{memory_limit}'")
             con.execute('SET threads=1')
+            if spill_dir is not None:
+                Path(spill_dir).mkdir(parents=True, exist_ok=True)
+                con.execute(f"SET temp_directory='{_q(spill_dir)}'")
             out['dup_keys_hive'] = con.execute(
                 f"SELECT count(*) - count(DISTINCT (ticker, date)) FROM {hive}").fetchone()[0]
             out['ticker_maxdate_mismatch'] = con.execute(
@@ -72,9 +76,10 @@ def main(argv=None) -> int:
     ap.add_argument('--sample', type=int, default=2000)
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--memory-limit', default='1GB')
+    ap.add_argument('--spill-dir', default=str(DEFAULT_SPILL))
     a = ap.parse_args(argv)
     r = parity(Path(a.src), Path(a.hive_dir), sample=a.sample, seed=a.seed,
-               memory_limit=a.memory_limit)
+               memory_limit=a.memory_limit, spill_dir=Path(a.spill_dir))
     return 0 if r['verdict'] == 'PASS' else 1
 
 

@@ -413,8 +413,45 @@ SURFACE_KEYS      = ['ticker', 'date']
 
 
 def prices_hive_enabled() -> bool:
-    """Hive dual-write flag (read at call time). Single file stays authoritative."""
+    """Hive dual-WRITE flag (read at call time). Gates only `write_prices`; the single
+    file stays authoritative. Readers use `prices_hive_read_enabled` (separate flag)."""
     return os.environ.get('OPENCLAW_PRICES_HIVE') == '1'
+
+
+def prices_hive_read_enabled() -> bool:
+    """Hive READ flag: `OPENCLAW_PRICES_HIVE_READ=1` AND at least one committed year
+    part exists. Independent of the write flag, so the dual-write can soak (and the
+    tree be built) before any reader trusts it."""
+    return os.environ.get('OPENCLAW_PRICES_HIVE_READ') == '1' and bool(prices_hive_files())
+
+
+def to_datetime_safe(s: pd.Series) -> pd.Series:
+    """pd.to_datetime that never leaves a Categorical: on a dictionary-read `date`
+    column whose dictionary is sorted (hive / date-major file) the to_datetime cache
+    path keeps the Categorical wrapper, and a later merge raises datetime64 vs category."""
+    out = pd.to_datetime(s)
+    if isinstance(out.dtype, pd.CategoricalDtype):
+        out = out.astype(out.cat.categories.dtype)
+    return out
+
+
+def _max_date_from_footers(files) -> str | None:
+    """Max of the `date` string column from row-group footer stats; None if any
+    footer lacks usable stats (caller treats unknown as stale)."""
+    best = None
+    for f in files:
+        md = pq.ParquetFile(f).metadata
+        if md.num_row_groups == 0:
+            continue
+        idx = md.schema.to_arrow_schema().get_field_index('date')
+        for g in range(md.num_row_groups):
+            st = md.row_group(g).column(idx).statistics
+            if st is None or not st.has_min_max:
+                return None
+            m = str(st.max)
+            if best is None or m > best:
+                best = m
+    return best
 
 
 def prices_hive_part(year: int) -> Path:
@@ -474,14 +511,17 @@ def prices_read_table(columns: Sequence[str], filters=None,
                       path: Path | str | None = None) -> pa.Table:
     """Read prices columns; filters = DNF list or pc.Expression.
 
-    Flag unset: the same pq.read_table call as before, no log line. Flag on with
-    `path` naming some other file: that file, logged `reason=path_override`. Flag on and at least one committed year part exists: a
-    pyarrow dataset over those explicit files. One `[prices_source]` line per
-    call while the flag is on."""
+    `OPENCLAW_PRICES_HIVE_READ` unset: the same pq.read_table call as before, no log
+    line (the write flag `OPENCLAW_PRICES_HIVE` does not affect readers). READ on with
+    `path` naming some other file: that file, logged `reason=path_override`. READ on
+    and no committed year part: file, `reason=hive_empty`. READ on and the hive's
+    newest `date` (footer stats) older than the single file's: file,
+    `reason=hive_stale`. Otherwise a pyarrow dataset over the explicit part files.
+    One `[prices_source]` line per call while READ is on."""
     columns = list(columns)
     rd = list(read_dictionary) if read_dictionary else None
     target = PRICES_PATH if path is None else path
-    if not prices_hive_enabled():
+    if os.environ.get('OPENCLAW_PRICES_HIVE_READ') != '1':
         return pq.read_table(target, columns=columns, filters=filters,
                              read_dictionary=rd)
     if Path(target) != Path(PRICES_PATH):
@@ -491,6 +531,15 @@ def prices_read_table(columns: Sequence[str], filters=None,
     files = prices_hive_files()
     if not files:
         print('[prices_source] layout=file reason=hive_empty', file=sys.stderr, flush=True)
+        return pq.read_table(target, columns=columns, filters=filters,
+                             read_dictionary=rd)
+    try:
+        hive_max = _max_date_from_footers(files)
+        file_max = _max_date_from_footers([target])
+    except Exception:  # noqa: BLE001 - unreadable footer = unproven tree
+        hive_max = file_max = None
+    if hive_max is None or file_max is None or hive_max < file_max:
+        print('[prices_source] layout=file reason=hive_stale', file=sys.stderr, flush=True)
         return pq.read_table(target, columns=columns, filters=filters,
                              read_dictionary=rd)
     if isinstance(filters, list):

@@ -216,7 +216,7 @@ def _attach_spot(agg: pd.DataFrame) -> pd.DataFrame:
         print(f'WARNING: spot backfill failed ({exc}) — spot left NULL')
         return agg
     px['ticker'] = px['ticker'].astype(str)
-    px['date'] = pd.to_datetime(px['date'])
+    px['date'] = ps.to_datetime_safe(px['date'])
     px = px.rename(columns={'close': '_spot'})
     agg = agg.merge(px, on=['ticker', 'date'], how='left')
     agg['spot'] = agg['_spot']

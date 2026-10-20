@@ -18,6 +18,7 @@ Usage:
   python3 scripts/resort_prices_master.py [--dry-run | --apply] [--path P]
       [--spill-dir D] [--memory-limit 2GB] [--row-group-size 122880] [--threads 1]
 Exit: 0 verified, 2 on any mismatch (master untouched), 3 dry-run layout FAIL.
+RUNBOOK: --apply holds the prices.parquet lock up to 600 s while collect's append_dedup times out after 30 s — run only outside 19:00–20:30Z.
 """
 from __future__ import annotations
 

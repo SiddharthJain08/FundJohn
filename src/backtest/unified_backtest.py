@@ -351,11 +351,8 @@ def load_prices_panels(calendar: str = 'union', tickers=None) -> tuple[pd.DataFr
     if str(p['ticker'].dtype) == 'category':
         p['ticker'] = p['ticker'].cat.remove_unused_categories()
         p['ticker'] = p['ticker'].cat.reorder_categories(sorted(p['ticker'].cat.categories))
-    p['date'] = pd.to_datetime(p['date'])
-    if isinstance(p['date'].dtype, pd.CategoricalDtype):
-        # A7: a hive read yields SORTED date dictionaries, for which to_datetime keeps
-        # the Categorical wrapper (the single file's unsorted ones come back datetime64).
-        p['date'] = p['date'].astype(p['date'].cat.categories.dtype)
+    # A7: to_datetime_safe — sorted (hive / date-major) dictionaries keep the Categorical.
+    p['date'] = _ps.to_datetime_safe(p['date'])
     p = p.sort_values(['ticker', 'date'])
     # Close panel (wide). Strategies expect index = date, columns = ticker, values = close.
     close_wide = p.pivot(index='date', columns='ticker', values='close')
