@@ -433,6 +433,10 @@ class TestSignalExprLint(unittest.TestCase):
         self.assertEqual(self._kinds(['SIGNAL: str = "rank_pct(close)"']), [])
         self.assertEqual(sl.lint_source(self._src(['SIGNAL = "sma(close, 20)"'])), [])
 
+    def test_empty_signal_is_not_a_violation(self):
+        self.assertEqual(self._kinds(["SIGNAL = ''"]), [])
+        self.assertEqual(self._kinds(['SIGNAL: str = ""']), [])
+
     def test_bad_annotated_signal_is_a_violation(self):
         self.assertEqual(len(self._kinds(['SIGNAL: str = "exp(close)"'])), 1)
 

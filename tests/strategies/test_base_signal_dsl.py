@@ -163,16 +163,15 @@ def test_signal_dsl_line_on_every_skip_path(capsys):
 
 
 def test_no_existing_implementation_declares_signal():
-    import importlib, pkgutil
-    import strategies.implementations as impl
-    for m in pkgutil.iter_modules(impl.__path__):
-        try:
-            mod = importlib.import_module(f'strategies.implementations.{m.name}')
-        except Exception:
-            continue
-        for v in vars(mod).values():
-            if isinstance(v, type) and issubclass(v, BaseStrategy) and v is not BaseStrategy:
-                assert not v.__dict__.get('SIGNAL'), (m.name, v)
+    """Source-text scan (no module imports): only the three `_dsl` pilots declare SIGNAL."""
+    from pathlib import Path
+    from strategies import generate_signatures as g
+    impl = Path(__file__).resolve().parents[2] / 'src' / 'strategies' / 'implementations'
+    declaring = {p.stem for p in impl.glob('*.py')
+                 if g._dsl_signal_literal(p.read_text(errors='replace')) is not None}
+    assert declaring == {'S_golden_cross_trend_signal_tv2_dsl',
+                         'S_amihud_illiquidity_premium_dsl',
+                         'oxf_bollinger_momentum_dsl'}
 
 
 def test_signal_columns_list_accepted_and_bad_type_reported():

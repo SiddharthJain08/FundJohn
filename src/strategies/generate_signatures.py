@@ -84,7 +84,8 @@ def _dsl_signal_literal(source: str):
 
 def signature_for_source(source: str) -> dict:
     """Per-file signature dict. A DSL source (class-body SIGNAL literal) also
-    gets an exact ``formula_hash`` and op/column ``formula_tokens``."""
+    gets an exact ``formula_hash`` and op/column names under ``formula_ops``
+    (``formula_tokens`` keeps FORMULA_VOCAB semantics for Jaccard dedup)."""
     regimes = extract_regimes(source)
     dirs    = extract_directions(source)
     sig = {
@@ -101,7 +102,7 @@ def signature_for_source(source: str) -> dict:
             used = {n.id for n in ast.walk(ast.parse(expr.strip(), mode='eval'))
                     if isinstance(n, ast.Name)}
             sig['formula_hash'] = h
-            sig['formula_tokens'] = sorted(n for n in used if n != 'abs')
+            sig['formula_ops'] = sorted(n for n in used if n != 'abs')
         except Exception as e:  # malformed SIGNAL: keep the substring signature
             print(f'[generate_signatures] SIGNAL not hashable ({e}); substring signature kept',
                   file=sys.stderr)

@@ -438,7 +438,7 @@ class BaseStrategy(ABC):
         regime_state:   str   = 'LOW_VOL',
     ) -> dict:
         """Standard stop/target computation. Reusable across strategies."""
-        _atr_raw = (self.ind.atr(prices_series, 14, method='close_diff', fallback_pct=None).iloc[-1]
+        _atr_raw = (_indicators.atr(prices_series, 14, method='close_diff', fallback_pct=None).iloc[-1]
                     if len(prices_series) >= 14 else float('nan'))
         # Treat ATR=0 (e.g. stale/ffilled constant series) same as NaN — use 2% fallback.
         atr  = float(_atr_raw) if (pd.notna(_atr_raw) and float(_atr_raw) > 0) else current_price * 0.02

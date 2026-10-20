@@ -81,6 +81,7 @@ class AmihudIlliquidityPremiumDsl(BaseStrategy):
         common = [t for t in pool if t in v.columns]
         if len(common) < 30:
             return None
+        eq, v = eq.iloc[-(fdays + 1):], v.iloc[-(fdays + 1):]
         return make_panel({'close': eq[common].astype('float64'),
                            'volume': v[common].astype('float64')})
 

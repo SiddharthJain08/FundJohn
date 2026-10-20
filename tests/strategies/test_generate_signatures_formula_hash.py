@@ -15,7 +15,8 @@ DSL_SRC = 'class A:\n    SIGNAL = "sma(close, 20) - close"\n    regimes = "LOW_V
 def test_signature_for_source_prefers_formula_hash():
     sig = g.signature_for_source(DSL_SRC)
     assert sig['formula_hash'] == signal_expr.formula_hash('sma(close, 20) - close')
-    assert sig['formula_tokens'] == ['close', 'sma']
+    assert sig['formula_tokens'] == g.extract_formula_tokens(DSL_SRC)
+    assert sig['formula_ops'] == ['close', 'sma']
     ann = g.signature_for_source('class A:\n    SIGNAL: str = "sma(close, 20) - close"\n')
     assert ann['formula_hash'] == sig['formula_hash']
 
@@ -23,7 +24,8 @@ def test_signature_for_source_prefers_formula_hash():
 def test_non_dsl_source_unchanged():
     src = "x = 'zscore'\ny = 'LONG'\nHIGH_VOL\n"
     sig = g.signature_for_source(src)
-    assert 'formula_hash' not in sig
+    assert 'formula_hash' not in sig and 'formula_ops' not in sig
+    assert list(sig) == ['regime_set_hash', 'direction_hash', 'formula_tokens', 'regimes']
     assert sig == {
         'regime_set_hash': g.sha256('HIGH_VOL'),
         'direction_hash': g.sha256('LONG'),

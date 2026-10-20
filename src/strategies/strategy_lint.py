@@ -289,6 +289,8 @@ def _lint_signal_expr(tree) -> list:
             v = _assigned(stmt, 'SIGNAL')
             if v is None:
                 continue
+            if isinstance(v, ast.Constant) and v.value == '':
+                continue  # empty SIGNAL = DSL off (base.py)
             if not (isinstance(v, ast.Constant) and isinstance(v.value, str)):
                 out.append(Violation(stmt.lineno, 'signal_expr', 'SIGNAL must be a string literal'))
             elif cols_bad is not None:

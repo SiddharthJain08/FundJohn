@@ -4,5 +4,5 @@
     "prices"
   ],
   "optional": [],
-  "origin": "backfilled 2026-07-29 from aux_data usage scan (same-day pivot ingest scoping)"
+  "origin": "created 2026-10-20 for the DSL pilot, copied from the parent oxf_bollinger_momentum sidecar (prices only)"
 }
