@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 from ..registry import check
 from ..types import Status
 
-Policy = tuple  # (kind: str, value: float)
+Policy = tuple[str, float]  # (kind, value)
 
 ROOT = Path(__file__).resolve().parents[3]
 _ET = ZoneInfo('America/New_York')
@@ -67,10 +67,7 @@ def _line_policy(line: str) -> Policy | None:
             return ('hours', 168)
         return None
     if toks and toks[0] == '*-*-*':
-        # sub-daily wildcards in the hour field (e.g. *:00:00) are not a daily job
-        time_tok = toks[1] if len(toks) > 1 else '00:00:00'
-        if not re.match(r'^\d{1,2}:', time_tok):
-            return None
+        # sub-daily wildcard: not a once-a-day job, but 2x24h staleness is the plan's floor
         return ('hours', 24)
     if toks and toks[0].lower() == 'daily':
         return ('hours', 24)
@@ -115,8 +112,8 @@ def _tc():
 def _session_overdue(last_ok: dt.datetime, now_et: dt.datetime) -> bool:
     tc = _tc()
     d0, d1 = last_ok.astimezone(_ET).date(), now_et.date()
-    if d1 <= d0:
-        return False
+    if (d1 - d0).days <= 1:
+        return False  # no full day strictly between
     return any(d0 < s < d1 for s in tc.sessions(d0 + dt.timedelta(days=1), d1 - dt.timedelta(days=1)))
 
 
@@ -168,16 +165,21 @@ def evaluate(rows: list[dict], policies: dict[str, Policy], *, now: dt.datetime)
 
 
 _QUERY = """
-SELECT job_name, source,
-       MAX(finished_at) FILTER (WHERE success) AS last_success_at,
-       COUNT(*) FILTER (WHERE success IS FALSE
-                          AND started_at > COALESCE(
-                              (SELECT MAX(r2.finished_at) FROM scheduled_job_runs r2
-                                WHERE r2.job_name = r.job_name AND r2.success), '-infinity')) AS n_fail,
-       (ARRAY_AGG(note ORDER BY started_at DESC))[1] AS last_note
+WITH last_ok AS (
+    SELECT job_name, MAX(finished_at) AS ts
+      FROM scheduled_job_runs
+     WHERE success
+     GROUP BY job_name
+)
+SELECT r.job_name, r.source,
+       MAX(r.finished_at) FILTER (WHERE r.success) AS last_success_at,
+       COUNT(*) FILTER (WHERE r.success IS FALSE
+                          AND r.started_at > COALESCE(lo.ts, '-infinity'::timestamptz)) AS n_fail,
+       (ARRAY_AGG(r.note ORDER BY r.started_at DESC))[1] AS last_note
   FROM scheduled_job_runs r
- WHERE started_at >= NOW() - interval '30 days'
- GROUP BY job_name, source
+  LEFT JOIN last_ok lo ON lo.job_name = r.job_name
+ WHERE r.started_at >= NOW() - interval '30 days'
+ GROUP BY r.job_name, r.source
 """
 
 

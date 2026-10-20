@@ -3,15 +3,58 @@
 Never touches Postgres: evaluate() is pure; the @check body is exercised only via mocks.
 """
 import re
+import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from unittest import mock
+from zoneinfo import ZoneInfo
+
+import pytest
 
 from src.system_checks.checks import scheduled_jobs as chk
 from src.system_checks.types import Status
 
 ROOT = Path(__file__).resolve().parents[2]
+_HOLIDAYS = {date(2026, 11, 26)}  # Thanksgiving
+
+
+class _StubCalendar:
+    """Weekdays minus Thanksgiving; open 09:30-16:00 ET. Same contracts as lib.trading_calendar."""
+
+    @staticmethod
+    def sessions(start, end):
+        out, d = [], start
+        while d <= end:
+            if d.weekday() < 5 and d not in _HOLIDAYS:
+                out.append(d)
+            d += timedelta(days=1)
+        return out
+
+    @staticmethod
+    def is_open(now_et):
+        now_et = now_et.astimezone(ZoneInfo('America/New_York'))
+        return (now_et.date() in _StubCalendar.sessions(now_et.date(), now_et.date())
+                and time(9, 30) <= now_et.time() < time(16, 0))
+
+
+@pytest.fixture(autouse=True)
+def _no_calendar_or_subprocess(monkeypatch):
+    monkeypatch.setattr(chk, '_tc', lambda: _StubCalendar)
+
+    def _boom(*a, **k):
+        raise AssertionError('subprocess used in a unit test')
+    monkeypatch.setattr(subprocess, 'run', _boom)
+    monkeypatch.setattr(subprocess, 'Popen', _boom)
+
+
+def test_guard_blocks_subprocess():
+    with pytest.raises(AssertionError):
+        subprocess.run(['true'])
+    with pytest.raises(AssertionError):
+        subprocess.Popen(['true'])
+
+
 MON_1000_ET = datetime(2026, 10, 19, 14, 0, tzinfo=timezone.utc)
 FRI_1600_ET = datetime(2026, 10, 16, 20, 0, tzinfo=timezone.utc)
 
@@ -75,13 +118,14 @@ def test_warn_lists_at_most_four_names():
     rows = [_row(n, None, fails=1) for n in ['sameday-compute-1500', 'sameday-execute-1555', 'premarket-gate-0915',
                                              'opg-sweep-0932', 'open-reconcile-0925', 'morning-regime-0900']]
     st, d = chk.evaluate(rows, chk.CRON_POLICIES, now=MON_1000_ET)
-    assert st is Status.WARN and d.count('-') >= 4 and 'morning-regime-0900' not in d
+    assert st is Status.WARN and '(+2 more)' in d and 'morning-regime-0900' not in d
 
 
 def test_policy_from_oncalendar():
     assert chk.policy_from_oncalendar(['Mon..Fri *-*-* 16:15:00 America/New_York']) == ('session', 1)
     assert chk.policy_from_oncalendar(['Sat *-*-* 06:00:00 UTC']) == ('hours', 168)
     assert chk.policy_from_oncalendar(['*-*-* 06:00:00 UTC']) == ('hours', 24)
+    assert chk.policy_from_oncalendar(['*-*-* *:00:00']) == ('hours', 24)
     assert chk.policy_from_oncalendar(['Tue..Fri *-*-* 21:45:00 UTC']) is None
     assert chk.policy_from_oncalendar(['Sat *-*-* 06:00:00 UTC', 'Mon..Fri *-*-* 06:00:00 UTC']) is None
 
@@ -125,3 +169,22 @@ def test_check_body_warns_when_table_absent_via_mocks(monkeypatch):
     monkeypatch.setitem(sys.modules, 'psycopg2', fake)
     st, d = chk._scheduled_jobs_overdue()
     assert st is Status.WARN and 'migration 167' in d
+
+
+def test_query_shape_bounded_failure_count():
+    q = chk._QUERY
+    assert 'last_ok' in q and 'LEFT JOIN' in q.upper()
+    final_select = q.split('SELECT r.job_name', 1)[1].split('FROM', 1)[0]
+    assert '(SELECT' not in final_select.upper().replace('(ARRAY_AGG', '') and 'MAX(R' not in final_select.upper().replace('MAX(R.FINISHED_AT) FILTER', '')
+    assert 'r2' not in q
+
+
+def test_empty_range_never_calls_sessions(monkeypatch):
+    class Boom(_StubCalendar):
+        @staticmethod
+        def sessions(*a):
+            raise AssertionError('sessions() called for empty range')
+    monkeypatch.setattr(chk, '_tc', lambda: Boom)
+    # last success Mon, now Tue: d1 - d0 == 1 -> no full day between
+    assert chk.evaluate([_row('sameday-compute-1500', MON_1000_ET)], chk.CRON_POLICIES,
+                        now=MON_1000_ET + timedelta(days=1))[0] is Status.PASS

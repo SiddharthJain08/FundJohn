@@ -51,3 +51,4 @@ Units without `EnvironmentFile=/root/openclaw/.env` log
 `[job_stat] skipped: POSTGRES_URI unset` and record nothing. Until the drop-in is
 installed only in-process cron rows exist; the `scheduled_jobs_overdue` system
 check (`src/system_checks/checks/scheduled_jobs.py`) judges whatever it sees.
+Mode-gated crons (registration gated in `cron-schedule.js`) keep WARNing for up to 30 days after a mode flip, until their last row ages out; this is expected.
