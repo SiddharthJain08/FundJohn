@@ -16,6 +16,7 @@ const cron         = require('node-cron');
 const { execSync, spawn } = require('child_process');
 const path         = require('path');
 const { Pool }     = require('pg');
+const jobStat      = require('../lib/job_stat');
 const { getClient: redisClient } = require('../database/redis');
 
 const pool = new Pool({ connectionString: process.env.POSTGRES_URI });
@@ -104,6 +105,14 @@ function runPython(script, args = '') {
 function log(msg) {
     const ts = new Date().toISOString();
     console.log(`[${ts}] [Cron] ${msg}`);
+}
+
+// Single registration point for every in-process cron entry: records one
+// scheduled_job_runs row per fire (job_stat.js, fail-open, never delays or
+// alters the callback; rethrows exactly what it threw). Rows for callbacks that
+// spawn detached children mean "dispatched", not "finished".
+function _sched(job, expr, fn, opts) {
+    return cron.schedule(expr, (...a) => jobStat.runTracked(pool, job, () => fn(...a)), opts);
 }
 
 
@@ -253,7 +262,7 @@ function start(swarm, generateId, notifyDiscord) {
     // See bot.js handleBotMessage() + runResearchPipeline() + runTradePipeline().
 
     // 23:59 ET daily — reset token budget
-    cron.schedule('59 23 * * *', resetTokenBudgets, { timezone: 'America/New_York' });
+    _sched('token-budget-reset', '59 23 * * *', resetTokenBudgets, { timezone: 'America/New_York' });
 
     // Close-execution rollout gate (default OFF). When ON, the daily cycle
     // computes at ~3:10pm ET (close[t]-proxy signals) and executes market orders
@@ -289,7 +298,7 @@ function start(swarm, generateId, notifyDiscord) {
     // 10:00 AM ET Mon–Fri — legacy daily cycle (registered only when NEITHER
     // close-exec NOR EOD-flow is ON). EOD-flow supersedes the legacy same-day
     // cycle (§4: entire live cycle re-timed to act-next-day).
-    if (!closeExecLive && !eodSignalRegister && !sameDayExec) cron.schedule('0 10 * * 1-5', () => {
+    if (!closeExecLive && !eodSignalRegister && !sameDayExec) _sched('legacy-daily-cycle-1000', '0 10 * * 1-5', () => {
         const useLangGraph = process.env.OPENCLAW_LANGGRAPH_ORCHESTRATOR === '1';
         const today = new Date().toISOString().slice(0, 10);
 
@@ -349,17 +358,17 @@ function start(swarm, generateId, notifyDiscord) {
             }
         };
         // 3:10 PM ET — compute phase (close[t]-proxy signals; produces sized handoff; no execution).
-        cron.schedule('10 15 * * 1-5', () => {
+        _sched('closeexec-compute-1510', '10 15 * * 1-5', () => {
             log('close-exec compute (3:10pm ET): activation → collect → coverage_warm → sentiment → signals → ic_gate → handoff → trade');
             dispatchCycle('scheduled-compute', ['activation', 'collect', 'coverage_warm', 'sentiment', 'signals', 'ic_gate', 'handoff', 'trade']);
         }, { timezone: 'America/New_York' });
         // 3:55 PM ET — execute phase (market orders into the close).
-        cron.schedule('55 15 * * 1-5', () => {
+        _sched('closeexec-execute-1555', '55 15 * * 1-5', () => {
             log('close-exec execute (3:55pm ET)');
             dispatchCycle('scheduled-execute', ['alpaca', 'reconcile', 'report', 'pyportfolioopt_shadow', 'health']);
         }, { timezone: 'America/New_York' });
         // 9:35 AM ET — start-of-day price refresh (dashboard only; not a signal input).
-        cron.schedule('35 9 * * 1-5', () => {
+        _sched('closeexec-sod-refresh-0935', '35 9 * * 1-5', () => {
             log('SOD dashboard refresh (9:35am ET)');
             try { runPython('src/pipeline/run_sod_refresh.py'); }
             catch (e) { log(`SOD refresh error: ${e.message.slice(0, 200)}`); }
@@ -395,7 +404,7 @@ function start(swarm, generateId, notifyDiscord) {
         // any positions filled that day.
         // EOD mode only — under same-day exec the 16:15 slot runs collect
         // alone (see the sameDayExec block below).
-        if (eodSignalRegister) cron.schedule('15 16 * * 1-5', () => {
+        if (eodSignalRegister) _sched('eod-signal-register-1615', '15 16 * * 1-5', () => {
             log('EOD compute (4:15pm ET): activation → collect → coverage_warm → sentiment → signals → option_hedge');
             dispatchCycle('eod-signal-register', ['activation', 'collect', 'coverage_warm', 'sentiment', 'signals', 'option_hedge']);
         }, { timezone: 'America/New_York' });
@@ -411,7 +420,7 @@ function start(swarm, generateId, notifyDiscord) {
         // market_news only. Fail-open: the script always exits 0, so a news outage
         // can never stop the gate from running.
         if (process.env.OPENCLAW_EOD_PREMARKET_GATE === '1') {
-            cron.schedule('5 9 * * 1-5', () => {
+            _sched('premarket-news-0905', '5 9 * * 1-5', () => {
                 log('pre-market news fetch (9:05am ET — ahead of the 9:15 gate)');
                 try {
                     const fs    = require('fs');
@@ -441,7 +450,7 @@ function start(swarm, generateId, notifyDiscord) {
         // sys.path bootstrap (the module inserts ROOT/src itself via Path(__file__),
         // but -c has no __file__ so we inject the path explicitly).
         if (process.env.OPENCLAW_EOD_PREMARKET_GATE === '1') {
-            cron.schedule('15 9 * * 1-5', () => {
+            _sched('premarket-gate-0915', '15 9 * * 1-5', () => {
                 log('EOD pre-market carry-forward gate (9:15am ET)');
                 try {
                     const fs    = require('fs');
@@ -475,7 +484,7 @@ function start(swarm, generateId, notifyDiscord) {
         // close dropped/flattened positions at the open (OPG dual-path) +
         // strategy-ledger close; does NOT size or submit opens.
         if (process.env.OPENCLAW_EOD_RECONCILE === '1') {
-            cron.schedule('25 9 * * 1-5', () => {
+            _sched('open-reconcile-0925', '25 9 * * 1-5', () => {
                 log('EOD open-window reconcile (9:25am ET — premarket, OPG required)');
                 try {
                     const fs    = require('fs');
@@ -500,7 +509,7 @@ function start(swarm, generateId, notifyDiscord) {
             // Day-closes any OPG drop/flatten orders that did not fill at the
             // auction (the 2026-05-18 214/224-expired failure pattern). Fires
             // after the 9:30 open so unfilled OPGs are visible as expired.
-            cron.schedule('32 9 * * 1-5', () => {
+            _sched('opg-sweep-0932', '32 9 * * 1-5', () => {
                 log('EOD post-open OPG day-sweep (9:32am ET)');
                 try {
                     const fs    = require('fs');
@@ -530,7 +539,7 @@ function start(swarm, generateId, notifyDiscord) {
         // there is nothing sized to execute. Drops are already closed at 9:30;
         // the sizer's re-diff sees them gone, so no double-close.
         // EOD mode only — same-day exec has its own 15:55 execute leg below.
-        if (eodSignalRegister) cron.schedule('55 15 * * 1-5', () => {
+        if (eodSignalRegister) _sched('eod-into-close-fill-1555', '55 15 * * 1-5', () => {
             log('EOD into-close fill (3:55pm ET): trade → alpaca → reconcile → report → health');
             dispatchCycle('eod-into-close-fill', ['trade', 'alpaca', 'reconcile', 'report', 'health']);
         }, { timezone: 'America/New_York' });
@@ -555,7 +564,7 @@ function start(swarm, generateId, notifyDiscord) {
             // so --budget 1200 leaves real headroom and still lands by ~14:50.
             // Adapters run cheapest-first, so a budget overrun truncates
             // financials (the last and most re-fetchable) rather than options.
-            cron.schedule('30 14 * * 1-5', () => {
+            _sched('tier1-acting-ingest-1430', '30 14 * * 1-5', () => {
                 log('tier-1 acting-set ingest (2:30pm ET): insider stream, options chains, today\'s reporters');
                 try {
                     const fs = require('fs');
@@ -579,7 +588,7 @@ function start(swarm, generateId, notifyDiscord) {
             // handoff. NO full collect in the critical path (67-min aux
             // collection is the 16:15 slot's job; the tier-1 overlay above is
             // what makes the aux the engine reads same-day).
-            cron.schedule('0 15 * * 1-5', () => {
+            _sched('sameday-compute-1500', '0 15 * * 1-5', () => {
                 // `activation` first (2026-08-22): applies any dashboard Strategy
                 // Activation slider change (eligibility + weights) before
                 // signals, so a slider moved today trades today.
@@ -592,7 +601,7 @@ function start(swarm, generateId, notifyDiscord) {
             // TODAY (a stale/missing handoff means the 15:00 compute failed —
             // submitting yesterday's sizing would be exactly the staleness
             // this pivot removes).
-            cron.schedule('55 15 * * 1-5', () => {
+            _sched('sameday-execute-1555', '55 15 * * 1-5', () => {
                 const fs = require('fs');
                 const today = new Date().toISOString().slice(0, 10);
                 const handoff = path.join(ROOT, 'output', 'handoffs', `${today}_sized.json`);
@@ -608,7 +617,7 @@ function start(swarm, generateId, notifyDiscord) {
             // 16:15 ET — official EOD collect (append real close[t] + aux
             // masters) + option_hedge. Signals are NOT recomputed here; the
             // 15:00 chain is the sole signal producer in this mode.
-            cron.schedule('15 16 * * 1-5', () => {
+            _sched('sameday-eod-collect-1615', '15 16 * * 1-5', () => {
                 log('same-day EOD collect (4:15pm ET): collect → coverage_warm → option_hedge');
                 dispatchCycle('sameday-eod-collect', ['collect', 'coverage_warm', 'option_hedge']);
             }, { timezone: 'America/New_York' });
@@ -621,7 +630,7 @@ function start(swarm, generateId, notifyDiscord) {
             // first same-day execution). Runs after the fills, produces NO
             // signals. Spawned directly: it is a measurement job, not a
             // pipeline step.
-            cron.schedule('20 16 * * 1-5', () => {
+            _sched('sameday-evening-marks-1620', '20 16 * * 1-5', () => {
                 log('same-day evening marks (4:20pm ET): parity → ledger → live_days → stale');
                 try {
                     const fs = require('fs');
@@ -642,7 +651,7 @@ function start(swarm, generateId, notifyDiscord) {
 
             // 9:35 ET — start-of-day dashboard price refresh (close-exec
             // heritage; dashboard-only, not a signal input).
-            cron.schedule('35 9 * * 1-5', () => {
+            _sched('sameday-sod-refresh-0935', '35 9 * * 1-5', () => {
                 log('SOD dashboard refresh (9:35am ET)');
                 try { runPython('src/pipeline/run_sod_refresh.py'); }
                 catch (e) { log(`SOD refresh error: ${e.message.slice(0, 200)}`); }
@@ -652,7 +661,7 @@ function start(swarm, generateId, notifyDiscord) {
     // ── End SP-6 Phase A EOD block ────────────────────────────────────────────
 
     // 9:00 AM ET Mon–Fri: fresh regime at market open (run_market_state.py only — no signals/Alpaca)
-    cron.schedule('0 9 * * 1-5', async () => {
+    _sched('morning-regime-0900', '0 9 * * 1-5', async () => {
         log('Morning regime refresh starting');
         try {
             runPython('scripts/run_market_state.py');
@@ -705,7 +714,7 @@ function start(swarm, generateId, notifyDiscord) {
     const _intradaySchedule = process.env.OPENCLAW_INTRADAY_15MIN_PREFETCH === '1'
         ? '*/15 9-19 * * 1-5'   // 15-min cadence (uniform 3-tick confirmation + prefetch)
         : '*/5 9-19 * * 1-5';   // legacy 5-min cadence
-    cron.schedule(_intradaySchedule, () => {
+    _sched('intraday-hmm-tick', _intradaySchedule, () => {
         try {
             const fs = require('fs');
             const path = require('path');
@@ -730,7 +739,7 @@ function start(swarm, generateId, notifyDiscord) {
     // Inert unless OPENCLAW_CRYPTO_REGIME=1. Spawns the driver detached,
     // mirroring the intraday-HMM spawn above. Produces a regime signal only
     // (crypto_regime_latest.json + crypto_regime_states); no redeploy (Phase C).
-    cron.schedule('0 * * * *', () => {
+    _sched('crypto-regime-tick', '0 * * * *', () => {
         if (process.env.OPENCLAW_CRYPTO_REGIME !== '1') return;
         try {
             const fs = require('fs');
@@ -757,7 +766,7 @@ function start(swarm, generateId, notifyDiscord) {
     // < 500 rows accumulated). Daily (not weekly) so the model arrives
     // within 24h of crossing the training threshold rather than waiting
     // up to a week for the next Sunday.
-    cron.schedule('0 18 * * *', () => {
+    _sched('intraday-hmm-refit-1800', '0 18 * * *', () => {
         log('Intraday HMM refit starting');
         try {
             const out = runPython('scripts/train_intraday_hmm.py');
@@ -774,7 +783,7 @@ function start(swarm, generateId, notifyDiscord) {
     // slot: box is quiet, options_eod already carries T-1, and the 18:00 ET
     // HMM refit then reads a fresh panel. Detached spawn (runs 10-30 min) with
     // its own log — same pattern as cadence-recompute below.
-    cron.schedule('5 6 * * 1-5', () => {
+    _sched('options-aggregates-refresh-0605', '5 6 * * 1-5', () => {
         log('options-aggregates refresh: spawning refresh_options_aggregates.py');
         try {
             const fs = require('fs');
@@ -798,7 +807,7 @@ function start(swarm, generateId, notifyDiscord) {
     }, { timezone: 'America/New_York' });
 
     // Daily 23:55 ET — recompute per-strategy avg holding period + next_fire_date.
-    cron.schedule('55 23 * * *', () => {
+    _sched('cadence-recompute-2355', '55 23 * * *', () => {
         log('cadence-recompute: spawning strategy_cadence_recompute.py');
         try {
             const fs = require('fs');
@@ -822,7 +831,7 @@ function start(swarm, generateId, notifyDiscord) {
     }, { timezone: 'America/New_York' });
 
     // Intraday every 5 min during RTH (9:00-16:00 ET) Mon–Fri — position circuit breaker for consolidate-mode positions.
-    cron.schedule('*/5 9-16 * * 1-5', () => {
+    _sched('circuit-breaker-tick', '*/5 9-16 * * 1-5', () => {
         try {
             const fs = require('fs');
             const path = require('path');
@@ -859,7 +868,7 @@ function start(swarm, generateId, notifyDiscord) {
     // Sunday 08:00 ET — weekly memory synthesis
     // (Reaper removed 2026-04-28 per CLAUDE.md NEVER-DELETE-DATA invariant —
     // orphan-column detection no longer feeds data_deprecation_queue.)
-    cron.schedule('0 8 * * 0', async () => {
+    _sched('weekly-maintenance-sun0800', '0 8 * * 0', async () => {
         log('Weekly maintenance starting — signatures, backtest sweep');
 
         // Refresh data_ledger materialized view
@@ -931,7 +940,7 @@ function start(swarm, generateId, notifyDiscord) {
   // execution instead of the morning before.
 
   // 3:05 AM ET daily: snapshot curator priors → time series for trend-aware calibration
-  cron.schedule('5 3 * * *', async () => {
+  _sched('curator-priors-snapshot-0305', '5 3 * * *', async () => {
     try {
       const { snapshotAll } = require('../agent/curators/snapshot_priors');
       const result = await snapshotAll();
