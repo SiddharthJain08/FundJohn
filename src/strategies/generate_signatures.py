@@ -6,10 +6,18 @@ for duplicate detection (Jaccard on formula_tokens + regime_set match).
 Usage:
     cd /root/openclaw && python3 src/strategies/generate_signatures.py
 """
+import ast
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
+
+# cron-schedule.js runs this file as a bare script (sys.path[0] = src/strategies):
+# make the `strategies` package importable (same shim as strategy_lint.py).
+_SRC_DIR = str(Path(__file__).resolve().parents[1])
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
 
 IMPL_DIR   = Path(__file__).parent / 'implementations'
 MANIFEST   = Path(__file__).parent / 'manifest.json'
@@ -50,6 +58,57 @@ def extract_formula_tokens(source: str) -> list[str]:
     return sorted(t for t in FORMULA_VOCAB if t in src_lower)
 
 
+def _dsl_signal_literal(source: str):
+    """The class-body ``SIGNAL = "<literal>"`` / ``SIGNAL: str = "<literal>"``
+    string, found via ast (the source is never imported); None if absent."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for stmt in node.body:
+            if isinstance(stmt, ast.Assign):
+                targets, value = stmt.targets, stmt.value
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                targets, value = [stmt.target], stmt.value
+            else:
+                continue
+            if (any(isinstance(t, ast.Name) and t.id == 'SIGNAL' for t in targets)
+                    and isinstance(value, ast.Constant) and isinstance(value.value, str)
+                    and value.value.strip()):
+                return value.value
+    return None
+
+
+def signature_for_source(source: str) -> dict:
+    """Per-file signature dict. A DSL source (class-body SIGNAL literal) also
+    gets an exact ``formula_hash`` and op/column names under ``formula_ops``
+    (``formula_tokens`` keeps FORMULA_VOCAB semantics for Jaccard dedup)."""
+    regimes = extract_regimes(source)
+    dirs    = extract_directions(source)
+    sig = {
+        'regime_set_hash':  sha256(' '.join(regimes)),
+        'direction_hash':   sha256(' '.join(dirs)),
+        'formula_tokens':   extract_formula_tokens(source),
+        'regimes':          regimes,
+    }
+    expr = _dsl_signal_literal(source)
+    if expr is not None:
+        try:
+            from strategies import signal_expr   # lazy: only DSL sources need it
+            h = signal_expr.formula_hash(expr)
+            used = {n.id for n in ast.walk(ast.parse(expr.strip(), mode='eval'))
+                    if isinstance(n, ast.Name)}
+            sig['formula_hash'] = h
+            sig['formula_ops'] = sorted(n for n in used if n != 'abs')
+        except Exception as e:  # malformed SIGNAL: keep the substring signature
+            print(f'[generate_signatures] SIGNAL not hashable ({e}); substring signature kept',
+                  file=sys.stderr)
+    return sig
+
+
 def main() -> None:
     manifest = json.loads(MANIFEST.read_text())
     strategies = manifest.get('strategies', {})
@@ -65,16 +124,7 @@ def main() -> None:
         source = path.read_text(errors='replace')
         strategy_id = path.stem
 
-        regimes   = extract_regimes(source)
-        dirs      = extract_directions(source)
-        tokens    = extract_formula_tokens(source)
-
-        sigs[strategy_id] = {
-            'regime_set_hash':  sha256(' '.join(regimes)),
-            'direction_hash':   sha256(' '.join(dirs)),
-            'formula_tokens':   tokens,
-            'regimes':          regimes,
-        }
+        sigs[strategy_id] = signature_for_source(source)
 
     # Merge the EJECTED-strategy signature archive (candidate reaper,
     # 2026-07-14): ejected strategies have their implementation files

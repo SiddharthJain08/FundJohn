@@ -1126,6 +1126,7 @@ def load_aux_data(universe: list, as_of=None, needed_kinds: set | None = None) -
                             continue
                         _rets = _g['close'].pct_change()
                         # Current HV20 (annualized, fraction)
+                        # Same quantity as strategies.indicators.realized_vol(close, 20, log=False) / (21, log=True); not migrated (re-gate risk, spec §3 C3).
                         _hv20_now = float(_rets.iloc[-20:].std() * (252 ** 0.5))
                         if _hv20_now > 0:
                             _hv20_by_ticker[_t] = round(_hv20_now, 4)

@@ -275,6 +275,7 @@ def build_hv21_lookup(prices: pd.DataFrame):
                 cache[tkr] = None
                 return None
             s = g.set_index('date')['close'].astype(float)
+            # Same quantity as strategies.indicators.realized_vol(close, 20, log=False) / (21, log=True); not migrated (re-gate risk, spec §3 C3).
             logret = np.log(s).diff()
             cache[tkr] = (logret.rolling(21).std() * math.sqrt(TRADING_DAYS)).dropna()
         return cache[tkr]

@@ -237,7 +237,7 @@ class TestCLIContract(unittest.TestCase):
             f.write_text(OK_HEAD)
             rc, payload = self._run_main(f)
         self.assertEqual(rc, 0)
-        self.assertEqual(payload, {'ok': True, 'violations': []})
+        self.assertEqual(payload, {'ok': True, 'violations': [], 'warnings': []})
 
     def test_cli_json_contract_on_a_violating_file(self):
         with tempfile.TemporaryDirectory() as d:
@@ -266,6 +266,203 @@ class TestCLIContract(unittest.TestCase):
         self.assertEqual(len(payload['violations']), 1)
         self.assertEqual(payload['violations'][0]['kind'], 'syntax')
         self.assertEqual(set(payload['violations'][0].keys()), {'file', 'line', 'kind', 'detail'})
+
+
+class TestWarnRules(unittest.TestCase):
+    """C1: mechanical rules on a WARN channel; never change ok/violations/rc without --strict."""
+
+    def _run_main(self, *argv):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = sl.main([str(a) for a in argv])
+        return rc, json.loads(buf.getvalue())
+
+    def _warn_file(self, d, name='w.py'):
+        f = Path(d) / name
+        f.write_text(OK_HEAD + 's = pd.Series([1.0])\nr = s.rolling(5).mean()\nx = s.shift(-1)\n')
+        return f
+
+    def test_each_rule_fires(self):
+        cases = [
+            ('x = s.shift(-1)\n', 'negative_shift'),
+            ('x = s.shift(periods=-2)\n', 'negative_shift'),
+            ('x = lag(s, -3)\n', 'negative_shift'),
+            ('import pandas as pd\nd = pd.read_parquet("p")\n', 'unguarded_parquet_read'),
+            ('r = s.rolling(20).mean()\n', 'rolling_without_min_periods'),
+            ('e = 1e-9\n', 'raw_epsilon_literal'),
+        ]
+        for snippet, kind in cases:
+            with self.subTest(snippet=snippet):
+                self.assertEqual([v.kind for v in sl.lint_warnings(OK_HEAD + snippet)], [kind])
+
+    def test_rules_do_not_fire_on_clean_forms(self):
+        for snippet in ('s.shift(1)\n', 's.rolling(20, min_periods=20).mean()\n',
+                        'e = 1e-3\n', 'e = 0.0\n',
+                        'from strategies.asof import asof_align\nimport pandas as pd\npd.read_parquet("p")\n',
+                        'from strategies import asof\nimport pandas as pd\npd.read_csv("p")\n',
+                        'import strategies.asof\nimport pandas as pd\npd.read_csv("p")\n'):
+            with self.subTest(snippet=snippet):
+                self.assertEqual(sl.lint_warnings(OK_HEAD + snippet), [])
+
+    def test_main_block_findings_are_tagged(self):
+        vs = sl.lint_warnings(OK_HEAD + "if __name__ == '__main__':\n    x = s.shift(-1)\n")
+        self.assertEqual(len(vs), 1)
+        self.assertTrue(vs[0].detail.endswith('[__main__]'))
+
+    def test_format_warnings_line(self):
+        vs = sl.lint_warnings(OK_HEAD + 'e = 1e-9\n')
+        self.assertTrue(sl.format_warnings(vs)[0].startswith('[strategy-lint-warn] line 7: raw_epsilon_literal: '))
+
+    def test_lint_source_never_returns_warn_kinds(self):
+        self.assertEqual(sl.lint_source(OK_HEAD + 'x = s.shift(-1)\ne = 1e-9\n'), [])
+
+    def test_warn_rules_never_change_ok_or_rc(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = self._warn_file(d)
+            rc, payload = self._run_main(f)
+            self.assertEqual(sl.lint_file(f), [])
+        self.assertEqual(rc, 0)
+        self.assertIs(payload['ok'], True)
+        self.assertEqual(payload['violations'], [])
+        self.assertEqual(len(payload['warnings']), 2)
+        for w in payload['warnings']:
+            self.assertEqual(set(w.keys()), {'file', 'line', 'kind', 'detail'})
+
+    def test_strict_promotes_warnings(self):
+        with tempfile.TemporaryDirectory() as d:
+            rc, payload = self._run_main('--strict', self._warn_file(d))
+        self.assertEqual(rc, 1)
+        self.assertIs(payload['ok'], False)
+        self.assertEqual(len(payload['violations']), 2)
+        self.assertEqual(payload['warnings'], [])
+
+    def test_census_shape(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self._warn_file(d, 'a.py')
+            b = Path(d) / 'b.py'
+            b.write_text(OK_HEAD)
+            c = sl.census([str(a), str(b)])
+        self.assertEqual(set(c.keys()), {'files', 'rules'})
+        self.assertEqual(c['files'], 2)
+        self.assertEqual(set(c['rules']), set(sl.WARN_KINDS))
+        for kind in sl.WARN_KINDS:
+            self.assertEqual(set(c['rules'][kind]), {'files', 'hits', 'hits_in_main'})
+        self.assertEqual(c['rules']['negative_shift'], {'files': 1, 'hits': 1, 'hits_in_main': 0})
+
+    def test_census_cli_exits_zero(self):
+        with tempfile.TemporaryDirectory() as d:
+            rc, payload = self._run_main('--census', self._warn_file(d))
+        self.assertEqual(rc, 0)
+        self.assertIn('rules', payload)
+
+    def test_extra_rule_forms(self):
+        for snippet, kinds in [
+            ('e = 1.0e-9\n', ['raw_epsilon_literal']), ('e = 1E-9\n', ['raw_epsilon_literal']),
+            ('r = s.rolling(window=20).mean()\n', ['rolling_without_min_periods']),
+            ('r = s.rolling(window=20, min_periods=5).mean()\n', []),
+            ('r = s.rolling(20, **kw).mean()\n', []),
+            ('x = s.shift(-k)\n', []),
+            ("if '__main__' == __name__:\n    x = s.shift(-1)\n", ['negative_shift']),
+        ]:
+            with self.subTest(snippet=snippet):
+                self.assertEqual([v.kind for v in sl.lint_warnings(OK_HEAD + snippet)], kinds)
+        vs = sl.lint_warnings(OK_HEAD + "if '__main__' == __name__:\n    x = s.shift(-1)\n")
+        self.assertTrue(vs[0].detail.endswith('[__main__]'))
+
+    def test_syntax_error_file_has_no_warnings(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'broken.py'
+            f.write_text('def f(:\n')
+            rc, payload = self._run_main(f)
+        self.assertEqual(rc, 1)
+        self.assertEqual(payload['warnings'], [])
+        self.assertEqual([v['kind'] for v in payload['violations']], ['syntax'])
+
+    def test_crashing_rule_cannot_break_the_gate(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            f = self._warn_file(d)
+            err = io.StringIO()
+            with mock.patch.object(sl, 'lint_warnings', side_effect=RuntimeError('boom')), \
+                 contextlib.redirect_stderr(err):
+                rc, payload = self._run_main(f)
+        self.assertEqual(rc, 0)
+        self.assertIs(payload['ok'], True)
+        self.assertEqual(payload['warnings'], [])
+        self.assertIn('[lint] warnings channel failed: RuntimeError', err.getvalue())
+
+    def test_fleet_warn_channel_never_changes_the_gate(self):
+        files = sorted(glob.glob(str(ROOT / 'src' / 'strategies' / 'implementations' / '*.py')))
+        self.assertGreater(len(files), 100)
+        rc, payload = self._run_main(*files)
+        self.assertEqual(rc, 0)
+        self.assertIs(payload['ok'], True)
+        self.assertEqual(payload['violations'], [])
+        self.assertGreater(len(payload['warnings']), 0)
+
+    def test_validate_prints_warnings_to_stderr(self):
+        from unittest import mock
+        from strategies import validate_strategy
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'cand.py'
+            f.write_text('x = 1\n')
+            warn = sl.Violation(3, 'negative_shift', 'shift(-1)')
+            err = io.StringIO()
+            with mock.patch.object(sl, 'lint_file_warnings', return_value=[warn]), \
+                 mock.patch.object(sl, 'lint_file', return_value=[sl.Violation(1, 'import', 'bad')]), \
+                 contextlib.redirect_stderr(err):
+                res = validate_strategy.validate(str(f))
+        self.assertIs(res['ok'], False)
+        self.assertIn('[strategy-lint-warn]', err.getvalue())
+
+
+class TestSignalExprLint(unittest.TestCase):
+    @staticmethod
+    def _src(body):
+        return OK_HEAD + 'class S(BaseStrategy):\n' + ''.join('    ' + b + '\n' for b in body)
+
+    def _kinds(self, body):
+        return [v for v in sl.lint_source(self._src(body)) if v.kind == 'signal_expr']
+
+    def test_bad_signal_is_a_violation(self):
+        for sig in ('"close.__class__"', '"sma(vol, 5)"', '"lag(close, 0)"', '"close > 1"'):
+            self.assertEqual(len(self._kinds([f'SIGNAL = {sig}'])), 1, sig)
+
+    def test_good_signal_is_clean(self):
+        self.assertEqual(self._kinds(['SIGNAL = "sma(close, 20) / close - 1"']), [])
+        self.assertEqual(self._kinds(['SIGNAL: str = "rank_pct(close)"']), [])
+        self.assertEqual(sl.lint_source(self._src(['SIGNAL = "sma(close, 20)"'])), [])
+
+    def test_empty_signal_is_not_a_violation(self):
+        self.assertEqual(self._kinds(["SIGNAL = ''"]), [])
+        self.assertEqual(self._kinds(['SIGNAL: str = ""']), [])
+
+    def test_bad_annotated_signal_is_a_violation(self):
+        self.assertEqual(len(self._kinds(['SIGNAL: str = "exp(close)"'])), 1)
+
+    def test_signal_columns_literal_is_honoured(self):
+        self.assertEqual(self._kinds(["SIGNAL_COLUMNS = frozenset({'close','volume'})",
+                                      'SIGNAL = "sma(close * volume, 5)"']), [])
+        self.assertEqual(self._kinds(["SIGNAL_COLUMNS = ['close', 'high', 'low']",
+                                      'SIGNAL = "atr(14)"']), [])
+        self.assertEqual(len(self._kinds(['SIGNAL = "close * volume"'])), 1)
+        self.assertEqual(len(self._kinds(['SIGNAL_COLUMNS = make()', 'SIGNAL = "close"'])), 1)
+
+    def test_non_literal_signal_is_a_violation(self):
+        for rhs in ('"sma(close, " + "5)"', 'build()', 'f"close"'):
+            v = self._kinds([f'SIGNAL = {rhs}'])
+            self.assertEqual(len(v), 1, rhs)
+            self.assertIn('string literal', v[0].detail)
+
+    def test_lint_never_imports_sympy(self):
+        import subprocess
+        src = self._src(['SIGNAL = "sma(close, 20)"'])
+        r = subprocess.run(
+            [sys.executable, '-c',
+             'import sys; from strategies import strategy_lint as sl; import sys as s2; '
+             f'sl.lint_source({src!r}); print("sympy" in sys.modules, "pandas" in sys.modules)'],
+            cwd=str(ROOT / 'src'), capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.stdout.strip(), 'False False', r.stderr)
 
 
 class TestFleetIsClean(unittest.TestCase):

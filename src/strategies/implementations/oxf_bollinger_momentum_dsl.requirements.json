@@ -1,0 +1,8 @@
+{
+  "strategy_id": "oxf_bollinger_momentum_dsl",
+  "required": [
+    "prices"
+  ],
+  "optional": [],
+  "origin": "created 2026-10-20 for the DSL pilot, copied from the parent oxf_bollinger_momentum sidecar (prices only)"
+}

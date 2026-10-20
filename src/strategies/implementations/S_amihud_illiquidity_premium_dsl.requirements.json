@@ -1,0 +1,7 @@
+{
+  "strategy_id": "S_amihud_illiquidity_premium_dsl",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}
