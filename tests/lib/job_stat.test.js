@@ -100,3 +100,25 @@ test('OPENCLAW_JOB_STAT=0 issues no queries', async () => {
     if (prev === undefined) delete process.env.OPENCLAW_JOB_STAT; else process.env.OPENCLAW_JOB_STAT = prev;
   }
 });
+
+test('runTracked rethrows the ORIGINAL value even when it cannot be stringified', async () => {
+  const pool = fakePool();
+  const e = Object.create(null);
+  assert.throws(() => js.runTracked(pool, 'zz', () => { throw e; }), (x) => x === e);
+  await tick(); await tick();
+  assert.strictEqual(pool.calls[1].cfg.values[1], false);
+  assert.match(pool.calls[1].cfg.values[3], /^threw: /);
+});
+
+test('runTracked with pool undefined still runs the callback and does not throw', () => {
+  let ran = false;
+  assert.doesNotThrow(() => js.runTracked(undefined, 'zz', () => { ran = true; }));
+  assert.ok(ran);
+});
+
+test('runTracked with a pool whose query throws synchronously still runs the callback', () => {
+  const pool = { query() { throw new Error('sync boom'); } };
+  let ran = false;
+  assert.doesNotThrow(() => js.runTracked(pool, 'zz', () => { ran = true; }));
+  assert.ok(ran);
+});

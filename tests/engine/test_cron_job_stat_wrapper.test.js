@@ -11,12 +11,22 @@ test('cron.schedule appears exactly once (inside _sched)', () => {
   assert.strictEqual((text.match(/cron\.schedule\(/g) || []).length, 1);
 });
 
-test('26 _sched names, all unique, equal the documented set', () => {
+const EXPECTED_NAMES = [
+  'token-budget-reset', 'legacy-daily-cycle-1000', 'closeexec-compute-1510', 'closeexec-execute-1555',
+  'closeexec-sod-refresh-0935', 'eod-signal-register-1615', 'premarket-news-0905', 'premarket-gate-0915',
+  'open-reconcile-0925', 'opg-sweep-0932', 'eod-into-close-fill-1555', 'tier1-acting-ingest-1430',
+  'sameday-compute-1500', 'sameday-execute-1555', 'sameday-eod-collect-1615', 'sameday-evening-marks-1620',
+  'sameday-sod-refresh-0935', 'morning-regime-0900', 'intraday-hmm-tick', 'crypto-regime-tick',
+  'intraday-hmm-refit-1800', 'options-aggregates-refresh-0605', 'cadence-recompute-2355',
+  'circuit-breaker-tick', 'weekly-maintenance-sun0800', 'curator-priors-snapshot-0305',
+];
+
+test('26 _sched names, all unique, set-equal to the Task 6 brief table', () => {
   const names = [...text.matchAll(/_sched\('([a-z0-9-]+)'/g)].map((m) => m[1]);
   assert.strictEqual(names.length, 26);
   assert.strictEqual(new Set(names).size, 26);
-  for (const n of ['token-budget-reset', 'sameday-sod-refresh-0935', 'curator-priors-snapshot-0305',
-                   'weekly-maintenance-sun0800', 'circuit-breaker-tick']) assert.ok(names.includes(n), n);
+  assert.strictEqual(EXPECTED_NAMES.length, 26);
+  assert.deepStrictEqual([...names].sort(), [...EXPECTED_NAMES].sort());
 });
 
 test('a captured callback writes a cron start row named for its job', async () => {

@@ -71,6 +71,16 @@ async function recordFinish(pool, args = {}) {
     }
 }
 
+// Note building must never throw: a pathological thrown value (Object.create(null))
+// would make String() raise a TypeError that masks the original error.
+function _note(prefix, err) {
+    try {
+        return prefix + String((err && err.message) || err).slice(0, 200);
+    } catch (_) {
+        return prefix + '<unprintable>';
+    }
+}
+
 function runTracked(pool, job, fn) {
     let startP;
     try {
@@ -87,13 +97,13 @@ function runTracked(pool, job, fn) {
     try {
         out = fn();
     } catch (err) {
-        finish(1, false, 'threw: ' + String((err && err.message) || err).slice(0, 200));
+        finish(1, false, _note('threw: ', err));
         throw err;
     }
     if (out && typeof out.then === 'function') {
         out.then(
             () => finish(0, true, 'callback-resolved'),
-            (err) => finish(1, false, 'rejected: ' + String((err && err.message) || err).slice(0, 200)),
+            (err) => finish(1, false, _note('rejected: ', err)),
         );
         return out;
     }
