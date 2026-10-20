@@ -4,11 +4,12 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
-from tests.backtest.test_open_book import TestConfigJsonExitHook, _mk_plain_cls
+from tests.backtest import test_open_book as _ob
+_mk_plain_cls = _ob._mk_plain_cls
 
 
 def _cfg(env: dict):
-    helper = TestConfigJsonExitHook()
+    helper = _ob.TestConfigJsonExitHook()
     base = {k: v for k, v in os.environ.items() if k != 'OPENCLAW_MACRO_PIT'}
     base.update(env)
     with patch.dict(os.environ, base, clear=True), \
