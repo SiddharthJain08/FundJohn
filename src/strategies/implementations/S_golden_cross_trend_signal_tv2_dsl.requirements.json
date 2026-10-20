@@ -1,0 +1,7 @@
+{
+  "strategy_id": "S_golden_cross_trend_signal_tv2_dsl",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}

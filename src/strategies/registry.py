@@ -468,6 +468,10 @@ _IMPL_MAP = {
     'S_vix_gamma_range_width': ('strategies.implementations.S_vix_gamma_range_width', 'VixGammaRangeWidth'),
     # Lewis 2026 (arXiv:2610.22144): OAS shrinkage intensity corrected by cross-sectional excess kurtosis (heavy tails), long-short global min-variance weights (variant 1 of 2)
     'S_oas_extended_covariance_shrinkage': ('strategies.implementations.S_oas_extended_covariance_shrinkage', 'OasExtendedCovarianceShrinkage'),
+    # C7 DSL pilots (candidates): SIGNAL-formula twins of golden-cross tv2 / Amihud / Oxford Bollinger
+    'S_golden_cross_trend_signal_tv2_dsl': ('strategies.implementations.S_golden_cross_trend_signal_tv2_dsl', 'GoldenCrossTrendStateTV2Dsl'),
+    'S_amihud_illiquidity_premium_dsl': ('strategies.implementations.S_amihud_illiquidity_premium_dsl', 'AmihudIlliquidityPremiumDsl'),
+    'oxf_bollinger_momentum_dsl': ('strategies.implementations.oxf_bollinger_momentum_dsl', 'OxfBollingerMomentumDsl'),
 }
 
 

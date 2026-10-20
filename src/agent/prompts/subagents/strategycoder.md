@@ -192,6 +192,40 @@ staging. The same file drives the unstack-removal flow in
   type fails approval, missing an optional type just downgrades the
   signal quality.
 
+## Shared helpers
+
+Import these instead of re-deriving them (all under `strategies.`):
+- `indicators` - `atr(bars_or_close, n, method=...)`: `'true_range'` for OHLC bars, `'close_diff'` (|close.diff()|) is the
+  house default for close-only panels. Never hand-roll "ATR" as a mean of `|diff|` under another name.
+- `safe_ops` - `EPS` and `safe_div(a, b)` instead of raw `1e-6`-style epsilon literals in denominators.
+- `windows` - `event_window(start, end, close_unfinished=...)`, `state_window`, `statecount`, `crossing(a, b, direction=...)`,
+  and `episodes_to_trades` (use it in the `__main__` quick backtest to turn state episodes into trade rows).
+- `resample.session_bars(wide, rule, ...)` - session-aware resampling. Never use `pd.BDay` as a session calendar.
+
+Four advisory lint rules exist now (`negative_shift`, `unguarded_parquet_read`, `rolling_without_min_periods`,
+`raw_epsilon_literal`). They are WARN today and will become FAIL after the fleet sweep, so write new code clean.
+
+## Expression DSL (`SIGNAL = "..."`)
+
+Use it when the rule is rolling ops + a cross-sectional rank + a threshold on the last bar. Declare class attributes and the
+base class generates `generate_signals` (do not write one):
+`SIGNAL`, `SIGNAL_DIRECTION` (`'long'|'short'|'both'`), `SIGNAL_THRESHOLD` (float, or `(lo, hi)` with lo < hi for `'both'`),
+`SIGNAL_COLUMNS` (default `{'close'}`), `SIGNAL_BASE_SIZE`.
+
+- Ops: `sma(x,n) ema(x,n) std(x,n) zscore(x,n) rsi(x,n) pct_change(x,n) max(x,n) min(x,n) lag(x,n)` (`n` a positive int
+  literal), `atr(n)`, `rank_pct(x)` (cross-sectional percentile), `abs(x)`, `+ - * / **`. No comparisons or booleans:
+  a SIGNAL is a numeric score. `std`/`zscore` are ddof=1 (fold a ddof=0 rule into the threshold).
+- Columns: only `close` by default. Any other column needs `SIGNAL_COLUMNS = {...}` AND an overridden
+  `signal_panel(self, prices, universe, aux_data)` returning `strategies.signal_expr.make_panel({'close': ..., 'volume': ...})`.
+- Semantics: comparisons are STRICT (`v > hi` LONG, `v < lo` SHORT); NaN means "no bar" and a ticker with no value on the
+  last row emits nothing. For other cut-offs (e.g. an inclusive 0.80) override `select_signals(values)`; for a calendar
+  gate override `dsl_should_fire(prices, regime)`.
+- Worked examples (each has a parity test against its parent): `S_golden_cross_trend_signal_tv2_dsl`
+  (`(sma(close, 50) - sma(close, 200)) / close`, long, 0.0), `S_amihud_illiquidity_premium_dsl`
+  (`rank_pct(sma(abs(pct_change(close, 1)) / (close * volume), 60))`, both, (0.20, 0.80), monthly gate + `select_signals`),
+  `oxf_bollinger_momentum_dsl` (`(close - sma(close, 80)) / std(close, 80)`, both, `(-B, B)`).
+- Not expressible (model fits, optimisers, recursions, multi-leg options, per-name state): write Python as before.
+
 ## Intraday (single-session) strategies
 
 If the edge is entered and closed inside ONE regular-hours session (e.g. "buy 10:00 ET, flat at the close"), the daily
