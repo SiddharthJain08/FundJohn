@@ -105,7 +105,8 @@ def test_ndarray_result_is_uncacheable_and_correct(panel):
     s, fn = _armed(panel), _Fn(lambda p: p.to_numpy())
     out = s.cached('arr', fn, panel.iloc[:40])
     assert isinstance(out, np.ndarray) and out.shape == (40, 5)
-    assert s._bt_cache_stats['uncacheable'] == 1 and not s._bt_cache
+    assert s._bt_cache_stats['uncacheable'] == 1
+    assert all(v is False for v in s._bt_cache.values())
 
 
 def test_universe_change_counts_recompute(panel):
@@ -126,7 +127,10 @@ def test_non_source_indexed_result_is_uncacheable_and_correct(panel, f):
     exp = f(frame)
     (pd.testing.assert_series_equal if isinstance(exp, pd.Series)
      else pd.testing.assert_frame_equal)(out, exp, check_exact=True)
-    assert s._bt_cache_stats['uncacheable'] == 1 and not s._bt_cache
+    assert s._bt_cache_stats['uncacheable'] == 1
+    assert all(v is False for v in s._bt_cache.values())
+    s.cached('red', fn, panel.iloc[:151])
+    assert fn.calls == 1 + 1 + 1   # first call: full + frame; repeat: frame only
 
 
 def test_fast_path_skips_full_compare_for_exact_prefix(panel, monkeypatch):
@@ -147,3 +151,19 @@ def test_mixed_dtype_frame_does_not_use_fast_path(panel):
     s._cache_source = src
     out = s.cached('m', fn, src.iloc[:60])
     pd.testing.assert_frame_equal(out, fn.f(src.iloc[:60]), check_exact=True)
+
+
+def test_relabelled_columns_never_return_wrong_values(panel):
+    s, fn = _armed(panel), _Fn()
+    swapped = panel.iloc[:80].set_axis(['ZZTEST2', 'ZZTEST1', 'ZZTEST3', 'ZZTEST4', 'ZZTEST5'], axis=1)
+    out = s.cached('sma', fn, swapped)
+    pd.testing.assert_frame_equal(out, fn.f(swapped), check_exact=True)
+    assert s._bt_cache_stats['incompatible'] == 1 and s._bt_cache_stats['miss'] == 0
+
+
+def test_unknown_labels_no_keyerror(panel):
+    s, fn = _armed(panel), _Fn()
+    odd = panel.iloc[:80].set_axis(['C', 'D', 'E', 'F', 'G'], axis=1)
+    out = s.cached('sma', fn, odd)
+    pd.testing.assert_frame_equal(out, fn.f(odd), check_exact=True)
+    assert s._bt_cache_stats['incompatible'] == 1

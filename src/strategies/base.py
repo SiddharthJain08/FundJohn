@@ -344,7 +344,8 @@ class BaseStrategy(ABC):
         call. Only one result is kept per ``name`` (a new column tuple evicts
         the old one). A ``fn`` whose result is not indexed like the source
         rows and columns (reductions such as ``.iloc[-1]``, ``tail``, a
-        row-dropping ``dropna``) is uncacheable: correct, no speed-up. Mutating the returned object is safe under
+        row-dropping ``dropna``) is uncacheable (remembered per name and column tuple): correct, no
+        speed-up. A fn that selects a column subset is uncacheable by design. Mutating the returned object is safe under
         pandas 3 Copy-on-Write."""
         stats = self.__dict__.setdefault(
             '_bt_cache_stats', {'hit': 0, 'miss': 0, 'recompute': 0, 'bypass': 0,
@@ -362,7 +363,8 @@ class BaseStrategy(ABC):
         # data pointer and strides under copy-on-write). Mixed dtypes / column
         # subsets / transformed frames fall through to the full compare.
         a, b = frame.to_numpy(), src.to_numpy()[:n]
-        if not (a.shape == b.shape and a.strides == b.strides
+        if not (frame.columns.equals(src.columns) and a.shape == b.shape
+                and a.strides == b.strides
                 and a.__array_interface__['data'][0] == b.__array_interface__['data'][0]):
             if (not all(c in src.columns for c in cols)
                     or not frame.equals(src.iloc[:n][cols])):
@@ -371,12 +373,18 @@ class BaseStrategy(ABC):
         store = self.__dict__.setdefault('_bt_cache', {})
         key = (name, tuple(frame.columns))
         ent = store.get(key)
+        if ent is False:        # remembered uncacheable key: skip the wasted full compute
+            stats['uncacheable'] += 1
+            return fn(frame)
         if ent is None:
             full = fn(src[cols])
             if (not isinstance(full, (pd.DataFrame, pd.Series))
                     or not full.index.equals(src.index)
                     or (isinstance(full, pd.DataFrame) and list(full.columns) != cols)):
                 stats['uncacheable'] += 1
+                for k in [k for k in store if k[0] == name]:
+                    del store[k]
+                store[key] = False
                 return fn(frame)
             stale = [k for k in store if k[0] == name]
             if stale:
