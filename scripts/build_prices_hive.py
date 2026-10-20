@@ -6,6 +6,8 @@ single authoritative prices.parquet (stream A, A7). The single file is never mod
 Usage: python3 scripts/build_prices_hive.py [--apply] [--years 2024,2025] [--src P]
        [--out-dir D] [--spill-dir D] [--memory-limit 1GB]
 Exit: 0 ok, 2 count mismatch.
+Run `build --apply` BEFORE setting OPENCLAW_PRICES_HIVE=1; parity FAILs until built.
+Each year's verify+replace holds the same per-year lock as the dual-write.
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ for _p in (ROOT, ROOT / 'src'):
 
 import duckdb  # noqa: E402
 
-from src.data.parquet_store import _file_lock  # noqa: E402
+from src.data.parquet_store import _file_lock, prices_hive_lock_base  # noqa: E402
 
 DEFAULT_SRC = ROOT / 'data' / 'master' / 'prices.parquet'
 DEFAULT_OUT = ROOT / 'data' / 'master' / 'prices'
@@ -64,18 +66,19 @@ def build(src: Path, out_dir: Path, *, years: list[int] | None, apply: bool,
                 part.parent.mkdir(parents=True, exist_ok=True)
                 tmp = Path(str(part) + '.tmp')
                 tmp.unlink(missing_ok=True)
-                try:
-                    con.execute(f"COPY ({body} ORDER BY date, ticker) TO '{_q(tmp)}' "
-                                f"(FORMAT PARQUET, COMPRESSION 'snappy', "
-                                f"ROW_GROUP_SIZE {int(row_group_size)})")
-                    n_out = con.execute(
-                        f"SELECT count(*) FROM read_parquet('{_q(tmp)}', "
-                        f"hive_partitioning=false)").fetchone()[0]
-                    if n_out != n_src:
-                        raise RuntimeError(f'year {y}: rows {n_out} != src {n_src}')
-                    os.replace(tmp, part)
-                finally:
-                    tmp.unlink(missing_ok=True)
+                with _file_lock(prices_hive_lock_base(y, out_dir), timeout=600.0):
+                    try:
+                        con.execute(f"COPY ({body} ORDER BY date, ticker) TO '{_q(tmp)}' "
+                                    f"(FORMAT PARQUET, COMPRESSION 'snappy', "
+                                    f"ROW_GROUP_SIZE {int(row_group_size)})")
+                        n_out = con.execute(
+                            f"SELECT count(*) FROM read_parquet('{_q(tmp)}', "
+                            f"hive_partitioning=false)").fetchone()[0]
+                        if n_out != n_src:
+                            raise RuntimeError(f'year {y}: rows {n_out} != src {n_src}')
+                        os.replace(tmp, part)
+                    finally:
+                        tmp.unlink(missing_ok=True)
                 res['rows_hive'] += n_out
             res['applied'] = bool(apply)
         finally:

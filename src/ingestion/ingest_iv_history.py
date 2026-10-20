@@ -40,7 +40,6 @@ import numpy as np
 import pandas as pd
 
 DATA_DIR = Path("/root/openclaw/data/master")
-OPTS_EOD = DATA_DIR / "options_eod.parquet"
 OUT_PATH = DATA_DIR / "iv_history.parquet"
 
 

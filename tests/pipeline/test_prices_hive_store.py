@@ -34,7 +34,7 @@ def _rows(dates, close=1.0):
             for t in ('ZZTEST1', 'ZZTEST2') for d in dates]
 
 
-def test_flag_unset_no_hive_tree(store, monkeypatch):
+def test_flag_unset_no_hive_tree(store, monkeypatch, capsys):
     single, hive = store
     calls = []
     real = ps.append_dedup
@@ -43,6 +43,8 @@ def test_flag_unset_no_hive_tree(store, monkeypatch):
     assert n == 2
     assert len(calls) == 1 and Path(calls[0]) == single
     assert not hive.exists()
+    cap = capsys.readouterr()
+    assert '[prices_hive]' not in cap.err + cap.out
 
 
 def test_dual_write_splits_by_year_and_dedups(store, monkeypatch):
@@ -82,3 +84,21 @@ def test_hive_failure_never_breaks_authoritative_write(store, monkeypatch, caplo
     assert n == 2 and len(pd.read_parquet(single)) == 2
     out = capsys.readouterr().err + caplog.text
     assert out.count('[prices_hive] status=error:OSError') == 1
+    line = [l for l in out.splitlines() if '[prices_hive] status=error' in l][0]
+    assert "detail=OSError('boom')" in line
+
+
+def test_failure_detail_collapsed_to_one_line(store, monkeypatch, capsys):
+    single, hive = store
+    monkeypatch.setenv('OPENCLAW_PRICES_HIVE', '1')
+    real = ps.append_dedup
+
+    def fake(path, *a, **k):
+        if Path(path) != single:
+            raise OSError('line one\nline two')
+        return real(path, *a, **k)
+    monkeypatch.setattr(ps, 'append_dedup', fake)
+    ps.write_prices(_rows(['2026-01-02']))
+    err = capsys.readouterr().err
+    assert err.count('[prices_hive]') == 1 and len(err.strip().splitlines()) == 1
+    assert 'detail=' in err and '\\n' in err   # repr-escaped, not a raw newline

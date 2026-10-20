@@ -86,6 +86,8 @@ _COVERED_ELSEWHERE = {
 _SMALL_ENOUGH_FOR_COLUMN_READ = 100 * 1024 * 1024  # bytes
 
 
+# Flag/glob duplicated from src.data.parquet_store on purpose: importing it here
+# would pull pandas/pyarrow/duckdb into every system_checks run (import weight).
 def _options_monthly() -> bool:
     return os.environ.get('OPENCLAW_OPTIONS_MONTHLY') == '1'
 

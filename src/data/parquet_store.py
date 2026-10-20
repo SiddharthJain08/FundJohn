@@ -421,6 +421,13 @@ def prices_hive_part(year: int) -> Path:
     return PRICES_HIVE_DIR / f'year={int(year)}' / 'part-0.parquet'
 
 
+def prices_hive_lock_base(year: int, hive_dir: Path | str | None = None) -> Path:
+    """Per-year hive lock base (`_file_lock` appends '.lock'); kept beside the tree,
+    never inside it. Shared by the dual-write and scripts/build_prices_hive.py."""
+    root = Path(PRICES_HIVE_DIR if hive_dir is None else hive_dir)
+    return root.parent / f'.prices_hive_y{int(year)}'
+
+
 def _write_prices_hive(df: pd.DataFrame) -> None:
     """Best-effort dual-write; never raises. One part file per year, deduped in place."""
     years: List[int] = []
@@ -432,14 +439,14 @@ def _write_prices_hive(df: pd.DataFrame) -> None:
         for y, part in df2.groupby(yrs, sort=True):
             append_dedup(prices_hive_part(int(y)), part.reset_index(drop=True),
                          PRICES_KEYS, 'replace',
-                         lock_path=PRICES_HIVE_DIR.parent / f'.prices_hive_y{int(y)}')
+                         lock_path=prices_hive_lock_base(int(y)))
             years.append(int(y))
         status = 'ok'
         total = sum(pq.read_metadata(f).num_rows
                     for f in PRICES_HIVE_DIR.glob('year=*/part-0.parquet'))
     except Exception as e:  # noqa: BLE001 - hive must never break the collector
         status = f'error:{type(e).__name__}'
-        detail = f' detail={e}'
+        detail = ' detail=' + ' '.join(repr(e).split())
         total = -1
     print(f"[prices_hive] status={status} years={','.join(map(str, years)) or '-'} "
           f"rows_in={len(df)} total_hive={total}"
@@ -467,14 +474,18 @@ def prices_read_table(columns: Sequence[str], filters=None,
                       path: Path | str | None = None) -> pa.Table:
     """Read prices columns; filters = DNF list or pc.Expression.
 
-    Flag unset (or `path` names some other file): the same pq.read_table call as
-    before, no log line. Flag on and at least one committed year part exists: a
+    Flag unset: the same pq.read_table call as before, no log line. Flag on with
+    `path` naming some other file: that file, logged `reason=path_override`. Flag on and at least one committed year part exists: a
     pyarrow dataset over those explicit files. One `[prices_source]` line per
     call while the flag is on."""
     columns = list(columns)
     rd = list(read_dictionary) if read_dictionary else None
     target = PRICES_PATH if path is None else path
-    if not prices_hive_enabled() or Path(target) != Path(PRICES_PATH):
+    if not prices_hive_enabled():
+        return pq.read_table(target, columns=columns, filters=filters,
+                             read_dictionary=rd)
+    if Path(target) != Path(PRICES_PATH):
+        print('[prices_source] layout=file reason=path_override', file=sys.stderr, flush=True)
         return pq.read_table(target, columns=columns, filters=filters,
                              read_dictionary=rd)
     files = prices_hive_files()

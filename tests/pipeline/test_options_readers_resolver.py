@@ -51,6 +51,36 @@ def _write_months(root, df):
         g.reset_index(drop=True).to_parquet(root / f'{ym}.parquet', index=False)
 
 
+REAL_MASTER = '/root/openclaw/data/master'
+
+
+_PATH_CONSTS = ('PRICES_PATH', 'OPTIONS_PATH', 'OPTIONS_DIR', 'MACRO_PATH',
+                'INSIDER_PATH', 'FUNDAMENTALS_PATH')
+
+
+@pytest.fixture(autouse=True)
+def _no_real_master(tmp_path_factory, monkeypatch):
+    """No ps.*_PATH / options_path() / PRICES_PATH may resolve under the real master.
+
+    Setup repoints every path constant at a non-existent tmp location (a test that
+    forgets to patch one errors on a missing file instead of scanning the real
+    master). Teardown runs BEFORE monkeypatch's undo (monkeypatch is set up first),
+    so it sees the test's final values and fails loudly if any is real again."""
+    dead = tmp_path_factory.mktemp('unpatched')
+    for n in _PATH_CONSTS:
+        monkeypatch.setattr(ps, n, dead / n)
+    yield
+    for env in (None, '1'):
+        if env is None:
+            monkeypatch.delenv('OPENCLAW_OPTIONS_MONTHLY', raising=False)
+        else:
+            monkeypatch.setenv('OPENCLAW_OPTIONS_MONTHLY', env)
+        probes = {n: getattr(ps, n) for n in _PATH_CONSTS}
+        probes['options_path()'] = ps.options_path()
+        bad = {k: str(v) for k, v in probes.items() if str(v).startswith(REAL_MASTER)}
+        assert not bad, f'test left real-master paths live: {bad}'
+
+
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     monkeypatch.setattr(ps, 'OPTIONS_PATH', tmp_path / 'options_eod.parquet')
@@ -139,8 +169,17 @@ def test_parquet_reader_ops_dir_aware(store, monkeypatch):
     _write_single(ps.OPTIONS_PATH, base)
     _write_months(ps.OPTIONS_DIR, pd.concat([base, _frame(['2026-10-20'], ('ZZTEST1',))]))
     monkeypatch.setattr(ps, 'PRICES_PATH', store / 'prices.parquet')
+    monkeypatch.setattr(ps, 'MACRO_PATH', store / 'macro.parquet')
+    monkeypatch.setattr(ps, 'INSIDER_PATH', store / 'insider.parquet')
+    monkeypatch.setattr(ps, 'FUNDAMENTALS_PATH', store / 'financials.parquet')
     pd.DataFrame({'ticker': ['ZZTEST1'], 'date': ['2026-10-19'], 'close': [1.0]}
                  ).to_parquet(ps.PRICES_PATH)
+    pd.DataFrame({'series': ['ZZ'], 'date': ['2026-10-19'], 'value': [1.0]}
+                 ).to_parquet(ps.MACRO_PATH)
+    pd.DataFrame({'ticker': ['ZZTEST1'], 'transaction_date': ['2026-10-19']}
+                 ).to_parquet(ps.INSIDER_PATH)
+    pd.DataFrame({'ticker': ['ZZTEST1'], 'date': ['2026-10-19']}
+                 ).to_parquet(ps.FUNDAMENTALS_PATH)
 
     def probe():
         opts = pr.op_options({'ticker': 'ZZTEST1', 'limit': 100})
@@ -217,7 +256,6 @@ def test_scripts_use_resolver_surface(recorder):
 def test_scripts_use_resolver_iv_history(store, recorder, monkeypatch, tmp_path):
     from ingestion import ingest_iv_history as iv
     _write_single(ps.OPTIONS_PATH, _frame(['2026-10-19']))
-    monkeypatch.setattr(iv, 'OPTS_EOD', ps.OPTIONS_PATH)   # never the real master
     monkeypatch.setattr(iv, 'DATA_DIR', tmp_path / 'm')
     monkeypatch.setattr(iv, 'OUT_PATH', tmp_path / 'm' / 'iv_history.parquet')
     monkeypatch.setattr(sys, 'argv', ['x', '--rebuild', '--dry-run'])
@@ -239,7 +277,7 @@ def test_scripts_use_resolver_parity(recorder):
     assert recorder and 'implied_volatility' in recorder[0][0]
 
 
-def test_scripts_use_resolver_acting_ingest(recorder, monkeypatch):
+def test_scripts_use_resolver_acting_ingest(store, recorder, monkeypatch):
     m = _load_script('rai_t', 'scripts/run_acting_ingest.py')
     # the recorder returns an empty table; path existence must come from the resolver
     monkeypatch.setattr(Path, 'exists', lambda self: True)

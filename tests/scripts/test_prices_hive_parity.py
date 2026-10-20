@@ -59,3 +59,64 @@ def test_parity_detects_drift(tmp_path, capsys):
     rc = php.main(['--src', str(src), '--hive-dir', str(out)])
     assert rc == 1
     assert 'verdict=FAIL' in capsys.readouterr().out
+
+
+def test_build_takes_per_year_lock_around_replace(tmp_path, monkeypatch):
+    from src.data import parquet_store as ps
+    src = _src(tmp_path)
+    out = tmp_path / 'prices'
+    events = []
+    real_lock = bph._file_lock
+    real_replace = bph.os.replace
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def spy(path, timeout=30.0):
+        events.append(('acquire', Path(path)))
+        with real_lock(path, timeout):
+            yield
+        events.append(('release', Path(path)))
+
+    def rep(a, b):
+        events.append(('replace', Path(b)))
+        return real_replace(a, b)
+    monkeypatch.setattr(bph, '_file_lock', spy)
+    monkeypatch.setattr(bph.os, 'replace', rep)
+    bph.build(src, out, years=None, apply=True, spill_dir=tmp_path / 'spill')
+    for y in (2024, 2025, 2026):
+        lk = tmp_path / f'.prices_hive_y{y}'
+        assert lk == ps.prices_hive_lock_base(y, out)
+        i = events.index(('acquire', lk))
+        j = events.index(('replace', out / f'year={y}' / 'part-0.parquet'))
+        k = events.index(('release', lk))
+        assert i < j < k
+    assert not list(out.rglob('*.lock'))   # sentinels live beside the tree
+
+
+def test_build_count_mismatch_exits_2(tmp_path, monkeypatch, capsys):
+    src = _src(tmp_path)
+    out = tmp_path / 'prices'
+    real_connect = bph.duckdb.connect
+
+    class Con:
+        def __init__(self, c):
+            self.c = c
+
+        def execute(self, sql, *a):
+            r = self.c.execute(sql, *a)
+            if 'FROM read_parquet' in sql and sql.startswith('SELECT count(*) FROM read_parquet'):
+                class R:
+                    def fetchone(_):
+                        return (r.fetchone()[0] + 1,)
+                return R()
+            return r
+
+        def close(self):
+            self.c.close()
+    monkeypatch.setattr(bph.duckdb, 'connect', lambda *a, **k: Con(real_connect(*a, **k)))
+    rc = bph.main(['--src', str(src), '--out-dir', str(out),
+                   '--spill-dir', str(tmp_path / 'spill'), '--apply'])
+    assert rc == 2
+    assert 'rows' in capsys.readouterr().err
+    assert not list(out.rglob('part-0.parquet'))   # nothing committed

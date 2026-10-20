@@ -75,6 +75,7 @@ def test_dataset_unifies_null_typed_month(store, monkeypatch):
     t2 = ps.options_read_table(['ticker'], filters=[('ticker', '=', 'ZZTEST2')],
                                read_dictionary=['ticker'])
     assert t2.num_rows == 1
+    assert pa.types.is_dictionary(t2.schema.field('ticker').type)
 
 
 def test_options_dataset_empty_dir_raises(store, monkeypatch):
