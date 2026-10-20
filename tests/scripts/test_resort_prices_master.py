@@ -21,11 +21,11 @@ def _sha(p: Path) -> str:
     return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
 
-def _fixture(tmp_path, n_days=400, rg=100) -> Path:
-    """Ticker-contiguous (the bad layout): 3 tickers x n_days."""
+def _fixture(tmp_path, n_days=400, rg=100, n_tickers=3) -> Path:
+    """Ticker-contiguous (the bad layout): n_tickers x n_days."""
     days = pd.bdate_range('2024-01-01', periods=n_days)
     frames = []
-    for i, t in enumerate(['ZZTEST1', 'ZZTEST2', 'ZZTEST3']):
+    for i, t in enumerate(f'ZZTEST{k}' for k in range(1, n_tickers + 1)):
         frames.append(pd.DataFrame({'ticker': t, 'date': days, 'close': [100.0 + i + k * 0.1 for k in range(n_days)],
                                     'volume': list(range(n_days))}))
     df = pd.concat(frames, ignore_index=True)
@@ -40,11 +40,12 @@ def _call(m, p, tmp_path, **kw):
 
 
 def test_resort_dry_run_leaves_master_untouched(tmp_path):
-    m = _mod(); p = _fixture(tmp_path); before = _sha(p)
-    r = _call(m, p, tmp_path, apply=False, row_group_size=100)  # ~33 bdays/group -> tight
+    # DuckDB COPY cuts row groups in 2048-row vectors, so tightness needs many tickers per day
+    m = _mod(); p = _fixture(tmp_path, n_tickers=60); before = _sha(p)
+    r = _call(m, p, tmp_path, apply=False, row_group_size=2048)  # ~34 bdays/group -> tight
     assert _sha(p) == before
     assert not list(tmp_path.glob('*.resort.tmp'))
-    assert r['rows_old'] == r['rows_new'] == 1200
+    assert r['rows_old'] == r['rows_new'] == 24000
     assert r['colhash_equal'] and r['rowhash_equal'] and r['schema_equal']
     assert r['verdict_new'] == 'PASS' and r['applied'] is False and r['backup'] is None
 
@@ -62,14 +63,13 @@ def test_resort_apply_sorts_and_keeps_backup(tmp_path):
     assert new_rows == old_rows
 
 
-def test_resort_output_has_page_index(tmp_path):
-    m = _mod(); p = _fixture(tmp_path, n_days=100)
-    _call(m, p, tmp_path, apply=True, today=date(2026, 10, 20), row_group_size=256)
-    md = pq.ParquetFile(p).metadata
-    assert md.num_row_groups == math.ceil(300 / 256)
-    for i in range(md.num_row_groups):
-        for j in range(md.num_columns):
-            assert md.row_group(i).column(j).has_offset_index
+def test_resort_output_is_sorted_and_tight(tmp_path):
+    from src.data.parquet_layout import rowgroup_span_report
+    m = _mod(); p = _fixture(tmp_path, n_days=100, n_tickers=60)
+    _call(m, p, tmp_path, apply=True, today=date(2026, 10, 20), row_group_size=2048)
+    r = rowgroup_span_report(p)
+    assert r['monotone'] is True and r['frac_tight'] == 1.0
+    assert pq.ParquetFile(p).metadata.num_row_groups == math.ceil(6000 / 2048)
 
 
 def test_resort_refuses_on_hash_mismatch(monkeypatch, tmp_path):
