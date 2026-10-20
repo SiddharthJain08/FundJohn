@@ -1,0 +1,16 @@
+[Unit]
+Description=Guarded OPENCLAW_PRICES_HIVE_READ=1 flip (scripts/prices_hive_read_flip.sh --apply; gates: OPENCLAW_PRICES_HIVE=1 dual-write live, >= 5 distinct-day parity PASS with latest PASS and no FAIL since, outside the compute window)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/openclaw
+ExecStart=/bin/bash /root/openclaw/scripts/prices_hive_read_flip.sh --apply --timer-unit openclaw-prices-hive-read-flip.timer
+StandardOutput=append:/var/log/openclaw-prices-hive-read-flip.log
+StandardError=append:/var/log/openclaw-prices-hive-read-flip.log
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

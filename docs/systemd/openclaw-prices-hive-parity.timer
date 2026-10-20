@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily (Tue-Sat 21:05 UTC) prices hive parity check, after the 16:15 ET collect and dual-write
+
+[Timer]
+# Persistent=false: a boot must never replay a missed check into the trading day.
+OnCalendar=Tue..Sat *-*-* 21:05:00 UTC
+Persistent=false
+AccuracySec=1min
+Unit=openclaw-prices-hive-parity.service
+
+[Install]
+WantedBy=timers.target

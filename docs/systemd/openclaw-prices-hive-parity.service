@@ -1,0 +1,20 @@
+[Unit]
+Description=Daily prices hive-vs-single-file parity check (scripts/prices_hive_parity.py); each run appends a timestamp line and a verdict=PASS|FAIL line to logs/prices_hive_parity.log, which gates openclaw-prices-hive-read-flip
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+Nice=19
+MemoryMax=2500M
+ExecStartPre=/bin/bash -c 'date -u +"[%%FT%%TZ] prices_hive_parity run" >> /root/openclaw/logs/prices_hive_parity.log'
+ExecStart=/usr/bin/python3 /root/openclaw/scripts/prices_hive_parity.py --memory-limit 1500MB
+StandardOutput=append:/root/openclaw/logs/prices_hive_parity.log
+StandardError=append:/root/openclaw/logs/prices_hive_parity.log
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target
