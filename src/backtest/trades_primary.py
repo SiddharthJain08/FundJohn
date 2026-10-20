@@ -162,7 +162,12 @@ def main(argv=None) -> int:
     if not uri:
         print('[bt_trades_primary] POSTGRES_URI not set', file=sys.stderr)
         return 2
-    conn = psycopg2.connect(uri, connect_timeout=5)
+    try:
+        conn = psycopg2.connect(uri, connect_timeout=5)
+    except Exception as e:
+        print(f'[bt_trades_primary] connect failed: {type(e).__name__}: {e}',
+              file=sys.stderr)
+        return 2
     try:
         cur = conn.cursor()
         if not hot_table_exists(cur):
@@ -172,20 +177,23 @@ def main(argv=None) -> int:
             return 2
         sids = [args.resync] if args.resync else _drifted_strategy_ids(cur)
         conn.commit()   # end the read txn before per-strategy write txns
+        failed = 0
         for sid in sids:
             try:
                 n = resync_strategy(cur, sid)
                 conn.commit()
-            except Exception:
+            except Exception as e:
                 conn.rollback()
-                raise
+                failed += 1
+                print(f'[bt_trades_primary] resync FAILED strategy={sid}: '
+                      f'{type(e).__name__}: {e}', file=sys.stderr)
+                continue
             print(f'[bt_trades_primary] resync strategy={sid} inserted={n}')
         if not sids:
             print('[bt_trades_primary] nothing drifted')
-        return 0
+        return 1 if failed else 0
     finally:
         conn.close()
-
 
 if __name__ == '__main__':
     sys.exit(main())

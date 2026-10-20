@@ -12,7 +12,7 @@ import os
 from ..registry import check
 from ..types import Status
 
-_REPAIR = 'repair: python3 -m backtest.trades_primary --resync-drifted'
+_REPAIR = 'repair: PYTHONPATH=src python3 -m backtest.trades_primary --resync-drifted'
 
 
 def evaluate(*, table_exists: bool, count_mismatches: list, orphan_runs: int,
@@ -34,7 +34,10 @@ def evaluate(*, table_exists: bool, count_mismatches: list, orphan_runs: int,
 def _backtest_trades_primary_sync():
     # Lazy imports: a module-level data/backtest import broke the registry once.
     import psycopg2
-    from backtest.trades_primary import drift_report, hot_table_exists
+    try:
+        from src.backtest.trades_primary import drift_report, hot_table_exists
+    except ImportError:
+        from backtest.trades_primary import drift_report, hot_table_exists
     uri = os.environ.get('POSTGRES_URI') or os.environ.get('DATABASE_URL', '')
     if not uri:
         return Status.SKIP, 'POSTGRES_URI not set'
