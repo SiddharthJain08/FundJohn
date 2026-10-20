@@ -123,7 +123,8 @@ def _load_returns(tickers, window, as_of=None):
     flt = (pc.field("ticker").isin(tickers)
            & (pc.field("date") >= lo)
            & (pc.field("date") <= anchor_d.isoformat()))
-    tbl = pq.read_table(PARQUET, columns=["ticker", "date", "close"], filters=flt)
+    from src.data import parquet_store as _ps
+    tbl = _ps.prices_read_table(["ticker", "date", "close"], filters=flt, path=PARQUET)
     df = tbl.to_pandas()
     df["date"] = df["date"].astype(str)
     out: dict[str, dict[str, float]] = {}

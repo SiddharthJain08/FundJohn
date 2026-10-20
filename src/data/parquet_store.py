@@ -456,6 +456,42 @@ def write_prices(rows: Iterable[dict]) -> int:
     return total
 
 
+def prices_hive_files() -> List[Path]:
+    """Committed hive part files only (never a directory glob: a writer's
+    part-0.parquet.tmp / .lock must not be picked up)."""
+    return sorted(PRICES_HIVE_DIR.glob('year=*/part-0.parquet'))
+
+
+def prices_read_table(columns: Sequence[str], filters=None,
+                      read_dictionary: Sequence[str] | None = None, *,
+                      path: Path | str | None = None) -> pa.Table:
+    """Read prices columns; filters = DNF list or pc.Expression.
+
+    Flag unset (or `path` names some other file): the same pq.read_table call as
+    before, no log line. Flag on and at least one committed year part exists: a
+    pyarrow dataset over those explicit files. One `[prices_source]` line per
+    call while the flag is on."""
+    columns = list(columns)
+    rd = list(read_dictionary) if read_dictionary else None
+    target = PRICES_PATH if path is None else path
+    if not prices_hive_enabled() or Path(target) != Path(PRICES_PATH):
+        return pq.read_table(target, columns=columns, filters=filters,
+                             read_dictionary=rd)
+    files = prices_hive_files()
+    if not files:
+        print('[prices_source] layout=file reason=hive_empty', file=sys.stderr, flush=True)
+        return pq.read_table(target, columns=columns, filters=filters,
+                             read_dictionary=rd)
+    if isinstance(filters, list):
+        filters = pq.filters_to_expression(filters)
+    fmt = ds.ParquetFileFormat(
+        read_options=ds.ParquetReadOptions(dictionary_columns=rd or []))
+    dataset = ds.dataset([str(f) for f in files], format=fmt, partitioning='hive',
+                         partition_base_dir=str(PRICES_HIVE_DIR))
+    print('[prices_source] layout=hive', file=sys.stderr, flush=True)
+    return dataset.to_table(columns=columns, filter=filters)
+
+
 def options_monthly_enabled() -> bool:
     """Per-month options layout flag (read at call time)."""
     return os.environ.get('OPENCLAW_OPTIONS_MONTHLY') == '1'

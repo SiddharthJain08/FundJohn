@@ -816,7 +816,8 @@ def _parquet_date_axis(path, date_col: str = 'date', cutoff: str | None = None):
         import pyarrow.parquet as _pq
         import pyarrow.compute as _pc
         _f = [(date_col, '>=', cutoff)] if cutoff else None
-        tab = _pq.read_table(path, columns=[date_col], filters=_f)
+        from src.data import parquet_store as _ps_ax
+        tab = _ps_ax.prices_read_table([date_col], filters=_f, path=path)
         vals = _pc.unique(tab.column(date_col).combine_chunks()).to_pylist()
         del tab
         _gc.collect()
@@ -909,7 +910,10 @@ def load_prices(universe: list, *, lookback_days: int | None = None,
             _filters.append(('date', '>=', _cutoff))
         if _filters:
             _read_kwargs['filters'] = _filters
-        df = pd.read_parquet(master_path, **_read_kwargs)
+        from src.data import parquet_store as _ps_ld
+        df = _ps_ld.prices_read_table(
+            _read_kwargs['columns'], filters=_read_kwargs.get('filters'),
+            path=master_path).to_pandas()
 
         if df.empty:
             wide = pd.DataFrame()
