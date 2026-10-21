@@ -200,7 +200,7 @@ def load_rows(run_ids=None, rows_json=None):
         with psycopg2.connect(uri) as c, c.cursor() as cur:
             if run_ids:
                 cur.execute('SELECT run_id, strategy_id, config_json FROM '
-                            'strategy_backtest_runs WHERE run_id = ANY(%s)', (run_ids,))
+                            'strategy_backtest_runs WHERE run_id = ANY(%s::uuid[])', (run_ids,))
                 raw = cur.fetchall()
             else:
                 raw = []
