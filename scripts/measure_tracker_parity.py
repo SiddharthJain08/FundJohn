@@ -23,6 +23,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -77,8 +78,9 @@ def _norm_cfg(cfg):
     return json.loads(cfg) if isinstance(cfg, str) else dict(cfg)
 
 
-def _norm_run_row(row):
-    """run_row JSON str -> list with any embedded config JSON string parsed."""
+def _norm_run_row(row, ignore=()):
+    """run_row JSON str -> list with any embedded config JSON string parsed;
+    `ignore` keys are dropped from embedded dicts (keys a later checkout ADDED)."""
     out = []
     for p in json.loads(row):
         if isinstance(p, str) and p.startswith('{'):
@@ -86,6 +88,8 @@ def _norm_run_row(row):
                 p = json.loads(p)
             except ValueError:
                 pass
+        if isinstance(p, dict) and ignore:
+            p = {k: v for k, v in p.items() if k not in ignore}
         out.append(p)
     return out
 
@@ -104,7 +108,9 @@ def capture_one(ub, strategy_id: str, kwargs: dict, env: dict) -> dict:
     conn.__exit__ = MagicMock(return_value=False)
 
     def spy(c, sql, rows, *a, **k):
-        if 'strategy_backtest_trades' in str(sql):
+        # \b: strategy_backtest_trades_primary (Stream E hot cache) must NOT count — it
+        # replays the same rows and would double every trade on a post-E checkout.
+        if re.search(r'strategy_backtest_trades\b', str(sql)):
             seen['trades'].extend(list(r) for r in rows)
         elif 'strategy_backtest_regimes' in str(sql):
             seen['regimes'].extend(list(r) for r in rows)
@@ -135,9 +141,9 @@ def _first_diff(a, b):
     return min(len(a), len(b))
 
 
-def _cfg_keys(a, b):
+def _cfg_keys(a, b, ignore=()):
     da, db = _norm_cfg(a), _norm_cfg(b)
-    return sorted(k for k in set(da) | set(db) if da.get(k) != db.get(k))
+    return sorted(k for k in (set(da) | set(db)) - set(ignore) if da.get(k) != db.get(k))
 
 
 def _seq_diff(name, xa, xb):
@@ -150,7 +156,9 @@ def _seq_diff(name, xa, xb):
                    f'a={json.dumps(ra, default=str)} b={json.dumps(rb, default=str)})')
 
 
-def compare(a: dict, b: dict) -> tuple[bool, list[str]]:
+def compare(a: dict, b: dict, ignore=()) -> tuple[bool, list[str]]:
+    """`ignore`: config keys the newer checkout ADDED (e.g. macro_pit from D1c) —
+    excluded from config_json and from the config embedded in run_row."""
     ra, rb = a.get('runs', {}), b.get('runs', {})
     lines, ok = [], True
     for rid in sorted(set(ra) | set(rb)):
@@ -164,10 +172,10 @@ def compare(a: dict, b: dict) -> tuple[bool, list[str]]:
         t_ok, tr = _seq_diff('trades', _clean(x['trade_rows']), _clean(y['trade_rows']))
         g_ok, rg = _seq_diff('regimes', _clean(x.get('regime_rows', [])),
                              _clean(y.get('regime_rows', [])))
-        keys = _cfg_keys(x['config_json'], y['config_json'])
+        keys = _cfg_keys(x['config_json'], y['config_json'], ignore)
         c_ok = not keys
         cf = 'IDENTICAL' if c_ok else f"DIFF(keys={','.join(keys)})"
-        r_ok = _norm_run_row(x['run_row']) == _norm_run_row(y['run_row'])
+        r_ok = _norm_run_row(x['run_row'], ignore) == _norm_run_row(y['run_row'], ignore)
         rr = 'IDENTICAL' if r_ok else 'DIFF'
         ok = ok and t_ok and g_ok and c_ok and r_ok
         lines.append(f"[tracker_parity] run={rid} sid={x.get('strategy_id')} "
@@ -253,6 +261,8 @@ def main(argv=None) -> int:
     d = sub.add_parser('compare')
     d.add_argument('a')
     d.add_argument('b')
+    d.add_argument('--ignore-keys', default='',
+                   help='comma-separated config keys the newer checkout added (e.g. macro_pit)')
     a = ap.parse_args(argv)
     try:
         if a.cmd == 'capture':
@@ -261,7 +271,7 @@ def main(argv=None) -> int:
         for pth in (a.a, a.b):
             with open(pth) as f:
                 docs.append(json.load(f))
-        ok, _ = compare(*docs)
+        ok, _ = compare(*docs, ignore=tuple(k for k in a.ignore_keys.split(',') if k))
         return 0 if ok else 1
     except (OSError, ValueError, KeyError, RuntimeError) as e:
         print(f'[tracker_parity] ERROR {type(e).__name__}: {e}', file=sys.stderr)

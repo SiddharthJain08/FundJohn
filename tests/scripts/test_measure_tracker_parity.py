@@ -154,3 +154,46 @@ def test_main_exit_codes_for_bad_inputs(tmp_path, capsys):
     assert m.main(['compare', str(good), str(bad)]) == 2
     assert 'ERROR' in capsys.readouterr().err
     assert m.main(['compare', str(good), str(good)]) == 0
+
+
+def test_capture_one_ignores_hot_table_insert():
+    """strategy_backtest_trades_primary (Stream E) replays the same rows; counting it doubled every trade."""
+    m = _mod()
+    cfg = json.dumps({'max_hold_days': 5})
+
+    def fake(sid, conn, commit, instrument_class, **kw):
+        cur = conn.cursor()
+        cur.execute('INSERT INTO strategy_backtest_runs …', ['RUNID', sid, 'SHA', 0.5, cfg])
+        ub.psycopg2.extras.execute_values(
+            cur, 'INSERT INTO strategy_backtest_trades (run_id, …)', [['RUNID', 'AAA', 1.0]])
+        ub.psycopg2.extras.execute_values(
+            cur, 'INSERT INTO strategy_backtest_trades_primary (run_id, …)', [['RUNID', 'AAA', 1.0]])
+    ub = SimpleNamespace(psycopg2=SimpleNamespace(extras=SimpleNamespace(execute_values=None)),
+                         run_backtest=fake, _resolve_instrument_class=lambda s: 'equity')
+    out = m.capture_one(ub, 'S_a', {}, {})
+    assert out['trade_rows'] == [['AAA', 1.0]]
+
+
+def test_compare_ignore_keys_drops_added_config_key_everywhere(capsys):
+    m = _mod()
+    a = _run(row=json.dumps(['x', json.dumps({'a': 1})]))  # run_row embeds the config JSON string
+    b = dict(a)
+    ca = json.loads(a['config_json']); ca['macro_pit'] = False
+    b['config_json'] = json.dumps(ca, sort_keys=True)
+    b['run_row'] = json.dumps(['x', json.dumps({'a': 1, 'macro_pit': False})])
+    ok, lines = m.compare({'runs': {'r': a}}, {'runs': {'r': b}})
+    assert not ok and 'keys=macro_pit' in lines[0] and 'run_row=DIFF' in lines[0]
+    ok, lines = m.compare({'runs': {'r': a}}, {'runs': {'r': b}}, ignore=('macro_pit',))
+    assert ok and 'config_json=IDENTICAL' in lines[0] and 'run_row=IDENTICAL' in lines[0]
+
+
+def test_main_compare_ignore_keys_flag(tmp_path):
+    m = _mod()
+    a = _run()
+    b = dict(a)
+    ca = json.loads(a['config_json']); ca['macro_pit'] = True
+    b['config_json'] = json.dumps(ca, sort_keys=True)
+    pa, pb = tmp_path / 'a.json', tmp_path / 'b.json'
+    pa.write_text(json.dumps({'runs': {'r': a}})); pb.write_text(json.dumps({'runs': {'r': b}}))
+    assert m.main(['compare', str(pa), str(pb)]) == 1
+    assert m.main(['compare', str(pa), str(pb), '--ignore-keys', 'macro_pit']) == 0
