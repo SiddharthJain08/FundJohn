@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_leveraged_portfolio_trend_brake_tv2",
+  "required": ["prices"],
+  "optional": []
+}

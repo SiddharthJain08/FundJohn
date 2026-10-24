@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_graham_number_value_screen",
+  "required": ["prices", "financials"],
+  "optional": []
+}

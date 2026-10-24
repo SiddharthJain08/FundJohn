@@ -1,5 +1,5 @@
 {
-  "strategy_id": "S_sector_neutral_debt_equity",
+  "strategy_id": "S_graham_number_value_screen_tv2",
   "required": ["prices", "financials"],
   "optional": []
 }

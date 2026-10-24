@@ -22,6 +22,7 @@ _IMPL_MAP = {
     'iv_rv_arb':         ('strategies.implementations.s15_iv_rv_arb',         'IVRVArb'),
     'jt_momentum_12mo':  ('strategies.implementations.S_custom_jt_momentum_12mo', 'JTMomentum12Mo'),
     'S_momentum_delayed_overreaction': ('strategies.implementations.s_momentum_delayed_overreaction', 'MomentumDelayedOverreaction'),
+    'S_stock_bond_corr_crash_warning': ('strategies.implementations.S_stock_bond_corr_crash_warning', 'StockBondCorrCrashWarning'),
     # S-HV7  S-HV12: hardcoded HV strategies (zero LLM tokens)
     'S_HV7_iv_crush_fade':           ('strategies.implementations.shv7_iv_crush_fade',            'IVCrushFade'),
     'S_HV8_gamma_theta_carry':       ('strategies.implementations.shv8_gamma_theta_carry',        'GammaThetaCarry'),
@@ -360,9 +361,22 @@ _IMPL_MAP = {
     'S_amihud_illiquidity_premium': ('strategies.implementations.S_amihud_illiquidity_premium', 'AmihudIlliquidityPremium'),
     'S_btc_equity_spillover': ('strategies.implementations.S_btc_equity_spillover', 'BtcEquitySpillover'),
     'S_earnings_sue_pead': ('strategies.implementations.S_earnings_sue_pead', 'EarningsSuePead'),
+    'S_ecf_bias_corrected_liquidity_premium': ('strategies.implementations.S_ecf_bias_corrected_liquidity_premium', 'EcfBiasCorrectedLiquidityPremium'),
     'S_factor_momentum_rotation': ('strategies.implementations.S_factor_momentum_rotation', 'FactorMomentumRotation'),
+    'S_9sig_tqqq_nav_rebalance': ('strategies.implementations.S_9sig_tqqq_nav_rebalance', 'Sig9TqqqNavRebalance'),
+    'S_9sig_tqqq_nav_rebalance_tv2': ('strategies.implementations.S_9sig_tqqq_nav_rebalance_tv2', 'Sig9TqqqNavRebalanceTv2'),
+    'S_graham_number_value_screen': ('strategies.implementations.S_graham_number_value_screen', 'GrahamNumberValueScreen'),
+    'S_graham_number_value_screen_tv2': ('strategies.implementations.S_graham_number_value_screen_tv2', 'GrahamNumberValueScreenTv2'),
     'S_overnight_intraday_tug_of_war': ('strategies.implementations.S_overnight_intraday_tug_of_war', 'OvernightIntradayTugOfWar'),
+    'S_return_stacking_gold_managed_futures': ('strategies.implementations.S_return_stacking_gold_managed_futures', 'ReturnStackingGoldManagedFutures'),
+    'S_return_stacking_gold_managed_futures_tv2': ('strategies.implementations.S_return_stacking_gold_managed_futures_tv2', 'ReturnStackingGoldManagedFuturesTv2'),
+    'S_rachev_ratio_etf_scenario_opt': ('strategies.implementations.S_rachev_ratio_etf_scenario_opt', 'RachevRatioEtfScenarioOpt'),
+    'S_rachev_ratio_etf_scenario_opt_tv2': ('strategies.implementations.S_rachev_ratio_etf_scenario_opt_tv2', 'RachevRatioEtfScenarioOptTv2'),
     'S_pre_earnings_vol_runup': ('strategies.implementations.S_pre_earnings_vol_runup', 'PreEarningsVolRunup'),
+    'S_amortized_neural_filter_stat_arb': ('strategies.implementations.S_amortized_neural_filter_stat_arb', 'AmortizedNeuralFilterStatArb'),
+    'S_amortized_neural_filter_stat_arb_tv2': ('strategies.implementations.S_amortized_neural_filter_stat_arb_tv2', 'AmortizedNeuralFilterStatArbTv2'),
+    'S_leveraged_portfolio_trend_brake': ('strategies.implementations.S_leveraged_portfolio_trend_brake', 'LeveragedPortfolioTrendBrake'),
+    'S_leveraged_portfolio_trend_brake_tv2': ('strategies.implementations.S_leveraged_portfolio_trend_brake_tv2', 'LeveragedPortfolioTrendBrakeTv2'),
     'S_regime_age_momentum': ('strategies.implementations.S_regime_age_momentum', 'RegimeAgeMomentum'),
     'S_volume_shock_overnight_drift': ('strategies.implementations.S_volume_shock_overnight_drift', 'VolumeShockOvernightDrift'),
     'S_vwap_closing_pressure': ('strategies.implementations.S_vwap_closing_pressure', 'VwapClosingPressure'),
@@ -442,6 +456,10 @@ _IMPL_MAP = {
     'S_option_implied_tail_premium': ('strategies.implementations.S_option_implied_tail_premium', 'OptionImpliedTailPremium'),
     # Gatheral/Jacquier 2013: arbitrage-free SVI wing-vs-ATM surface_premium mean reversion on SPY options, delta-hedged strangle, skew secondary conviction
     'S_svi_vol_surface_relative_value': ('strategies.implementations.S_svi_vol_surface_relative_value', 'SviVolSurfaceRelativeValue'),
+    # Luo/Lin/Luo/Minh/Zhang/Liu 2026: additive-martingale no-arb surface fair value (mfiv_30d) vs quoted iv30 mean reversion on SPY options, delta-hedged strangle, fitted-tail richness secondary conviction
+    'S_iv_surface_no_arb_relative_value': ('strategies.implementations.S_iv_surface_no_arb_relative_value', 'IvSurfaceNoArbRelativeValue'),
+    # Wang/Slepaczuk/Sakowski 2026: deterministic proxy for an oracle-guided MLP+RL exit policy (time-to-expiry, PnL proxy, realized/implied vol gap) on SPY-proxy SPX short ATM straddles
+    'S_spx_straddle_rl_exit_timing': ('strategies.implementations.S_spx_straddle_rl_exit_timing', 'SpxStraddleRlExitTiming'),
     # quantish 2025: SPX first-60-min opening range sets bias; confirmed 10:30-noon breakout -> sell $15-wide 0DTE credit spread at the range extreme, SPY chain proxy
     'S_spx_0dte_opening_range_breakout': ('strategies.implementations.S_spx_0dte_opening_range_breakout', 'SpxZeroDteOpeningRangeBreakout'),
     # Wysocki 2026: LTR proxy ranking 8 delta-targeted SPXW 0DTE short puts + SKIP via a regime/tail-risk-aware expected-value score, SPY chain proxy
@@ -472,6 +490,8 @@ _IMPL_MAP = {
     'S_golden_cross_trend_signal_tv2_dsl': ('strategies.implementations.S_golden_cross_trend_signal_tv2_dsl', 'GoldenCrossTrendStateTV2Dsl'),
     'S_amihud_illiquidity_premium_dsl': ('strategies.implementations.S_amihud_illiquidity_premium_dsl', 'AmihudIlliquidityPremiumDsl'),
     'oxf_bollinger_momentum_dsl': ('strategies.implementations.oxf_bollinger_momentum_dsl', 'OxfBollingerMomentumDsl'),
+    'S_gem_dual_momentum_rotation': ('strategies.implementations.S_gem_dual_momentum_rotation', 'GemDualMomentumRotation'),
+    'S_sector_fund_annual_momentum_rotation': ('strategies.implementations.S_sector_fund_annual_momentum_rotation', 'SectorFundAnnualMomentumRotation'),
 }
 
 

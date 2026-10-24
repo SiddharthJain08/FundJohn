@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_9sig_tqqq_nav_rebalance_tv2",
+  "required": ["prices"],
+  "optional": []
+}

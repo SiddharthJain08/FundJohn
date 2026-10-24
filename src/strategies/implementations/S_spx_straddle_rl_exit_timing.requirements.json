@@ -1,5 +1,5 @@
 {
-  "strategy_id": "S_option_sdf_equity_premium",
+  "strategy_id": "S_spx_straddle_rl_exit_timing",
   "required": ["prices", "options_eod"],
   "optional": []
 }

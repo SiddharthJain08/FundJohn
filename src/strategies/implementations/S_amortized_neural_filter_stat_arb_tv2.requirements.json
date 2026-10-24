@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_amortized_neural_filter_stat_arb_tv2",
+  "required": ["prices"],
+  "optional": []
+}

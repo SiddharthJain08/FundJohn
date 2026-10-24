@@ -1,5 +1,5 @@
 {
-  "strategy_id": "S_model_free_iv_forecast",
+  "strategy_id": "S_iv_surface_no_arb_relative_value",
   "required": ["prices", "options_eod"],
   "optional": []
 }

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_stock_bond_corr_crash_warning",
+  "required": ["prices"],
+  "optional": []
+}

@@ -1,8 +1,0 @@
-{
-  "strategy_id": "str06_baltussen_eod_reversal",
-  "required": [
-    "prices",
-    "prices_30m"
-  ],
-  "optional": []
-}

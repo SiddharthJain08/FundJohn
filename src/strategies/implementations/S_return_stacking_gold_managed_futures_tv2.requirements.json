@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_return_stacking_gold_managed_futures_tv2",
+  "required": ["prices"],
+  "optional": []
+}

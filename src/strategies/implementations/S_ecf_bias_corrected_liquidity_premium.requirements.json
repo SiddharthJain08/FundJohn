@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ecf_bias_corrected_liquidity_premium",
+  "required": ["prices"],
+  "optional": []
+}

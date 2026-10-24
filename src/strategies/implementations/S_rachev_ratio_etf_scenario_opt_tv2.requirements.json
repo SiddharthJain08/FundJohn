@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_rachev_ratio_etf_scenario_opt_tv2",
+  "required": ["prices"],
+  "optional": []
+}

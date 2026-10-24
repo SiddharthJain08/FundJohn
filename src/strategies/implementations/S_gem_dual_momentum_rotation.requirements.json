@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_gem_dual_momentum_rotation",
+  "required": ["prices", "macro"],
+  "optional": []
+}
