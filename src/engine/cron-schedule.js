@@ -365,7 +365,7 @@ function start(swarm, generateId, notifyDiscord) {
         // 3:55 PM ET — execute phase (market orders into the close).
         _sched('closeexec-execute-1555', '55 15 * * 1-5', () => {
             log('close-exec execute (3:55pm ET)');
-            dispatchCycle('scheduled-execute', ['alpaca', 'reconcile', 'report', 'pyportfolioopt_shadow', 'health']);
+            dispatchCycle('scheduled-execute', ['alpaca', 'reconcile', 'stop_reattach', 'report', 'pyportfolioopt_shadow', 'health']);
         }, { timezone: 'America/New_York' });
         // 9:35 AM ET — start-of-day price refresh (dashboard only; not a signal input).
         _sched('closeexec-sod-refresh-0935', '35 9 * * 1-5', () => {
@@ -540,8 +540,8 @@ function start(swarm, generateId, notifyDiscord) {
         // the sizer's re-diff sees them gone, so no double-close.
         // EOD mode only — same-day exec has its own 15:55 execute leg below.
         if (eodSignalRegister) _sched('eod-into-close-fill-1555', '55 15 * * 1-5', () => {
-            log('EOD into-close fill (3:55pm ET): trade → alpaca → reconcile → report → health');
-            dispatchCycle('eod-into-close-fill', ['trade', 'alpaca', 'reconcile', 'report', 'health']);
+            log('EOD into-close fill (3:55pm ET): trade → alpaca → reconcile → stop_reattach → report → health');
+            dispatchCycle('eod-into-close-fill', ['trade', 'alpaca', 'reconcile', 'stop_reattach', 'report', 'health']);
         }, { timezone: 'America/New_York' });
 
         // ── Same-day execution (2026-07-29 pivot): signal[t] → submission[t] ──
@@ -609,9 +609,9 @@ function start(swarm, generateId, notifyDiscord) {
                     log(`same-day execute ABORT: no ${today}_sized.json — 15:00 compute did not complete; nothing submitted`);
                     return;
                 }
-                log('same-day execute (3:55pm ET): alpaca → reconcile → report → shadow → health');
+                log('same-day execute (3:55pm ET): alpaca → reconcile → stop_reattach → report → shadow → health');
                 dispatchCycle('sameday-execute',
-                              ['alpaca', 'reconcile', 'report', 'pyportfolioopt_shadow', 'health']);
+                              ['alpaca', 'reconcile', 'stop_reattach', 'report', 'pyportfolioopt_shadow', 'health']);
             }, { timezone: 'America/New_York' });
 
             // 16:15 ET — official EOD collect (append real close[t] + aux
