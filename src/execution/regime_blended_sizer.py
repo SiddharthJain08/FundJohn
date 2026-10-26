@@ -1791,6 +1791,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # Amendment 1: S_m is forward/entry-tagged at horizon pipeline_config.benchmark_horizon_days (default 1).
     _bench_applied_dropped = 0
     _beta_budget_applied = False
+    _bench_hurdle_applied = False   # amendment 2026-10-26: the §3.4 NAV clamp keys off THIS, not the budget
     _beta_pool = 0.0            # same reason as _bench_applied_dropped: read at the emission tail
     try:
         _h = _bsz.load_benchmark_horizon()
@@ -1835,9 +1836,18 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             ticker_w = defaultdict(float, _budgeted if _apply_budget else _hurdled)
             _bench_applied_dropped = len(_bench_dropped)
             _beta_budget_applied = _apply_budget
-            if _apply_budget and _bench_applied_dropped and _bench_applied_dropped == len(_before) - len(_bench_tkrs):
-                logger.info('bench_sizing: beta budget moved the whole book to beta (pool=%.1f, dropped=%d)',
-                            _beta_pool, _bench_applied_dropped)
+            _bench_hurdle_applied = True
+            if _bench_applied_dropped and _bench_applied_dropped == len(_before) - len(_bench_tkrs):
+                if _apply_budget:
+                    logger.info('bench_sizing: beta budget moved the whole book to beta (pool=%.1f, dropped=%d)',
+                                _beta_pool, _bench_applied_dropped)
+                else:
+                    # Amendment 2026-10-26 (budget OFF): the benchmark's own un-hurdled
+                    # conviction is all that is left; the λ·NAV normalizer would hand it
+                    # the whole gross, so the §3.4 clamp below bounds it at frac×NAV.
+                    logger.info('bench_sizing: rule C dropped every alpha name (dropped=%d); benchmark %s '
+                                'alone carries the book, clamped at %.2f×NAV',
+                                _bench_applied_dropped, sorted(_bench_tkrs), _bsz.benchmark_max_nav_frac())
     except Exception as e:
         logger.warning('bench_sizing: failed (%s: %s); sizing on raw S_adj', type(e).__name__, e)
 
@@ -1993,12 +2003,16 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # beta to hold that day). Fail-open: targets unchanged.
     target_usd = _apply_benchmark_corr_removal(target_usd, _bench_exempt, nav)
 
-    # Benchmark NAV cap (spec 2026-08-30 §3.4, D-4): under the beta budget the
-    # reference portfolio is UNLEVERED, so a benchmark ticker never exceeds
+    # Benchmark NAV cap (spec 2026-08-30 §3.4, D-4; amendment 2026-10-26 D-4'):
+    # the reference portfolio is UNLEVERED, so a benchmark ticker never exceeds
     # benchmark_max_nav_frac × NAV (default 1.0). Shaved, never redistributed
-    # (same philosophy as the two caps above). Inert unless the budget applied
-    # this cycle. Fail-open: an unreadable frac falls back to 1.0 in the reader.
-    if _beta_budget_applied:
+    # (same philosophy as the two caps above). Applies whenever rule C applied
+    # this cycle — budget on OR off: with the budget off the benchmark competes
+    # on its own un-hurdled conviction and still owns the whole λ·NAV gross on a
+    # day every alpha name is dropped (operator directive 2026-10-26: SPY is the
+    # full book when nothing else qualifies, never a levered one). Fail-open: an
+    # unreadable frac falls back to 1.0 in the reader.
+    if _bench_hurdle_applied:
         _max_bench = _bsz.benchmark_max_nav_frac() * nav
         for _t in _bench_tkrs:
             _usd = target_usd.get(_t)
@@ -2070,7 +2084,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                 bench_frac=_bsz.benchmark_max_nav_frac(),
                 cap_active=(os.environ.get('OPENCLAW_EOD_RECONCILE') == '1'
                             or os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1'),
-                bench_clamp=bool(_beta_budget_applied))  # cascade clamps SPY only under the budget
+                bench_clamp=bool(_bench_hurdle_applied))  # cascade clamps SPY whenever rule C applied (D-4')
             for _t in _qp_base:
                 if not target_usd.get(_t):
                     _qp_caps[_t] = 0.0

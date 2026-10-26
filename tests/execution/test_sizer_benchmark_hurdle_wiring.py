@@ -83,7 +83,10 @@ def test_off_is_byte_identical_and_logs_shadow(monkeypatch):
 
 
 def test_on_applies_hurdle(monkeypatch):
-    t = targets(run(monkeypatch, flag=True))
+    # max_nav_frac lifted out of the way: SPY's 2.0/2.6 share of the 2x gross is
+    # 153.8% of NAV and the D-4' clamp (default 1.0, applied whenever rule C
+    # applies since 2026-10-26) would bind; the clamp has its own tests below.
+    t = targets(run(monkeypatch, flag=True, max_nav_frac=10.0))
     # after hurdle: SPY 2.0 (exempt), ZZTA 0.6, ZZTB dropped -> gross 2.6
     gross = LAM * NAV
     assert 'ZZTB' not in t
@@ -120,10 +123,14 @@ def test_budget_flag_alone_is_rule_c_shadow_and_prints_budget_shadow(monkeypatch
     assert any('bench_sizing.shadow[LOW_VOL]' in l and 'beta_budget=shadow pool=3.5' in l for l in lines)
 
 
-def test_rule_c_on_budget_off_is_unchanged(monkeypatch):
-    t = targets(run(monkeypatch, flag=True, budget=False))
+def test_rule_c_on_budget_off_sizes_benchmark_on_its_own_conviction(monkeypatch):
+    # Operator directive 2026-10-26: with the budget off the benchmark competes in
+    # the normalizer like any other name, on its own UN-hurdled S_adj (2.0 of 2.6).
+    t = targets(run(monkeypatch, flag=True, budget=False, max_nav_frac=10.0))
     gross = LAM * NAV
     assert abs(t['SPY'] - gross * 2.0 / 2.6) < 1e-6           # Task-wiring behaviour from 2026-08-29
+    assert abs(t['ZZTA'] - gross * 0.6 / 2.6) < 1e-6
+    assert 'ZZTB' not in t
 
 
 def test_budget_with_no_s_m_falls_back_to_raw(monkeypatch):
@@ -138,10 +145,35 @@ def test_budget_nav_cap_clamps_benchmark_without_redistribution(monkeypatch):
     assert abs(t['ZZTA'] - gross * 0.6 / 6.1) < 1e-6           # alpha untouched (no renorm-up)
 
 
-def test_nav_cap_inert_when_budget_off(monkeypatch):
+def test_nav_cap_clamps_benchmark_with_budget_off(monkeypatch):
+    # D-4' (2026-10-26): the clamp keys off rule C having applied, not the budget.
     t = targets(run(monkeypatch, flag=True, budget=False, max_nav_frac=0.5))
     gross = LAM * NAV
-    assert abs(t['SPY'] - gross * 2.0 / 2.6) < 1e-6           # 153.8k > 50k, NOT clamped
+    assert abs(t['SPY'] - 0.5 * NAV) < 1e-6                    # 153.8k -> clamped to 50k
+    assert abs(t['ZZTA'] - gross * 0.6 / 2.6) < 1e-6           # alpha untouched (no renorm-up)
+
+
+def test_nav_cap_default_frac_binds_with_budget_off(monkeypatch):
+    t = targets(run(monkeypatch, flag=True, budget=False))      # frac 1.0 (default)
+    assert abs(t['SPY'] - NAV) < 1e-6                          # 153.8% NAV -> 100% NAV
+
+
+def test_budget_off_every_alpha_dropped_benchmark_alone_is_one_nav_not_lambda_nav(monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger='execution.regime_blended_sizer')
+    # S_m above every alpha S_adj (2.6, 1.5): rule C drops both; SPY (2.0, exempt)
+    # is the whole book. λ·NAV = 200k would be a 2x-levered SPY; D-4' bounds it at NAV.
+    t = targets(run(monkeypatch, flag=True, budget=False, s_m=3.0))
+    assert set(t) == {'SPY'}
+    assert abs(t['SPY'] - NAV) < 1e-6
+    assert any('rule C dropped every alpha name (dropped=2)' in r.getMessage() for r in caplog.records)
+    assert not any('beta budget moved the whole book' in r.getMessage() for r in caplog.records)
+
+
+def test_nav_cap_inert_when_rule_c_is_shadow(monkeypatch):
+    t = targets(run(monkeypatch, flag=False, max_nav_frac=0.5))
+    gross = LAM * NAV
+    assert abs(t['SPY'] - gross * 2.0 / 6.1) < 1e-6           # 65.6k, raw book, no clamp without rule C
 
 
 def test_alert_when_the_benchmark_is_shed_downstream_of_the_budget(monkeypatch, caplog):

@@ -41,6 +41,12 @@ def run(monkeypatch, rows, carried, corr_spy=None, bench_flag='1'):
         monkeypatch.setenv(bz.BENCH_SIZING_ENV, '0')
     else:
         monkeypatch.setenv(bz.BENCH_SIZING_ENV, bench_flag)
+    # Pin the beta budget OFF and lift the D-4' NAV clamp (default 1.0 would bind
+    # on SPY's 153.8%-of-NAV share here): this file's subject is the per-ticker /
+    # cluster cap exemptions only. Without the pin the live .env value leaked in
+    # (the file had been red since the 2026-09-01 budget flip).
+    monkeypatch.setenv(bz.BETA_BUDGET_ENV, '0')
+    monkeypatch.setattr(bz, 'benchmark_max_nav_frac', lambda default=1.0, conn=None: 10.0)
     for g in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_CORR_WEIGHT', 'OPENCLAW_STRATEGY_ORTHO_SHADOW',
               'OPENCLAW_STRATEGY_BRACKET_STACK', 'OPENCLAW_OPTION_DELTA_HEDGE', 'OPENCLAW_TRADE_WEIGHT_FACTOR',
               'OPENCLAW_INTRADAY_REDEPLOY'):
