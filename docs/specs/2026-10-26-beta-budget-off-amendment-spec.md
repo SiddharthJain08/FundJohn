@@ -32,10 +32,10 @@ the same λ·NAV normalizer as every alpha name (rule C alone). Realized: `bench
 - **D-B** Benchmark exemptions from the per-ticker cap, cluster cap and D9 similarity are KEPT (still gated on rule C).
   "Treated the same as all other names" is read as *same normalizer, own conviction*; applying the 0.10·(|S|+1)·λ·NAV
   per-ticker cap to SPY would contradict "full book when nothing else qualifies" (it would bound SPY near 37 % NAV).
-- **D-C (flagged, NOT changed)** `bench_corr_removal` (operator directive 2026-09-04: drop alpha names with |ρ(t,SPY)| ≥ 0.60
+- **D-C (APPLIED 20:53Z on operator instruction "turn off the corr removal too": `OPENCLAW_BENCH_CORR_REMOVAL=0`, johnbot restarted)** `bench_corr_removal` (operator directive 2026-09-04: drop alpha names with |ρ(t,SPY)| ≥ 0.60
   outright) was premised on "the budget holds the market through SPY". With the budget off that premise is gone and the rule
-  only deletes alpha (1–7.6 % NAV/day in the last two weeks: 10-22 17 names, 10-23 17 names, 10-26 VRT $5.4k). Recommended
-  follow-up: `OPENCLAW_BENCH_CORR_REMOVAL=0`. Separate operator decision.
+  only deletes alpha (1–7.6 % NAV/day in the last two weeks: 10-22 17 names, 10-23 17 names, 10-26 VRT $5.4k). Kill switch is the
+  existing env check at the top of `_apply_benchmark_corr_removal` (tested: `test_wiring_env_kill_switch`).
 - **Backtest side** never had a beta budget (no mirror in `src/backtest`), so this change moves live TOWARD the backtest book.
 
 ## 3. Expected effect (from the shadow column above)
@@ -46,7 +46,7 @@ LOW_VOL with 40–90 alpha names: SPY ≈ 3–5 % of gross ≈ 5–8 % of NAV (�
 dropped-everything days) and `bench_realized`.
 
 ## 4. Rollback
-`OPENCLAW_BENCH_BETA_BUDGET=1` in `.env` + `XDG_RUNTIME_DIR=/run/user/0 systemctl --user restart johnbot.service`. D-4′ is
+`OPENCLAW_BENCH_BETA_BUDGET=1` (and `OPENCLAW_BENCH_CORR_REMOVAL=1`) in `.env` + `XDG_RUNTIME_DIR=/run/user/0 systemctl --user restart johnbot.service`. D-4′ is
 behaviour-preserving under the budget (the budget always implied rule C), so no code revert is needed.
 
 ## 5. Code / tests
