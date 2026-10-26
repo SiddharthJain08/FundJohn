@@ -20,9 +20,9 @@ says in production. Spec §2.5.2 — this is the parity artefact for rule C.
 Run outside 13:00–20:15 UTC. Usage:
     python3 scripts/bench_relative_sizing_replay.py --nav 152000 [--regime LOW_VOL] [--beta-budget] [--max-nav-frac FLOAT]
 --nav is required (read it with: /root/go/bin/alpaca account get --jq .equity).
---max-nav-frac only has an effect together with --beta-budget: the spec §3.4
-benchmark NAV cap is applied by the sizer ONLY when the budget applied that
-cycle (`_beta_budget_applied`), so passing it alone changes nothing. Negative
+--max-nav-frac overrides the spec §3.4 benchmark NAV cap; since amendment
+D-4' (2026-10-26) the sizer applies that cap whenever rule C applied that cycle
+(`_bench_hurdle_applied`), budget on or off, so it matters in both modes. Negative
 values are floored at 0.0 (a 0 cap = "no benchmark exposure" what-if); the LIVE
 reader instead treats a non-positive pipeline_config value as garbage and falls
 back to 1.0 — this override is an explicit operator instruction, not a config
