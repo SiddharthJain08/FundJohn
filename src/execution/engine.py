@@ -16,6 +16,7 @@ Daily run sequence:
 
 import math
 import os
+import re
 import sys
 import gc as _gc
 import json
@@ -328,39 +329,108 @@ def _load_options_window(path, columns, window_days, today):
     a superset of dte_own <= MAX_DTE since date <= today); the exact
     per-observation cut follows in pandas.
     """
-    import pyarrow.compute as _pc
     import pyarrow.parquet as _pq
     try:
         from ingestion.intraday_options import MAX_DTE as _max_dte
     except Exception:  # noqa: BLE001 — same default as intraday_options.py
         _max_dte = int(os.environ.get('OPENCLAW_INTRADAY_OPTIONS_MAX_DTE', '100'))
     cutoff = (today - pd.Timedelta(days=window_days)).strftime('%Y-%m-%d')
-    _filters = [('date', '>=', cutoff),
-                ('expiry', '>', today.strftime('%Y-%m-%d')),
-                ('expiry', '<=', (today + pd.Timedelta(days=_max_dte)).strftime('%Y-%m-%d'))]
-    _rdict = ['ticker', 'date', 'expiry', 'option_type']
     from src.data import parquet_store as _ps
-    if _ps.options_monthly_enabled() or Path(path) == _ps.options_path():
-        # A6: the resolver reads the single file (flag off, identical call) or
-        # the per-month directory (flag on).
-        tbl = _ps.options_read_table(list(columns), filters=_filters,
-                                     read_dictionary=_rdict)
-    else:  # explicit non-store path (tests / ad-hoc callers): unchanged read
-        tbl = _pq.read_table(path, columns=list(columns), filters=_filters,
-                             read_dictionary=_rdict)
-    total = tbl.num_rows
-    greeks = [c for c in ('delta', 'gamma', 'theta', 'vega')
-              if c in tbl.column_names]
-    if greeks and total:
-        zero = None
-        for c in greeks:
-            m = _pc.equal(_pc.fill_null(tbl[c], 0.0), 0.0)
-            zero = m if zero is None else _pc.and_(zero, m)
-        tbl = tbl.filter(_pc.invert(zero))
-        dropped = total - tbl.num_rows
-        if dropped > 0:
-            logger.info('sp1.engine.options_filter dropped=%d degenerate rows (of %d total)',
-                        dropped, total)
+    _store = _ps.options_monthly_enabled() or Path(path) == _ps.options_path()
+    # 2026-10-27: a ROW-GROUP STREAMING read replaces the dataset scan.
+    # `ds.dataset(...).to_table(filter=...)` with dictionary-typed date/expiry
+    # fields did not prune row groups on their statistics: it decoded every
+    # month file (129M rows) and only then applied the predicate — measured
+    # 5.2 GB peak for a 4.8M-row / 0.5 GB result, i.e. the whole 4500M step
+    # cap and then some (rc=137 at the 10-27 catch-up compute, the first
+    # LOW_VOL run with S_options_flow_confirmed_momentum pulling the options
+    # kind back into the aux plan). Now: (1) month files whose name lies
+    # before the window month are never opened; (2) within a file, a row
+    # group is skipped when its `date` max < cutoff or its `expiry` range
+    # lies outside the band (parquet column statistics, no data read);
+    # (3) each surviving row group is read alone, the full predicate —
+    # window, expiry band and the degenerate-greek drop (every requested
+    # greek null or exactly 0.0; NaN is neither, exactly as fill_null(c, 0)
+    # == 0 treated it) — is applied to that one batch, and only kept rows
+    # accumulate. ticker/option_type stay dictionary-encoded (pandas
+    # category downstream, as before); date/expiry are parsed to timestamps
+    # per batch (the old path produced datetime64 via _cat_to_datetime).
+    # Peak ≈ kept rows + one row group.
+    import pyarrow as _pa
+    import pyarrow.compute as _pc
+    import pyarrow.dataset as _ds
+    _expiry_lo = today.strftime('%Y-%m-%d')
+    _expiry_hi = (today + pd.Timedelta(days=_max_dte)).strftime('%Y-%m-%d')
+    if _store and _ps.options_monthly_enabled():
+        _files = list(_ps.options_month_files())
+    else:
+        _files = [Path(path)]
+    _cut_month = cutoff[:7]
+    _files_total = len(_files)
+    _files = [f for f in _files
+              if not (re.fullmatch(r'\d{4}-\d{2}', f.stem) and f.stem < _cut_month)]
+    _rdict = ['ticker', 'option_type']
+    _greek_cols: list = []
+    _pieces: list = []
+    _groups_read = 0
+    _groups_total = 0
+    for _f in _files:
+        _pf = _pq.ParquetFile(_f, read_dictionary=_rdict)
+        _names = _pf.schema_arrow.names
+        # Predicate per FILE: a month file may lack a greek column (the
+        # permissive-schema case options_dataset() unified); only the greeks
+        # this file carries take part in its degenerate-row test.
+        _greek_cols = [c for c in ('delta', 'gamma', 'theta', 'vega')
+                       if c in columns and c in _names]
+        _expr = ((_ds.field('date') >= cutoff)
+                 & (_ds.field('expiry') > _expiry_lo)
+                 & (_ds.field('expiry') <= _expiry_hi))
+        if _greek_cols:
+            _zero = None
+            for c in _greek_cols:
+                _fld = _ds.field(c)
+                _m = _fld.is_null() | (_fld == 0.0)
+                _zero = _m if _zero is None else (_zero & _m)
+            _expr = _expr & ~_zero
+        _md = _pf.metadata
+        _di = _names.index('date') if 'date' in _names else -1
+        _ei = _names.index('expiry') if 'expiry' in _names else -1
+        for _g in range(_md.num_row_groups):
+            _groups_total += 1
+            _rg = _md.row_group(_g)
+            if _di >= 0:
+                _st = _rg.column(_di).statistics
+                if _st is not None and _st.has_min_max and str(_st.max) < cutoff:
+                    continue
+            if _ei >= 0:
+                _st = _rg.column(_ei).statistics
+                if _st is not None and _st.has_min_max and (
+                        str(_st.max) <= _expiry_lo or str(_st.min) > _expiry_hi):
+                    continue
+            _groups_read += 1
+            _t = _pf.read_row_group(_g, columns=list(columns)).filter(_expr)
+            if _t.num_rows == 0:
+                continue
+            for _dc in ('date', 'expiry'):
+                if _dc in _t.column_names:
+                    _idx = _t.schema.get_field_index(_dc)
+                    _t = _t.set_column(_idx, _dc, _pc.cast(
+                        _pc.strptime(_t[_dc], format='%Y-%m-%d', unit='s',
+                                     error_is_null=True), _pa.timestamp('ns')))
+            _pieces.append(_t)
+    if _pieces:
+        # Drop embedded pandas metadata: to_pandas() would otherwise restore the
+        # WRITER's dtypes (str for date/expiry) over the timestamps cast above.
+        tbl = (_pa.concat_tables(_pieces, promote_options='permissive')
+               .unify_dictionaries().replace_schema_metadata(None))
+    else:
+        tbl = _pa.table({c: _pa.array([], type=_pa.string()) for c in columns})
+    del _pieces
+    logger.info('sp1.engine.options_window rows=%d kept (files=%d/%d, row groups '
+                'read=%d/%d; window>=%s, expiry band, degenerate greeks dropped on %s '
+                '— all applied per row group)',
+                tbl.num_rows, len(_files), _files_total, _groups_read, _groups_total,
+                cutoff, ','.join(_greek_cols) or '-')
     df = tbl.to_pandas(self_destruct=True, split_blocks=True)
     del tbl
     for col in ('date', 'expiry'):

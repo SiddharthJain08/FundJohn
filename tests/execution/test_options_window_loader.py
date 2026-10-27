@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pathlib
+
 import pandas as pd
 import pytest
 
@@ -145,3 +147,89 @@ def test_loader_applies_dte_band(opts_parquet):
     assert (dte_own <= MAX_DTE).all()
     # The fixture's 2027-01-15 LEAPS (dte_own ~162-171) must be gone.
     assert not (new['expiry'] == pd.Timestamp('2027-01-15')).any()
+
+
+# ── 2026-10-27: row-group streaming read — prune files and row groups on
+# statistics, apply window + expiry band + degenerate-greek drop per row group
+def test_loader_skips_month_files_before_the_window(opts_parquet, tmp_path, monkeypatch):
+    """Month files named before the window's first month are never opened."""
+    import pyarrow.parquet as pq
+    from src.data import parquet_store as ps
+    df = pd.read_parquet(opts_parquet)
+    d = tmp_path / 'options_eod'
+    d.mkdir()
+    for m, part in df.groupby(df['date'].str[:7]):
+        part.reset_index(drop=True).to_parquet(d / f'{m}.parquet', index=False)
+    assert sorted(f.name for f in d.iterdir()) == ['2026-06.parquet', '2026-07.parquet',
+                                                   '2026-08.parquet']
+    monkeypatch.setattr(ps, 'OPTIONS_DIR', d)
+    monkeypatch.setattr(ps, 'OPTIONS_PATH', tmp_path / 'absent.parquet')
+    monkeypatch.setenv('OPENCLAW_OPTIONS_MONTHLY', '1')
+    opened = []
+    real = pq.ParquetFile
+
+    class Spy(real):
+        def __init__(self, source, *a, **k):
+            opened.append(pathlib.Path(source).name)
+            super().__init__(source, *a, **k)
+    monkeypatch.setattr(pq, 'ParquetFile', Spy)
+    # TODAY=08-06, window 3 days -> cutoff 2026-08-03 -> only the August file
+    new = engine._load_options_window(ps.options_path(), engine._OPTIONS_SIGNAL_COLS,
+                                      3, TODAY)
+    assert opened == ['2026-08.parquet']
+    old = _old_path(opts_parquet, 3)
+    keys = ['ticker', 'date', 'expiry', 'strike', 'option_type']
+    pd.testing.assert_frame_equal(
+        _normalize(new).sort_values(keys).reset_index(drop=True),
+        _normalize(old).sort_values(keys).reset_index(drop=True), check_dtype=False)
+
+
+def test_loader_skips_row_groups_on_statistics(opts_parquet, tmp_path, monkeypatch):
+    """A row group whose `date` max precedes the window, or whose `expiry`
+    range lies outside the band, is never read (statistics only)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    df = pd.read_parquet(opts_parquet).sort_values(['date', 'expiry']).reset_index(drop=True)
+    old_rows = df[df['date'] < '2026-07-01']            # 2026-06-01 rows
+    new_rows = df[df['date'] >= '2026-07-01']
+    p = tmp_path / 'rg.parquet'
+    w = pq.ParquetWriter(p, pa.Table.from_pandas(old_rows, preserve_index=False).schema)
+    w.write_table(pa.Table.from_pandas(old_rows, preserve_index=False))
+    w.write_table(pa.Table.from_pandas(new_rows, preserve_index=False))
+    w.close()
+    assert pq.ParquetFile(p).metadata.num_row_groups == 2
+    read = []
+    real = pq.ParquetFile.read_row_group
+
+    def spy(self, i, *a, **k):
+        read.append(i)
+        return real(self, i, *a, **k)
+    monkeypatch.setattr(pq.ParquetFile, 'read_row_group', spy)
+    new = engine._load_options_window(p, engine._OPTIONS_SIGNAL_COLS, 30, TODAY)
+    assert read == [1], read
+    old = _old_path(p, 30)
+    keys = ['ticker', 'date', 'expiry', 'strike', 'option_type']
+    pd.testing.assert_frame_equal(
+        _normalize(new).sort_values(keys).reset_index(drop=True),
+        _normalize(old).sort_values(keys).reset_index(drop=True), check_dtype=False)
+
+
+def test_loader_monthly_dir_matches_old_path(opts_parquet, tmp_path, monkeypatch):
+    """Flag on + per-month directory: same rows as the single-file old path."""
+    import pyarrow.parquet as pq
+    from src.data import parquet_store as ps
+    df = pd.read_parquet(opts_parquet)
+    d = tmp_path / 'options_eod'
+    d.mkdir()
+    for m, part in df.groupby(df['date'].str[:7]):
+        part.reset_index(drop=True).to_parquet(d / f'{m}.parquet', index=False)
+    monkeypatch.setattr(ps, 'OPTIONS_DIR', d)
+    monkeypatch.setattr(ps, 'OPTIONS_PATH', tmp_path / 'absent.parquet')
+    monkeypatch.setenv('OPENCLAW_OPTIONS_MONTHLY', '1')
+    new = engine._load_options_window(ps.options_path(), engine._OPTIONS_SIGNAL_COLS,
+                                      30, TODAY)
+    old = _old_path(opts_parquet, 30)
+    keys = ['ticker', 'date', 'expiry', 'strike', 'option_type']
+    pd.testing.assert_frame_equal(
+        _normalize(new).sort_values(keys).reset_index(drop=True),
+        _normalize(old).sort_values(keys).reset_index(drop=True), check_dtype=False)

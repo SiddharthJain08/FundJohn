@@ -165,10 +165,21 @@ def _master_coverage(category: str, wanted) -> dict | None:
         return {'in_master': 0, 'wanted': len(wanted), 'frac': 0.0}
     try:
         import pyarrow.parquet as pq
-        if _opts:
-            have = set(ps.options_read_table(['ticker']).column('ticker').to_pylist())
-        else:
-            have = set(pq.read_table(path, columns=['ticker']).column('ticker').to_pylist())
+        # 2026-10-27: dictionary read + unique() PER FILE. The previous
+        # `options_read_table(['ticker']).column('ticker').to_pylist()` built
+        # ~130M Python strings across the month files (6.5 GB anon-rss,
+        # global OOM at 19:00:05Z) and, through box pressure, took the
+        # johnbot scheduler down with it — the 15:00 ET compute tick was
+        # missed and the day traded nothing. A dictionary-encoded ticker
+        # column is int32 codes + one small dictionary per row group;
+        # unique() decodes only the distinct values.
+        files = (ps.options_month_files() if (_opts and ps.options_monthly_enabled())
+                 else [path])
+        have: set = set()
+        for _f in files:
+            _col = pq.read_table(_f, columns=['ticker'],
+                                 read_dictionary=['ticker']).column('ticker')
+            have.update(v for v in _col.unique().to_pylist() if v is not None)
     except Exception as exc:  # noqa: BLE001
         logger.warning('coverage probe failed for %s: %s', category, exc)
         return None

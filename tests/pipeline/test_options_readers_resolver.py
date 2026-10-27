@@ -138,11 +138,14 @@ def test_engine_options_window_reads_dir(both_layouts, monkeypatch):
     off = engine._load_options_window(ps.options_path(), COLS14, 30, TODAY)
     monkeypatch.setenv('OPENCLAW_OPTIONS_MONTHLY', '1')
     calls = []
-    real = ps.options_read_table
-    monkeypatch.setattr(ps, 'options_read_table',
+    real = ps.options_month_files
+    # 2026-10-27: the window read streams row groups per month file; the FILE
+    # LIST still comes from the resolver (options_month_files), so flag on/off
+    # resolution stays in one place.
+    monkeypatch.setattr(ps, 'options_month_files',
                         lambda *a, **k: (calls.append(1), real(*a, **k))[1])
     on = engine._load_options_window(ps.options_path(), COLS14, 30, TODAY)
-    assert calls, 'engine window read must go through ps.options_read_table'
+    assert calls, 'engine window read must take its file list from the resolver'
     assert len(off) == 12   # 3 dates x 2 tickers x call/put
     keys = ['ticker', 'date', 'option_type']
     pd.testing.assert_frame_equal(
@@ -277,10 +280,20 @@ def test_scripts_use_resolver_parity(recorder):
     assert recorder and 'implied_volatility' in recorder[0][0]
 
 
-def test_scripts_use_resolver_acting_ingest(store, recorder, monkeypatch):
+def test_scripts_use_resolver_acting_ingest(store, monkeypatch, tmp_path):
+    """2026-10-27: the coverage probe no longer goes through
+    options_read_table (which materialized every month file's ticker column —
+    6.5 GB, global OOM); it reads ONE dictionary-encoded column PER FILE, with
+    the file list still coming from the resolver (options_month_files /
+    options_path), so flag on/off resolution stays in one place."""
     m = _load_script('rai_t', 'scripts/run_acting_ingest.py')
-    # the recorder returns an empty table; path existence must come from the resolver
+    f = tmp_path / '2026-10.parquet'
+    _write_single(f, _frame(['2026-10-19']))
+    calls = []
+    monkeypatch.setenv('OPENCLAW_OPTIONS_MONTHLY', '1')
+    monkeypatch.setattr(ps, 'options_month_files',
+                        lambda root=None: (calls.append(1), [f])[1])
     monkeypatch.setattr(Path, 'exists', lambda self: True)
     out = m._master_coverage('options_eod', ['AAA'])
-    assert recorder and recorder[0][0] == ['ticker']
-    assert out['in_master'] == 0
+    assert calls, 'file list must come from the resolver'
+    assert out['in_master'] == 0 and out['wanted'] == 1
