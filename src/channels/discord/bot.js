@@ -1899,6 +1899,16 @@ client.on('messageReactionAdd', async (reaction, user) => {
 
 client.on('error', (err) => console.error('[bot] Discord error:', err));
 process.on('unhandledRejection', (err) => console.error('[bot] Unhandled rejection:', err));
+// 2026-10-27: an unhandled 'error' event on a dependency ws client (Discord
+// gateway shard, late handshake ECONNRESET after its onerror was nulled on
+// destroy) exited this process at 19:00:07Z; node-cron re-registered after
+// the 15:00 ET tick and the day traded nothing. The scheduler must outlive a
+// socket error: log + alert + keep running (crash loops still exit; see
+// src/lib/process_guard.js).
+require('../../lib/process_guard').installUncaughtExceptionGuard({
+  log: (m) => console.error(m),
+  alert: (m) => agentPersonas.post('botjohn', 'botjohn-log', m),
+});
 
 let _shuttingDown = false;
 async function gracefulShutdown(signal) {

@@ -254,6 +254,37 @@ async function checkPipelineResume() {
 
 // ── Register Cron Jobs ─────────────────────────────────────────────────────────
 
+// 2026-10-27: same-day compute CATCH-UP after a scheduler restart.
+// johnbot died at 19:00:07Z (unhandled ws error after the tier-1 ingest OOM),
+// systemd restarted it at 19:00:26Z and node-cron re-registered at 19:01:09Z —
+// AFTER the 15:00 ET tick. Nothing re-dispatched the compute, no handoff was
+// written, and the 15:55 lane aborted by design: a six-minute delay became a
+// lost trading day. Pure decision (exported for tests): due iff a weekday
+// in America/New_York, 15:00 <= HH:MM < 15:45 ET (the chain takes ~8 min and
+// the execute lane needs the handoff by 15:55), and no sized handoff for
+// today exists yet. The graph's Redis run lock makes a dispatch harmless when
+// a 15:00 run is in fact still alive (it returns __lock_held__).
+const SAMEDAY_CATCHUP_WINDOW = { start: '15:00', end: '15:45' };
+function sameDayComputeCatchUpDue({ now = new Date(), handoffExists = false,
+                                    window = SAMEDAY_CATCHUP_WINDOW } = {}) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour12: false,
+        hour: '2-digit', minute: '2-digit',
+    }).formatToParts(now).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+    const hhmm = `${parts.hour === '24' ? '00' : parts.hour}:${parts.minute}`;
+    const weekday = parts.weekday;
+    if (weekday === 'Sat' || weekday === 'Sun') {
+        return { due: false, reason: `${weekday} ${hhmm} ET — weekend` };
+    }
+    if (hhmm < window.start || hhmm >= window.end) {
+        return { due: false, reason: `${weekday} ${hhmm} ET — outside ${window.start}–${window.end} ET` };
+    }
+    if (handoffExists) {
+        return { due: false, reason: `${weekday} ${hhmm} ET — today's sized handoff already exists` };
+    }
+    return { due: true, reason: `${weekday} ${hhmm} ET inside ${window.start}–${window.end} ET and no sized handoff for today` };
+}
+
 function start(swarm, generateId, notifyDiscord) {
 
     // NOTE: Signal pipeline (post_memos → research_report → trade_agent) is no longer
@@ -656,6 +687,29 @@ function start(swarm, generateId, notifyDiscord) {
                 try { runPython('src/pipeline/run_sod_refresh.py'); }
                 catch (e) { log(`SOD refresh error: ${e.message.slice(0, 200)}`); }
             }, { timezone: 'America/New_York' });
+
+            // Registration-time catch-up (see sameDayComputeCatchUpDue): a
+            // restart inside 15:00–15:45 ET with no handoff for today
+            // re-dispatches the 15:00 step list ONCE, so the 15:55 lane has
+            // something to execute. Same steps, same graph, different reason
+            // tag so the log and the run row say what happened.
+            try {
+                const fs = require('fs');
+                const _today = new Date().toISOString().slice(0, 10);
+                const _handoff = path.join(ROOT, 'output', 'handoffs', `${_today}_sized.json`);
+                const _cu = sameDayComputeCatchUpDue({ now: new Date(),
+                                                       handoffExists: fs.existsSync(_handoff) });
+                if (_cu.due) {
+                    log(`same-day compute CATCH-UP dispatched at registration: ${_cu.reason}`);
+                    _postAlert(`⚠️ johnbot restarted inside the 15:00–15:45 ET window with no sized handoff for ${_today} — re-dispatching the same-day compute (activation → sentiment → signals → ic_gate → handoff → trade)`);
+                    dispatchCycle('sameday-compute-catchup',
+                                  ['activation', 'sentiment', 'signals', 'ic_gate', 'handoff', 'trade']);
+                } else {
+                    log(`same-day compute catch-up not due at registration: ${_cu.reason}`);
+                }
+            } catch (e) {
+                log(`same-day compute catch-up check error: ${e.message}`);
+            }
         }
     }
     // ── End SP-6 Phase A EOD block ────────────────────────────────────────────
@@ -954,4 +1008,4 @@ function start(swarm, generateId, notifyDiscord) {
     log('Agents will only activate for DEPLOY, REPORT, and weekly synthesis tasks.');
 }
 
-module.exports = { start, processReportQueue, resetTokenBudgets };
+module.exports = { start, processReportQueue, resetTokenBudgets, sameDayComputeCatchUpDue, SAMEDAY_CATCHUP_WINDOW };
