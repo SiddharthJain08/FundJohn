@@ -643,11 +643,20 @@ def _apply_options_surface(old: dict, opts, universe, today, master_dir, px_wind
         # shadow-only diagnostic — a real signals change, not a cost cut. The
         # mitigation self-disarms the moment v2 goes live; no follow-up
         # task needed.
-        if (os.environ.get('OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS', '0') == '1'
-                and not _v2.enabled()):
-            logger.info('[engine] shadow options build skipped (same-day compute)')
-            return old
-        new = _v2.build(opts, universe, today, master_dir, px_window, earnings)
+        from execution import options_aux_panel as _panel
+        if _panel.panel_source_enabled():
+            # 2026-10-27: source=panel — the v2 keys come from the surface
+            # master (+ today's overlay), one filtered 30 MB read, so this
+            # shadow is cheap enough for the 15:00 ET compute the raw v2
+            # shadow skips below. With the flag ON, `new` is what is served.
+            new = _panel.build(universe, today, master_dir, px_window, earnings,
+                               overlay=_panel.load_today_overlay(today, universe))
+        else:
+            if (os.environ.get('OPENCLAW_SIGNALS_SKIP_SHADOW_OPTIONS', '0') == '1'
+                    and not _v2.enabled()):
+                logger.info('[engine] shadow options build skipped (same-day compute)')
+                return old
+            new = _v2.build(opts, universe, today, master_dir, px_window, earnings)
     except Exception as exc:  # noqa: BLE001 — the v2 path must never take the legacy path down
         logger.warning('[options_surface] v2 build failed (%s); serving legacy dict', exc)
         return old
@@ -1082,6 +1091,53 @@ def _sentiment_slice(universe: list, as_of=None) -> dict:
         return {}
 
 
+def _options_served_from_panel() -> bool:
+    """True when the live options aux comes from the surface master: the v2
+    dict is load-bearing (OPENCLAW_OPTIONS_SURFACE=1) AND its source is the
+    panel (OPENCLAW_OPTIONS_SURFACE_SOURCE=panel). Both read at call time."""
+    try:
+        from execution import options_aux_v2 as _v2
+        from execution import options_aux_panel as _panel
+        return _v2.enabled() and _panel.panel_source_enabled()
+    except Exception:  # noqa: BLE001 — a broken module must not change the default path
+        return False
+
+
+def _serve_options_from_panel(universe, today, master_dir) -> dict:
+    """Build the served options dict from the surface master + today's tier-1
+    overlay. The price window (rv_20 / last_price) and the upcoming-earnings
+    split are the same inputs the raw path derives; the shadow line is logged
+    too so the flip gate's G2 reader keeps its series."""
+    from execution import options_aux_panel as _panel
+    from execution import options_aux_v2 as _v2
+    from lib import shadow_log
+    px_window = None
+    _px_path = Path(master_dir) / 'prices.parquet'
+    if _px_path.exists():
+        px_window = _read_parquet_window(_px_path, ['ticker', 'date', 'close'],
+                                         _HV20_PRICES_WINDOW_DAYS, today)
+        px_window['date'] = pd.to_datetime(px_window['date'])
+    earnings = None
+    _earnings_path = Path(master_dir) / 'earnings.parquet'
+    if _earnings_path.exists():
+        try:
+            _e = pd.read_parquet(_earnings_path)
+            _e['date'] = pd.to_datetime(_e['date'], errors='coerce')
+            earnings = _e[_e['date'] >= today].copy()
+        except Exception as _e_exc:  # noqa: BLE001
+            logger.warning(f"Could not load earnings.parquet: {_e_exc}")
+    t0 = time.monotonic()
+    new = _panel.build(universe, today, master_dir, px_window, earnings,
+                       overlay=_panel.load_today_overlay(today, universe))
+    try:
+        line = _v2.shadow_summary({}, new, seconds=time.monotonic() - t0)
+        logger.info(line)
+        shadow_log.record('options_surface_shadow', line)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('[options_surface] shadow summary failed (%s)', exc)
+    return new
+
+
 def load_aux_data(universe: list, as_of=None, needed_kinds: set | None = None) -> dict:
     """Load financials + insider from master Parquets; convert to dict formats the strategies expect.
 
@@ -1233,7 +1289,17 @@ def load_aux_data(universe: list, as_of=None, needed_kinds: set | None = None) -
     # inside this try block, so gating here makes last_price execute only
     # when the options kind is loaded, per the M3 brief's constraint 3,
     # with no separate condition needed.
-    if _need('options') and opts_path.exists():
+    if _need('options') and _options_served_from_panel():
+        # 2026-10-27: OPENCLAW_OPTIONS_SURFACE=1 + OPENCLAW_OPTIONS_SURFACE_SOURCE=panel
+        # — the surface master IS the per-ticker aux; the raw options_eod
+        # window (4.3–5.2 GB peak under the monthly layout) is never read.
+        try:
+            aux['options'] = _serve_options_from_panel(universe, _as_of_ts, master_dir)
+            logger.info(f"Options loaded from the surface master: {len(aux['options'])} tickers "
+                        f"(raw options window skipped)")
+        except Exception as e:  # noqa: BLE001 — same fail-open contract as the raw path
+            logger.warning(f"Could not load options from the surface master: {e}")
+    elif _need('options') and opts_path.exists():
         try:
             today = _as_of_ts
             # Pre-compute HV20 per ticker from master prices (options_eod has no hv20 column)

@@ -13,7 +13,8 @@ FIX = ROOT / 'tests' / 'fixtures'
 def _inputs(tmp_path):
     chain = pd.read_parquet(FIX / 'options_chain_2026-09-03.parquet')
     chain['date'] = pd.to_datetime(chain['date']); chain['expiry'] = pd.to_datetime(chain['expiry'])
-    meta = json.load(open(FIX / 'options_chain_2026-09-03_spots.json'))
+    with open(FIX / 'options_chain_2026-09-03_spots.json') as fh:   # -W error: no unclosed handle
+        meta = json.load(fh)
     px = pd.DataFrame([{'ticker': t, 'date': pd.Timestamp(d), 'close': c}
                        for t, m in meta['closes'].items() for d, c in m.items()])
     master = tmp_path / 'master'; master.mkdir()
