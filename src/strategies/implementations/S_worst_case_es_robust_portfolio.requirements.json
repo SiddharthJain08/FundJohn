@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_worst_case_es_robust_portfolio",
+  "required": ["prices"],
+  "optional": []
+}

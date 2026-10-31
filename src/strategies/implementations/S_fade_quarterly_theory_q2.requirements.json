@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_fade_quarterly_theory_q2",
+  "required": ["prices", "prices_30m"],
+  "optional": []
+}

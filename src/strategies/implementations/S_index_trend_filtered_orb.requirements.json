@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_index_trend_filtered_orb",
+  "required": ["prices", "prices_30m"],
+  "optional": []
+}

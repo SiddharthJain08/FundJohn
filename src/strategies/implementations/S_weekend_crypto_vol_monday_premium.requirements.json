@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_weekend_crypto_vol_monday_premium",
+  "required": ["prices", "options_eod"],
+  "optional": []
+}

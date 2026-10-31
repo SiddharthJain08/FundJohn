@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-10-24T23:34:50.286Z",
+  "updated_at": "2026-10-31T19:32:53.189Z",
   "strategies": {
     "S_leadlag_cluster_minirocket_v2": {
       "state": "live",
@@ -2967,6 +2967,20 @@
       ],
       "instrument_class": "etp"
     },
+    "S_btc_donchian_breakout_realistic_costs": {
+      "state": "candidate",
+      "state_since": "2026-10-31T18:20:13.183104+00:00",
+      "metadata": {
+        "canonical_file": "S_btc_donchian_breakout_realistic_costs.py",
+        "class": "BtcDonchianBreakoutRealisticCosts",
+        "description": "Donchian(20) channel breakout on BTC-USD close with a 10bps realistic-cost breakout margin filter; LONG above the upper band, FLAT below the lower band.",
+        "eligible_regimes": [
+          "LOW_VOL"
+        ]
+      },
+      "history": [],
+      "instrument_class": "crypto"
+    },
     "S_btc_momentum": {
       "state": "live",
       "state_since": "2026-09-05T20:37:35.058Z",
@@ -4166,8 +4180,8 @@
       "instrument_class": "etp"
     },
     "S_ast_pairs_trading_with_country_etfs": {
-      "state": "live",
-      "state_since": "2026-07-13T12:52:55.089Z",
+      "state": "candidate",
+      "state_since": "2026-10-26T04:00:14.367687+00:00",
       "metadata": {
         "canonical_file": "S_ast_pairs_trading_with_country_etfs.py",
         "class": "AstPairsTradingWithCountryEtfs",
@@ -4198,6 +4212,14 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-10-26T04:00:14.367687+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_weekly_cron",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -6831,35 +6853,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_day_after_big_move_contrarian_fade": {
-      "state": "candidate",
-      "state_since": "2026-10-10T18:16:05.987728+00:00",
-      "metadata": {
-        "canonical_file": "S_day_after_big_move_contrarian_fade.py",
-        "class": "DayAfterBigMoveContrarianFade",
-        "description": "LONG-only: fade a >=1x ATR(14) down-day close-to-close move on SPY/QQQ/DIA with a next-session rebound bet, sized by panic magnitude. Up-day moves generate no signal (source paper found no replicable effect there).",
-        "eligible_regimes": [
-          "LOW_VOL"
-        ]
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
-    "S_first_candle_ema12_breakout": {
-      "state": "candidate",
-      "state_since": "2026-10-10T18:16:05.987728+00:00",
-      "metadata": {
-        "canonical_file": "S_first_candle_ema12_breakout_tv1.py",
-        "class": "FirstCandleEma12Breakout",
-        "description": "Daily-bar adaptation (variant 1 of 2): LONG if today's open is above EMA(12) of prior closes, SHORT if below, broad equity universe. Source paper finds no detectable edge over always-long once leverage and bull-market drift are accounted for.",
-        "universe_filter_ref": "src.strategies.universe_default:sp500",
-        "universe_filter_ref_prior": "<none>",
-        "universe_filter_ref_changed_at": "2026-10-15T22:16:44.193Z",
-        "universe_filter_ref_changed_by": "manual:operator"
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
     "S_vix_gamma_range_width": {
       "state": "candidate",
       "state_since": "2026-10-10T23:11:12.782657+00:00",
@@ -7179,14 +7172,34 @@
       "instrument_class": "equity"
     },
     "S_leveraged_portfolio_trend_brake_tv2": {
-      "state": "candidate",
-      "state_since": "2026-10-24T00:00:00.000000+00:00",
+      "state": "live",
+      "state_since": "2026-10-31T18:50:49.483Z",
       "metadata": {
         "canonical_file": "S_leveraged_portfolio_trend_brake_tv2.py",
         "class": "LeveragedPortfolioTrendBrakeTv2",
-        "description": "Monthly, sleeve-level 200-day underlying-index trend brake (HFEA/LEV_GROWTH/LEV_BALANCED/LEV_DIVERSIFIED, variant 2 of 2) switches each multi-asset leveraged sleeve to cash when its blended underlying trend score turns negative, re-evaluated on the first trading day of each month."
+        "description": "Monthly, sleeve-level 200-day underlying-index trend brake (HFEA/LEV_GROWTH/LEV_BALANCED/LEV_DIVERSIFIED, variant 2 of 2) switches each multi-asset leveraged sleeve to cash when its blended underlying trend score turns negative, re-evaluated on the first trading day of each month.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING"
+        ]
       },
-      "history": [],
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-10-31T18:50:49.483Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": null,
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        }
+      ],
       "instrument_class": "etp"
     },
     "S_spx_straddle_rl_exit_timing": {
@@ -7522,6 +7535,230 @@
         }
       ],
       "instrument_class": "etp"
+    },
+    "S_btc_donchian_breakout_realistic_costs_tv2": {
+      "state": "candidate",
+      "state_since": "2026-10-31T00:00:00.000Z",
+      "metadata": {
+        "canonical_file": "S_btc_donchian_breakout_realistic_costs_tv2.py",
+        "class": "BtcDonchianBreakoutRealisticCostsTv2",
+        "description": "Donchian(55) breakout on BTC-USD close requiring 3-bar confirmation before LONG entry, single-bar exit below the lower band; realistic-cost ATR sizing haircut."
+      },
+      "history": [],
+      "instrument_class": "crypto"
+    },
+    "S_rsi2_hourly_gold_meanrev_tv2": {
+      "state": "candidate",
+      "state_since": "2026-10-31T00:00:00.000Z",
+      "metadata": {
+        "canonical_file": "S_rsi2_hourly_gold_meanrev_tv2.py",
+        "class": "Rsi2HourlyGoldMeanrevTv2",
+        "description": "RSI(2) < 10 pullback, no trend filter -> LONG GLD; exit on RSI(2) > 70 or 20-day time stop. Daily-bar adaptation of a paper (yuratrading.com, 2026) reporting the hourly-gold version loses money net of real tick-data costs in every swept configuration."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_retail_scale_multimarket_trend_tv2": {
+      "state": "candidate",
+      "state_since": "2026-10-31T00:00:00.000Z",
+      "metadata": {
+        "canonical_file": "S_retail_scale_multimarket_trend_tv2.py",
+        "class": "RetailScaleMultimarketTrendTv2",
+        "description": "Literal Kelly fraction (trailing-return / realized-variance) sign-of-trend (252d) across 6 retail-accessible macro ETFs (SPY/IEF/GLD/DBC/FXE/VNQ), weekly rebalance, explicit FLAT on a zero trailing return. Falsification test (yuratrading.com 2026): 58/60 swept settings lost money at this universe size (variant 2 of 2)."
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_worst_case_es_robust_portfolio_tv2": {
+      "state": "candidate",
+      "state_since": "2026-10-31T00:00:00.000Z",
+      "metadata": {
+        "canonical_file": "S_worst_case_es_robust_portfolio_tv2.py",
+        "class": "WorstCaseEsRobustPortfolioTv2",
+        "description": "Market-neutral long/short decile sleeve ranked by a standardized worst-case-ES coefficient (EWMA Gaussian reference, single global KL radius), monthly rebalance. Variant 2 of 2."
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_fade_quarterly_theory_q2": {
+      "state": "candidate",
+      "state_since": "2026-10-31T19:09:18.342623+00:00",
+      "metadata": {
+        "canonical_file": "S_fade_quarterly_theory_q2.py",
+        "class": "FadeQuarterlyTheoryQ2",
+        "description": "Fades a new day-high/day-low set during the Q2 RTH window on liquid ETPs; the published 'extreme forms in Q2' rule tests below the 25% chance rate (16.6% hit rate, 2,162 trades, 2019-2021).",
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
+        "universe_filter_source": "fused_approval_default"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-10-31T18:50:49.235Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices_30m: reachable but not backfilled (providers alpaca)",
+                "prices: backfilled (2016-01-04→2026-10-28, providers polygon/alpaca/yahoo/alpha_vantage)"
+              ],
+              "missing_columns": [
+                "prices_30m"
+              ],
+              "provider_route": [
+                {
+                  "provider": "alpaca",
+                  "column": "prices_30m",
+                  "gap_from": "2026-02-21",
+                  "gap_to": "2026-10-31"
+                }
+              ]
+            },
+            "candidate_id": "06753544-4ee5-4eca-b37d-14f1c16d6074"
+          }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-10-31T19:09:18.342623+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe -1.90, DD 17.4%, trades 491",
+          "metadata": {}
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "S_index_trend_filtered_orb": {
+      "state": "staging",
+      "state_since": "2026-10-31T18:50:49.235Z",
+      "metadata": {
+        "canonical_file": "S_index_trend_filtered_orb.py",
+        "class": "IndexTrendFilteredORB",
+        "description": "9:30 opening-range breakout on SPY/QQQ/IWM, taken long-only and only when price is above its 50-day SMA; the source paper found no edge in breakout shorts or counter-trend longs."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-10-31T18:50:49.235Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "intraday_features: reachable but not backfilled (providers alpaca)",
+                "prices: backfilled (2016-01-04→2026-10-28, providers polygon/alpaca/yahoo/alpha_vantage)"
+              ],
+              "missing_columns": [
+                "intraday_features"
+              ],
+              "provider_route": [
+                {
+                  "provider": "alpaca",
+                  "column": "intraday_features",
+                  "gap_from": "2026-02-21",
+                  "gap_to": "2026-10-31"
+                }
+              ]
+            },
+            "candidate_id": "646b4f7d-281e-45a2-b958-25755395b1d6"
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "S_short_volume_settlement_predictor": {
+      "state": "staging",
+      "state_since": "2026-10-31T18:50:49.235Z",
+      "metadata": {
+        "canonical_file": "S_short_volume_settlement_predictor.py",
+        "class": "S_short_volume_settlement_predictor",
+        "description": "Daily short-volume data can predict the official bi-monthly FINRA short-interest settlement figure before it is publicly reported, letting a trader position ahead of the price reaction to the eventual short-interest surprise."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-10-31T18:50:49.235Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "short_interest: reachable but not backfilled (providers finra)",
+                "prices: backfilled (2016-01-04→2026-10-28, providers polygon/alpaca/yahoo/alpha_vantage)"
+              ],
+              "missing_columns": [
+                "short_interest"
+              ],
+              "provider_route": [
+                {
+                  "provider": "finra",
+                  "column": "short_interest",
+                  "gap_from": "2025-06-14",
+                  "gap_to": "2026-10-31"
+                }
+              ]
+            },
+            "candidate_id": "fb65e485-0964-4242-82d7-65df31fb8e13"
+          }
+        }
+      ],
+      "instrument_class": "equity"
+    },
+    "S_weekend_crypto_vol_monday_premium": {
+      "state": "candidate",
+      "state_since": "2026-10-31T19:31:11.407599Z",
+      "metadata": {
+        "canonical_file": "S_weekend_crypto_vol_monday_premium.py",
+        "class": "WeekendCryptoVolMondayPremium",
+        "description": "Weekend BTC/ETH/XRP realized-variance (a common crypto factor) carries predictive content for Monday equity variance post-2024, so going long volatility (e.g. SPY ATM straddle) ahead of Monday open when the weekend crypto-vol factor is elevated captures the forecast variance prem"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-10-31T18:50:49.235Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-01-04→2026-10-28, providers polygon/alpaca/yahoo/alpha_vantage)",
+                "options_eod: backfilled but insufficient (2026-04-08→2026-10-28; needs ≥ 2025-06-14)",
+                "realized_vol: backfilled (2016-01-04→2026-10-28, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "options_eod"
+              ],
+              "provider_route": [
+                {
+                  "provider": "alpaca",
+                  "column": "options_eod",
+                  "data_type": "options",
+                  "gap_from": "2025-06-14",
+                  "gap_to": "2026-04-08"
+                }
+              ]
+            },
+            "candidate_id": "ae7eb315-c1ab-420f-9049-d3235e5cd76d"
+          }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-10-31T19:31:11.407599Z",
+          "actor": "strategycoder",
+          "reason": "Implementation landed: src/strategies/implementations/S_weekend_crypto_vol_monday_premium.py + registry + requirements.json",
+          "metadata": {}
+        }
+      ],
+      "instrument_class": "option"
     }
   },
   "decommissioned": {

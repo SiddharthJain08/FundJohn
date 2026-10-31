@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_retail_scale_multimarket_trend_tv2",
+  "required": ["prices"],
+  "optional": []
+}

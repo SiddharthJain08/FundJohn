@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_btc_donchian_breakout_realistic_costs",
+  "required": ["prices"],
+  "optional": []
+}

@@ -1,0 +1,6 @@
+{
+  "strategy_id": "S_short_volume_settlement_predictor",
+  "instrument_class": "equity",
+  "required": ["prices", "short_interest"],
+  "optional": []
+}

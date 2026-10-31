@@ -100,6 +100,8 @@ _IMPL_MAP = {
     'S_volume_return_autocorr_lmsw': ('strategies.implementations.S_volume_return_autocorr_lmsw', 'VolumeReturnAutocorrLMSW'),
     'S_long_term_price_reversal':    ('strategies.implementations.S_long_term_price_reversal',    'LongTermPriceReversal'),
     'S_fama_french_five_factor':     ('strategies.implementations.S_fama_french_five_factor',     'FamaFrenchFiveFactor'),
+    'S_fade_quarterly_theory_q2':     ('strategies.implementations.S_fade_quarterly_theory_q2',     'FadeQuarterlyTheoryQ2'),
+    'S_index_trend_filtered_orb':     ('strategies.implementations.S_index_trend_filtered_orb',     'IndexTrendFilteredORB'),
     'S_renko_kagi_pairs_spread':     ('strategies.implementations.S_renko_kagi_pairs_spread',     'RenkoKagiPairsSpread'),
     'S_expected_idiosyncratic_skewness': ('strategies.implementations.S_expected_idiosyncratic_skewness', 'ExpectedIdiosyncraticSkewness'),
     'S_partial_cointegration_pairs': ('strategies.implementations.S_partial_cointegration_pairs', 'PartialCointegrationPairs'),
@@ -175,6 +177,10 @@ _IMPL_MAP = {
     'S_btc_momentum':                    ('strategies.implementations.S_btc_momentum',                    'BtcMomentum'),
     # Zhang & Okoye (2026), The Refutation — negative-result port: naive Supertrend(10,3) flip on BTC
     'S_btc_supertrend_naive_flip':        ('strategies.implementations.S_btc_supertrend_naive_flip',       'SupertrendNaiveFlip'),
+    # yuratrading.com (2026) — Donchian(20) breakout on BTC-USD with a realistic-cost breakout margin filter (variant 1 of 2)
+    'S_btc_donchian_breakout_realistic_costs': ('strategies.implementations.S_btc_donchian_breakout_realistic_costs', 'BtcDonchianBreakoutRealisticCosts'),
+    # yuratrading.com (2026) — Donchian(55) breakout on BTC-USD, 3-bar confirmed entry + ATR cost-haircut sizing (variant 2 of 2)
+    'S_btc_donchian_breakout_realistic_costs_tv2': ('strategies.implementations.S_btc_donchian_breakout_realistic_costs_tv2', 'BtcDonchianBreakoutRealisticCostsTv2'),
     # Peng, Khushi, Poon (2026), CAST — cross-asset Kalman filter + uncertainty-penalized MPC drawdown control (variant 1 of 2)
     'S_cross_asset_kalman_mpc_drawdown':  ('strategies.implementations.S_cross_asset_kalman_mpc_drawdown',  'CrossAssetKalmanMpcDrawdown'),
     # SP-4 Phase 0: short straddle VRP — reference strategy for instrument_class='option' rails
@@ -361,6 +367,7 @@ _IMPL_MAP = {
     'S_amihud_illiquidity_premium': ('strategies.implementations.S_amihud_illiquidity_premium', 'AmihudIlliquidityPremium'),
     'S_btc_equity_spillover': ('strategies.implementations.S_btc_equity_spillover', 'BtcEquitySpillover'),
     'S_earnings_sue_pead': ('strategies.implementations.S_earnings_sue_pead', 'EarningsSuePead'),
+    'S_short_volume_settlement_predictor': ('strategies.implementations.S_short_volume_settlement_predictor', 'ShortVolumeSettlementPredictor'),
     'S_ecf_bias_corrected_liquidity_premium': ('strategies.implementations.S_ecf_bias_corrected_liquidity_premium', 'EcfBiasCorrectedLiquidityPremium'),
     'S_factor_momentum_rotation': ('strategies.implementations.S_factor_momentum_rotation', 'FactorMomentumRotation'),
     'S_9sig_tqqq_nav_rebalance': ('strategies.implementations.S_9sig_tqqq_nav_rebalance', 'Sig9TqqqNavRebalance'),
@@ -412,6 +419,10 @@ _IMPL_MAP = {
     'S_gold_trend_long_beta': ('strategies.implementations.S_gold_trend_long_beta', 'GoldTrendLongBeta'),
     # arXiv 2610.11917 (Yadav & Mehra, 2026): robust mean / worst-case tau=0.10-expectile score (L1-Wasserstein-dilated by 0.5x MAD), top-5% long-only equal-weight sleeve (variant 1 of 2)
     'S_expectile_wasserstein_robust_portfolio': ('strategies.implementations.S_expectile_wasserstein_robust_portfolio', 'ExpectileWassersteinRobustPortfolio'),
+    # arXiv 2610.29652 (Gao, Li, Wang, Zhang, 2026): standardized worst-case-ES score (Gaussian reference, per-ticker KL radius from realized-vol CV), top-quintile long-only weight-tilted sleeve, weekly rebalance (variant 1 of 2)
+    'S_worst_case_es_robust_portfolio': ('strategies.implementations.S_worst_case_es_robust_portfolio', 'WorstCaseEsRobustPortfolio'),
+    # arXiv 2610.29652 (Gao, Li, Wang, Zhang, 2026): standardized worst-case-ES score (EWMA Gaussian reference, single global KL radius), market-neutral long/short decile sleeve, monthly rebalance (variant 2 of 2)
+    'S_worst_case_es_robust_portfolio_tv2': ('strategies.implementations.S_worst_case_es_robust_portfolio_tv2', 'WorstCaseEsRobustPortfolioTv2'),
     # Trading & Investing Strategies 2025: 3 consecutive bearish candles (close<open) on SPY → mean-reversion long
     'S_spy_three_down_days_mean_reversion': ('strategies.implementations.S_spy_three_down_days_mean_reversion', 'SpyThreeDownDaysMeanReversion'),
     # QuantSeeker 2026: first 30-minute SPY/QQQ return predicts last 30-minute return → LONG at 15:30 ET
@@ -462,6 +473,8 @@ _IMPL_MAP = {
     'S_spx_straddle_rl_exit_timing': ('strategies.implementations.S_spx_straddle_rl_exit_timing', 'SpxStraddleRlExitTiming'),
     # quantish 2025: SPX first-60-min opening range sets bias; confirmed 10:30-noon breakout -> sell $15-wide 0DTE credit spread at the range extreme, SPY chain proxy
     'S_spx_0dte_opening_range_breakout': ('strategies.implementations.S_spx_0dte_opening_range_breakout', 'SpxZeroDteOpeningRangeBreakout'),
+    # Ebadollahyvahed/Umeorah 2026: weekend BTC/ETH/XRP realized-variance common factor forecasts Monday equity variance (post-2024 break) -> BUY_VOL SPY ATM straddle on an elevated z-score
+    'S_weekend_crypto_vol_monday_premium': ('strategies.implementations.S_weekend_crypto_vol_monday_premium', 'WeekendCryptoVolMondayPremium'),
     # Wysocki 2026: LTR proxy ranking 8 delta-targeted SPXW 0DTE short puts + SKIP via a regime/tail-risk-aware expected-value score, SPY chain proxy
     'S_spxw_0dte_ltr_put_ranker': ('strategies.implementations.S_spxw_0dte_ltr_put_ranker', 'SpxwZeroDteLtrPutRanker'),
     # therefutation.com 2026: golden/death cross (SMA50 x SMA200) event-triggered trend signal, OOS negative-result replication, all-regime coverage
@@ -492,6 +505,20 @@ _IMPL_MAP = {
     'oxf_bollinger_momentum_dsl': ('strategies.implementations.oxf_bollinger_momentum_dsl', 'OxfBollingerMomentumDsl'),
     'S_gem_dual_momentum_rotation': ('strategies.implementations.S_gem_dual_momentum_rotation', 'GemDualMomentumRotation'),
     'S_sector_fund_annual_momentum_rotation': ('strategies.implementations.S_sector_fund_annual_momentum_rotation', 'SectorFundAnnualMomentumRotation'),
+    # yuratrading.com (2026): RSI(2) pullback mean-reversion on gold — source paper falsifies the hourly-bar
+    # version net of real tick costs; daily-bar GLD adaptation (variant 1 of 2, forced by data availability)
+    'S_rsi2_hourly_gold_meanrev': ('strategies.implementations.S_rsi2_hourly_gold_meanrev', 'Rsi2HourlyGoldMeanrev'),
+    # same source, variant 2 of 2: no trend filter + classic Connors(10/70) thresholds + 20-day time
+    # stop + a more punishing 12bps round-trip cost assumption
+    'S_rsi2_hourly_gold_meanrev_tv2': ('strategies.implementations.S_rsi2_hourly_gold_meanrev_tv2', 'Rsi2HourlyGoldMeanrevTv2'),
+    # yuratrading.com (2026): falsification of multi-market trend diversification at retail
+    # scale (6 markets: SPY/TLT/GLD/USO/UUP/EEM); variant 1 of 2 (126d lookback, inverse-vol
+    # risk-parity sizing, monthly rebalance)
+    'S_retail_scale_multimarket_trend': ('strategies.implementations.S_retail_scale_multimarket_trend', 'RetailScaleMultimarketTrend'),
+    # yuratrading.com (2026): falsification of multi-market trend diversification at retail
+    # scale (6 markets: SPY/IEF/GLD/DBC/FXE/VNQ); variant 2 of 2 (252d lookback, literal
+    # Kelly mu/sigma^2 sizing, weekly rebalance, explicit FLAT)
+    'S_retail_scale_multimarket_trend_tv2': ('strategies.implementations.S_retail_scale_multimarket_trend_tv2', 'RetailScaleMultimarketTrendTv2'),
 }
 
 
