@@ -15,7 +15,7 @@
 #      session), spanning >= 2 distinct days, every one parseable with a finite
 #      const AND macro Sharpe and |const - macro| <= 0.5 (the 20-day book/SPY
 #      Sharpe moves by (0.05 - rf)/vol — anything larger is a parsing/data fault).
-#   G3 never inside the weekday 13:00–20:15 UTC compute window.
+#   G3 never inside the weekday 09:00–16:15 ET compute window (DST-aware since 2026-11-03; was UTC).
 # Otherwise it posts why and leaves everything alone (exit 0 — "not yet" is not
 # a unit failure). Once applied it stops its own transient timer.
 #
@@ -66,10 +66,10 @@ if grep -qE '^OPENCLAW_RF_SOURCE=macro' "$ENVF"; then
   exit 0
 fi
 
-# --- G3 compute-window guard (weekdays 13:00–20:15 UTC) ----------------------
-dow=$(date -u +%u); hm=$(date -u +%H%M)
-if [ "$dow" -le 5 ] && [ "$hm" -ge 1300 ] && [ "$hm" -le 2015 ] && [ "$APPLY" = 1 ]; then
-  say "refusing to flip inside the weekday compute window (UTC $hm)"; exit 0
+# --- G3 compute-window guard (weekdays 09:00–16:15 ET) ----------------------
+dow=$(TZ=America/New_York date +%u); hm=$(TZ=America/New_York date +%H%M)
+if [ "$dow" -le 5 ] && [ "$hm" -ge 0900 ] && [ "$hm" -le 1615 ] && [ "$APPLY" = 1 ]; then
+  say "refusing to flip inside the weekday compute window (ET $hm)"; exit 0
 fi
 
 # --- G1 + G2 ------------------------------------------------------------------

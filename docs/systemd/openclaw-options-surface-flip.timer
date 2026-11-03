@@ -1,8 +1,9 @@
 [Unit]
-Description=Nightly (Tue-Fri 21:50 UTC) guarded options-surface flip check; the script disables this timer once applied
+Description=Nightly (Tue-Fri 17:50 ET) guarded options-surface flip check; the script disables this timer once applied
 
 [Timer]
-OnCalendar=Tue..Fri *-*-* 21:50:00 UTC
+# 17:50 ET, DST-aware (was 21:50 UTC = 17:50 EDT only; after 2026-11-01 it landed in the fleet/archive window)
+OnCalendar=Tue..Fri *-*-* 17:50:00 America/New_York
 Persistent=false
 AccuracySec=1min
 Unit=openclaw-options-surface-flip.service

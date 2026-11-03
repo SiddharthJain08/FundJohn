@@ -1,0 +1,18 @@
+[Unit]
+Description=Nightly (Mon-Fri post-close) trigger for OpenClaw fleet overnight resume
+
+[Timer]
+# 17:30 ET, DST-aware (since 2026-11-03): clear of the 15:55 ET live sizer, the 16:15 ET
+# collect (~30 min), the 16:20 ET evening marks and the 16:30 ET options archive (3 GB).
+# Was the UTC-fixed 21:30 (= 17:30 EDT only): after the 2026-11-01 clock change it fired
+# at 16:30 EST on top of collect + archive -> kernel global_oom 2026-11-02 21:54Z.
+# The script's no-new-spawn deadline stays 10:30 UTC; RuntimeMaxSec 48600 then ends the
+# unit at 12:00Z in winter (before the 12:15Z edgar boundary) and 11:00Z in summer.
+OnCalendar=Mon..Fri *-*-* 17:30:00 America/New_York
+# Persistent=false: NEVER fire a missed catch-up run during the trading day (the
+# opposite of the actuator timers, whose Persistent=yes caused catch-up hazards).
+Persistent=false
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

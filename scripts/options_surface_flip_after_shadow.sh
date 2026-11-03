@@ -21,7 +21,7 @@
 #   G3 backtest authority: the five options strategies' latest primary backtest
 #      rows post-date the v3 panel (the fleet re-derived them on the §H panel),
 #      so eligibility reflects the same feature definitions the live dict serves.
-#   G4 never inside the weekday 13:00–20:15 UTC compute window.
+#   G4 never inside the weekday 09:00–16:15 ET compute window.
 # Otherwise it posts why and leaves the flag alone (exit 0). Once applied it
 # stops its own transient timer. Kill switch: OPENCLAW_OPTIONS_SURFACE=0 +
 # user-scope johnbot restart (the legacy dict path is intact in engine.py).
@@ -71,10 +71,10 @@ if grep -qE '^OPENCLAW_OPTIONS_SURFACE=1' "$ENVF"; then
   exit 0
 fi
 
-# --- G4 compute-window guard (weekdays 13:00–20:15 UTC) ----------------------
-dow=$(date -u +%u); hm=$(date -u +%H%M)
-if [ "$dow" -le 5 ] && [ "$hm" -ge 1300 ] && [ "$hm" -le 2015 ] && [ "$APPLY" = 1 ]; then
-  say "refusing to flip inside the weekday compute window (UTC $hm)"; exit 0
+# --- G4 compute-window guard (weekdays 09:00–16:15 ET) ----------------------
+dow=$(TZ=America/New_York date +%u); hm=$(TZ=America/New_York date +%H%M)  # ET, DST-aware (was UTC; wrong after 2026-11-01)
+if [ "$dow" -le 5 ] && [ "$hm" -ge 0900 ] && [ "$hm" -le 1615 ] && [ "$APPLY" = 1 ]; then
+  say "refusing to flip inside the weekday compute window (ET $hm)"; exit 0
 fi
 
 # --- G1 + G2 + G3 ---------------------------------------------------------------

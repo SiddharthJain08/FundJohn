@@ -12,7 +12,7 @@
 #      "[prices_hive_parity] ... verdict=PASS|FAIL" line) holds >= --min-sessions PASS verdicts
 #      on distinct UTC dates (the last PASS of each date counts), the most recent verdict is
 #      PASS, and no verdict=FAIL appears after the earliest of the counted PASS lines.
-#   G3 never inside the weekday 13:00-20:15 UTC compute window (--apply only).
+#   G3 never inside the weekday 09:00–16:15 ET compute window (DST-aware since 2026-11-03; was UTC) (--apply only).
 # Otherwise it prints why and exits 0 ("not yet" is not a unit failure). Once applied it
 # stops its own timer.
 #
@@ -64,11 +64,11 @@ if grep -qE '^OPENCLAW_PRICES_HIVE_READ=1' "$ENVF"; then
   exit 0
 fi
 
-# --- G3 compute-window guard (weekdays 13:00–20:15 UTC) ----------------------
+# --- G3 compute-window guard (weekdays 09:00–16:15 ET) ----------------------
 if [ -n "${PRICES_HIVE_FLIP_NOW:-}" ]; then dow=${PRICES_HIVE_FLIP_NOW%% *}; hm=${PRICES_HIVE_FLIP_NOW##* }
-else dow=$(date -u +%u); hm=$(date -u +%H%M); fi
-if [ "$dow" -le 5 ] && [ "$hm" -ge 1300 ] && [ "$hm" -le 2015 ] && [ "$APPLY" = 1 ]; then
-  say "refusing to flip inside the weekday compute window (UTC $hm)"; exit 0
+else dow=$(TZ=America/New_York date +%u); hm=$(TZ=America/New_York date +%H%M); fi
+if [ "$dow" -le 5 ] && [ "$hm" -ge 0900 ] && [ "$hm" -le 1615 ] && [ "$APPLY" = 1 ]; then
+  say "refusing to flip inside the weekday compute window (ET $hm)"; exit 0
 fi
 
 # --- G1 dual-write live -------------------------------------------------------

@@ -9,7 +9,7 @@
 #      carries config_json.target_mode='atr_r' (<= --max-lagging exceptions).
 #   G2 sharpe: median (atr_r - flat) Sharpe >= --min-median-dsharpe and the
 #      positive-Sharpe count under atr_r >= --min-positive-frac x the flat count.
-#   G3 never inside the weekday 13:00–20:15 UTC compute window.
+#   G3 never inside the weekday 09:00–16:15 ET compute window.
 # Otherwise it posts why and leaves everything alone (exit 0 — "not yet" is not
 # a unit failure). Once applied it stops its own timer.
 #
@@ -60,10 +60,10 @@ if grep -qE '^OPENCLAW_TARGET_MODE=atr_r' "$ENVF"; then
   exit 0
 fi
 
-# --- G3 compute-window guard (weekdays 13:00–20:15 UTC) ----------------------
-dow=$(date -u +%u); hm=$(date -u +%H%M)
-if [ "$dow" -le 5 ] && [ "$hm" -ge 1300 ] && [ "$hm" -le 2015 ] && [ "$APPLY" = 1 ]; then
-  say "refusing to flip inside the weekday compute window (UTC $hm)"; exit 0
+# --- G3 compute-window guard (weekdays 09:00–16:15 ET) ----------------------
+dow=$(TZ=America/New_York date +%u); hm=$(TZ=America/New_York date +%H%M)  # ET, DST-aware (was UTC; wrong after 2026-11-01)
+if [ "$dow" -le 5 ] && [ "$hm" -ge 0900 ] && [ "$hm" -le 1615 ] && [ "$APPLY" = 1 ]; then
+  say "refusing to flip inside the weekday compute window (ET $hm)"; exit 0
 fi
 
 # --- G1 + G2 (read-only) ------------------------------------------------------

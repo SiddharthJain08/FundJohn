@@ -9,7 +9,7 @@
 # and that day's log has no `bench_sizing: failed` / `flag ON but no
 # net-direction-qualified` warning. Otherwise it posts why and leaves the flags
 # alone (exit 0 — a "not yet" is not a unit failure). Never acts inside the
-# weekday 13:00–20:15 UTC compute window.
+# weekday 09:00–16:15 ET compute window.
 #
 # Usage:
 #   scripts/bench_flip_after_shadow.sh            # check only, prints the verdict
@@ -49,10 +49,10 @@ if row and row[0]:
 PY
 }
 
-# --- compute-window guard (weekdays 13:00–20:15 UTC) -------------------------
-dow=$(date -u +%u); hm=$(date -u +%H%M)
-if [ "$dow" -le 5 ] && [ "$hm" -ge 1300 ] && [ "$hm" -le 2015 ] && [ "$APPLY" = 1 ]; then
-  say "refusing to flip inside the weekday compute window (UTC $hm)"; exit 0
+# --- compute-window guard (weekdays 09:00–16:15 ET) -------------------------
+dow=$(TZ=America/New_York date +%u); hm=$(TZ=America/New_York date +%H%M)  # ET, DST-aware (was UTC; wrong after 2026-11-01)
+if [ "$dow" -le 5 ] && [ "$hm" -ge 0900 ] && [ "$hm" -le 1615 ] && [ "$APPLY" = 1 ]; then
+  say "refusing to flip inside the weekday compute window (ET $hm)"; exit 0
 fi
 
 # --- gather the shadow lines ---------------------------------------------------
