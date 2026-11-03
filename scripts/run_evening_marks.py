@@ -109,6 +109,7 @@ def main() -> int:
 
     import psycopg2
     import psycopg2.extras
+    from execution.engine import resolve_workspace
     from execution.parity_mark import (finalize_parity_marks,
                                        finalize_execution_ledger,
                                        backfill_broker_fill_truth,
@@ -129,11 +130,17 @@ def main() -> int:
     conn = psycopg2.connect(uri, cursor_factory=psycopg2.extras.RealDictCursor)
     try:
         cur = conn.cursor()
-        n_marks = finalize_parity_marks(cur, closes, run_date, WORKSPACE)
+        # execution_signals.workspace_id is a uuid column; WORKSPACE defaults
+        # to the name 'default', so it must be resolved the same way
+        # engine.main() does (engine.py:3138) before it hits any query — else
+        # every query below 500s on "invalid input syntax for type uuid" and
+        # the whole pass rolls back (broken 2026-10-23 through 2026-10-29).
+        ws_id = resolve_workspace(cur, WORKSPACE)
+        n_marks = finalize_parity_marks(cur, closes, run_date, ws_id)
         logger.info('parity marks finalized: %s', n_marks)
         n_ledger = finalize_execution_ledger(cur, closes, run_date)
         logger.info('execution ledger finalized: %s', n_ledger)
-        backfill_broker_fill_truth(cur, run_date, WORKSPACE)
+        backfill_broker_fill_truth(cur, run_date, ws_id)
         n_live = refresh_live_days(cur)
         logger.info('live_days refreshed: %s', n_live)
         try:
