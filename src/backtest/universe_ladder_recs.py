@@ -16,6 +16,28 @@ GRID_COLS = ('sharpe', 'max_dd_pct', 'win_rate', 'trades_n', 'sortino', 'calmar'
 USER_AGENT = 'OpenClaw-LadderRecs/1.0 (+botjohn)'
 
 
+def _json_safe(obj):
+    """Replace float NaN/±inf with None recursively. json.dumps emits the bare
+    tokens NaN/Infinity, which Postgres jsonb rejects ("Token \"NaN\" is
+    invalid") — this aborted run_universe_shrink --force mid-loop on 2026-11-05
+    when a zero-drawdown grid cell carried calmar=NaN."""
+    if isinstance(obj, float):
+        return obj if obj == obj and obj not in (float('inf'), float('-inf')) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    try:  # numpy scalars
+        import numpy as np
+        if isinstance(obj, np.floating):
+            return _json_safe(float(obj))
+        if isinstance(obj, np.integer):
+            return int(obj)
+    except Exception:  # noqa: BLE001
+        pass
+    return obj
+
+
 def insert_recommendation(pg, *, strategy_id: str, current_predicate: str,
                           candidate_predicate: str, candidate_set_id: str,
                           backtest_summary: dict, rationale: str) -> int:
@@ -28,7 +50,7 @@ def insert_recommendation(pg, *, strategy_id: str, current_predicate: str,
                VALUES (%s, %s, %s, %s, %s::jsonb, %s, NULL, NULL)
                RETURNING id""",
             (strategy_id, current_predicate, candidate_predicate,
-             candidate_set_id, json.dumps(backtest_summary), rationale))
+             candidate_set_id, json.dumps(_json_safe(backtest_summary)), rationale))
         rec_id = cur.fetchone()[0]
     pg.commit()
     return int(rec_id)

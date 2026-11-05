@@ -56,3 +56,39 @@ def test_autoadopted_message_has_banner_and_no_reaction_footer():
     assert 'React ✅' not in msg
     assert '| `sp500` |' in msg and len(msg) <= 1900
     assert 'rec 987' in msg                    # id still visible for audit
+
+
+# 2026-11-05: Postgres jsonb rejects the bare NaN/Infinity tokens json.dumps emits.
+def test_json_safe_replaces_nan_and_inf():
+    import math
+    import numpy as np
+    obj = {'grid': [{'calmar': float('nan'), 'sharpe': 1.5, 'n': np.int64(3)}],
+           'inf': float('inf'), 'neg': -math.inf, 'np_nan': np.float64('nan'), 'ok': 'x'}
+    out = recs._json_safe(obj)
+    assert out == {'grid': [{'calmar': None, 'sharpe': 1.5, 'n': 3}],
+                   'inf': None, 'neg': None, 'np_nan': None, 'ok': 'x'}
+
+
+def test_insert_recommendation_serialises_nan_as_null():
+    import json
+
+    class _Cur:
+        def __init__(self): self.params = None
+        def execute(self, sql, params): self.params = params
+        def fetchone(self): return (7,)
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    class _PG:
+        def __init__(self): self.cur = _Cur(); self.committed = False
+        def cursor(self): return self.cur
+        def commit(self): self.committed = True
+
+    pg = _PG()
+    rec_id = recs.insert_recommendation(
+        pg, strategy_id='S_x', current_predicate='tier_r3000', candidate_predicate='tier_r1000',
+        candidate_set_id='shrink-1-test', backtest_summary={'grid': [{'calmar': float('nan')}]},
+        rationale='r')
+    assert rec_id == 7 and pg.committed
+    payload = json.loads(pg.cur.params[4])
+    assert payload == {'grid': [{'calmar': None}]} and 'NaN' not in pg.cur.params[4]
