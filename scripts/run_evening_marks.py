@@ -38,12 +38,21 @@ logger = logging.getLogger('evening_marks')
 WORKSPACE = os.environ.get('OPENCLAW_WORKSPACE', 'default')
 
 
-def _closes_for(universe_hint=None) -> dict:
-    """{ticker: latest close} from the engine's own price loader, so the mark
-    prices are identical to what the signals-step pass would have used."""
+def _closes_for(universe_hint=None, as_of=None) -> dict:
+    """{ticker: close as of `as_of`} from the engine's own price loader, so the
+    mark prices are identical to what the signals-step pass would have used.
+
+    `as_of` (date) truncates the panel to sessions <= as_of before taking the
+    last close. Without it a `--date 2026-10-26` backfill marked and ledgered
+    against the LATEST close in the master (observed 2026-10-30: the 10-23,
+    10-26 and 10-28 re-runs all stamped the 10-29 close; corrected 2026-11-05).
+    None keeps the historical behaviour (latest close = today's for the 16:20
+    ET pass)."""
     from execution.engine import load_prices, load_approved_strategies  # noqa: F401
     import pandas as pd  # noqa: F401
     prices = load_prices(universe_hint or [])
+    if as_of is not None and prices is not None and not prices.empty:
+        prices = prices.loc[:pd.Timestamp(as_of)]
     closes: dict = {}
     if prices is not None and not prices.empty:
         for tk in prices.columns:
@@ -121,7 +130,7 @@ def main() -> int:
     # it is explicitly disabled for this pass regardless of the live flag.
     os.environ['OPENCLAW_CLOSE_PROXY_SNAPSHOT'] = '0'
 
-    closes = _closes_for()
+    closes = _closes_for(as_of=run_date)
     if not closes:
         logger.error('no closes available — refusing to mark against an empty panel')
         return 1
