@@ -106,16 +106,22 @@ class EcfBiasCorrectedLiquidityPremium(BaseStrategy):
         ECF (corrected): 2*sqrt(max(0, -(cov1 + var/n)))   — first-order bias added back
                                                               before the sign clamp
         """
-        r_t   = rets.iloc[1:]
-        r_lag = rets.shift(1).iloc[1:]
-        n     = r_t.count()                                  # per-ticker valid-pair count
-        mean_t, mean_l = r_t.mean(), r_lag.mean()
-        cov1  = ((r_t - mean_t) * (r_lag - mean_l)).mean()    # per-ticker lag-1 sample autocovariance
-        var   = rets.var(ddof=1)
-        bias_term  = var / n.clip(lower=1)
-        cov1_corr  = cov1 + bias_term
-        roll_spread = 2.0 * np.sqrt(cov1.abs())
-        ecf_spread  = 2.0 * np.sqrt((-cov1_corr).clip(lower=0.0))
+        # 2026-11-05: pandas routes frame binops above 1M elements through numexpr;
+        # the distro numexpr 2.10.2 corrupts the heap on this expression even at
+        # NUMEXPR_MAX_THREADS=1 ("malloc(): corrupted top size", SIGABRT in every
+        # fleet attempt since 10-25; faulthandler trace logs/hostops/secf-diag-20261105.log).
+        # Disabling the numexpr path for this block is numerically identical.
+        with pd.option_context('compute.use_numexpr', False):
+            r_t   = rets.iloc[1:]
+            r_lag = rets.shift(1).iloc[1:]
+            n     = r_t.count()                                  # per-ticker valid-pair count
+            mean_t, mean_l = r_t.mean(), r_lag.mean()
+            cov1  = ((r_t - mean_t) * (r_lag - mean_l)).mean()    # per-ticker lag-1 sample autocovariance
+            var   = rets.var(ddof=1)
+            bias_term  = var / n.clip(lower=1)
+            cov1_corr  = cov1 + bias_term
+            roll_spread = 2.0 * np.sqrt(cov1.abs())
+            ecf_spread  = 2.0 * np.sqrt((-cov1_corr).clip(lower=0.0))
         return roll_spread, ecf_spread
 
     def generate_signals(
