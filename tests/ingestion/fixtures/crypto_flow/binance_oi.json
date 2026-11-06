@@ -1,0 +1,8 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT",
+ "payload": {
+  "symbol": "BTCUSDT",
+  "openInterest": "96576.544",
+  "time": 1794001512706
+ }
+}

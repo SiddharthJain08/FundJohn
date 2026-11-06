@@ -1,0 +1,116 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 from api.hyperliquid.xyz/info metaAndAssetCtxs, trimmed to BTC ETH kPEPE SOL LINK (universe/ctxs index-aligned)",
+ "payload": [
+  {
+   "universe": [
+    {
+     "szDecimals": 5,
+     "name": "BTC",
+     "maxLeverage": 40,
+     "marginTableId": 56
+    },
+    {
+     "szDecimals": 4,
+     "name": "ETH",
+     "maxLeverage": 25,
+     "marginTableId": 55
+    },
+    {
+     "szDecimals": 2,
+     "name": "SOL",
+     "maxLeverage": 20,
+     "marginTableId": 54
+    },
+    {
+     "szDecimals": 0,
+     "name": "kPEPE",
+     "maxLeverage": 10,
+     "marginTableId": 52
+    },
+    {
+     "szDecimals": 1,
+     "name": "LINK",
+     "maxLeverage": 10,
+     "marginTableId": 52
+    }
+   ]
+  },
+  [
+   {
+    "funding": "0.0000125",
+    "openInterest": "42343.94552",
+    "prevDayPx": "75945.0",
+    "dayNtlVlm": "2949602452.4712610245",
+    "premium": "-0.0000580273",
+    "oraclePx": "75826.4",
+    "markPx": "75817.0",
+    "midPx": "75821.5",
+    "impactPxs": [
+     "75819.8",
+     "75822.0"
+    ],
+    "dayBaseVlm": "38920.05577"
+   },
+   {
+    "funding": "0.0000125",
+    "openInterest": "980356.3154000001",
+    "prevDayPx": "2233.0",
+    "dayNtlVlm": "757198284.2296895981",
+    "premium": "-0.0002511211",
+    "oraclePx": "2230.0",
+    "markPx": "2229.2",
+    "midPx": "2229.15",
+    "impactPxs": [
+     "2229.1",
+     "2229.44"
+    ],
+    "dayBaseVlm": "339271.0440000001"
+   },
+   {
+    "funding": "-0.000012062",
+    "openInterest": "5700310.9399999995",
+    "prevDayPx": "90.041",
+    "dayNtlVlm": "220160594.3252099454",
+    "premium": "-0.0002777006",
+    "oraclePx": "90.025",
+    "markPx": "89.9719",
+    "midPx": "89.9995",
+    "impactPxs": [
+     "89.999",
+     "90.0"
+    ],
+    "dayBaseVlm": "2445406.2399999993"
+   },
+   {
+    "funding": "0.0000125",
+    "openInterest": "11238242854.0",
+    "prevDayPx": "0.004833",
+    "dayNtlVlm": "39349253.4002890065",
+    "premium": "-0.0010028079",
+    "oraclePx": "0.004986",
+    "markPx": "0.004981",
+    "midPx": "0.00498",
+    "impactPxs": [
+     "0.004979",
+     "0.004981"
+    ],
+    "dayBaseVlm": "7895506665.0"
+   },
+   {
+    "funding": "0.0000125",
+    "openInterest": "4871893.5999999996",
+    "prevDayPx": "10.707",
+    "dayNtlVlm": "8337442.9038999984",
+    "premium": "-0.0001441491",
+    "oraclePx": "10.8915",
+    "markPx": "10.887",
+    "midPx": "10.888",
+    "impactPxs": [
+     "10.88535",
+     "10.88993"
+    ],
+    "dayBaseVlm": "772780.7"
+   }
+  ]
+ ]
+}

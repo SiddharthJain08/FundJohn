@@ -1,0 +1,11 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 https://fapi.binance.com/futures/data/takerlongshortRatio?symbol=BTCUSDT&period=1h&limit=1",
+ "payload": [
+  {
+   "buySellRatio": "0.8424",
+   "sellVol": "2108.6040",
+   "buyVol": "1776.2830",
+   "timestamp": 1793995200000
+  }
+ ]
+}

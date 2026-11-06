@@ -1,0 +1,12 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 https://fapi.binance.com/futures/data/topLongShortPositionRatio?symbol=BTCUSDT&period=1h&limit=1",
+ "payload": [
+  {
+   "symbol": "BTCUSDT",
+   "longAccount": "0.6729",
+   "longShortRatio": "2.0569",
+   "shortAccount": "0.3271",
+   "timestamp": 1793998800000
+  }
+ ]
+}

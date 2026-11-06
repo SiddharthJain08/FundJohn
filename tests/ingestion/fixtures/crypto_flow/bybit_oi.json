@@ -1,0 +1,21 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 https://api.bybit.com/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=1h&limit=1",
+ "payload": {
+  "retCode": 0,
+  "retMsg": "OK",
+  "result": {
+   "symbol": "BTCUSDT",
+   "category": "linear",
+   "list": [
+    {
+     "openInterest": "70561.07399999",
+     "singleOpenInterest": "35280.537",
+     "timestamp": "1793998800000"
+    }
+   ],
+   "nextPageCursor": "lastid%3D16176541%26lasttime%3D1793998800"
+  },
+  "retExtInfo": {},
+  "time": 1794001518730
+ }
+}

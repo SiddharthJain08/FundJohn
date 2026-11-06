@@ -1,0 +1,20 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 https://api.bybit.com/v5/market/account-ratio?category=linear&symbol=BTCUSDT&period=1h&limit=1",
+ "payload": {
+  "retCode": 0,
+  "retMsg": "OK",
+  "result": {
+   "list": [
+    {
+     "symbol": "BTCUSDT",
+     "buyRatio": "0.7113",
+     "sellRatio": "0.2887",
+     "timestamp": "1793998800000"
+    }
+   ],
+   "nextPageCursor": "lastid%3D0%26lasttime%3D1793998800"
+  },
+  "retExtInfo": {},
+  "time": 1794001518978
+ }
+}

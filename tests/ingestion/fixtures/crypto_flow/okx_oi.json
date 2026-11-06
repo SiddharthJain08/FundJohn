@@ -1,0 +1,17 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP",
+ "payload": {
+  "code": "0",
+  "data": [
+   {
+    "instId": "BTC-USDT-SWAP",
+    "instType": "SWAP",
+    "oi": "3487908.15000001671",
+    "oiCcy": "34879.0815000001671",
+    "oiUsd": "2643830889.79186266616329",
+    "ts": "1794001519192"
+   }
+  ],
+  "msg": ""
+ }
+}

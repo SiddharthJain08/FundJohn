@@ -1,0 +1,138 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 okx liquidation-orders uly=BTC-USDT, details trimmed to 12 rows; tests rebase \"now\" relative to ts",
+ "payload": {
+  "code": "0",
+  "data": [
+   {
+    "details": [
+     {
+      "bkLoss": "0",
+      "bkPx": "75967.8",
+      "ccy": "",
+      "posSide": "short",
+      "side": "buy",
+      "sz": "6.47",
+      "time": 1793990071067,
+      "ts": "1793990071067"
+     },
+     {
+      "bkLoss": "0",
+      "bkPx": "75473.2",
+      "ccy": "",
+      "posSide": "long",
+      "side": "sell",
+      "sz": "0.01",
+      "time": 1793987610452,
+      "ts": "1793987610452"
+     },
+     {
+      "bkLoss": "0",
+      "bkPx": "75475.6",
+      "ccy": "",
+      "posSide": "long",
+      "side": "sell",
+      "sz": "100",
+      "time": 1793987609755,
+      "ts": "1793987609755"
+     },
+     {
+      "bkLoss": "0",
+      "bkPx": "75476.4",
+      "ccy": "",
+      "posSide": "long",
+      "side": "sell",
+      "sz": "1.14",
+      "time": 1793987609643,
+      "ts": "1793987609643"
+     },
+     {
+      "bkLoss": "0",
+      "bkPx": "75475.6",
+      "ccy": "",
+      "posSide": "long",
+      "side": "sell",
+      "sz": "1.77",
+      "time": 1793987609639,
+      "ts": "1793987609639"
+     },
+     {
+      "bkLoss": "0",
+      "bkPx": "75476.4",
+      "ccy": "",
+      "posSide": "long",
+      "side": "sell",
+      "sz": "1.32",
+      "time": 1793987609584,
+      "ts": "1793987609584"
+     },
+     {
+      "bkLoss": "0",
+      "bkPx": "75481",
+      "ccy": "",
+      "posSide": "long",
+      "side": "sell",
+      "sz": "0.04",
+      "time": 1793987609403,
+      "ts": "1793987609403"
+     },
+     {
+      "bkLoss": "0",
+      "bkPx": "75481",
+      "ccy": "",
+      "posSide": "long",
+      "side": "sell",
+      "sz": "5.73",
+      "time": 1793987609372,
+      "ts": "1793987609372"
+     },
+     {
+      "bkLoss": "0",
+      "bkPx": "75481",
+      "ccy": "",
+      "posSide": "long",
+      "side": "sell",
+      "sz": "8.26",
+      "time": 1793987609349,
+      "ts": "1793987609349"
+     },
+     {
+      "bkLoss": "0",
+      "bkPx": "75537.1",
+      "ccy": "",
+      "posSide": "long",
+      "side": "sell",
+      "sz": "25",
+      "time": 1793987420247,
+      "ts": "1793987420247"
+     },
+     {
+      "bkLoss": "0",
+      "bkPx": "75543.9",
+      "ccy": "",
+      "posSide": "short",
+      "side": "buy",
+      "sz": "0.04",
+      "time": 1793987371143,
+      "ts": "1793987371143"
+     },
+     {
+      "bkLoss": "0",
+      "bkPx": "75493.3",
+      "ccy": "",
+      "posSide": "long",
+      "side": "sell",
+      "sz": "0.03",
+      "time": 1793986696608,
+      "ts": "1793986696608"
+     }
+    ],
+    "instFamily": "BTC-USDT",
+    "instId": "BTC-USDT-SWAP",
+    "instType": "SWAP",
+    "totalLoss": "0",
+    "uly": "BTC-USDT"
+   }
+  ],
+  "msg": ""
+ }
+}

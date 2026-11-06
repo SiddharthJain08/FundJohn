@@ -1,0 +1,26 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 okx instruments SWAP trimmed to BTC ETH PEPE (ctVal)",
+ "payload": {
+  "code": "0",
+  "data": [
+   {
+    "instId": "BTC-USDT-SWAP",
+    "ctVal": "0.01",
+    "ctMult": "1",
+    "uly": "BTC-USDT"
+   },
+   {
+    "instId": "ETH-USDT-SWAP",
+    "ctVal": "0.1",
+    "ctMult": "1",
+    "uly": "ETH-USDT"
+   },
+   {
+    "instId": "PEPE-USDT-SWAP",
+    "ctVal": "10000000",
+    "ctMult": "1",
+    "uly": "PEPE-USDT"
+   }
+  ]
+ }
+}
