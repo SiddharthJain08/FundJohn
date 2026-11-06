@@ -130,7 +130,7 @@ def test_mem_available_mb_parses_meminfo(tmp_path):
     assert t.mem_available_mb(str(tmp_path / 'missing')) is None
 
 
-def test_redis_run_lock_held_checks_et_and_utc_keys(monkeypatch):
+def test_redis_run_lock_held_checks_et_and_utc_keys(monkeypatch, capsys):
     import sys
     import types
     got = []
@@ -148,6 +148,8 @@ def test_redis_run_lock_held_checks_et_and_utc_keys(monkeypatch):
         raise ConnectionError('no redis')
     monkeypatch.setitem(sys.modules, 'redis', types.SimpleNamespace(from_url=boom))
     assert t.redis_run_lock_held(datetime(2026, 11, 6, 3, 0, tzinfo=timezone.utc)) is False
+    out = capsys.readouterr().out
+    assert 'run-lock check failed (ConnectionError)' in out and 'no redis' not in out
 
 
 def test_due_providers_by_cadence():

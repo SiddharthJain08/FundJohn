@@ -79,7 +79,8 @@ def redis_run_lock_held(now_utc: datetime) -> bool:
                            socket_connect_timeout=2, socket_timeout=2)
         dates = {now_utc.astimezone(_ET).date().isoformat(), now_utc.astimezone(timezone.utc).date().isoformat()}
         return any(r.get(run_lock.lock_key(d)) is not None for d in sorted(dates))
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 — type only: REDIS_URL can carry a password
+        print(f'[crypto-flow] run-lock check failed ({type(e).__name__}); treating as not held')
         return False
 
 
