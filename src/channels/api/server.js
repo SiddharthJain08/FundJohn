@@ -11587,7 +11587,8 @@ function _crSortRows(rows) {
     if (na && nb) return 0;
     if (na) return 1;            // missing always last
     if (nb) return -1;
-    if (typeof va === 'number' || typeof vb === 'number') return (Number(va) - Number(vb)) * mul;
+    const xa = _crNum(va), xb = _crNum(vb);   // numeric-looking strings sort numerically
+    if (xa != null && xb != null) return (xa - xb) * mul;
     return String(va).localeCompare(String(vb)) * mul;
   };
   const bench = rows.filter(r => r.role === 'benchmark').sort(cmp);

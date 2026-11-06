@@ -188,11 +188,12 @@ test('board: stables hidden, benchmark pinned, whale score desc, netflow colours
     { ticker: 'USDT-USD', role: 'stable', whale_score: 99 },
     { ticker: 'BTC-USD', role: 'benchmark', whale_score: 10, exch_netflow_usd_24h: -3e8, funding_ann: 0.1234 },
     { ticker: 'ETH-USD', role: 'alt', whale_score: 50 },
+    { ticker: 'DOGE-USD', role: 'alt', whale_score: '9' },
   ] });
   const h = els['cr-board'].innerHTML;
   assert.doesNotMatch(h, /USDT/);
-  const order = ['BTC-USD', 'SOL-USD', 'ETH-USD'].map(t => h.indexOf('data-t="' + t + '"'));
-  assert.ok(order[0] > 0 && order[0] < order[1] && order[1] < order[2], 'benchmark first, then score desc');
+  const order = ['BTC-USD', 'SOL-USD', 'ETH-USD', 'DOGE-USD'].map(t => h.indexOf('data-t="' + t + '"'));
+  assert.ok(order[0] > 0 && order[0] < order[1] && order[1] < order[2] && order[2] < order[3], 'benchmark first, then score desc (string scores numeric)');
   assert.ok(h.includes('color:var(--red)">+$1.2M'));
   assert.ok(h.includes('color:var(--green)">-$300.0M'));
   assert.ok(h.includes('>12.34<'), 'funding_ann × 100, 2 dp');
