@@ -39,7 +39,13 @@ def usd(amount: float, price: float | None) -> float | None:
     return amount * price
 
 
+class ProviderFetchError(RuntimeError):
+    """Raised by a provider when its PRIMARY source returns None/garbage so run_provider records ok=False."""
+
+
 class Provider:
+    """Subclasses implement _fetch. If the primary source returns None/garbage, raise
+    ProviderFetchError; fallback sources may swallow None."""
     name: str = ''
     cadence: str = 'tick'  # 'tick' | 'hourly' | 'daily'
 

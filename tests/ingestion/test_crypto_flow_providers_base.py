@@ -53,3 +53,33 @@ def test_usd_and_owner_edge_cases():
     assert registry.owner_of('ETH', '0xAB', reg) == ('X', 'exchange')
     assert registry.owner_of('BTC', 'abc', reg) == (None, None)
     assert registry.owner_of('BTC', None, reg) == (None, None)
+
+def test_run_provider_fetch_error_is_failed_result():
+    class _P(base.Provider):
+        name = 'hl'
+        def _fetch(self, assets, since, now): raise base.ProviderFetchError('hyperliquid: None')
+    n = datetime.now(timezone.utc)
+    r = base.run_provider(_P(), [], n, n)
+    assert r.ok is False and r.err == 'ProviderFetchError: hyperliquid: None'
+
+def test_registry_has_no_malformed_addresses():
+    import re
+    reg = registry.load_registry()
+    evm = re.compile(r'^0x[0-9a-f]{40}$')
+    b58 = re.compile(r'^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$')
+    bech = re.compile(r'^bc1[ac-hj-np-z02-9]{11,71}$')
+    for chain, addrs in reg.items():
+        for a in addrs:
+            if chain == 'BTC':
+                assert b58.match(a) or bech.match(a), a
+            elif chain in ('ETH', 'ARB', 'POL', 'AVAX', 'BASE', 'BNB'):
+                assert evm.match(a), a
+
+def test_registry_rejected_list_is_not_served():
+    import json
+    raw = json.loads(registry.REGISTRY_PATH.read_text())
+    assert raw['_rejected']
+    reg = registry.load_registry()
+    assert '_rejected' not in reg and '_meta' not in reg
+    for r in raw['_rejected']:
+        assert reg.get(r['chain'], {}).get(r['address']) is None
