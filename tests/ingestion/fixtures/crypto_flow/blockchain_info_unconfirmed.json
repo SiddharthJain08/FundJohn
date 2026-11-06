@@ -1,0 +1,160 @@
+{
+ "_fixture_notes": "Captured 2026-11-06 from blockchain.info/unconfirmed-transactions, trimmed to 5 txs, slimmed to used fields. Edits: tx0 out[0].value=1.4e9 sat (>=$1M @76000); tx1 out[0] redirected to its own input addr, 1.4e9 sat (change case); tx2 out[0] addr -> Binance 34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo (value unchanged, small; tests use low min_usd).",
+ "txs": [
+  {
+   "hash": "2c64ebd28ad3bfbfe6aeda47c836d89de0c5785def9b22ce6c02b0d80c2d58c9",
+   "time": 1794000713,
+   "inputs": [
+    {
+     "prev_out": {
+      "addr": "bc1qlwl457d70kchlnzdm043zazewndw28ldhu8kvn",
+      "value": 135446
+     }
+    },
+    {
+     "prev_out": {
+      "addr": "bc1qe3gehhgv9jla9cznxkqljk27dx3x7ca8psuqtc",
+      "value": 53541
+     }
+    }
+   ],
+   "out": [
+    {
+     "n": 0,
+     "addr": "bc1qyme6uj99sldks6w599jj355jr5vwfcj4jr7y92",
+     "value": 1400000000
+    },
+    {
+     "n": 1,
+     "addr": "bc1qhu8znk3q4u96wckmnljmh8u94ljen2hx0f002u",
+     "value": 56075
+    }
+   ]
+  },
+  {
+   "hash": "6844d9f3e617a4daf57dc167c9aa222c9716b7b8259c3d7b8e98ec41f5f291c4",
+   "time": 1794000713,
+   "inputs": [
+    {
+     "prev_out": {
+      "addr": "bc1qs0rpt35u5x49wq2wvdgsc53uczp40q2vh5057a",
+      "value": 1510351
+     }
+    },
+    {
+     "prev_out": {
+      "addr": "bc1qs0rpt35u5x49wq2wvdgsc53uczp40q2vh5057a",
+      "value": 237963
+     }
+    },
+    {
+     "prev_out": {
+      "addr": "bc1qs0rpt35u5x49wq2wvdgsc53uczp40q2vh5057a",
+      "value": 290318
+     }
+    }
+   ],
+   "out": [
+    {
+     "n": 0,
+     "addr": "bc1qs0rpt35u5x49wq2wvdgsc53uczp40q2vh5057a",
+     "value": 1400000000
+    },
+    {
+     "n": 1,
+     "addr": "bc1qs0rpt35u5x49wq2wvdgsc53uczp40q2vh5057a",
+     "value": 583547
+    }
+   ]
+  },
+  {
+   "hash": "2ccfe6056c3a896f2854554fea6bbcad43ec21d648848074c47f69a9bbdde3c1",
+   "time": 1794000713,
+   "inputs": [
+    {
+     "prev_out": {
+      "addr": "bc1qf6752cn39q877h50f05mvkx8cdarf42dpk3u7k",
+      "value": 69780
+     }
+    }
+   ],
+   "out": [
+    {
+     "n": 0,
+     "addr": "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo",
+     "value": 64418
+    },
+    {
+     "n": 1,
+     "addr": "bc1p5akucnl7tasjp7cw0qej6q389hsed54uwham9ucepr4x3lygyz9q0kuvla",
+     "value": 1650
+    },
+    {
+     "n": 2,
+     "addr": "bc1qu3h39g6rn9tfus6wrgntdy2emaqj0ehecp7vy0",
+     "value": 3160
+    }
+   ]
+  },
+  {
+   "hash": "61ccd8cd78b9e72477a8502ab56592b7b870880d41051c77a00250f8d6cb8db4",
+   "time": 1794000713,
+   "inputs": [
+    {
+     "prev_out": {
+      "addr": "bc1qxyh6kdheych9vsw08wdpkyalpgth9gvnjym5ez",
+      "value": 2172307
+     }
+    }
+   ],
+   "out": [
+    {
+     "n": 0,
+     "addr": "bc1qxyh6kdheych9vsw08wdpkyalpgth9gvnjym5ez",
+     "value": 2105873
+    },
+    {
+     "n": 1,
+     "addr": "1H6F7b76UXBkigDrJbabDhLN6kExMRUmpo",
+     "value": 66112
+    }
+   ]
+  },
+  {
+   "hash": "f6dcdeba9ac3af3611d04facf8ccae11d8fa123bef7a5fd93ba9a6745bfbeb8b",
+   "time": 1794000713,
+   "inputs": [
+    {
+     "prev_out": {
+      "addr": "bc1q8yrs5athjndt3w2cckdnwf73rwh0emh9su789f",
+      "value": 90301
+     }
+    },
+    {
+     "prev_out": {
+      "addr": "bc1q0ymzpv2kjthfspj6tmy54mc78wc3puzgdqtjnh",
+      "value": 132522
+     }
+    },
+    {
+     "prev_out": {
+      "addr": "bc1quayzkkrn3urps5slv59jawnvunl4c3x7vtjwdt",
+      "value": 72841
+     }
+    }
+   ],
+   "out": [
+    {
+     "n": 0,
+     "addr": "bc1qhru9h2h3w94jjd482d4a4z7vk04chyf3uqs9ke",
+     "value": 138846
+    },
+    {
+     "n": 1,
+     "addr": "bc1qrl96h6a9v56k8eht03q7gpfwfem43u3hghnhgw",
+     "value": 156195
+    }
+   ]
+  }
+ ]
+}

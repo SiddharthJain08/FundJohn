@@ -1,0 +1,50 @@
+{
+ "_fixture_notes": "Captured 2026-11-06 from mempool.space/api/block/<latest>/txs, 2 txs slimmed. Edit: tx0 vout[0].value=1.4e9 sat (vout[1] is change to the input addr, left unedited).",
+ "height": 974860,
+ "timestamp": 1794000227,
+ "id": "00000000000000000000ea1989e11a5a2640f84ca84546581ef21c5142655b0a",
+ "txs": [
+  {
+   "txid": "7975be9d28cd99349ae357f7e5bc945740968c47898f65985bf180672f6e13ad",
+   "vin": [
+    {
+     "prevout": {
+      "scriptpubkey_address": "bc1qnss6g92k2ghv5rnd7js7cvfx4tmyfmxfcu40ap",
+      "value": 595628620
+     }
+    }
+   ],
+   "vout": [
+    {
+     "scriptpubkey_address": "bc1qqywzry2dr9u24mx7qj79g2ya78evqv5m4mvqg4",
+     "value": 1400000000
+    },
+    {
+     "scriptpubkey_address": "bc1qnss6g92k2ghv5rnd7js7cvfx4tmyfmxfcu40ap",
+     "value": 1400000000
+    }
+   ]
+  },
+  {
+   "txid": "c156fc8018a5fbe4c18ac1b6cdf452a90b36addeac71cda0ff0c80fb02fea698",
+   "vin": [
+    {
+     "prevout": {
+      "scriptpubkey_address": "bc1qx4th8823cwnjz2lt5pl2xq0rlx5eewgpg4x7cl",
+      "value": 217441
+     }
+    }
+   ],
+   "vout": [
+    {
+     "scriptpubkey_address": "bc1q6e0z35pzckxjczns36nvl4vxr83kwcr6mwfyer",
+     "value": 41718
+    },
+    {
+     "scriptpubkey_address": "bc1qu058flvkearvlur35pqhuuxq8ywjmm696ha82h",
+     "value": 173185
+    }
+   ]
+  }
+ ]
+}
