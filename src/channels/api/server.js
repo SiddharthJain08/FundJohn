@@ -54,6 +54,8 @@ function broadcast(data) {
   }
 }
 module.exports.broadcast = broadcast;
+// Crypto page: push new whale events over SSE (opt-in so a cold box never polls a missing table)
+if (process.env.OPENCLAW_CRYPTO_FLOWS === '1') require('./routes_crypto').startEventWatcher(broadcast);
 // Wire SSE broadcast into the pipeline collector so all data collection events push live updates
 require("../../pipeline/collector").setBroadcast(broadcast);
 
@@ -3383,6 +3385,7 @@ app.use('/api/research', require('./routes_research'));
 
 // ── Pipeline Diagnostics — LangGraph run inspector ────────────────────────────
 app.use('/api/pipelines', require('./routes_pipelines'));
+app.use('/api/crypto', require('./routes_crypto'));
 
 // ── Regime eligibility (operator trim/expand) ─────────────────────────────────
 app.use('/api/regime-eligibility', require('./routes_regime_eligibility'));
