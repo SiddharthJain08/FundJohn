@@ -1,0 +1,220 @@
+{
+ "jsonrpc": "2.0",
+ "result": {
+  "transaction": {
+   "signatures": [
+    "5kRLmxZhTGohTrr6LCx81XwPAoP47NpaJf76raaNaQ8tTLxbXwnNxB7EsDnfsU4A3T8BKUayuPLPSwFWH1cr9ACV"
+   ],
+   "message": {
+    "accountKeys": [
+     {
+      "pubkey": "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+      "writable": true,
+      "signer": true,
+      "source": "transaction"
+     },
+     {
+      "pubkey": "DJm4WGbK53ZiHLkp6RtfQ8f6LQSnbk3neJa2FmAdG1ur",
+      "writable": true,
+      "signer": false,
+      "source": "transaction"
+     },
+     {
+      "pubkey": "CVwBQD4C1ySuwnfbnq3pGcmgC3cb1RYt25U8XpsVEpyF",
+      "writable": true,
+      "signer": false,
+      "source": "transaction"
+     },
+     {
+      "pubkey": "7DaumTmUaK3xcpd8XJXAjUzDrCqPuj3S1Sc2cbootBUN",
+      "writable": true,
+      "signer": false,
+      "source": "transaction"
+     },
+     {
+      "pubkey": "SysvarRecentB1ockHashes11111111111111111111",
+      "writable": false,
+      "signer": false,
+      "source": "transaction"
+     },
+     {
+      "pubkey": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+      "writable": false,
+      "signer": false,
+      "source": "transaction"
+     },
+     {
+      "pubkey": "11111111111111111111111111111111",
+      "writable": false,
+      "signer": false,
+      "source": "transaction"
+     },
+     {
+      "pubkey": "ComputeBudget111111111111111111111111111111",
+      "writable": false,
+      "signer": false,
+      "source": "transaction"
+     },
+     {
+      "pubkey": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "writable": false,
+      "signer": false,
+      "source": "transaction"
+     }
+    ],
+    "recentBlockhash": "EEpcWJZq89R4EwLQAG1VpXVZprgdKjc1LR5wpqV88CGL",
+    "instructions": [
+     {
+      "program": "system",
+      "programId": "11111111111111111111111111111111",
+      "parsed": {
+       "info": {
+        "nonceAccount": "DJm4WGbK53ZiHLkp6RtfQ8f6LQSnbk3neJa2FmAdG1ur",
+        "nonceAuthority": "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+        "recentBlockhashesSysvar": "SysvarRecentB1ockHashes11111111111111111111"
+       },
+       "type": "advanceNonce"
+      },
+      "stackHeight": 1
+     },
+     {
+      "programId": "ComputeBudget111111111111111111111111111111",
+      "accounts": [],
+      "data": "3QAwFKa3MJAs",
+      "stackHeight": 1
+     },
+     {
+      "programId": "ComputeBudget111111111111111111111111111111",
+      "accounts": [],
+      "data": "G9oAjh",
+      "stackHeight": 1
+     },
+     {
+      "program": "spl-token",
+      "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "parsed": {
+       "info": {
+        "authority": "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+        "destination": "7DaumTmUaK3xcpd8XJXAjUzDrCqPuj3S1Sc2cbootBUN",
+        "mint": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+        "source": "CVwBQD4C1ySuwnfbnq3pGcmgC3cb1RYt25U8XpsVEpyF",
+        "tokenAmount": {
+         "amount": "6943531803000",
+         "decimals": 6,
+         "uiAmount": 6943531.803,
+         "uiAmountString": "6943531.803"
+        }
+       },
+       "type": "transferChecked"
+      },
+      "stackHeight": 1
+     },
+     {
+      "program": "system",
+      "programId": "11111111111111111111111111111111",
+      "parsed": {
+       "info": {
+        "destination": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+        "lamports": 2500000000000,
+        "source": "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
+       },
+       "type": "transfer"
+      },
+      "stackHeight": 1
+     }
+    ]
+   }
+  },
+  "meta": {
+   "err": null,
+   "status": {
+    "Ok": null
+   },
+   "fee": 15000,
+   "preBalances": [
+    155033078288513,
+    20103713,
+    4087799,
+    2039313,
+    42706560,
+    1350134340051,
+    1,
+    1,
+    230130698
+   ],
+   "postBalances": [
+    155033078273513,
+    20103713,
+    4087799,
+    2039313,
+    42706560,
+    1350134340051,
+    1,
+    1,
+    230130698
+   ],
+   "innerInstructions": [],
+   "logMessages": [],
+   "preTokenBalances": [
+    {
+     "accountIndex": 2,
+     "mint": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+     "uiTokenAmount": {
+      "uiAmount": 6943534.803078,
+      "decimals": 6,
+      "amount": "6943534803078",
+      "uiAmountString": "6943534.803078"
+     },
+     "owner": "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+     "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    },
+    {
+     "accountIndex": 3,
+     "mint": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+     "uiTokenAmount": {
+      "uiAmount": 54373046.772,
+      "decimals": 6,
+      "amount": "54373046772000",
+      "uiAmountString": "54373046.772"
+     },
+     "owner": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+     "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    }
+   ],
+   "postTokenBalances": [
+    {
+     "accountIndex": 2,
+     "mint": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+     "uiTokenAmount": {
+      "uiAmount": 3.000078,
+      "decimals": 6,
+      "amount": "3000078",
+      "uiAmountString": "3.000078"
+     },
+     "owner": "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+     "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    },
+    {
+     "accountIndex": 3,
+     "mint": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+     "uiTokenAmount": {
+      "uiAmount": 61316578.575,
+      "decimals": 6,
+      "amount": "61316578575000",
+      "uiAmountString": "61316578.575"
+     },
+     "owner": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+     "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    }
+   ],
+   "rewards": [],
+   "computeUnitsConsumed": 555,
+   "costUnits": 2514
+  },
+  "version": "legacy",
+  "slot": 463058742,
+  "transactionIndex": 64,
+  "blockTime": 1793314949
+ },
+ "_fixture_notes": "Real getTransaction(jsonParsed, maxSupportedTransactionVersion 0) via Helius 2026-11-06: Binance 5tzF.. -> Binance 9WzD.. transferChecked of 6,943,531.803 TRUMP (mint 6p6xgH..). EDITED: appended a system transfer instruction of 2500 SOL (2.5e12 lamports) 5tzF.. -> 9WzD.. (real system transfers in this wallet were 1 lamport); logMessages emptied."
+}

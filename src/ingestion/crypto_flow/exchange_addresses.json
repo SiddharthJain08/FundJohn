@@ -69,8 +69,36 @@
    "3D2oetdNuZUqQHPJmcMDDHYoqkyNVsFk9r"
   ]
  },
- "SOL": {},
- "XRP": {},
+ "SOL": {
+  "Binance": [
+   "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+   "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+  ],
+  "Coinbase": [
+   "H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS",
+   "2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm"
+  ],
+  "Kraken": [
+   "FWznbcNXWQuHTawe9RxvQ2LdCENssh12dsznf4RiouN5"
+  ],
+  "OKX": [
+   "5VCwKtCXgCJ6kit5FybXjvriW3xELsFDhYrPSqtJNmcD"
+  ],
+  "Bybit": [
+   "AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2"
+  ]
+ },
+ "XRP": {
+  "Binance": [
+   "rs8ZPbYqgecRcDzQpJYAMhSxSi5htsjnza"
+  ],
+  "Bitstamp": [
+   "rDsbeomae4FXwgQTJp9Rs64Qg9vDiTCdBv"
+  ],
+  "Bitfinex": [
+   "rLW9gnQo7BQhU6igk5keqYnH3TVrCxGRzm"
+  ]
+ },
  "ARB": {},
  "POL": {},
  "AVAX": {},
@@ -166,6 +194,34 @@
    "owner": "Bitfinex",
    "address": "bc1qgdjqv0av3q56jvd82tkdjpy7gdp9ut8tlqmgrpmv24sq90ecnvqqjwvw97",
    "reason": "inactive:355",
+   "checked": "2026-11-06"
+  },
+  {
+   "chain": "XRP",
+   "owner": "Binance",
+   "address": "rEb8TK3gBgk5auZkwc6sHnwrGVJH8DuaLh",
+   "reason": "inactive:0",
+   "checked": "2026-11-06"
+  },
+  {
+   "chain": "XRP",
+   "owner": "Kraken",
+   "address": "rLHzPsX6oXkzU2qL12kHCH8G8cnZv1rBJh",
+   "reason": "inactive:0",
+   "checked": "2026-11-06"
+  },
+  {
+   "chain": "XRP",
+   "owner": "Coinbase",
+   "address": "rw2ciyaNshpHe7bCHo4bRWq6pqqynnWKQg",
+   "reason": "inactive:0",
+   "checked": "2026-11-06"
+  },
+  {
+   "chain": "XRP",
+   "owner": "OKX",
+   "address": "rDxfhNRgCDNDckm45zT5ayhKDC4Ljm7UoP",
+   "reason": "inactive:0",
    "checked": "2026-11-06"
   }
  ]

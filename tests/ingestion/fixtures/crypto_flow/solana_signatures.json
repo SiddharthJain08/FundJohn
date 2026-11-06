@@ -1,0 +1,60 @@
+{
+ "jsonrpc": "2.0",
+ "result": [
+  {
+   "signature": "2qfWZJow9eMv2KTEAjgfpFSkEjucPCyyt2kLV5PZoKG25hfafKgfS2av2TXZudGzvJ6eiQeYMnJEEwHPRpV9J3wQ",
+   "slot": 465438125,
+   "err": null,
+   "memo": null,
+   "blockTime": 1793824580,
+   "confirmationStatus": "finalized",
+   "transactionIndex": 339
+  },
+  {
+   "signature": "2yhXLmRAGzeiwWcLgpSn55Dagux1dUQmbwm8FDK5jTHww787ozJHAMAyeeVwWvF1QnmMdotYDH4apVznjpUWFo9g",
+   "slot": 465434408,
+   "err": null,
+   "memo": null,
+   "blockTime": 1793823785,
+   "confirmationStatus": "finalized",
+   "transactionIndex": 30
+  },
+  {
+   "signature": "3mTfECWQjtjHz87DPdvyVA4jKz3jbXrch6nTDj8h4XhMNciUJHpNJR6ctPuGh7xmnopsgZsyZcRg1aEy2AeekJk1",
+   "slot": 465422272,
+   "err": null,
+   "memo": null,
+   "blockTime": 1793821176,
+   "confirmationStatus": "finalized",
+   "transactionIndex": 45
+  },
+  {
+   "signature": "35Sz18sXKkb2d1xB2ENCkRCzvE5CTC7oboJneid3CDSo8pRuWXs6jNHbrZ75saxUFoSpCkhZTQTbnApGfqzX6vE",
+   "slot": 465316595,
+   "err": null,
+   "memo": null,
+   "blockTime": 1793798443,
+   "confirmationStatus": "finalized",
+   "transactionIndex": 294
+  },
+  {
+   "signature": "2QDrgwHm8Eiw3yz92ZhQyr4GbfavjFjG2zJGqnDkHXZbwqDiGVvphN2hbWsAV71YQbRt5yubuG3cvRpmnDyAMbYE",
+   "slot": 465316252,
+   "err": null,
+   "memo": null,
+   "blockTime": 1793798369,
+   "confirmationStatus": "finalized",
+   "transactionIndex": 88
+  },
+  {
+   "signature": "5doGu7JNpBcYBUpBdLk6UDAoDtpJnQ8tASrS5o48D4nVUe6Sgo3cWFJfZWSHKyT639B8CF9W8C6ghJejwAKTsKM4",
+   "slot": 465258141,
+   "err": null,
+   "memo": null,
+   "blockTime": 1793785902,
+   "confirmationStatus": "finalized",
+   "transactionIndex": 90
+  }
+ ],
+ "_fixture_notes": "Real getSignaturesForAddress(5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9, limit 50) via Helius 2026-11-06, first 6 rows (newest first)."
+}

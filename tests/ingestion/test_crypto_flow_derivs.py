@@ -171,7 +171,8 @@ def test_liquidations_provider_caches_ctval_and_raises_when_all_fail(monkeypatch
 
 def test_providers_registered():
     from src.ingestion.crypto_flow.providers import all_providers
-    assert [p.name for p in all_providers()][-5:] == ['derivs', 'liquidations', 'spot_tape', 'deribit_vol', 'hl_whales']
+    assert [p.name for p in all_providers()][-8:] == [
+        'derivs', 'liquidations', 'spot_tape', 'deribit_vol', 'hl_whales', 'xrp_onchain', 'sol_onchain', 'utxo_alts']
 
 
 def test_binance_futures_symbol_rule_and_mark_scaling(monkeypatch):

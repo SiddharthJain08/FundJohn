@@ -1,0 +1,280 @@
+{
+ "result": {
+  "account": "rs8ZPbYqgecRcDzQpJYAMhSxSi5htsjnza",
+  "ledger_index_min": 32570,
+  "ledger_index_max": 108161440,
+  "transactions": [
+   {
+    "tx": {
+     "Account": "rEPak6n2CEsQmowqsTMnkooskcLaGW9MzE",
+     "Amount": "10",
+     "DeliverMax": "10",
+     "Destination": "rs8ZPbYqgecRcDzQpJYAMhSxSi5htsjnza",
+     "Fee": "11",
+     "Flags": 0,
+     "LastLedgerSequence": 108116005,
+     "Sequence": 99180995,
+     "SigningPubKey": "ED4C767651D1B94D9F1EAA11119442F8228D473E0778926C49D34D3ACE3AFE08B5",
+     "TransactionType": "Payment",
+     "TxnSignature": "487C2CA77F81B2FE5463585CB33A88F020E440386ABCE9CE067D1410EB48F1CC691AFEEBC84B2D6F470EFA45442BE9F4BDD1255720516B74E8738E1C63B9E102",
+     "ctid": "C671B7C200430000",
+     "date": 847134651,
+     "hash": "AFADFDB8B94176441437B3BE7E98CA76096CB68FBF96D365D4D61A4499B799CC",
+     "inLedger": 108115906,
+     "ledger_index": 108115906
+    },
+    "meta": {
+     "TransactionResult": "tesSUCCESS",
+     "TransactionIndex": 67
+    },
+    "validated": true
+   },
+   {
+    "tx": {
+     "Account": "rs8ZPbYqgecRcDzQpJYAMhSxSi5htsjnza",
+     "Amount": "368477929983648",
+     "DeliverMax": "368477929983648",
+     "Destination": "rPz2qA93PeRCyHyFCqyNggnyycJR1N4iNf",
+     "Fee": "10",
+     "Flags": 2147483648,
+     "LastLedgerSequence": 108115889,
+     "Sequence": 128,
+     "SigningPubKey": "0254F73ECE779857F382DAB2CD5319156BFE99B612DA7982EA2206C8E2995ED8E7",
+     "TransactionType": "Payment",
+     "TxnSignature": "3044022020C3781EE09648DB86185B665D691FD2F5C841BD40D8CCE0392C207102B2FC1902206BAB2FD8DB3E75AE569904C744ABAF718B9D651AC652C7F79650D0FF60047D47",
+     "ctid": "C671B7A000320000",
+     "date": 847134520,
+     "hash": "ED71D3EEE5A00362D5A1FDAC3EDE809FFD165EF27030A472144DC50C972A0D12",
+     "inLedger": 108115872,
+     "ledger_index": 108115872
+    },
+    "meta": {
+     "TransactionResult": "tesSUCCESS",
+     "TransactionIndex": 50
+    },
+    "validated": true
+   },
+   {
+    "tx": {
+     "Account": "rs8ZPbYqgecRcDzQpJYAMhSxSi5htsjnza",
+     "Amount": "30000000000000",
+     "DeliverMax": "30000000000000",
+     "Destination": "r9nsQj5fGr1TcDpCGqntaVWYqt53qS7mSN",
+     "Fee": "10",
+     "Flags": 2147483648,
+     "LastLedgerSequence": 108115882,
+     "Sequence": 127,
+     "SigningPubKey": "0254F73ECE779857F382DAB2CD5319156BFE99B612DA7982EA2206C8E2995ED8E7",
+     "TransactionType": "Payment",
+     "TxnSignature": "304402202696B7958A99289C54C76C5989D3C4F7929C438CA4FC6668F73306A47415BC040220162EB0DBCF8786300CFF4AE9C68454D31A4421C56691FA95B57089621A7D7676",
+     "ctid": "C671B79900750000",
+     "date": 847134491,
+     "hash": "B32DA0867535D101F98F14245DAB0B0EAB1804F746F1BFE39CD9C89BC62D0E7E",
+     "inLedger": 108115865,
+     "ledger_index": 108115865
+    },
+    "meta": {
+     "TransactionResult": "tesSUCCESS",
+     "TransactionIndex": 117
+    },
+    "validated": true
+   },
+   {
+    "tx": {
+     "Account": "rs8ZPbYqgecRcDzQpJYAMhSxSi5htsjnza",
+     "Amount": {
+      "currency": "524C555344000000000000000000000000000000",
+      "issuer": "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De",
+      "value": "3000000"
+     },
+     "DeliverMax": {
+      "currency": "524C555344000000000000000000000000000000",
+      "issuer": "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De",
+      "value": "3000000"
+     },
+     "Destination": "r9nsQj5fGr1TcDpCGqntaVWYqt53qS7mSN",
+     "Fee": "12",
+     "Flags": 2147483648,
+     "LastLedgerSequence": 108102713,
+     "Sequence": 126,
+     "SigningPubKey": "0254F73ECE779857F382DAB2CD5319156BFE99B612DA7982EA2206C8E2995ED8E7",
+     "TransactionType": "Payment",
+     "TxnSignature": "304402206A34CD09E1C30CEED634A925F62A77922B1D74CD50CC43DB391D2DD7444CC303022030407B4B37965D819E5D4C4E6B557654342DD4A7B00F03802ED2143A813F464F",
+     "ctid": "C671840F01010000",
+     "date": 847081841,
+     "hash": "D46C8B0F01DA3F988596933E0D248DFA890E2B3B030D861DB52B48DA3A09D8FB",
+     "inLedger": 108102671,
+     "ledger_index": 108102671
+    },
+    "meta": {
+     "TransactionResult": "tesSUCCESS",
+     "TransactionIndex": 257
+    },
+    "validated": true
+   },
+   {
+    "tx": {
+     "Account": "rarG6FaeYhnzSKSS5EEPofo4gFsPn2bZKk",
+     "Amount": "17686000",
+     "DeliverMax": "17686000",
+     "Destination": "rs8ZPbYqgecRcDzQpJYAMhSxSi5htsjnza",
+     "Fee": "3000",
+     "Flags": 0,
+     "LastLedgerSequence": 108009741,
+     "Sequence": 86357090,
+     "SigningPubKey": "03E37075A971263F669084C53E09BD1CB3CF23D1554EC6372A1E123EE71CBC5551",
+     "TransactionType": "Payment",
+     "TxnSignature": "3044022018B1BDD1454E185A71362C0C7D1595B88B04A6DEBCEC5DC862FEBA85791012DD02207A5F9A1A02F085029E80E97AC16B5EE1DD06EFB0EF9BAD5226C653F5EBDB2F85",
+     "ctid": "C670190000EE0000",
+     "date": 846712070,
+     "hash": "2A7433DEEE02E1FBDF6B3DCC2F8B2824B220C0E453716D3A392BB3EF7445A24B",
+     "inLedger": 108009728,
+     "ledger_index": 108009728
+    },
+    "meta": {
+     "TransactionResult": "tesSUCCESS",
+     "TransactionIndex": 238
+    },
+    "validated": true
+   },
+   {
+    "tx": {
+     "Account": "rDAE53VfMvftPB4ogpWGWvzkQxfht6JPxr",
+     "Amount": {
+      "currency": "524C555344000000000000000000000000000000",
+      "issuer": "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De",
+      "value": "51172508"
+     },
+     "DeliverMax": {
+      "currency": "524C555344000000000000000000000000000000",
+      "issuer": "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De",
+      "value": "51172508"
+     },
+     "Destination": "rs8ZPbYqgecRcDzQpJYAMhSxSi5htsjnza",
+     "Fee": "3000",
+     "Flags": 0,
+     "LastLedgerSequence": 107991467,
+     "Sequence": 72035650,
+     "SigningPubKey": "036085B9E6A6C3628E94FB87914AD5CBABB1DD5FA510D50D742919DC5684A43900",
+     "TransactionType": "Payment",
+     "TxnSignature": "3045022100F75BE275F3FE09B0AC625675EA55F11AE4E259713606B622B19A6AD4A2A52440022043B852F7A83AAA4EE9733D5040113BB40E3F182CD28BF188BFBE2654C6B7124E",
+     "ctid": "C66FD19E00390000",
+     "date": 846638830,
+     "hash": "0B9D3AF460BA9C5EA84D75F369854D90C57A441752C3608AB78208A39B1683B7",
+     "inLedger": 107991454,
+     "ledger_index": 107991454
+    },
+    "meta": {
+     "TransactionResult": "tesSUCCESS",
+     "TransactionIndex": 57
+    },
+    "validated": true
+   },
+   {
+    "tx": {
+     "Account": "rs8ZPbYqgecRcDzQpJYAMhSxSi5htsjnza",
+     "Fee": "12",
+     "Flags": 2147614720,
+     "LastLedgerSequence": 107991279,
+     "LimitAmount": {
+      "currency": "534F4C4F00000000000000000000000000000000",
+      "issuer": "rsoLo2S1kiGeCcn6hCUXVrCpGMWLrRrLZz",
+      "value": "1000000000"
+     },
+     "Sequence": 120,
+     "SigningPubKey": "0254F73ECE779857F382DAB2CD5319156BFE99B612DA7982EA2206C8E2995ED8E7",
+     "TransactionType": "TrustSet",
+     "TxnSignature": "3044022024DC359802026CB32CB728FDE4CEE0D6CCF8B6F613A5B0A23D706C3404CF68AE022059E7BDA04E2187EC3251AE0B2AF1A4B54B50D0B6A1FA80161B0F9F521D62FABE",
+     "ctid": "C66FD0C6001F0000",
+     "date": 846637971,
+     "hash": "944EC250F34E479FD27DFFE81E693AFF93511A095FB4CBD794E715F405A6BADA",
+     "inLedger": 107991238,
+     "ledger_index": 107991238
+    },
+    "meta": {
+     "TransactionResult": "tesSUCCESS",
+     "TransactionIndex": 31
+    },
+    "validated": true
+   },
+   {
+    "tx": {
+     "Account": "rEni1epjkJfVXMmMaDDWuz3hFe1mYnqfsk",
+     "Amount": "10",
+     "DeliverMax": "10",
+     "Destination": "rs8ZPbYqgecRcDzQpJYAMhSxSi5htsjnza",
+     "Fee": "12",
+     "Flags": 0,
+     "LastLedgerSequence": 107989662,
+     "Sequence": 98210695,
+     "SigningPubKey": "ED3BC404165C0062C17025BE84A47BBCB9F9B1F091F63E6EFC732501213D86EE7C",
+     "TransactionType": "Payment",
+     "TxnSignature": "2B245075C1603132FB2D7C6572290A751C542AE52F845EEA880DA743ACD05E80A3FE1D0813FF8C5200FAB77A5AD849551910603152815C4EBEFB9884C580280D",
+     "ctid": "C66FCA8C00D30000",
+     "date": 846631380,
+     "hash": "9B18E5F1D933CBB6BDAEA98A9A2D89FFF48BDEC3672A6F6A091DD532D4EB8D44",
+     "inLedger": 107989644,
+     "ledger_index": 107989644
+    },
+    "meta": {
+     "TransactionResult": "tesSUCCESS",
+     "TransactionIndex": 211
+    },
+    "validated": true
+   },
+   {
+    "tx": {
+     "Account": "rDAE53VfMvftPB4ogpWGWvzkQxfht6JPxr",
+     "Amount": "11141435843000",
+     "DeliverMax": "11141435843000",
+     "Destination": "rs8ZPbYqgecRcDzQpJYAMhSxSi5htsjnza",
+     "Fee": "3000",
+     "Flags": 0,
+     "LastLedgerSequence": 107989493,
+     "Sequence": 72035649,
+     "SigningPubKey": "036085B9E6A6C3628E94FB87914AD5CBABB1DD5FA510D50D742919DC5684A43900",
+     "TransactionType": "Payment",
+     "TxnSignature": "30440220235A99114A766C0A6821AA315A6F59A89D8050140FEB3F4F47A18C90FE5E7F6B02205F46432AD1266A8AC05BAFB101491E387498523D4B0BB55EED544CE60CD5A80E",
+     "ctid": "C66FC9E8001D0000",
+     "date": 846630740,
+     "hash": "A3385338DABFD08E63B5718566FF0E6E5A352876166B421E0450B68729BB6410",
+     "inLedger": 107989480,
+     "ledger_index": 107989480
+    },
+    "meta": {
+     "TransactionResult": "tesSUCCESS",
+     "TransactionIndex": 29
+    },
+    "validated": true
+   },
+   {
+    "tx": {
+     "Account": "rs8ZPbYqgecRcDzQpJYAMhSxSi5htsjnza",
+     "Amount": "368477929983648",
+     "DeliverMax": "368477929983648",
+     "Destination": "rPz2qA93PeRCyHyFCqyNggnyycJR1N4iNf",
+     "Fee": "10",
+     "Flags": 2147483648,
+     "LastLedgerSequence": 108115889,
+     "Sequence": 128,
+     "SigningPubKey": "0254F73ECE779857F382DAB2CD5319156BFE99B612DA7982EA2206C8E2995ED8E7",
+     "TransactionType": "Payment",
+     "TxnSignature": "3044022020C3781EE09648DB86185B665D691FD2F5C841BD40D8CCE0392C207102B2FC1902206BAB2FD8DB3E75AE569904C744ABAF718B9D651AC652C7F79650D0FF60047D47",
+     "ctid": "C671B7A000320000",
+     "date": 847134520,
+     "hash": "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+     "inLedger": 108115872,
+     "ledger_index": 108115872
+    },
+    "meta": {
+     "TransactionResult": "tecPATH_DRY",
+     "TransactionIndex": 50
+    },
+    "validated": true
+   }
+  ],
+  "status": "success",
+  "validated": true
+ },
+ "_fixture_notes": "Real xrplcluster.com account_tx for rs8ZPbYqgecRcDzQpJYAMhSxSi5htsjnza (Binance) captured 2026-11-06; 9 of 50 rows kept (out 368.5M XRP, out 30M XRP, IOU out, in 11.1M XRP, 10-drop dust, TrustSet); meta trimmed to TransactionResult/TransactionIndex. EDITED: last row is a copy of row 2 with TransactionResult=tecPATH_DRY and hash=F*64 (failed-tx case)."
+}

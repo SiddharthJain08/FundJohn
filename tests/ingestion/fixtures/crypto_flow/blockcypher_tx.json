@@ -1,0 +1,56 @@
+{
+ "block_hash": "67816973cba5b00c21f6a91d951409567ee2fd07a6814f2f98b23d8f130bb1d1",
+ "block_height": 6446860,
+ "block_index": 1,
+ "hash": "7a1ed230a8a72fc6b3276347043c04b26a5fe8cdb512486af98b8f25a7b8c56d",
+ "addresses": [
+  "DCqNmZtSZv8Luef7i9jfoLxE3r93ZBLuMh",
+  "DM9Vr9A28CY6tQicB3oudfrLJ2jusJoieH"
+ ],
+ "total": 48219721872878,
+ "fees": 18750000,
+ "size": 225,
+ "preference": "high",
+ "relayed_by": "157.90.89.105:9003",
+ "confirmed": "2026-11-06T22:02:48Z",
+ "received": "2026-11-06T22:02:27.995Z",
+ "ver": 2,
+ "double_spend": false,
+ "vin_sz": 1,
+ "vout_sz": 2,
+ "confirmations": 2,
+ "confidence": 1,
+ "inputs": [
+  {
+   "prev_hash": "1957ea48541d105ca0d6b42b112de58dcd5c7e87d059b5ba949903c83469bbce",
+   "output_index": 1,
+   "script": "473044022004d5fb22431adb25b6ad9d05aa71efdc5cc401e37aa59139d0e948516d1b15a702200b451c128ddd1d937aba0fd042322e0e74d02453b7a9d7cb5143f2a3f0c35adf0121037c589738fb9f4d73c9f60edbc99b78683a7923b75258c4bb3b8369f79ae3cb20",
+   "output_value": 48219740622878,
+   "sequence": 4294967295,
+   "addresses": [
+    "DM9Vr9A28CY6tQicB3oudfrLJ2jusJoieH"
+   ],
+   "script_type": "pay-to-pubkey-hash",
+   "age": 6444969
+  }
+ ],
+ "outputs": [
+  {
+   "value": 19295617022511,
+   "script": "76a9145467110f44b26bc1cab3cbcd476868f876ce45ea88ac",
+   "addresses": [
+    "DCqNmZtSZv8Luef7i9jfoLxE3r93ZBLuMh"
+   ],
+   "script_type": "pay-to-pubkey-hash"
+  },
+  {
+   "value": 28924104850367,
+   "script": "76a914af95782779400568ab66ee1b4fbf9089eea0b5b988ac",
+   "addresses": [
+    "DM9Vr9A28CY6tQicB3oudfrLJ2jusJoieH"
+   ],
+   "script_type": "pay-to-pubkey-hash"
+  }
+ ],
+ "_fixture_notes": "Real BlockCypher doge/main/txs/7a1ed2..8c56d captured 2026-11-06 (unmodified except this note). Output 0 is a payment, output 1 is change back to the input address."
+}

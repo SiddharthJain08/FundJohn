@@ -13,6 +13,9 @@ PATH = Path(__file__).resolve().parents[1] / 'src/ingestion/crypto_flow/exchange
 EVM = {'ETH', 'ARB', 'POL', 'AVAX', 'BASE', 'BNB'}
 EVM_RE = re.compile(r'^0x[0-9a-f]{40}$')
 B58_RE = re.compile(r'^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$')
+SOL_RE = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
+XRP_RE = re.compile(r'^r[1-9A-HJ-NP-Za-km-z]{24,34}$')
+XRP_MIN_DROPS = 1_000_000 * 1_000_000  # >= 1 M XRP
 BECH_RE = re.compile(r'^bc1[ac-hj-np-z02-9]{11,71}$')
 TODAY = '2026-11-06'
 MIN_TX = 1000
@@ -25,6 +28,21 @@ def _key():
     sys.exit('no ETHERSCAN_API_KEY')
 
 
+def _post(url, body):
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method='POST',
+                                 headers={'User-Agent': 'openclaw-crypto-flow/1.0', 'Content-Type': 'application/json'})
+    return json.loads(urllib.request.urlopen(req, timeout=30).read())
+
+
+def _sol_rpc():
+    key = os.environ.get('HELIUS_API_KEY')
+    if not key:
+        for line in open('/root/openclaw/.env'):
+            if line.startswith('HELIUS_API_KEY='):
+                key = line.split('=', 1)[1].strip().strip('"\'')
+    return f'https://mainnet.helius-rpc.com/?api-key={key}' if key else 'https://api.mainnet-beta.solana.com'
+
+
 def _get(url):
     req = urllib.request.Request(url, headers={'User-Agent': 'openclaw-crypto-flow/1.0'})
     return json.loads(urllib.request.urlopen(req, timeout=30).read())
@@ -35,6 +53,10 @@ def fmt_ok(chain, a):
         return bool(EVM_RE.match(a))
     if chain == 'BTC':
         return bool(B58_RE.match(a) or BECH_RE.match(a))
+    if chain == 'SOL':
+        return bool(SOL_RE.match(a))
+    if chain == 'XRP':
+        return bool(XRP_RE.match(a))
     return True
 
 
@@ -49,6 +71,17 @@ def activity(chain, a, key):
                 except urllib.error.HTTPError as e:
                     if e.code != 429 or attempt:
                         return None, f'HTTP{e.code}'
+        if chain == 'XRP':
+            r = _post('https://xrplcluster.com/', {'method': 'account_info', 'params': [{'account': a}]})['result']
+            if 'account_data' not in r:
+                return (0, None) if r.get('error') == 'actNotFound' else (None, str(r.get('error'))[:40])
+            # balance >= 1 M XRP counts as active; encode as MIN_TX so the shared threshold passes
+            return (MIN_TX if int(r['account_data']['Balance']) >= XRP_MIN_DROPS else 0), None
+        if chain == 'SOL':
+            time.sleep(0.2)
+            r = _post(_sol_rpc(), {'jsonrpc': '2.0', 'id': 1, 'method': 'getSignaturesForAddress',
+                                   'params': [a, {'limit': 1000}]})
+            return (len(r['result']), None) if isinstance(r.get('result'), list) else (None, 'rpc_error')
         if chain != 'ETH':
             return None, 'unsupported chain'
         for attempt in (0, 1):
@@ -67,12 +100,16 @@ def activity(chain, a, key):
 
 def main():
     d = json.loads(PATH.read_text())
-    key = _key()
+    only = set(sys.argv[1:])  # optional: validate just these chains, keep the rest untouched
+    key = _key() if not only or 'ETH' in only else ''
     out = {'_meta': dict(d['_meta'], validated=TODAY, validator='scripts/validate_exchange_addresses.py')}
     rejected = list(d.get('_rejected', []))
     before, after = {}, {}
     for chain, owners in d.items():
         if chain.startswith('_'):
+            continue
+        if only and chain not in only:
+            out[chain] = owners
             continue
         out[chain] = {}
         for owner, addrs in owners.items():

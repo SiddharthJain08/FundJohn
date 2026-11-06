@@ -68,12 +68,18 @@ def test_registry_has_no_malformed_addresses():
     evm = re.compile(r'^0x[0-9a-f]{40}$')
     b58 = re.compile(r'^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$')
     bech = re.compile(r'^bc1[ac-hj-np-z02-9]{11,71}$')
+    sol = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
+    xrp = re.compile(r'^r[1-9A-HJ-NP-Za-km-z]{24,34}$')
     for chain, addrs in reg.items():
         for a in addrs:
             if chain == 'BTC':
                 assert b58.match(a) or bech.match(a), a
             elif chain in ('ETH', 'ARB', 'POL', 'AVAX', 'BASE', 'BNB'):
                 assert evm.match(a), a
+            elif chain == 'SOL':
+                assert sol.match(a), a
+            elif chain == 'XRP':
+                assert xrp.match(a), a
 
 def test_registry_rejected_list_is_not_served():
     import json
