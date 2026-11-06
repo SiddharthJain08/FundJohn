@@ -3591,6 +3591,21 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 .cr-dot-ok{background:var(--green)}
 .cr-dot-fail{background:var(--red)}
 .cr-dot-degraded{background:var(--yellow)}
+.cr-table{width:100%;border-collapse:collapse;font-size:12px}
+.cr-table th{color:var(--muted);text-align:right;padding:6px 8px;cursor:pointer;border-bottom:1px solid var(--border);white-space:nowrap}
+.cr-table td{text-align:right;padding:6px 8px;border-bottom:1px solid var(--border2);white-space:nowrap}
+.cr-table td:first-child,.cr-table th:first-child{text-align:left}
+.cr-bar{display:inline-block;height:6px;border-radius:3px;vertical-align:middle;margin-right:6px}
+.cr-row-sel{background:var(--border2)}
+.cr-tag-in{color:var(--red)}
+.cr-tag-out{color:var(--green)}
+.cr-charts{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.cr-chart{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:6px}
+.cr-chart-box{position:relative;height:120px}
+.cr-risk-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.cr-feed-row{display:grid;grid-template-columns:70px 80px 60px 100px 1fr 90px 90px;gap:8px;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border2)}
+.cr-sm-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:4px}
+.cr-sm-cell{padding:3px 5px;border:1px solid var(--border2);border-radius:4px;text-align:center;color:var(--muted)}
 
 /* Pipeline Diagnostics — LangGraph run inspector */
 #pipeline-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
@@ -4829,6 +4844,13 @@ body.rs-chat-locked{overflow:hidden}
   /* Disable hover-only effects on touch devices. */
   .nav-btn:hover { background: transparent; color: var(--muted); }
   .nav-btn.active:hover, .nav-btn.active { background: var(--border2); color: var(--blue); }
+
+  /* Crypto page: optional board columns + feed owner/hash/chain cells hidden; stack risk + charts. */
+  .cr-table .cr-opt{display:none}
+  .cr-charts{grid-template-columns:repeat(2,1fr)}
+  .cr-risk-grid{grid-template-columns:1fr}
+  .cr-feed-row{grid-template-columns:60px 1fr 80px 90px}
+  .cr-feed-row .cr-opt{display:none}
 }
 </style>
 </head>
@@ -5408,7 +5430,6 @@ async function loadMarket() {
   // to glance at to confirm the live regime engine is still healthy.
   setInterval(() => {
     if (document.getElementById('regime-panel')) loadRegime();
-    if (document.getElementById('crypto-page')?.style.display === 'block') loadCryptoRegime();
   }, 60_000);
   // Portfolio refresh: pulls live broker truth (unrealized_pl + plpc per
   // ticker) on every poll. 30s during RTH so the heatmap tracks intraday
@@ -11367,6 +11388,7 @@ const _cryptoState = {
   selected: null,
   snapshot: null,
   charts: [],
+  sort: { key: 'whale_score', dir: 'desc' },
 };
 
 function _cryptoVisible() {
@@ -11390,20 +11412,33 @@ function _initCrypto() {
 }
 
 async function _refreshCrypto() {
-  const [snap, regime, providers, risk, positions] = await Promise.all([
+  const [snap, regime, providers, risk, positions, events] = await Promise.all([
     _safeFetch('/api/crypto/snapshot',  { available: false }, { label: 'crypto-snapshot' }),
     _safeFetch('/api/regime/crypto',    { available: false }, { label: 'regime-crypto' }),
     _safeFetch('/api/crypto/providers', { available: false }, { label: 'crypto-providers' }),
     _safeFetch('/api/crypto/risk',      { available: false }, { label: 'crypto-risk' }),
     _safeFetch('/api/crypto/positions', { available: false }, { label: 'crypto-positions' }),
+    _safeFetch('/api/crypto/events?limit=50', { available: false }, { label: 'crypto-events' }),
   ]);
   _cryptoState.snapshot = snap;
-  await loadCryptoRegime(regime);
-  _renderCryptoHero(snap, regime, providers);
-  _renderCryptoBoard(snap);
-  _renderCryptoTiles(snap, regime);
-  _renderCryptoFeed(null);
-  _renderCryptoRisk(risk, positions);
+  // Each render is isolated: one bad payload must not blank the whole page.
+  const guard = (id, fn) => {
+    try { return fn(); } catch (e) {
+      console.warn('[crypto]', e);
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = '<div class="empty">render error</div>';
+    }
+  };
+  try { await loadCryptoRegime(regime); } catch (e) {
+    console.warn('[crypto]', e);
+    const el = document.getElementById('cr-regime');
+    if (el) el.innerHTML = '<div class="empty">render error</div>';
+  }
+  guard('cr-hero',  () => _renderCryptoHero(snap, regime, providers));
+  guard('cr-board', () => _renderCryptoBoard(snap));
+  guard('cr-tiles', () => _renderCryptoTiles(snap, regime));
+  guard('cr-feed',  () => _renderCryptoFeed(events && events.available !== false && Array.isArray(events.rows) ? events.rows : []));
+  guard('cr-risk',  () => _renderCryptoRisk(risk, positions));
 }
 
 function _renderCryptoHero(snap, regime, providers) {
@@ -11443,31 +11478,371 @@ function _renderCryptoHero(snap, regime, providers) {
   const dotsHtml = (snap.provider_health || []).map(p => {
     const cls = degraded.has(p.provider) ? 'cr-dot-degraded' : (p.ok ? 'cr-dot-ok' : 'cr-dot-fail');
     const tip = String(p.provider) + ': ' + (p.err || 'ok');
-    return \`<span class="cr-dot \${cls}" title="\${tip.replace(/"/g, '&quot;')}"></span>\`;
+    const tipAttr = tip.replace(/"/g, '&quot;');
+    return \`<span class="cr-dot \${cls}" title="\${tipAttr}" aria-label="\${tipAttr}"></span>\`;
   }).join('');
 
   el.innerHTML = \`<div class="cr-hero">\${priceHtml}\${regimeHtml}\${breakerHtml}\${flowsHtml}<span title="provider health">\${dotsHtml}</span></div>\`;
 }
 
-// Task 16 renderers — stubs so the page is never blank.
+// ── Crypto page renderers: board, detail, tiles, feed, risk ─────────────────
+let _cryptoTitleTimer = null;
+let _cryptoTitleOrig = null;
+let _cryptoEvents = [];
+
+function _crNum(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  return isFinite(n) ? n : null;
+}
+function _crCompact(v, prefix, signed) {
+  const n = _crNum(v);
+  if (n == null) return '—';
+  const a = Math.abs(n);
+  let s;
+  if (a >= 1e12) s = (a / 1e12).toFixed(1) + 'T';
+  else if (a >= 1e9) s = (a / 1e9).toFixed(1) + 'B';
+  else if (a >= 1e6) s = (a / 1e6).toFixed(1) + 'M';
+  else if (a >= 1e3) s = (a / 1e3).toFixed(1) + 'K';
+  else s = a.toFixed(0);
+  const sign = n < 0 ? '-' : (signed && n > 0 ? '+' : '');
+  return sign + (prefix || '') + s;
+}
+function _crUsd(v, signed) { return _crCompact(v, '$', signed); }
+function _crFix(v, dp, suffix) {
+  const n = _crNum(v);
+  return n == null ? '—' : n.toFixed(dp) + (suffix || '');
+}
+function _crSignedPct(v, dp) {
+  const n = _crNum(v);
+  if (n == null) return '—';
+  const col = n >= 0 ? 'var(--green)' : 'var(--red)';
+  return '<span style="color:' + col + '">' + (n >= 0 ? '+' : '') + n.toFixed(dp) + ' %</span>';
+}
+function _crCssVar(name, fallback) {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  } catch (_) { return fallback; }
+}
+
+const _CR_BOARD_COLS = [
+  { key: 'ticker',                   label: 'Ticker' },
+  { key: 'price_usd',                label: 'Price' },
+  { key: 'ret_24h',                  label: '24h' },
+  { key: 'whale_score',              label: 'Whale score' },
+  { key: 'exch_netflow_usd_24h',     label: 'Exch netflow 24h' },
+  { key: 'exch_netflow_z_7d',        label: 'z',              opt: true },
+  { key: 'oi_usd',                   label: 'OI',             opt: true },
+  { key: 'oi_chg_24h_pct',           label: 'OI Δ24h %',      opt: true },
+  { key: 'funding_ann',              label: 'Funding ann. %', opt: true },
+  { key: 'ls_ratio_global',          label: 'L/S',            opt: true },
+  { key: 'taker_buy_sell',           label: 'Taker',          opt: true },
+  { key: 'large_print_imbalance_1h', label: 'Print imb 1h',   opt: true },
+  { key: 'attribution_coverage',     label: 'Coverage %' },
+];
+
+function _crBoardCell(t, key) {
+  const v = t[key];
+  switch (key) {
+    case 'ticker': return escapeHtml(t.ticker || '—');
+    case 'price_usd': {
+      const n = _crNum(v);
+      if (n == null) return '—';
+      return '$' + n.toLocaleString('en-US', { maximumFractionDigits: n >= 100 ? 0 : (n >= 1 ? 2 : 4) });
+    }
+    case 'ret_24h': return _crSignedPct(v, 2);
+    case 'whale_score': {
+      const n = _crNum(v);
+      if (n == null) return '—';
+      const col = n >= 70 ? 'var(--red)' : (n >= 40 ? 'var(--yellow)' : 'var(--green)');
+      const w = Math.max(2, Math.min(100, n)) * 0.6;
+      return '<span class="cr-bar" style="width:' + w.toFixed(0) + 'px;background:' + col + '"></span>'
+        + n.toFixed(0) + ' · ' + escapeHtml(t.whale_direction || '—');
+    }
+    case 'exch_netflow_usd_24h': {
+      const n = _crNum(v);
+      if (n == null) return '—';
+      const col = n > 0 ? 'var(--red)' : (n < 0 ? 'var(--green)' : 'var(--muted)');
+      return '<span style="color:' + col + '">' + _crUsd(n, true) + '</span>';
+    }
+    case 'exch_netflow_z_7d': return _crFix(v, 2);
+    case 'oi_usd': return _crUsd(v, false);
+    case 'oi_chg_24h_pct': return _crSignedPct(v, 2);
+    case 'funding_ann': { const n = _crNum(v); return n == null ? '—' : (n * 100).toFixed(2); }
+    case 'ls_ratio_global': return _crFix(v, 2);
+    case 'taker_buy_sell': return _crFix(v, 2);
+    case 'large_print_imbalance_1h': return _crFix(v, 2);
+    case 'attribution_coverage': { const n = _crNum(v); return n == null ? '—' : (n * 100).toFixed(0); }
+  }
+  return '—';
+}
+
+function _crSortRows(rows) {
+  const s = _cryptoState.sort || { key: 'whale_score', dir: 'desc' };
+  const mul = s.dir === 'asc' ? 1 : -1;
+  const cmp = (a, b) => {
+    const va = a[s.key], vb = b[s.key];
+    const na = va == null || va === '', nb = vb == null || vb === '';
+    if (na && nb) return 0;
+    if (na) return 1;            // missing always last
+    if (nb) return -1;
+    if (typeof va === 'number' || typeof vb === 'number') return (Number(va) - Number(vb)) * mul;
+    return String(va).localeCompare(String(vb)) * mul;
+  };
+  const bench = rows.filter(r => r.role === 'benchmark').sort(cmp);
+  const rest = rows.filter(r => r.role !== 'benchmark').sort(cmp);
+  return bench.concat(rest);
+}
+
+function _crSortBy(key) {
+  const s = _cryptoState.sort || { key: 'whale_score', dir: 'desc' };
+  _cryptoState.sort = { key, dir: s.key === key && s.dir === 'desc' ? 'asc' : 'desc' };
+  _renderCryptoBoard(_cryptoState.snapshot);
+}
+
 function _renderCryptoBoard(snap) {
   const el = document.getElementById('cr-board');
-  if (el) el.innerHTML = '<div class="empty">Whale flow board (Task 16)</div>';
+  if (!el) return;
+  if (!snap || snap.available === false) {
+    el.innerHTML = '<div class="empty">No flow ticks yet</div>';
+    return;
+  }
+  const rows = _crSortRows((snap.tickers || []).filter(t => t && t.role !== 'stable'));
+  if (!rows.length) { el.innerHTML = '<div class="empty">No tickers in the latest tick</div>'; return; }
+  const s = _cryptoState.sort || { key: 'whale_score', dir: 'desc' };
+  const head = _CR_BOARD_COLS.map(c =>
+    '<th' + (c.opt ? ' class="cr-opt"' : '') + ' data-k="' + c.key + '" onclick="_crSortBy(this.dataset.k)">'
+    + c.label + (s.key === c.key ? (s.dir === 'desc' ? ' ▾' : ' ▴') : '') + '</th>').join('');
+  const body = rows.map(t => {
+    const sel = t.ticker === _cryptoState.selected ? ' class="cr-row-sel"' : '';
+    const tk = escapeHtml(t.ticker || '');
+    return '<tr' + sel + ' style="cursor:pointer" data-t="' + tk + '" onclick="_selectCryptoTicker(this.dataset.t)">'
+      + _CR_BOARD_COLS.map(c => '<td' + (c.opt ? ' class="cr-opt"' : '') + '>' + _crBoardCell(t, c.key) + '</td>').join('')
+      + '</tr>';
+  }).join('');
+  el.innerHTML = '<div style="overflow-x:auto"><table class="cr-table"><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table></div>';
 }
+
+function _crFmtTs(ts) {
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return String(ts || '');
+  const iso = d.toISOString();
+  return iso.slice(5, 10) + ' ' + iso.slice(11, 16);
+}
+
+function _crDestroyCharts() {
+  for (const c of (_cryptoState.charts || [])) { try { c.destroy(); } catch (_) {} }
+  _cryptoState.charts = [];
+}
+
+async function _selectCryptoTicker(ticker) {
+  if (!ticker) return;
+  _cryptoState.selected = ticker;
+  _renderCryptoBoard(_cryptoState.snapshot);
+  const el = document.getElementById('cr-detail');
+  if (!el) return;
+  const hist = await _safeFetch('/api/crypto/history/' + encodeURIComponent(ticker) + '?days=7',
+    { available: false }, { label: 'crypto-history' });
+  if (_cryptoState.selected !== ticker) return;   // a later click won the race
+  _crDestroyCharts();
+  const rows = (hist && hist.available !== false && Array.isArray(hist.rows)) ? hist.rows : [];
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">No history for ' + escapeHtml(ticker) + '</div>';
+    return;
+  }
+  const series = [
+    { cap: 'Exch netflow 24h (USD)', color: '#58a6ff', f: r => _crNum(r.exch_netflow_usd_24h), fmt: v => _crUsd(v, true) },
+    { cap: 'Open interest (USD)',    color: '#bc8cff', f: r => _crNum(r.oi_usd),               fmt: v => _crUsd(v, false) },
+    { cap: 'Funding ann. %',         color: '#d29922', f: r => { const n = _crNum(r.funding_8h); return n == null ? null : n * 3 * 365 * 100; }, fmt: v => Number(v).toFixed(2) },
+    { cap: 'Whale score',            color: '#f85149', f: r => _crNum(r.whale_score),          fmt: v => Number(v).toFixed(0) },
+  ];
+  el.innerHTML = '<div class="regime-panel-header" style="margin-top:12px">' + escapeHtml(ticker) + ' · 7 d</div><div class="cr-charts">'
+    + series.map((s, i) => '<div class="cr-chart"><div style="font-size:10px;color:var(--muted);margin-bottom:4px">'
+      + s.cap + '</div><div class="cr-chart-box"><canvas id="cr-chart-' + i + '"></canvas></div></div>').join('')
+    + '</div>';
+  if (typeof Chart === 'undefined') return;
+  const labels = rows.map(r => _crFmtTs(r.ts_utc));
+  const tick = _crCssVar('--muted', '#8b949e');
+  const grid = _crCssVar('--border2', '#21262d');
+  series.forEach((s, i) => {
+    const cv = document.getElementById('cr-chart-' + i);
+    if (!cv) return;
+    _cryptoState.charts.push(new Chart(cv.getContext('2d'), {
+      type: 'line',
+      data: { labels, datasets: [{ label: s.cap, data: rows.map(s.f), borderColor: s.color, borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0.1, spanGaps: true }] },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#161b22', borderColor: '#30363d', borderWidth: 1,
+            titleColor: '#8b949e', bodyColor: '#e6edf3',
+            callbacks: { label: c => c.parsed.y == null ? '—' : s.fmt(c.parsed.y) },
+          },
+        },
+        scales: {
+          x: { ticks: { color: tick, maxTicksLimit: 4, font: { size: 10 } }, grid: { color: grid } },
+          y: { position: 'right', ticks: { color: tick, font: { size: 10 }, callback: v => s.fmt(v) }, grid: { color: grid } },
+        },
+      },
+    }));
+  });
+}
+
+function _crFearWord(v) {
+  if (v <= 25) return 'Extreme Fear';
+  if (v <= 45) return 'Fear';
+  if (v <= 55) return 'Neutral';
+  if (v <= 75) return 'Greed';
+  return 'Extreme Greed';
+}
+
+function _crTile(label, valueHtml, subHtml) {
+  return '<div class="ov-card" style="cursor:default"><div class="ov-name">' + label + '</div>'
+    + '<div class="ov-price">' + valueHtml + '</div>'
+    + (subHtml ? '<div class="ov-chg">' + subHtml + '</div>' : '') + '</div>';
+}
+
 function _renderCryptoTiles(snap, regime) {
   const el = document.getElementById('cr-tiles');
-  if (el) el.innerHTML = '<div class="empty">Market flow tiles (Task 16)</div>';
+  if (!el) return;
+  const m = (snap && snap.market) || {};
+  const cap = s => '<span style="color:var(--muted)">' + s + '</span>';
+  const tiles = [];
+
+  let stSub = '7d Δ ' + _crSignedPct(m.stable_supply_chg_7d_pct, 2);
+  if (m.stable_supply_missing) stSub += '<br><span style="color:var(--yellow)">partial: ' + escapeHtml(m.stable_supply_missing) + '</span>';
+  tiles.push(_crTile('Stablecoin supply', _crUsd(m.stable_supply_usd, false), stSub));
+
+  tiles.push(_crTile('BTC dominance', _crFix(m.btc_dominance, 1, ' %')));
+
+  const fg = _crNum(m.fear_greed);
+  tiles.push(_crTile('Fear &amp; Greed', fg == null ? '—' : fg.toFixed(0), fg == null ? '' : cap(_crFearWord(fg))));
+
+  tiles.push(_crTile('Aggregate OI', _crUsd(m.oi_usd_total, false)));
+
+  tiles.push(_crTile('Deleveraging', m.delev_market === true
+    ? '<span style="color:var(--red)">YES</span>' : '<span style="color:var(--muted)">no</span>'));
+
+  const cotChg = _crNum(m.cot_lev_net_chg_1w);
+  tiles.push(_crTile('COT lev. funds net', _crCompact(m.cot_lev_net, '', true),
+    '1w Δ ' + (cotChg == null ? '—' : _crCompact(cotChg, '', true))
+    + (m.cot_report_date ? '<br>' + cap(escapeHtml(m.cot_report_date)) : '')));
+
+  tiles.push(_crTile('DVOL BTC', _crFix(m.dvol_btc, 1),
+    cap('ATM 30d IV ' + _crFix(m.atm_iv_30d_btc, 1)) + '<br>' + cap('skew ' + _crFix(m.skew_25d_btc, 2))
+    + '<br>' + cap('P/C OI ' + _crFix(m.put_call_oi_btc, 2))));
+
+  tiles.push(_crTile('Santiment exch. balance',
+    'BTC ' + _crCompact(m.san_btc_exchange_balance_30d_lag, '', false)
+    + ' · ETH ' + _crCompact(m.san_eth_exchange_balance_30d_lag, '', false), cap('30 d lag')));
+
+  const cur = regime && regime.latest && regime.latest.state;
+  const cells = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'].map(st => {
+    const short = st === 'TRANSITIONING' ? 'TRANS' : st;
+    const cls = st === cur ? ' ' + (_STATE_CLASS[st] || '') : '';
+    return '<div class="cr-sm-cell' + cls + '"><div style="font-size:10px">' + short + '</div><div style="font-size:11px">pending</div></div>';
+  }).join('');
+  tiles.push('<div class="ov-card" style="cursor:default"><div class="ov-name">S_m crypto by regime</div><div class="cr-sm-grid">' + cells + '</div></div>');
+
+  el.innerHTML = '<div class="ov-label">Market flow</div><div class="ov-cards">' + tiles.join('') + '</div>';
 }
+
+function _crFeedRow(e) {
+  const dir = e.direction || '';
+  const tagCls = dir === 'exchange_in' ? 'cr-tag-in' : (dir === 'exchange_out' ? 'cr-tag-out' : '');
+  const tagStyle = tagCls ? '' : ' style="color:var(--muted)"';
+  const hash = e.tx_hash ? String(e.tx_hash) : '';
+  return '<div class="cr-feed-row">'
+    + '<span style="color:var(--muted)">' + _ageStr(e.ts_utc) + '</span>'
+    + '<span class="cr-opt">' + escapeHtml(e.chain || '—') + '</span>'
+    + '<span>' + escapeHtml(e.symbol || e.ticker || '—') + '</span>'
+    + '<span>' + _crUsd(e.amount_usd, false) + '</span>'
+    + '<span class="cr-opt" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+    + escapeHtml(e.from_owner || 'unknown wallet') + ' → ' + escapeHtml(e.to_owner || 'unknown wallet') + '</span>'
+    + '<span class="' + tagCls + '"' + tagStyle + '>' + escapeHtml(dir || '—') + '</span>'
+    + '<span class="cr-opt" style="font-family:monospace;color:var(--muted)" title="' + escapeHtml(hash) + '">' + escapeHtml(hash.slice(0, 8) || '—') + '</span>'
+    + '</div>';
+}
+
+function _crTsMs(e) { const t = new Date(e && e.ts_utc).getTime(); return isNaN(t) ? 0 : t; }
+
 function _renderCryptoFeed(events) {
   const el = document.getElementById('cr-feed');
-  if (el) el.innerHTML = '<div class="empty">Whale event feed (Task 16)</div>';
+  if (!el) return;
+  if (Array.isArray(events)) {
+    _cryptoEvents = events.slice().sort((a, b) => _crTsMs(b) - _crTsMs(a)).slice(0, 50);
+  }
+  const head = '<div class="regime-panel-header">Whale events (live)</div>';
+  el.innerHTML = head + (_cryptoEvents.length
+    ? _cryptoEvents.map(_crFeedRow).join('')
+    : '<div class="empty">No events yet</div>');
 }
+
+function _appendCryptoEvents(rows) {
+  if (!Array.isArray(rows) || !rows.length) return;
+  const seen = new Set(_cryptoEvents.map(e => e.event_key));
+  const fresh = rows.filter(e => e && !seen.has(e.event_key));
+  if (!fresh.length) return;
+  _cryptoEvents = fresh.sort((a, b) => _crTsMs(b) - _crTsMs(a)).concat(_cryptoEvents).slice(0, 50);
+  _renderCryptoFeed(null);
+  if (_cryptoTitleTimer) clearTimeout(_cryptoTitleTimer);
+  else _cryptoTitleOrig = document.title;
+  document.title = '• ' + _cryptoTitleOrig;
+  _cryptoTitleTimer = setTimeout(() => {
+    document.title = _cryptoTitleOrig;
+    _cryptoTitleTimer = null;
+  }, 10_000);
+}
+
 function _renderCryptoRisk(risk, positions) {
   const el = document.getElementById('cr-risk');
-  if (el) el.innerHTML = '<div class="empty">Crypto risk + positions (Task 16)</div>';
-}
-function _appendCryptoEvents(rows) {
-  // Task 16: prepend live SSE whale events to #cr-feed.
+  if (!el) return;
+  const r = risk || {};
+  const flags = r.flags || {};
+  const chips = Object.keys(flags).map(k => {
+    const v = flags[k];
+    const word = v === '1' ? 'on' : (v === '0' ? 'off' : 'unset');
+    const col = v === '1' ? 'var(--green)' : (v === '0' ? 'var(--red)' : 'var(--muted)');
+    return '<span class="cr-chip" style="color:' + col + ';border-color:' + col + '">' + escapeHtml(k) + ': ' + word + '</span>';
+  }).join(' ') || '<span style="color:var(--muted)">flags —</span>';
+
+  const p = r.params || {};
+  const th = p.thresholds || {};
+  const paramRows = [['whale min USD', _crUsd(p.whale_min_usd, false)], ['large-print USD', _crUsd(p.large_print_usd, false)]]
+    .concat(Object.keys(th).map(k => [escapeHtml(k), escapeHtml(th[k])]))
+    .map(x => '<tr><td>' + x[0] + '</td><td>' + x[1] + '</td></tr>').join('');
+
+  const b = r.breaker || {};
+  const trig = (b.triggers || []).map(t => '<li>' + escapeHtml(t) + '</li>').join('');
+  const sz = r.sizing || {};
+  const pctOf = v => { const n = _crNum(v); return n == null ? '—' : (n * 100).toFixed(0) + ' %'; };
+  const benchSym = sz.benchmark ? String(sz.benchmark).split('-')[0] : 'bench';
+  const sizingLine = 'sizing: ' + escapeHtml(sz.status || '—') + ' — benchmark ' + escapeHtml(sz.benchmark || '—')
+    + ', ' + escapeHtml(benchSym) + ' cap ' + pctOf(sz.bench_cap_nav) + ', crypto gross cap ' + pctOf(sz.gross_cap_nav);
+
+  const left = '<div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">' + chips + '</div>'
+    + '<table class="cr-table" style="margin-bottom:10px"><tbody>' + paramRows + '</tbody></table>'
+    + '<div style="font-size:12px">breaker: ' + escapeHtml(b.status || '—') + '</div>'
+    + (trig ? '<ul style="font-size:12px;color:var(--muted);margin:4px 0 8px 18px">' + trig + '</ul>' : '')
+    + '<div style="font-size:12px">' + sizingLine + '</div></div>';
+
+  const pos = (positions && positions.available !== false && Array.isArray(positions.rows)) ? positions.rows : [];
+  const right = pos.length
+    ? '<table class="cr-table"><thead><tr><th>Ticker</th><th>Qty</th><th>Market value</th><th>Unrl. P/L %</th></tr></thead><tbody>'
+      + pos.map(x => {
+        const pl = _crNum(x.unrealized_plpc);
+        const plHtml = pl == null ? '—' : _crSignedPct(pl * 100, 2);
+        return '<tr><td>' + escapeHtml(x.ticker || x.symbol || '—') + '</td><td>' + _crFix(x.qty, 4) + '</td><td>'
+          + _crUsd(x.market_value, false) + '</td><td>' + plHtml + '</td></tr>';
+      }).join('') + '</tbody></table>'
+    : '<div class="empty">No crypto positions</div>';
+
+  el.innerHTML = '<div class="regime-panel-header">Crypto risk</div><div class="cr-risk-grid">' + left + '<div>' + right + '</div></div>';
 }
 
 async function showPipelines() {
