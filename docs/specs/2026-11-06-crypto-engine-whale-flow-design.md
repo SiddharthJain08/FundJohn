@@ -466,14 +466,14 @@ gets the empty placeholder. Nothing here costs money.
 | alternative.me | Fear & Greed | daily |
 | Polymarket gamma | crypto prediction-market probabilities | existing client |
 
-### 10.2 Free registrations worth doing (operator action; each is a 2-minute signup, no card)
+### 10.2 Free registrations (operator checked 2026-11-06 21:08Z: **Helius and Santiment keys PROVIDED and stored**; CoinGecko Demo, Dune, Glassnode were not free or trial-only → dropped; BlockCypher, Blockchair, Subscan, Messari, CryptoCompare not yet checked → later if needed)
 | Service | Env var | What it adds | Why it matters |
 |---|---|---|---|
 | **CoinGecko Demo API** (coingecko.com → Developer Dashboard) | `COINGECKO_API_KEY` | 30 req/min, 10 k calls/month, stable auth | lifts the keyless throttle so per-coin mcap/volume for all 36 names fits in one tick |
-| **Helius** (helius.dev, free tier) | `HELIUS_API_KEY` | Solana RPC with 1 M credits/month, enhanced parsed transfers, address webhooks | the public Solana RPC is the weakest link for SOL/BONK/WIF/TRUMP whale transfers |
+| **Helius** — **KEY STORED** | `HELIUS_API_KEY` | Solana RPC with 1 M credits/month, enhanced parsed transfers, address webhooks | the public Solana RPC is the weakest link for SOL/BONK/WIF/TRUMP whale transfers |
 | **Dune Analytics** (dune.com, free plan: 2 500 credits/month API) | `DUNE_API_KEY` | run community SQL dashboards (exchange netflows, ETF holdings, stablecoin mints) via API | the closest free substitute for Whale Alert's labelled exchange flows; 2 500 credits ≈ one daily refresh of 3–4 queries |
 | **Glassnode** (studio.glassnode.com, free "Standard" account) | `GLASSNODE_API_KEY` | API access to Tier-1 metrics at 24 h resolution (active addresses, exchange balance for BTC/ETH on the free tier, SOPR basics) | daily exchange-balance series = the netflow ground truth we otherwise approximate; the endpoint returned 401 keyless, so the key is required |
-| **Santiment SanAPI** (app.santiment.net, free) | `SANTIMENT_API_KEY` | GraphQL metrics (exchange_balance, whale transaction count, dev activity) — free tier restricts the time window to lagged data | useful for backtest history even if the live edge is lagged; the keyless probe confirmed the tier gate |
+| **Santiment SanAPI** — **KEY STORED** | `SANTIMENT_API_KEY` | verified: `exchange_balance`, `exchange_inflow/outflow`, `whale_transaction_count_1m_usd_to_inf`, `daily_active_addresses` for BTC/ETH, **30-day lag**, 1-year window | lagged daily history → `crypto_onchain_daily.parquet` (backtest ground truth for our netflow proxy; never a live signal) |
 | **BlockCypher** (blockcypher.com, free token) | `BLOCKCYPHER_TOKEN` | 3 → 200 req/s for DOGE/LTC | removes the hourly-only cadence for those two names |
 | **Blockchair** (blockchair.com/api, free key) | `BLOCKCHAIR_API_KEY` | higher limits for BCH and fallback chains | same |
 | **Subscan** (subscan.io, free key) | `SUBSCAN_API_KEY` | Polkadot transfers | the only DOT source; low priority |

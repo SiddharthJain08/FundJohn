@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **NEVER-DELETE**: `data/master/crypto_whale_events.parquet` and `data/master/crypto_flows_1h.parquet` are append-only masters; writes go through `parquet_store.append_insert_only` / `append_dedup` (tmp + `os.replace`, file-locked). Add both to the CLAUDE.md invariant list (Task 2). The Postgres tables `crypto_flow_snapshot` and `crypto_flow_provider_health` are append-only; `crypto_whale_events_live` is an explicitly documented 7-day **cache** (parquet is the archive) and is the only table that prunes.
-- **No paid data sources.** Every provider is keyless or uses a free key from `.env`; a missing optional key disables that provider with a counter, never an error (`ETHERSCAN_API_KEY` is present; `COINGECKO_API_KEY`, `HELIUS_API_KEY`, `BLOCKCYPHER_TOKEN`, `BLOCKCHAIR_API_KEY` are optional).
+- **No paid data sources.** Every provider is keyless or uses a free key from `.env`; a missing optional key disables that provider with a counter, never an error (`ETHERSCAN_API_KEY`, `HELIUS_API_KEY`, `SANTIMENT_API_KEY` are present in `.env` as of 2026-11-06 21:10Z; `COINGECKO_API_KEY`, `BLOCKCYPHER_TOKEN`, `BLOCKCHAIR_API_KEY` are optional and currently absent — the operator found CoinGecko Demo, Dune and Glassnode not free or trial-only, so no code path may require them).
 - **Memory**: the tick runs under `MemoryMax=600M`; never `pd.read_parquet` a whole master — use `parquet_store.read_filtered`/duckdb windowed reads; every HTTP call has `timeout ≤ 20 s`; process `nice -n 19`.
 - **Compute-window skip**: the tick exits 0 with `skipped=compute_window` during 15:00–15:50 America/New_York on Monday–Friday, or whenever `pgrep -f pipeline_orchestrator.py` finds a process.
 - **Counters are the contract**: every tick prints one `[crypto-flow]` summary line with `providers_ok/providers_failed/events_new/flows_rows/snapshot_rows/skipped`; rc=1 only when the driver itself cannot run (no DB, no universe file).
@@ -171,11 +171,12 @@ git commit -m "crypto-flow: universe map for the 36 Alpaca pairs + broker symbol
       rows: int; latency_ms: int; err: str | None = None; skipped: str | None = None
   MARKET_TICKER = '__MARKET__'
   # store.py
-  EVENTS_PATH = Path('data/master/crypto_whale_events.parquet'); FLOWS_PATH = Path('data/master/crypto_flows_1h.parquet')
+  EVENTS_PATH = Path('data/master/crypto_whale_events.parquet'); FLOWS_PATH = Path('data/master/crypto_flows_1h.parquet'); ONCHAIN_DAILY_PATH = Path('data/master/crypto_onchain_daily.parquet')
   EVENT_KEY = ('source', 'chain', 'tx_hash', 'out_index'); FLOW_KEY = ('ticker', 'ts_utc')
   def events_to_frame(events: list[WhaleEvent]) -> pd.DataFrame
   def write_events(events: list[WhaleEvent], *, path: Path = EVENTS_PATH) -> int          # append_insert_only; returns new rows written
   def write_flows(rows: pd.DataFrame, *, path: Path = FLOWS_PATH) -> int                 # append_dedup mode='replace'; returns total rows
+  def write_onchain_daily(rows: pd.DataFrame, *, path: Path = ONCHAIN_DAILY_PATH) -> int   # key (ticker, date, metric); append_dedup mode='replace'
   def read_events_window(since: datetime, *, path: Path = EVENTS_PATH, tickers: list[str] | None = None) -> pd.DataFrame
   def read_flows_window(since: datetime, *, path: Path = FLOWS_PATH, tickers: list[str] | None = None) -> pd.DataFrame
   def write_snapshot(conn, ts_utc: datetime, per_ticker: dict[str, dict]) -> int         # INSERT … ON CONFLICT DO NOTHING
@@ -270,7 +271,7 @@ CREATE INDEX IF NOT EXISTS idx_crypto_whale_events_live_ts ON crypto_whale_event
 
 - [ ] **Step 5: Add the invariant line to CLAUDE.md**
 
-In the "Core invariant" paragraph, after `crypto_bars_1h.parquet`, add `crypto_whale_events.parquet, or crypto_flows_1h.parquet` so the sentence reads `…historical_regimes.parquet, crypto_bars_1h.parquet, crypto_whale_events.parquet, or crypto_flows_1h.parquet.**`.
+In the "Core invariant" paragraph, after `crypto_bars_1h.parquet`, add `crypto_whale_events.parquet, crypto_flows_1h.parquet, or crypto_onchain_daily.parquet` so the sentence reads `…historical_regimes.parquet, crypto_bars_1h.parquet, crypto_whale_events.parquet, crypto_flows_1h.parquet, or crypto_onchain_daily.parquet.**`.
 
 - [ ] **Step 6: Run tests to verify they pass**
 
@@ -511,10 +512,11 @@ def test_rate_limiter_spaces_calls(monkeypatch): ...  # 6 calls → sleep total 
 
 ---
 
-### Task 10: Providers `cftc_cot`, `stables_defi`, `macro_sent`
+### Task 10: Providers `cftc_cot`, `stables_defi`, `macro_sent`, `santiment`
 
 **Files:**
-- Create: `providers/cftc_cot.py`, `providers/stables_defi.py`, `providers/macro_sent.py`
+- Create: `providers/cftc_cot.py`, `providers/stables_defi.py`, `providers/macro_sent.py`, `providers/santiment.py`
+- Create: `tests/ingestion/fixtures/crypto_flow/santiment_exchange_balance.json`
 - Fixtures: `cftc_tff.json`, `llama_stablecoins.json`, `llama_chains.json`, `llama_dexs.json`, `coingecko_global.json`, `coingecko_markets.json`, `coinpaprika_tickers.json`, `fng.json`
 - Test: `tests/ingestion/test_crypto_flow_market_providers.py`
 
@@ -522,9 +524,10 @@ def test_rate_limiter_spaces_calls(monkeypatch): ...  # 6 calls → sleep total 
 - `CftcCot` (`cadence='daily'`): `GET https://publicreporting.cftc.gov/resource/gpe5-46if.json?$where=contract_market_name like '%BITCOIN%'&$order=report_date_as_yyyy_mm_dd DESC&$limit=12` → for `contract_market_name == 'BITCOIN'` (CME 5-BTC): `cot_lev_net = lev_money_positions_long − lev_money_positions_short`, `cot_am_net`, `cot_dealer_net`, `cot_report_date`, `cot_lev_net_chg_1w`.
 - `StablesDefi` (`cadence='hourly'`): `stable_supply_usd` = Σ `circulating.peggedUSD` for USDT+USDC+USDG (match `symbol`), `tvl_usd` (Σ `api.llama.fi/v2/chains`), `dex_vol_24h_usd` (`overview/dexs?excludeTotalDataChart=true…` `total24h`); per-stable observations `circulating_usd`.
 - `MacroSent` (`cadence='hourly'`): `btc_dominance`, `total_mcap_usd` (`/global`), `fear_greed` (`https://api.alternative.me/fng/?limit=1`).
+- `Santiment` (`cadence='daily'`, `enabled()` false without `SANTIMENT_API_KEY`; header `Authorization: Apikey <key>`; `POST https://api.santiment.net/graphql`). The free tier (verified 2026-11-06, user `sidjain08`) serves `exchange_balance`, `exchange_inflow`, `exchange_outflow`, `whale_transaction_count_1m_usd_to_inf`, `daily_active_addresses` for slugs `bitcoin`, `ethereum` **with a 30-day lag** (`restrictedTo = now − 30 d`) over a 1-year window. Query `getMetric(metric){ timeseriesData(slug, from:"utc_now-45d", to:"utc_now-31d", interval:"1d"){ datetime value } }` per metric per slug (10 calls/run). These are **lagged daily history**, not live signals, so they do **not** go into `crypto_flows_1h`; they are written to a third append-only master `data/master/crypto_onchain_daily.parquet`, key `(ticker, date, metric)`, via `store.write_onchain_daily(df) -> int` (`append_dedup mode='replace'`, Santiment revises). Add that path to the NEVER-DELETE list (Task 2 invariant line) and to `master_freshness._CADENCES` as `('date', 40)` (lag-aware). The Crypto page shows the latest Santiment exchange-balance 7-day change for BTC/ETH on the market tiles labelled "(30 d lag)".
 
-- [ ] **Step 1: Failing tests** — `test_cot_picks_5btc_contract_and_nets`, `test_stables_sum_three_symbols`, `test_macro_sent_header_when_key_set`, `test_macro_sent_paprika_fallback`.
-- [ ] **Step 2–5:** fail → implement → pass → commit `"crypto-flow: cftc_cot, stables_defi, macro_sent providers"`.
+- [ ] **Step 1: Failing tests** — `test_cot_picks_5btc_contract_and_nets`, `test_stables_sum_three_symbols`, `test_macro_sent_header_when_key_set`, `test_macro_sent_paprika_fallback`, `test_santiment_disabled_without_key`, `test_santiment_rows_keyed_ticker_date_metric(fixture)` (BTC exchange_balance fixture → rows with `ticker='BTC-USD'`, `metric='exchange_balance'`, `date` from `datetime[:10]`), `test_santiment_restricted_error_is_error_not_rows` (GraphQL `errors[]` present → `err` set).
+- [ ] **Step 2–5:** fail → implement → pass → commit `"crypto-flow: cftc_cot, stables_defi, macro_sent, santiment (lagged daily) providers"`.
 
 ---
 
@@ -646,7 +649,7 @@ After the `crypto-regime-tick` block add `_sched('crypto-flow-tick', '*/15 * * *
 
 - [ ] **Step 5: Register health**
 
-`scheduled_jobs.CRON_POLICIES['crypto-flow-tick'] = ('intraday_min', 15)` **only if** that policy kind is evaluated 24/7; otherwise add a new kind `('minutes', 20)` with the same semantics as `'hours'` (read the policy evaluator in the same file first). `master_freshness._CADENCES`: `'crypto_whale_events.parquet': ('ts_utc', 1)`, `'crypto_flows_1h.parquet': ('ts_utc', 1)`. `sync_data_ledger`: `PARQUET_MAP['crypto_flows_1h'] = 'crypto_flows_1h'`, `PARQUET_MAP['crypto_whale_events'] = 'crypto_whale_events'`, `PROVIDERS[...] = 'keyless-multi+etherscan'`. `.env.example`: `OPENCLAW_CRYPTO_FLOWS=` (comment: `1` enables the 15-min flow tick), `OPENCLAW_CRYPTO_FLOW_MEMORY_MAX=600M`, `OPENCLAW_CRYPTO_WHALE_MIN_USD=1000000`, `OPENCLAW_CRYPTO_LARGE_PRINT_USD=250000`, and the optional keys `COINGECKO_API_KEY= HELIUS_API_KEY= BLOCKCYPHER_TOKEN= BLOCKCHAIR_API_KEY=` under a `# Crypto engine — optional free keys (spec §10.2)` comment.
+`scheduled_jobs.CRON_POLICIES['crypto-flow-tick'] = ('intraday_min', 15)` **only if** that policy kind is evaluated 24/7; otherwise add a new kind `('minutes', 20)` with the same semantics as `'hours'` (read the policy evaluator in the same file first). `master_freshness._CADENCES`: `'crypto_whale_events.parquet': ('ts_utc', 1)`, `'crypto_flows_1h.parquet': ('ts_utc', 1)`, `'crypto_onchain_daily.parquet': ('date', 40)`. `sync_data_ledger`: `PARQUET_MAP['crypto_flows_1h'] = 'crypto_flows_1h'`, `PARQUET_MAP['crypto_whale_events'] = 'crypto_whale_events'`, `PARQUET_MAP['crypto_onchain_daily'] = 'crypto_onchain_daily'`, `PROVIDERS[...] = 'keyless-multi+etherscan'`. `.env.example`: `OPENCLAW_CRYPTO_FLOWS=` (comment: `1` enables the 15-min flow tick), `OPENCLAW_CRYPTO_FLOW_MEMORY_MAX=600M`, `OPENCLAW_CRYPTO_WHALE_MIN_USD=1000000`, `OPENCLAW_CRYPTO_LARGE_PRINT_USD=250000`, `HELIUS_API_KEY=` and `SANTIMENT_API_KEY=` (provided; Solana RPC + lagged on-chain daily), and the optional `COINGECKO_API_KEY= BLOCKCYPHER_TOKEN= BLOCKCHAIR_API_KEY=` under a `# Crypto engine — free keys (spec §10.2)` comment.
 
 - [ ] **Step 6: Run tests** — `pytest tests/scripts/test_run_crypto_flow_tick.py tests/ingestion/test_crypto_flow_*.py -q` → all passed; `node --check src/engine/cron-schedule.js` → no output.
 
