@@ -39,6 +39,10 @@ PARQUET_MAP = {
     'earnings_calendar_nasdaq': 'earnings_calendar_nasdaq', # Nasdaq keyless calendar (timing cross-check)
     'cboe_chain_aggregates':    'cboe_chain_aggregates',    # CBOE chain OI/IV/PCR/GEX per underlying-day
     'options_surface':          'options_surface',   # per-(ticker,date) smile-fit features (spec 2026-09-04 A.6)
+    # crypto flow engine (spec 2026-11-06), written by scripts/run_crypto_flow_tick.py
+    'crypto_flows_1h':          'crypto_flows_1h',
+    'crypto_whale_events':      'crypto_whale_events',
+    'crypto_onchain_daily':     'crypto_onchain_daily',
 }
 
 # Derived columns computable from prices — inherit prices coverage
@@ -86,6 +90,9 @@ PROVIDERS = {
     'earnings_calendar_nasdaq': 'nasdaq',
     'cboe_chain_aggregates':    'cboe',
     'options_surface':          'alpaca',   # derived from Alpaca-sourced options_eod
+    'crypto_flows_1h':          'keyless-multi+etherscan+helius+santiment',
+    'crypto_whale_events':      'keyless-multi+etherscan+helius+santiment',
+    'crypto_onchain_daily':     'keyless-multi+etherscan+helius+santiment',
 }
 
 

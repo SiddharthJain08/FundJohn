@@ -814,6 +814,36 @@ function start(swarm, generateId, notifyDiscord) {
         }
     }, { timezone: 'UTC' });
 
+    // Every 15 min UTC, 24/7 — crypto flow tick (whale events, derivs, market
+    // flow features → crypto_flows_1h.parquet + crypto_flow_snapshot). Gated on
+    // OPENCLAW_CRYPTO_FLOWS=1. MemoryMax-capped via systemd-run (plain spawn
+    // fallback); the script renices itself (os.nice(19)) and skips the
+    // 15:00–15:50 ET weekday compute window + any running orchestrator.
+    _sched('crypto-flow-tick', '*/15 * * * *', () => {
+        if (process.env.OPENCLAW_CRYPTO_FLOWS !== '1') return;
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            const capped = require('../lib/capped_spawn');
+            const today = new Date().toISOString().slice(0, 10);
+            const logDir = path.join(ROOT, 'logs');
+            try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+            const logFd = fs.openSync(path.join(logDir, `crypto_flows_${today}.log`), 'a');
+            const w = capped.wrapCapped(PYTHON, ['scripts/run_crypto_flow_tick.py'],
+                { memoryMax: process.env.OPENCLAW_CRYPTO_FLOW_MEMORY_MAX || '600M', fallback: '600M' });
+            const child = spawn(w.cmd, w.args, {
+                cwd: ROOT,
+                env: { ...process.env, PYTHONPATH: ROOT },
+                detached: true,
+                stdio: ['ignore', logFd, logFd],
+            });
+            child.unref();
+            fs.closeSync(logFd);
+        } catch (e) {
+            log(`Crypto flow tick spawn error: ${e.message}`);
+        }
+    }, { timezone: 'UTC' });
+
     // Daily 18:00 ET — intraday HMM refit attempt. Trains a fresh HMM on
     // the accumulated intraday_features.parquet; the detector reads
     // hmm_intraday_latest.pkl on its next tick. Bootstrap-safe (no-op if

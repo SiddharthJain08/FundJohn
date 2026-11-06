@@ -48,6 +48,11 @@ _CADENCES: dict[str, tuple[str | None, int]] = {
     'prices_30m.parquet':         ('date', 7),
     'historical_regimes.parquet': ('date', 7),
     'crypto_bars_1h.parquet':     ('ts_utc', 3),    # 24/7 market
+    # crypto flow engine (scripts/run_crypto_flow_tick.py, every 15 min, flag-gated):
+    # missing until OPENCLAW_CRYPTO_FLOWS=1 has run once -> WARN, not FAIL.
+    'crypto_whale_events.parquet':  ('ts_utc', 1),
+    'crypto_flows_1h.parquet':      ('ts_utc', 1),
+    'crypto_onchain_daily.parquet': ('date', 40),   # Santiment free tier lags ~30 d
     'intraday_features.parquet':  ('ts_utc', 7),
     # earnings: the refresh appends forward-calendar rows and reported
     # actuals daily, stamping last_updated (ISO str) — see spec §3.

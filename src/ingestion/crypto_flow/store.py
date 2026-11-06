@@ -129,6 +129,20 @@ def write_snapshot(conn, ts_utc: datetime, per_ticker: dict[str, dict]) -> int:
     return n
 
 
+def read_latest_snapshot(conn) -> dict[str, dict]:
+    """ticker -> features of its newest crypto_flow_snapshot row (last 2 days). Fail-open: {} on any error."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT ON (ticker) ticker, features FROM crypto_flow_snapshot "
+                        "WHERE ts_utc > NOW() - INTERVAL '2 days' ORDER BY ticker, ts_utc DESC")
+            rows = cur.fetchall()
+    except Exception as e:  # noqa: BLE001
+        print(f'[crypto-flow] read_latest_snapshot failed: {type(e).__name__}: {e}')
+        conn.rollback()
+        return {}
+    return {t: (json.loads(f) if isinstance(f, (str, bytes)) else dict(f or {})) for t, f in rows}
+
+
 def write_provider_health(conn, ts_utc: datetime, results: list[ProviderResult]) -> int:
     n = 0
     try:

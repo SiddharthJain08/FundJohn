@@ -91,3 +91,24 @@ def test_writer_rolls_back_on_exception():
     with pytest.raises(RuntimeError):
         store.write_snapshot(c, datetime(2026,11,6,1,tzinfo=timezone.utc), {'A': {'x': 1}, 'B': {'x': 2}})
     assert c.rolled == 1 and c.committed == 0
+
+
+class _RowsCur(_Cur):
+    def __init__(s, rows=None, boom=False):
+        super().__init__(); s.rows = rows or []; s.boom = boom
+    def execute(s, q, p=None):
+        if s.boom:
+            raise RuntimeError('no table')
+        super().execute(q, p)
+    def fetchall(s): return s.rows
+
+def test_read_latest_snapshot_latest_row_per_ticker_dict_or_json():
+    c = _Conn(); c.cur = _RowsCur([('BTC-USD', {'price_usd': 70000.0}), ('ETH-USD', '{"price_usd": 3000.0}')])
+    out = store.read_latest_snapshot(c)
+    assert out == {'BTC-USD': {'price_usd': 70000.0}, 'ETH-USD': {'price_usd': 3000.0}}
+    q = c.cur.sql[0][0]
+    assert 'DISTINCT ON (ticker)' in q and 'ORDER BY ticker, ts_utc DESC' in q
+
+def test_read_latest_snapshot_fail_open_rolls_back():
+    c = _Conn(); c.cur = _RowsCur(boom=True)
+    assert store.read_latest_snapshot(c) == {} and c.rolled == 1

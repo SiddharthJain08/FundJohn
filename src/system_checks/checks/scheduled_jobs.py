@@ -36,6 +36,7 @@ CRON_POLICIES: dict[str, Policy] = {
     'cadence-recompute-2355': ('hours', 24),
     'curator-priors-snapshot-0305': ('hours', 24),
     'crypto-regime-tick': ('hours', 1),
+    'crypto-flow-tick': ('hours', 1),  # */15 UTC 24/7; intraday_min is market-hours only
     'weekly-maintenance-sun0800': ('hours', 168),
     'intraday-hmm-tick': ('intraday_min', 15),
     'circuit-breaker-tick': ('intraday_min', 5),
