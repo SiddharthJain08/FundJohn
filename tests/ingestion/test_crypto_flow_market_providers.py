@@ -158,6 +158,11 @@ def test_paprika_symbol_collision_uses_id_match(monkeypatch):
     monkeypatch.setattr(macro_sent, 'get_json', _macro_router(**{'coins/markets': None, 'coinpaprika': rows}))
     res = MacroSent().fetch([sky], NOW, NOW)
     assert fields_of(res, 'SKY-USD')['price_usd'] == 2.0 and fields_of(res)['paprika_ambiguous'] is None
+    # a lone unranked 'sky-skycoin' must NOT be matched by substring of coingecko_id 'sky'
+    lone = _paprika([('sky-skycoin', 'SKY', 0, 1.0)])
+    monkeypatch.setattr(macro_sent, 'get_json', _macro_router(**{'coins/markets': None, 'coinpaprika': lone}))
+    res = MacroSent().fetch([sky], NOW, NOW)
+    assert not any(o.ticker == 'SKY-USD' for o in res.observations) and fields_of(res)['paprika_ambiguous'] == 1
 
 
 def test_paprika_ambiguous_symbol_skipped_and_counted(monkeypatch):

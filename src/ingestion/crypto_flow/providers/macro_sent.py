@@ -59,9 +59,8 @@ class MacroSent(Provider):
         for a in assets:
             cands = by_sym.get(a.ticker.split('-')[0].upper(), [])
             cg = a.coingecko_id or ''
-            # symbols collide (SKY, TRUMP, RENDER...): trust the id (`btc-bitcoin`), else a lone ranked candidate
-            row = next((r for r in cands if cg and str(r.get('id', '')).endswith('-' + cg)), None) \
-                or next((r for r in cands if cg and cg in str(r.get('id', ''))), None)
+            # symbols collide (SKY, TRUMP, RENDER...): exact id suffix (`btc-bitcoin`), else a lone ranked candidate
+            row = next((r for r in cands if cg and str(r.get('id', '')).endswith('-' + cg)), None)
             if row is None and len(cands) == 1 and (_f(cands[0].get('rank')) or 0) > 0:
                 row = cands[0]
             if row is None and cands:
