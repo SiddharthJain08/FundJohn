@@ -51,13 +51,22 @@ class MacroSent(Provider):
         data = get_json(PAPRIKA_URL, label='coinpaprika_tickers', timeout=15)
         if not isinstance(data, list):
             return None
-        by_sym: dict[str, dict] = {}
+        by_sym: dict[str, list[dict]] = {}
         for r in data:
             if isinstance(r, dict):
-                by_sym.setdefault(str(r.get('symbol', '')).upper(), r)  # first = best rank
-        out = {}
+                by_sym.setdefault(str(r.get('symbol', '')).upper(), []).append(r)
+        out, self.paprika_ambiguous = {}, 0
         for a in assets:
-            q = _get(by_sym.get(a.ticker.split('-')[0].upper()), 'quotes', 'USD')
+            cands = by_sym.get(a.ticker.split('-')[0].upper(), [])
+            cg = a.coingecko_id or ''
+            # symbols collide (SKY, TRUMP, RENDER...): trust the id (`btc-bitcoin`), else a lone ranked candidate
+            row = next((r for r in cands if cg and str(r.get('id', '')).endswith('-' + cg)), None) \
+                or next((r for r in cands if cg and cg in str(r.get('id', ''))), None)
+            if row is None and len(cands) == 1 and (_f(cands[0].get('rank')) or 0) > 0:
+                row = cands[0]
+            if row is None and cands:
+                self.paprika_ambiguous += 1
+            q = _get(row, 'quotes', 'USD')
             if q:
                 out[a.ticker] = {'price_usd': _f(q.get('price')), 'mcap_usd': _f(q.get('market_cap')),
                                  'vol_24h_usd': _f(q.get('volume_24h')), 'ret_1h': _f(q.get('percent_change_1h')),
@@ -65,13 +74,14 @@ class MacroSent(Provider):
         return out
 
     def _fetch(self, assets, since, now):
+        self.paprika_ambiguous = 0
         key = os.environ.get('COINGECKO_API_KEY')
         headers = {'x-cg-demo-api-key': key} if key else None
         glob = get_json(f'{CG}/global', label='coingecko_global', timeout=15, headers=headers)
         per_asset = self._per_asset_coingecko([a for a in assets if a.role != 'stable'], headers)
         if per_asset is None:
             per_asset = self._per_asset_paprika([a for a in assets if a.role != 'stable'])
-        if per_asset is None and glob is None:
+        if per_asset is None:  # per-asset prices are the primary output; /global is supplementary
             raise ProviderFetchError('macro_sent: coingecko and coinpaprika both None')
         fng = get_json(FNG_URL, label='alternative_fng', timeout=15)
         try:
@@ -79,6 +89,7 @@ class MacroSent(Provider):
         except (TypeError, KeyError, IndexError, ValueError):
             fear_greed = None
         market = {'btc_dominance': _f(_get(glob, 'data', 'market_cap_percentage', 'btc')),
-                  'total_mcap_usd': _f(_get(glob, 'data', 'total_market_cap', 'usd')), 'fear_greed': fear_greed}
+                  'total_mcap_usd': _f(_get(glob, 'data', 'total_market_cap', 'usd')), 'fear_greed': fear_greed,
+                  'paprika_ambiguous': self.paprika_ambiguous or None}
         return [], [Observation(now, MARKET_TICKER, self.name, market)] + [
             Observation(now, t, self.name, f) for t, f in (per_asset or {}).items()]

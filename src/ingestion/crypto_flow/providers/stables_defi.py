@@ -40,7 +40,9 @@ class StablesDefi(Provider):
         tvls = [_f(c.get('tvl')) for c in chains if isinstance(c, dict)] if isinstance(chains, list) else []
         tvls = [t for t in tvls if t is not None]
         dexs = get_json(DEXS_URL, label='llama_dexs', timeout=15)
-        market = {'stable_supply_usd': sum(circ.values()),
+        missing = [s for s in SYMBOLS if s not in circ]
+        market = {'stable_supply_usd': None if missing else sum(circ.values()),
+                  'stable_supply_missing': ','.join(missing) or None,
                   'tvl_usd': sum(tvls) if tvls else None,
                   'dex_vol_24h_usd': _f(dexs.get('total24h')) if isinstance(dexs, dict) else None}
         obs = [Observation(now, MARKET_TICKER, self.name, market)]

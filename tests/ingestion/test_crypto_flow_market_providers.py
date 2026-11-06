@@ -141,6 +141,42 @@ def test_macro_sent_both_down_is_error_and_fng_none(monkeypatch):
     assert fields_of(MacroSent().fetch(SET, NOW, NOW))['fear_greed'] is None
 
 
+def test_macro_sent_raises_when_both_asset_sources_down_even_if_global_up(monkeypatch):
+    monkeypatch.setattr(macro_sent, 'get_json', _macro_router(**{'coins/markets': None, 'coinpaprika': None}))
+    res = run_provider(MacroSent(), SET, NOW, NOW)
+    assert not res.ok and 'both None' in res.err
+
+
+def _paprika(rows):
+    return [{'id': i, 'symbol': s, 'rank': r, 'quotes': {'USD': {'price': p, 'market_cap': 1.0, 'volume_24h': 1.0,
+            'percent_change_1h': 0.0, 'percent_change_24h': 0.0}}} for i, s, r, p in rows]
+
+
+def test_paprika_symbol_collision_uses_id_match(monkeypatch):
+    sky = A['SKY-USD']
+    rows = _paprika([('sky-skycoin', 'SKY', 300, 1.0), ('sky-sky', 'SKY', 900, 2.0)])
+    monkeypatch.setattr(macro_sent, 'get_json', _macro_router(**{'coins/markets': None, 'coinpaprika': rows}))
+    res = MacroSent().fetch([sky], NOW, NOW)
+    assert fields_of(res, 'SKY-USD')['price_usd'] == 2.0 and fields_of(res)['paprika_ambiguous'] is None
+
+
+def test_paprika_ambiguous_symbol_skipped_and_counted(monkeypatch):
+    rows = _paprika([('trump-trumpcoin', 'TRUMP', 300, 1.0), ('trump-maga', 'TRUMP', 400, 2.0)])
+    monkeypatch.setattr(macro_sent, 'get_json', _macro_router(**{'coins/markets': None, 'coinpaprika': rows}))
+    res = MacroSent().fetch([A['TRUMP-USD']], NOW, NOW)
+    assert not any(o.ticker == 'TRUMP-USD' for o in res.observations)
+    assert fields_of(res)['paprika_ambiguous'] == 1
+
+
+def test_stables_partial_set_gives_none_supply(monkeypatch):
+    peg = [a for a in fx('llama_stablecoins.json')['peggedAssets'] if a['symbol'] != 'USDG']
+    monkeypatch.setattr(stables_defi, 'get_json', Router({'stablecoins.llama.fi': {'peggedAssets': peg}}))
+    res = StablesDefi().fetch([], NOW, NOW)
+    m = fields_of(res)
+    assert m['stable_supply_usd'] is None and m['stable_supply_missing'] == 'USDG'
+    assert sorted(o.ticker for o in res.observations if o.ticker != MARKET_TICKER) == ['USDC-USD', 'USDT-USD']
+
+
 def test_santiment_disabled_without_key(monkeypatch):
     monkeypatch.delenv('SANTIMENT_API_KEY', raising=False)
     res = Santiment().fetch([], NOW, NOW)
