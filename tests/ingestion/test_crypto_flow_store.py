@@ -109,6 +109,13 @@ def test_read_latest_snapshot_latest_row_per_ticker_dict_or_json():
     q = c.cur.sql[0][0]
     assert 'DISTINCT ON (ticker)' in q and 'ORDER BY ticker, ts_utc DESC' in q
 
+def test_read_latest_snapshot_with_ts_exposes_ts_utc():
+    ts = datetime(2026,11,6,1,tzinfo=timezone.utc)
+    c = _Conn(); c.cur = _RowsCur([('BTC-USD', {'price_usd': 1.0}, ts)])
+    out = store.read_latest_snapshot(c, with_ts=True)
+    assert out == {'BTC-USD': {'price_usd': 1.0, '_ts_utc': ts}}
+    assert 'features, ts_utc FROM' in c.cur.sql[0][0]
+
 def test_read_latest_snapshot_fail_open_rolls_back():
     c = _Conn(); c.cur = _RowsCur(boom=True)
     assert store.read_latest_snapshot(c) == {} and c.rolled == 1

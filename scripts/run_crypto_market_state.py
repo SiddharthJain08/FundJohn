@@ -76,6 +76,27 @@ def _spawn_crypto_redeploy(prior_state: str, new_state: str, date_str: str) -> s
     return 'spawned'
 
 
+def advisory_features(conn) -> dict:
+    """Read-only crypto-flow advisory fields for features_json (NOT HMM inputs). Fail-open: {} on any error."""
+    try:
+        from ingestion.crypto_flow import store
+        snap = store.read_latest_snapshot(conn, with_ts=True)
+        btc, mkt = snap.get('BTC-USD') or {}, snap.get('__MARKET__') or {}
+        ts = mkt.get('_ts_utc')
+        age = None if ts is None else round(max(0.0, (datetime.now(timezone.utc) - ts).total_seconds() / 60), 1)
+        return store._sanitize({
+            'adv_btc_netflow_z_7d': btc.get('exch_netflow_z_7d'), 'adv_btc_funding_8h': btc.get('funding_8h'),
+            'adv_delev_market': mkt.get('delev_market'), 'adv_dvol_btc': mkt.get('dvol_btc'),
+            'adv_whale_score_btc': btc.get('whale_score'), 'adv_flow_age_min': age})
+    except Exception as e:  # noqa: BLE001
+        print(f'[crypto-regime] advisory unavailable: {type(e).__name__}')
+        return {}
+
+
+def merge_advisory(latest_features: dict, adv: dict) -> dict:
+    return {**latest_features, **adv}
+
+
 def main() -> int:
     if os.environ.get('OPENCLAW_CRYPTO_REGIME') != '1':
         print('[crypto-regime] gate OFF (OPENCLAW_CRYPTO_REGIME != 1) — no-op')
@@ -107,6 +128,7 @@ def main() -> int:
     uri = os.environ.get('POSTGRES_URI', '')
     conn = psycopg2.connect(uri)
     try:
+        latest_features = merge_advisory(latest_features, advisory_features(conn))
         history = _last_n_states(conn, LOOKBACK_ROWS)
         streak = cr.hysteresis_streak(history, state)
         fired, prior = cr.confirmed_transition(history, state, streak, confidence)

@@ -129,18 +129,24 @@ def write_snapshot(conn, ts_utc: datetime, per_ticker: dict[str, dict]) -> int:
     return n
 
 
-def read_latest_snapshot(conn) -> dict[str, dict]:
-    """ticker -> features of its newest crypto_flow_snapshot row (last 2 days). Fail-open: {} on any error."""
+def read_latest_snapshot(conn, with_ts: bool = False) -> dict[str, dict]:
+    """ticker -> features of its newest crypto_flow_snapshot row (last 2 days); with_ts adds '_ts_utc' (datetime)
+    to each dict. Fail-open: {} on any error."""
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT ON (ticker) ticker, features FROM crypto_flow_snapshot "
+            cur.execute("SELECT DISTINCT ON (ticker) ticker, features" + (", ts_utc" if with_ts else "") +
+                        " FROM crypto_flow_snapshot "
                         "WHERE ts_utc > NOW() - INTERVAL '2 days' ORDER BY ticker, ts_utc DESC")
             rows = cur.fetchall()
     except Exception as e:  # noqa: BLE001
         print(f'[crypto-flow] read_latest_snapshot failed: {type(e).__name__}: {e}')
         conn.rollback()
         return {}
-    return {t: (json.loads(f) if isinstance(f, (str, bytes)) else dict(f or {})) for t, f in rows}
+    out = {r[0]: (json.loads(r[1]) if isinstance(r[1], (str, bytes)) else dict(r[1] or {})) for r in rows}
+    if with_ts:
+        for r in rows:
+            out[r[0]]['_ts_utc'] = r[2]
+    return out
 
 
 _SNAP_TEXT_FIELDS = {'oi_venues'}
