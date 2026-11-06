@@ -1,0 +1,25 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 POST https://api.santiment.net/graphql query { getMetric(metric:\"exchange_balance\"){ timeseriesData(slug:\"bitcoin\", from:\"utc_now-10d\", to:\"utc_now-1d\", interval:\"1d\"){ datetime value } } } (too-recent window on free tier); no edits",
+ "payload": {
+  "data": {
+   "getMetric": {
+    "timeseriesData": null
+   }
+  },
+  "errors": [
+   {
+    "message": "Both `from` and `to` parameters are outside the allowed interval you can query exchange_balance with your current subscription SANAPI FREE. Upgrade to a higher tier in order to access more data.\n\nAllowed time restrictions:\n  - `from` - 2025-11-06 22:13:14.822801Z\n  - `to` - 2026-10-07 22:13:14.822801Z\n",
+    "path": [
+     "getMetric",
+     "timeseriesData"
+    ],
+    "locations": [
+     {
+      "line": 1,
+      "column": 41
+     }
+    ]
+   }
+  ]
+ }
+}

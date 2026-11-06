@@ -1,0 +1,14 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 GET https://api.coingecko.com/api/v3/global; trimmed to data.market_cap_percentage{btc,eth}, data.total_market_cap{usd}",
+ "payload": {
+  "data": {
+   "market_cap_percentage": {
+    "btc": 59.20012596919908,
+    "eth": 10.625755366428463
+   },
+   "total_market_cap": {
+    "usd": 2575458618276.9
+   }
+  }
+ }
+}

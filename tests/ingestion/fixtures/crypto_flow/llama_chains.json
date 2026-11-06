@@ -1,0 +1,17 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 GET https://api.llama.fi/v2/chains; trimmed to top 3 chains by tvl, fields name+tvl",
+ "payload": [
+  {
+   "name": "Ethereum",
+   "tvl": 43068552322.602684
+  },
+  {
+   "name": "Base",
+   "tvl": 5792492734.127382
+  },
+  {
+   "name": "Solana",
+   "tvl": 5241110140.968387
+  }
+ ]
+}

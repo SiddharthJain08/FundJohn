@@ -1,0 +1,31 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 GET https://stablecoins.llama.fi/stablecoins?includePrices=false; trimmed to peggedAssets USDT/USDC/USDG/DAI with symbol+circulating.peggedUSD",
+ "payload": {
+  "peggedAssets": [
+   {
+    "symbol": "USDT",
+    "circulating": {
+     "peggedUSD": 176972473410.7244
+    }
+   },
+   {
+    "symbol": "USDC",
+    "circulating": {
+     "peggedUSD": 70606391951.59972
+    }
+   },
+   {
+    "symbol": "USDG",
+    "circulating": {
+     "peggedUSD": 2742413247.2867503
+    }
+   },
+   {
+    "symbol": "DAI",
+    "circulating": {
+     "peggedUSD": 4670726910.946165
+    }
+   }
+  ]
+ }
+}

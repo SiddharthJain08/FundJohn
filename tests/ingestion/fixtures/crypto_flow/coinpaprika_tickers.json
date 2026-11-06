@@ -1,0 +1,44 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 GET https://api.coinpaprika.com/v1/tickers; trimmed to first rank-order match of BTC/ETH/PEPE symbols and 5 USD quote fields",
+ "payload": [
+  {
+   "id": "btc-bitcoin",
+   "symbol": "BTC",
+   "quotes": {
+    "USD": {
+     "price": 75960.05241795236,
+     "market_cap": 1527476440309,
+     "volume_24h": 20928045777.623367,
+     "percent_change_1h": 0.20999999344348907,
+     "percent_change_24h": 0.8299999833106995
+    }
+   }
+  },
+  {
+   "id": "eth-ethereum",
+   "symbol": "ETH",
+   "quotes": {
+    "USD": {
+     "price": 2239.8475718175887,
+     "market_cap": 273698017248,
+     "volume_24h": 7938594885.247004,
+     "percent_change_1h": 0.49000000953674316,
+     "percent_change_24h": 1.2300000190734863
+    }
+   }
+  },
+  {
+   "id": "pepe-pepe",
+   "symbol": "PEPE",
+   "quotes": {
+    "USD": {
+     "price": 4.9703403300228776e-06,
+     "market_cap": 2090972473,
+     "volume_24h": 312993938.84391344,
+     "percent_change_1h": -1.5700000524520874,
+     "percent_change_24h": 4.679999828338623
+    }
+   }
+  }
+ ]
+}

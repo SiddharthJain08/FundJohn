@@ -1,0 +1,35 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 GET https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=bitcoin,ethereum,pepe&price_change_percentage=1h,24h; trimmed to 8 fields",
+ "payload": [
+  {
+   "id": "bitcoin",
+   "symbol": "btc",
+   "current_price": 75972,
+   "market_cap": 1527560771693,
+   "total_volume": 31839295428,
+   "price_change_percentage_24h": 0.03362,
+   "price_change_percentage_1h_in_currency": 0.017,
+   "price_change_percentage_24h_in_currency": 0.03362
+  },
+  {
+   "id": "ethereum",
+   "symbol": "eth",
+   "current_price": 2239.07,
+   "market_cap": 273587612449,
+   "total_volume": 11667448952,
+   "price_change_percentage_24h": 0.16721,
+   "price_change_percentage_1h_in_currency": 0.3652,
+   "price_change_percentage_24h_in_currency": 0.16721
+  },
+  {
+   "id": "pepe",
+   "symbol": "pepe",
+   "current_price": 4.97e-06,
+   "market_cap": 2090500507,
+   "total_volume": 424275498,
+   "price_change_percentage_24h": 2.87598,
+   "price_change_percentage_1h_in_currency": -1.4935,
+   "price_change_percentage_24h_in_currency": 2.87598
+  }
+ ]
+}

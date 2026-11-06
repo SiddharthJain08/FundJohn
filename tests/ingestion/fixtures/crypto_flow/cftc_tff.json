@@ -1,0 +1,49 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 GET https://publicreporting.cftc.gov/resource/gpe5-46if.json?$where=contract_market_name%20like%20%27%25BITCOIN%25%27&$order=report_date_as_yyyy_mm_dd%20DESC&$limit=12; trimmed to 2 report dates x (BITCOIN, MICRO BITCOIN) and 9 fields, no value edits",
+ "payload": [
+  {
+   "contract_market_name": "BITCOIN",
+   "report_date_as_yyyy_mm_dd": "2026-11-03T00:00:00.000",
+   "open_interest_all": "17527",
+   "dealer_positions_long_all": "6027",
+   "dealer_positions_short_all": "5548",
+   "asset_mgr_positions_long": "4379",
+   "asset_mgr_positions_short": "1976",
+   "lev_money_positions_long": "5114",
+   "lev_money_positions_short": "7705"
+  },
+  {
+   "contract_market_name": "MICRO BITCOIN",
+   "report_date_as_yyyy_mm_dd": "2026-11-03T00:00:00.000",
+   "open_interest_all": "22838",
+   "dealer_positions_long_all": "1282",
+   "dealer_positions_short_all": "2138",
+   "asset_mgr_positions_long": "1572",
+   "asset_mgr_positions_short": "457",
+   "lev_money_positions_long": "10468",
+   "lev_money_positions_short": "15782"
+  },
+  {
+   "contract_market_name": "BITCOIN",
+   "report_date_as_yyyy_mm_dd": "2026-10-27T00:00:00.000",
+   "open_interest_all": "20791",
+   "dealer_positions_long_all": "6257",
+   "dealer_positions_short_all": "5001",
+   "asset_mgr_positions_long": "4743",
+   "asset_mgr_positions_short": "1989",
+   "lev_money_positions_long": "5887",
+   "lev_money_positions_short": "9866"
+  },
+  {
+   "contract_market_name": "MICRO BITCOIN",
+   "report_date_as_yyyy_mm_dd": "2026-10-27T00:00:00.000",
+   "open_interest_all": "30883",
+   "dealer_positions_long_all": "3692",
+   "dealer_positions_short_all": "438",
+   "asset_mgr_positions_long": "1838",
+   "asset_mgr_positions_short": "355",
+   "lev_money_positions_long": "9477",
+   "lev_money_positions_short": "21243"
+  }
+ ]
+}

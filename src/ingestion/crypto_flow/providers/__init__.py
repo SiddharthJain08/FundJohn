@@ -16,5 +16,10 @@ def all_providers() -> list[Provider]:
     from src.ingestion.crypto_flow.providers.xrp_onchain import XrpOnchain
     from src.ingestion.crypto_flow.providers.sol_onchain import SolOnchain
     from src.ingestion.crypto_flow.providers.utxo_alts import UtxoAlts
+    from src.ingestion.crypto_flow.providers.cftc_cot import CftcCot
+    from src.ingestion.crypto_flow.providers.stables_defi import StablesDefi
+    from src.ingestion.crypto_flow.providers.macro_sent import MacroSent
+    from src.ingestion.crypto_flow.providers.santiment import Santiment
     return [BtcOnchain(), EvmOnchain(), Derivs(), Liquidations(), SpotTape(), DeribitVol(), HlWhales(),
-            XrpOnchain(), SolOnchain(), UtxoAlts()]
+            XrpOnchain(), SolOnchain(), UtxoAlts(),
+            CftcCot(), StablesDefi(), MacroSent(), Santiment()]

@@ -1,0 +1,17 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 GET https://api.alternative.me/fng/?limit=1; no edits",
+ "payload": {
+  "name": "Fear and Greed Index",
+  "data": [
+   {
+    "value": "28",
+    "value_classification": "Fear",
+    "timestamp": "1793923200",
+    "time_until_update": "6406"
+   }
+  ],
+  "metadata": {
+   "error": null
+  }
+ }
+}

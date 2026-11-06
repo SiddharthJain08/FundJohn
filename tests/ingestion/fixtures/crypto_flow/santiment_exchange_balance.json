@@ -1,0 +1,23 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 POST https://api.santiment.net/graphql query { getMetric(metric:\"exchange_balance\"){ timeseriesData(slug:\"bitcoin\", from:\"utc_now-45d\", to:\"utc_now-31d\", interval:\"1d\"){ datetime value } } }; trimmed to first 3 datapoints",
+ "payload": {
+  "data": {
+   "getMetric": {
+    "timeseriesData": [
+     {
+      "datetime": "2026-09-22T00:00:00Z",
+      "value": -656.439591439999
+     },
+     {
+      "datetime": "2026-09-23T00:00:00Z",
+      "value": -2426.873117890007
+     },
+     {
+      "datetime": "2026-09-24T00:00:00Z",
+      "value": -7471.146711160006
+     }
+    ]
+   }
+  }
+ }
+}

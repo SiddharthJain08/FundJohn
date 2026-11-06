@@ -1,0 +1,8 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 GET https://api.llama.fi/overview/dexs?excludeTotalDataChart=true&excludeTotalDataChartBreakdown=true; trimmed to total24h,total7d,total30d",
+ "payload": {
+  "total24h": 11683627079.82,
+  "total7d": 64607310907.75998,
+  "total30d": 254805046196.62967
+ }
+}
