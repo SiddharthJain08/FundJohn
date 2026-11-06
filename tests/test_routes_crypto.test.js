@@ -151,3 +151,31 @@ test('watcher broadcasts only on advance', async () => {
   assert.equal(sent[0].rows.length, 1);
   assert.ok(timer);
 });
+
+test('watcher broadcasts first event after empty start', async () => {
+  let max = null;
+  const sent = [];
+  router._setQueryForTests(async (sql) => {
+    if (/MAX\(ts_utc\)/i.test(sql)) return { rows: [{ ts: max }] };
+    return { rows: [{ event_key: 'first', ts_utc: max }] };
+  });
+  router.startEventWatcher((m) => sent.push(m), { intervalMs: 20 });
+  await new Promise((r) => setTimeout(r, 70));
+  assert.equal(sent.length, 0);
+  max = new Date('2026-11-06T11:00:00Z');
+  await new Promise((r) => setTimeout(r, 90));
+  router.stopEventWatcher();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].rows[0].event_key, 'first');
+});
+
+test('watcher skips ticks while a poll is in flight', async () => {
+  let calls = 0;
+  let release;
+  router._setQueryForTests(() => { calls += 1; return new Promise((r) => { release = () => r({ rows: [] }); }); });
+  router.startEventWatcher(() => {}, { intervalMs: 10 });
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(calls, 1);
+  release();
+  router.stopEventWatcher();
+});

@@ -159,16 +159,19 @@ let watcherTimer = null;
 
 function startEventWatcher(broadcast, { intervalMs = 30000 } = {}) {
   stopEventWatcher();
-  let watermark = null;       // primed by the first poll; no replay of old events
+  let watermark = null;       // primed by the first successful poll; no replay of old events
+  let primed = false;         // distinct from watermark: an empty table primes to epoch
+  let inFlight = false;       // a slow DB must not stack overlapping ticks
   let lastErr = null;
   const tick = async () => {
+    if (inFlight) return;
+    inFlight = true;
     try {
       const m = await dbQuery('SELECT MAX(ts_utc) AS ts FROM crypto_whale_events_live');
       const ts = m.rows[0] && m.rows[0].ts ? new Date(m.rows[0].ts) : null;
       lastErr = null;
-      if (!ts) return;
-      if (watermark === null) { watermark = ts; return; }
-      if (ts > watermark) {
+      if (!primed) { watermark = ts || new Date(0); primed = true; return; }
+      if (ts && ts > watermark) {
         const r = await dbQuery(
           `SELECT ${EVENT_COLS} FROM crypto_whale_events_live WHERE ts_utc > $1
             ORDER BY ts_utc DESC LIMIT 50`, [watermark]);
@@ -178,6 +181,8 @@ function startEventWatcher(broadcast, { intervalMs = 30000 } = {}) {
     } catch (e) {
       if (e.message !== lastErr) console.warn('[crypto-watcher]', e.message);
       lastErr = e.message;
+    } finally {
+      inFlight = false;
     }
   };
   watcherTimer = setInterval(tick, intervalMs);
