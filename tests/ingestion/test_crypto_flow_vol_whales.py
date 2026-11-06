@@ -89,6 +89,7 @@ def test_deribit_fetch_emits_btc_and_eth(monkeypatch):
     res = DeribitVol().fetch(SET, NOW, NOW)
     assert res.ok and {o.ticker for o in res.observations} == {'BTC-USD', 'ETH-USD'}
     o = res.observations[0]
+    assert o.fields['options_degraded'] is False
     assert o.source == 'deribit_vol' and o.fields['dvol'] == 39.58 and o.fields['n_options'] == 20
     assert DeribitVol.cadence == 'tick'
 
@@ -146,25 +147,67 @@ def test_hl_whales_hourly_cadence_flag(monkeypatch, tmp_path):
     assert json.loads(p.state_path.read_text())['hl_whales_leaderboard']['addresses']
 
 
-def test_leaderboard_cache_used_within_24h(monkeypatch, tmp_path):
+def _warm(tmp_path, monkeypatch):
     p = HlWhales()
     p.state_path = tmp_path / 's.json'
     r = _hl_router(fx('hl_leaderboard.json'), fx('hl_clearinghouse.json'))
     monkeypatch.setattr(hl_whales, 'get_json', r)
     p.fetch(SET, NOW, NOW)
+    return p, r
+
+
+def test_leaderboard_cache_fresh_skips_refetch(monkeypatch, tmp_path):
+    p, r = _warm(tmp_path, monkeypatch)
     p.fetch(SET, NOW, NOW)
     assert sum('leaderboard' in u for u, _ in r.calls) == 1
-    # leaderboard outage with a warm cache is fine; with a cold cache it is an error
+
+
+def test_leaderboard_stale_cache_used_when_refetch_fails(monkeypatch, tmp_path, capsys):
+    p, _ = _warm(tmp_path, monkeypatch)
     monkeypatch.setattr(hl_whales, 'get_json', _hl_router(None, fx('hl_clearinghouse.json')))
     real = _time.time
     monkeypatch.setattr(hl_whales.time, 'time', lambda: real() + 25 * 3600)
+    res = p.fetch(SET, NOW, NOW)
+    assert res.ok and res.observations
+    assert 'using cached list age=25.0h' in capsys.readouterr().out
+
+
+def test_leaderboard_none_and_no_cache_raises(monkeypatch, tmp_path):
+    p = HlWhales()
+    p.state_path = tmp_path / 's.json'
+    monkeypatch.setattr(hl_whales, 'get_json', _hl_router(None, fx('hl_clearinghouse.json')))
     with pytest.raises(ProviderFetchError, match='leaderboard None'):
         p.fetch(SET, NOW, NOW)
+
+
+def test_early_abort_on_majority_failure(monkeypatch, tmp_path):
+    p = HlWhales()
+    p.state_path = tmp_path / 's.json'
+    lb = {'leaderboardRows': [{'ethAddress': f'0x{i}', 'accountValue': str(100 - i)} for i in range(10)]}
+    r = _hl_router(lb, None)
+    monkeypatch.setattr(hl_whales, 'get_json', r)
+    monkeypatch.setenv('OPENCLAW_CRYPTO_HL_WHALES_TOP_N', '10')
+    res = base.run_provider(p, SET, NOW, NOW)
+    assert not res.ok and '6/10' in res.err
+    assert sum(1 for _, b in r.calls if b) == 6
+
+
+def test_zero_mark_iv_treated_as_absent():
+    rows = [{'instrument_name': 'BTC-4DEC26-100-C', 'mark_iv': 0, 'open_interest': 1, 'underlying_price': 100.0},
+            {'instrument_name': 'BTC-4DEC26-100-P', 'mark_iv': 55.0, 'open_interest': 1, 'underlying_price': 100.0}]
+    assert summarize_options(rows, NOW)['atm_iv_30d'] == 55.0
+
+
+def test_book_none_flags_options_degraded(monkeypatch):
+    monkeypatch.setattr(deribit_vol, 'get_json', Router({
+        'get_volatility_index_data': fx('deribit_dvol.json'), 'get_book_summary_by_currency': None}))
+    o = DeribitVol().fetch(SET, NOW, NOW).observations[0]
+    assert o.fields['dvol'] == 39.58 and o.fields['options_degraded'] is True and o.fields['n_options'] == 0
 
 
 def test_more_than_half_accounts_failing_raises(monkeypatch, tmp_path):
     p = HlWhales()
     p.state_path = tmp_path / 's.json'
     monkeypatch.setattr(hl_whales, 'get_json', _hl_router(fx('hl_leaderboard.json'), None))
-    with pytest.raises(ProviderFetchError, match=r'5/5 accounts failed'):
+    with pytest.raises(ProviderFetchError, match=r'3/5 accounts failed'):
         p.fetch(SET, NOW, NOW)

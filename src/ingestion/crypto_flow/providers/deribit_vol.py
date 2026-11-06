@@ -45,7 +45,8 @@ def summarize_options(rows, now: datetime) -> dict:
         except (ValueError, KeyError, TypeError):
             continue
         oi[kind] += _f(r.get('open_interest')) or 0.0
-        parsed.append((exp, strike, kind, _f(r.get('mark_iv')), _f(r.get('underlying_price'))))
+        iv = _f(r.get('mark_iv'))
+        parsed.append((exp, strike, kind, iv if iv and iv > 0 else None, _f(r.get('underlying_price'))))
     out = {'atm_iv_30d': None, 'skew_25d': None, 'atm_expiry': None, 'n_options': len(parsed),
            'put_call_oi': oi['P'] / oi['C'] if oi['C'] > 0 else None}
 
@@ -98,7 +99,9 @@ class DeribitVol(Provider):
             book = get_json(f'{BASE}/get_book_summary_by_currency?currency={cur}&kind=option',
                             label=f'deribit_book_{cur}', timeout=15)
             rows = book.get('result') if isinstance(book, dict) else None
-            obs.append(Observation(now, ticker, self.name, {'dvol': dvol} | summarize_options(rows, now)))
+            degraded = rows is None
+            obs.append(Observation(now, ticker, self.name, {'dvol': dvol} | summarize_options(rows, now)
+                                   | {'options_degraded': degraded}))
         if len(failed) == len(CURRENCIES):
             raise ProviderFetchError('deribit_vol: dvol None')
         return [], obs

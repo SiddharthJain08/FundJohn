@@ -78,7 +78,7 @@ class HlWhales(Provider):
         os.replace(tmp, path)
 
     def _addresses(self, n: int) -> list[str]:
-        """Top-n addresses; the list is cached in state for 24 h (stale cache is not a fallback)."""
+        """Top-n addresses; cached in state for 24 h, and a stale cache is the fallback if the refetch fails."""
         state = self.load_state()
         cache = state.get('hl_whales_leaderboard') or {}
         try:
@@ -89,6 +89,10 @@ class HlWhales(Provider):
             return cache['addresses'][:n]
         addrs = parse_leaderboard(get_json(LEADERBOARD_URL, label='hl_leaderboard', timeout=60), n)
         if not addrs:
+            if cache.get('addresses'):  # stale cache beats no data
+                hours = f'{age / 3600:.1f}' if age is not None else '?'
+                print(f'[hl_whales] leaderboard refetch failed; using cached list age={hours}h')
+                return cache['addresses'][:n]
             raise ProviderFetchError('hl_whales: leaderboard None')
         self.save_state({**state, 'hl_whales_leaderboard': {
             'fetched_at': datetime.fromtimestamp(time.time(), timezone.utc).isoformat(), 'addresses': addrs}})
@@ -96,16 +100,18 @@ class HlWhales(Provider):
 
     def _fetch(self, assets, since, now):
         addrs = self._addresses(top_n())
-        states = []
-        for addr in addrs:
+        states, failed = [], 0
+        for i, addr in enumerate(addrs):
+            if i:
+                time.sleep(0.1)
             st = get_json(INFO_URL, label='hl_clearinghouse', timeout=15, method='POST',
                           body={'type': 'clearinghouseState', 'user': addr})
             if isinstance(st, dict):
                 states.append(st)
-            time.sleep(0.1)
-        failed = len(addrs) - len(states)
-        if failed * 2 > len(addrs):
-            raise ProviderFetchError(f'hl_whales: {failed}/{len(addrs)} accounts failed')
+                continue
+            failed += 1
+            if failed * 2 > len(addrs):
+                raise ProviderFetchError(f'hl_whales: {failed}/{len(addrs)} accounts failed')
         coin_to_ticker = {a.hyperliquid: a.ticker for a in universe.load_universe() if a.hyperliquid}
         agg = aggregate_positions(states, coin_to_ticker)
         return [], [Observation(now, t, self.name, rec | {'whale_perp_accounts_seen': len(states)})
