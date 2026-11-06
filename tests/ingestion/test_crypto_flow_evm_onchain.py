@@ -129,3 +129,62 @@ def test_majority_failed_calls_raise(tmp_path, monkeypatch):
     p = _provider(tmp_path, monkeypatch, [], load('etherscan_ratelimit.json'))
     with pytest.raises(evm_onchain.ProviderFetchError, match='calls failed: Max rate limit reached'):
         p._fetch(universe.load_universe(), None, None)
+
+
+def test_partial_failure_does_not_advance_cursor(tmp_path, monkeypatch):
+    p = _provider(tmp_path, monkeypatch, [], None)
+    good, bad = load('etherscan_txlist.json'), load('etherscan_ratelimit.json')
+    n = []
+
+    def fake(url, **kw):
+        if 'coingecko' in url:
+            return {}
+        n.append(1)
+        return bad if len(n) == 3 else good  # one failed call, rest fine
+    monkeypatch.setattr(evm_onchain, 'get_json', fake)
+    evs, _ = p._fetch(universe.load_universe(), None, None)
+    assert len(evs) == 1
+    assert 'evm_last_block' not in json.loads(p.state_path.read_text()) or \
+        'ETH' not in json.loads(p.state_path.read_text())['evm_last_block']
+
+
+def test_partner_chain_failure_keeps_eth_events_and_state(tmp_path, monkeypatch, capsys):
+    p = _provider(tmp_path, monkeypatch, [], None)
+    p.state_path.write_text(json.dumps({'evm_next_chain_idx': 1}))  # ARB is the partner chain
+    good, bad = load('etherscan_txlist.json'), load('etherscan_ratelimit.json')
+
+    def fake(url, **kw):
+        if 'coingecko' in url:
+            return {}
+        return good if 'chainid=1&' in url else bad
+    monkeypatch.setattr(evm_onchain, 'get_json', fake)
+    evs, _ = p._fetch(universe.load_universe(), None, None)
+    st = json.loads(p.state_path.read_text())
+    assert len(evs) == 1 and st['evm_last_block'] == {'ETH': 26344458} and st['evm_next_chain_idx'] == 2
+    assert '[evm_onchain] chain=ARB failed' in capsys.readouterr().out
+    monkeypatch.setattr(evm_onchain, 'get_json', lambda url, **kw: {} if 'coingecko' in url else bad)
+    p.state_path.write_text(json.dumps({'evm_next_chain_idx': 1}))
+    with pytest.raises(evm_onchain.ProviderFetchError, match='ETH failed.*ARB failed'):
+        p._fetch(universe.load_universe(), None, None)
+
+
+def test_out_index_discriminates_token_contract_and_native(abc):
+    rows = load('etherscan_tokentx.json')['result']
+    a = dict(rows[1], transactionIndex='0')
+    b = dict(a, contractAddress='0xdac17f958d2ee523a2206206994597c13d831ec7', tokenDecimal='6', value='2000000000000')
+    evs, _ = parse({'result': [a, b]}, abc)
+    assert len({e.out_index for e in evs}) == 2 and all(e.out_index >= 1 for e in evs)
+    nat, _ = parse(load('etherscan_txlist.json'), abc)
+    assert nat[0].out_index == 0
+
+
+def test_error_strings_never_contain_api_key(tmp_path, monkeypatch):
+    p = _provider(tmp_path, monkeypatch, [], load('etherscan_ratelimit.json'))
+    monkeypatch.setenv('ETHERSCAN_API_KEY', 'SECRETKEY123')
+    _, err = parse(load('etherscan_ratelimit.json'), evm_onchain.assets_by_contract(universe.load_universe()))
+    assert 'SECRETKEY123' not in err
+    for payload in (load('etherscan_ratelimit.json'), None):
+        monkeypatch.setattr(evm_onchain, 'get_json', lambda url, _p=payload, **kw: {} if 'coingecko' in url else _p)
+        with pytest.raises(evm_onchain.ProviderFetchError) as ei:
+            p._fetch(universe.load_universe(), None, None)
+        assert 'SECRETKEY123' not in str(ei.value)

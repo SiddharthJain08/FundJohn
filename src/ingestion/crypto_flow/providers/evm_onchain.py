@@ -77,9 +77,15 @@ def parse_transfers(payload, *, chain_id, exchange_addr, owner, assets_by_contra
             chain=CHAIN_NAMES[chain_id], symbol=asset.ticker.removesuffix('-USD'), ticker=asset.ticker,
             amount=amount, amount_usd=amount * price, from_addr=frm, from_owner=f_owner, from_owner_type=f_type,
             to_addr=to, to_owner=t_owner, to_owner_type=t_type, tx_type='transfer', tx_hash=r['hash'],
-            out_index=int(r.get('logIndex') or r.get('transactionIndex') or 0) if is_token else 0,
+            out_index=_out_index(r) if is_token else 0,
             direction=registry.classify_direction(f_type, t_type)))
     return events, None
+
+
+def _out_index(r) -> int:
+    """tokentx has no logIndex: txindex*1000 + 1 + contract discriminator, so it never equals native's 0
+    and two token transfers in one tx differ."""
+    return int(r.get('transactionIndex') or 0) * 1000 + 1 + int((r.get('contractAddress') or '0')[-4:], 16) % 999
 
 
 class _Throttle:
@@ -138,6 +144,36 @@ class EvmOnchain(Provider):
             raise ProviderFetchError('evm_onchain: no prices')
         return prices
 
+    def _pass(self, cid, key, abc, prices, min_usd, reg, found, last):
+        """One chain. The cursor only advances when EVERY call succeeded: a failed address would otherwise
+        lose its rows below the max block seen from the others (inclusive startblock re-fetches are
+        absorbed by the store's dedupe) - simpler than per-address cursors."""
+        code, watched = CHAINS[cid], watched_addresses(reg, CHAINS[cid])
+        calls = errs = 0
+        seen, last_err = last.get(code, 0), None
+        for addr, owner in watched.items():
+            for action in ('tokentx', 'txlist'):
+                self.throttle.wait()
+                calls += 1
+                # _http_retry truncates logged URLs at 140 chars; the apikey sits past that. Never put the URL in an error.
+                payload = get_json(API_URL.format(cid=cid, action=action, addr=addr, start=last.get(code, 0), key=key),
+                                   label=f'etherscan_{action}')
+                evs, err = parse_transfers(payload, chain_id=cid, exchange_addr=addr, owner=owner,
+                                           assets_by_contract=abc, prices=prices, min_usd=min_usd, watched=watched) \
+                    if payload else ([], 'no response')
+                if err:
+                    errs, last_err = errs + 1, err
+                    continue
+                seen = max(seen, max_block(payload))
+                for e in evs:
+                    found[(e.chain, e.tx_hash, e.out_index)] = e
+        if errs * 2 > calls:
+            raise ProviderFetchError(f'evm_onchain: {errs}/{calls} calls failed: {last_err}')
+        if errs == 0:
+            last[code] = seen
+        else:
+            print(f'[evm_onchain] chain={code} {errs}/{calls} calls failed: {last_err}; cursor not advanced')
+
     def _fetch(self, assets, since, now):
         key, reg, min_usd = os.environ['ETHERSCAN_API_KEY'], registry.load_registry(), _min_usd()
         abc, state = assets_by_contract(assets), self.load_state()
@@ -148,28 +184,16 @@ class EvmOnchain(Provider):
         chains = [1] + ([order[idx]] if order[idx] != 1 else [])
         prices = self._prices({a.ticker: a for (cid, _), a in abc.items() if cid in chains})
         found: dict[tuple, WhaleEvent] = {}
-        last = dict(state.get('evm_last_block', {}))
+        failures = []
         for cid in chains:
-            code, watched = CHAINS[cid], watched_addresses(reg, CHAINS[cid])
-            calls = errs = 0
-            seen, last_err = last.get(code, 0), None
-            for addr, owner in watched.items():
-                for action in ('tokentx', 'txlist'):
-                    self.throttle.wait()
-                    calls += 1
-                    payload = get_json(API_URL.format(cid=cid, action=action, addr=addr, start=last.get(code, 0), key=key),
-                                       label=f'etherscan_{action}')
-                    evs, err = parse_transfers(payload, chain_id=cid, exchange_addr=addr, owner=owner,
-                                               assets_by_contract=abc, prices=prices, min_usd=min_usd, watched=watched) \
-                        if payload else ([], 'no response')
-                    if err:
-                        errs, last_err = errs + 1, err
-                        continue
-                    seen = max(seen, max_block(payload))
-                    for e in evs:
-                        found[(e.chain, e.tx_hash, e.out_index)] = e
-            if errs * 2 > calls:
-                raise ProviderFetchError(f'evm_onchain: {errs}/{calls} calls failed: {last_err}')
-            last[code] = seen
-        self.save_state({**self.load_state(), 'evm_last_block': last})
+            last = dict(self.load_state().get('evm_last_block', {}))
+            try:
+                self._pass(cid, key, abc, prices, min_usd, reg, found, last)
+            except ProviderFetchError as e:
+                failures.append(f'{CHAINS[cid]} failed: {e}')
+                print(f'[evm_onchain] chain={CHAINS[cid]} failed: {e}')
+                continue
+            self.save_state({**self.load_state(), 'evm_last_block': last})  # persist per chain
+        if failures and not found:
+            raise ProviderFetchError('evm_onchain: ' + '; '.join(failures))
         return list(found.values()), []
