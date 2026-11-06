@@ -15,7 +15,7 @@ FEATURE_COLS = ['whale_n_1h', 'whale_usd_1h', 'whale_n_24h', 'whale_usd_24h', 'e
                 'oi_chg_1h_pct', 'oi_chg_24h_pct', 'funding_8h', 'funding_ann', 'premium', 'ls_ratio_global',
                 'ls_ratio_top', 'taker_buy_sell', 'oi_price_divergence', 'large_print_imbalance_1h',
                 'large_print_usd_1h', 'liq_long_usd_1h', 'liq_short_usd_1h', 'whale_perp_net_usd', 'price_usd',
-                'ret_1h', 'ret_24h', 'delev_1h', 'whale_score', 'whale_direction', 'whale_score_components']
+                'price_spot_usd', 'ret_1h', 'ret_24h', 'delev_1h', 'whale_score', 'whale_direction', 'whale_score_components']
 # netflow component saturates (40 pts) at $10M of net exchange flow
 _NETFLOW_PTS_PER_DECADE = 40.0 / 7.0
 
@@ -174,9 +174,14 @@ def compute_ticker_features(ticker, now, events, flows_hist, obs, agreement_shar
     else:
         oi1 = _oi_change(hist, t, timedelta(hours=1), timedelta(minutes=30), oi, venues)
         oi24 = _oi_change(hist, t, timedelta(hours=24), timedelta(hours=2), oi, venues)
-    ret1 = _pct(g('price_usd'), _snap_value(snap, t - timedelta(hours=1), timedelta(minutes=5), 'price_usd'))
+    # per-tick price: the derivs perp mark (every tick) when sane, else macro_sent's hourly spot
+    spot, mark = g('price_usd'), g('mark_px')
+    price = mark if mark is not None and math.isfinite(mark) and mark > 0 else spot
+    ret1 = _pct(price, _snap_value(snap, t - timedelta(hours=1), timedelta(minutes=5), 'price_usd'))
     ret1 = g('ret_1h') if ret1 is None else ret1
-    ret24, imb = g('ret_24h'), g('large_print_imbalance_1h')
+    ret24 = _pct(price, _snap_value(snap, t - timedelta(hours=24), timedelta(minutes=30), 'price_usd'))
+    ret24 = g('ret_24h') if ret24 is None else ret24
+    imb = g('large_print_imbalance_1h')
     funding, ls, tk = g('funding_8h'), g('ls_ratio_global'), g('taker_buy_sell')
     sign = {'distributing': 1, 'accumulating': -1}.get(_direction(z, imb), 0)
     dc = deriv_confirm(sign, funding, ls, tk) if sign else None
@@ -196,7 +201,7 @@ def compute_ticker_features(ticker, now, events, flows_hist, obs, agreement_shar
         'oi_price_divergence': oi_price_divergence(oi24, ret24), 'large_print_imbalance_1h': imb,
         'large_print_usd_1h': (buy or 0.0) + (sell or 0.0) if buy is not None or sell is not None else None,
         'liq_long_usd_1h': g('liq_long_usd_1h'), 'liq_short_usd_1h': g('liq_short_usd_1h'),
-        'whale_perp_net_usd': g('whale_perp_net_usd'), 'price_usd': g('price_usd'), 'ret_1h': ret1, 'ret_24h': ret24,
+        'whale_perp_net_usd': g('whale_perp_net_usd'), 'price_usd': price, 'price_spot_usd': spot, 'ret_1h': ret1, 'ret_24h': ret24,
         'delev_1h': deleveraging_flag(oi1, ret1, thr), 'whale_score': score, 'whale_direction': direction,
         'whale_score_components': comps}
 

@@ -136,11 +136,26 @@ def test_oi_change_snapshot_requires_same_venues_and_tolerance():
 
 
 def test_ret_1h_from_snapshot_prices_overrides_carried_value():
-    snap = pd.DataFrame({'ticker': ['BTC-USD'], 'ts_utc': [NOW - timedelta(minutes=62)], 'oi_usd': [None],
-                         'oi_venues': [None], 'price_usd': [50000.0]})
-    obs = {'price_usd': 48000.0, 'ret_1h': 1.0}
+    # snapshot price_usd rows were written from the per-tick perp mark (mark_px), not the hourly spot
+    snap = pd.DataFrame({'ticker': ['BTC-USD'] * 2, 'ts_utc': [NOW - timedelta(minutes=62), NOW - timedelta(hours=24, minutes=20)],
+                         'oi_usd': [None] * 2, 'oi_venues': [None] * 2, 'price_usd': [50000.0, 40000.0]})
+    obs = {'mark_px': 48000.0, 'price_usd': 47000.0, 'ret_1h': 1.0, 'ret_24h': 2.0}
     r = features.compute_ticker_features('BTC-USD', NOW, pd.DataFrame(), pd.DataFrame(), obs, None, snap_hist=snap)
-    assert abs(r['ret_1h'] - (-4.0)) < 1e-9
+    assert abs(r['ret_1h'] - (-4.0)) < 1e-9 and abs(r['ret_24h'] - 20.0) < 1e-9
+    assert r['price_usd'] == 48000.0 and r['price_spot_usd'] == 47000.0
     r2 = features.compute_ticker_features('BTC-USD', NOW, pd.DataFrame(), pd.DataFrame(), obs, None,
-                                          snap_hist=snap.assign(ts_utc=[NOW - timedelta(minutes=70)]))
-    assert r2['ret_1h'] == 1.0  # no price within ±5 min of t-1h → macro_sent value
+                                          snap_hist=snap.assign(ts_utc=[NOW - timedelta(minutes=70), NOW - timedelta(hours=25)]))
+    assert r2['ret_1h'] == 1.0 and r2['ret_24h'] == 2.0  # no snapshot price in tolerance → macro_sent values
+
+
+def test_price_usd_prefers_mark_px_and_keeps_spot():
+    f = lambda o: features.compute_ticker_features('BTC-USD', NOW, pd.DataFrame(), pd.DataFrame(), o, None)  # noqa: E731
+    r = f({'mark_px': 70100.0, 'price_usd': 70000.0})
+    assert r['price_usd'] == 70100.0 and r['price_spot_usd'] == 70000.0
+    for bad in (None, 0.0, -1.0, float('nan'), float('inf'), 'x'):
+        r = f({'mark_px': bad, 'price_usd': 70000.0})
+        assert r['price_usd'] == 70000.0 and r['price_spot_usd'] == 70000.0
+    r = f({'mark_px': 70100.0})
+    assert r['price_usd'] == 70100.0 and r['price_spot_usd'] is None
+    i = features.FEATURE_COLS.index('price_usd')
+    assert features.FEATURE_COLS[i + 1] == 'price_spot_usd'
