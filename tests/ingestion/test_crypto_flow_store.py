@@ -1,4 +1,7 @@
 from datetime import datetime, timezone, timedelta
+import json
+import numpy as np
+import pytest
 import pandas as pd
 from src.ingestion.crypto_flow import store, models
 
@@ -36,9 +39,10 @@ class _Cur:
     def __enter__(s): return s
     def __exit__(s, *a): pass
 class _Conn:
-    def __init__(s): s.cur=_Cur(); s.committed=0
+    def __init__(s): s.cur=_Cur(); s.committed=0; s.rolled=0
     def cursor(s): return s.cur
     def commit(s): s.committed += 1
+    def rollback(s): s.rolled += 1
 
 def test_write_snapshot_one_insert_per_ticker_on_conflict_do_nothing():
     c = _Conn(); ts = datetime(2026,11,6,1,tzinfo=timezone.utc)
@@ -70,3 +74,20 @@ def test_write_onchain_daily_replace_same_key(tmp_path):
     store.write_onchain_daily(row(1.0), path=p)
     assert store.write_onchain_daily(row(2.0), path=p) == 1
     assert pd.read_parquet(p).loc[0,'value'] == 2.0
+
+def test_sanitize_numpy_scalars():
+    d = {'a': np.int64(3), 'b': np.float64('nan'), 'c': np.bool_(True), 'd': np.float32(1.5)}
+    assert json.dumps(store._sanitize(d), allow_nan=False) == '{"a": 3, "b": null, "c": true, "d": 1.5}'
+    assert store._sanitize(pd.Timestamp('2026-11-06', tz='UTC')).startswith('2026-11-06')
+
+def test_writer_rolls_back_on_exception():
+    c = _Conn(); n = {'k': 0}
+    orig = c.cur.execute
+    def boom(q, p=None):
+        n['k'] += 1
+        if n['k'] == 2: raise RuntimeError('db down')
+        orig(q, p)
+    c.cur.execute = boom
+    with pytest.raises(RuntimeError):
+        store.write_snapshot(c, datetime(2026,11,6,1,tzinfo=timezone.utc), {'A': {'x': 1}, 'B': {'x': 2}})
+    assert c.rolled == 1 and c.committed == 0

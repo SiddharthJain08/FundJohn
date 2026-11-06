@@ -9,10 +9,12 @@ import dataclasses
 import json
 import math
 import os
+from datetime import date as _date
 from datetime import datetime
 from pathlib import Path
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 from src.data import parquet_store
@@ -39,7 +41,7 @@ def events_to_frame(events: list[WhaleEvent]) -> pd.DataFrame:
 
 
 def write_events(events: list[WhaleEvent], *, path: Path = EVENTS_PATH) -> int:
-    """Insert-only append; returns the number of NEW rows written."""
+    """Insert-only append; returns NEW rows written (approximate under concurrent writers; the parquet is the truth)."""
     if not events:
         return 0
     path = Path(path)
@@ -91,8 +93,17 @@ def read_flows_window(since: datetime, *, path: Path = FLOWS_PATH,
 
 def _sanitize(obj):
     """Replace NaN/+-inf with None recursively (Postgres jsonb rejects them)."""
-    if isinstance(obj, float):
-        return obj if math.isfinite(obj) else None
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, (float, np.floating)):
+        f = float(obj)
+        return f if math.isfinite(f) else None
+    if obj is pd.NaT:
+        return None
+    if isinstance(obj, (datetime, _date)):
+        return obj.isoformat()
     if isinstance(obj, dict):
         return {k: _sanitize(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -102,52 +113,64 @@ def _sanitize(obj):
 
 def write_snapshot(conn, ts_utc: datetime, per_ticker: dict[str, dict]) -> int:
     n = 0
-    with conn.cursor() as cur:
-        for ticker, features in per_ticker.items():
-            payload = json.dumps(_sanitize(features), allow_nan=False)
-            cur.execute(
-                'INSERT INTO crypto_flow_snapshot (ticker, ts_utc, features) '
-                'VALUES (%s,%s,%s::jsonb) ON CONFLICT DO NOTHING',
-                (ticker, ts_utc, payload))
-            n += 1
-    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            for ticker, features in per_ticker.items():
+                payload = json.dumps(_sanitize(features), allow_nan=False)
+                cur.execute(
+                    'INSERT INTO crypto_flow_snapshot (ticker, ts_utc, features) '
+                    'VALUES (%s,%s,%s::jsonb) ON CONFLICT DO NOTHING',
+                    (ticker, ts_utc, payload))
+                n += 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return n
 
 
 def write_provider_health(conn, ts_utc: datetime, results: list[ProviderResult]) -> int:
     n = 0
-    with conn.cursor() as cur:
-        for r in results:
-            cur.execute(
-                'INSERT INTO crypto_flow_provider_health '
-                '(provider, ts_utc, ok, rows, latency_ms, err, skipped) '
-                'VALUES (%s,%s,%s,%s,%s,%s,%s)',
-                (r.provider, ts_utc, r.ok, r.rows, r.latency_ms, r.err, r.skipped))
-            n += 1
-    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            for r in results:
+                cur.execute(
+                    'INSERT INTO crypto_flow_provider_health '
+                    '(provider, ts_utc, ok, rows, latency_ms, err, skipped) '
+                    'VALUES (%s,%s,%s,%s,%s,%s,%s)',
+                    (r.provider, ts_utc, r.ok, r.rows, r.latency_ms, r.err, r.skipped))
+                n += 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return n
 
 
 def write_events_live(conn, events: list[WhaleEvent]) -> int:
     """Upsert into the 7-day cache, then prune rows older than 7 days."""
     n = 0
-    with conn.cursor() as cur:
-        for e in events:
-            cur.execute(
-                'INSERT INTO crypto_whale_events_live '
-                '(event_key, ts_utc, source, chain, symbol, ticker, amount, amount_usd, '
-                'from_owner, to_owner, direction, tx_hash) '
-                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
-                'ON CONFLICT (event_key) DO UPDATE SET ts_utc=EXCLUDED.ts_utc, '
-                'amount=EXCLUDED.amount, amount_usd=EXCLUDED.amount_usd, '
-                'from_owner=EXCLUDED.from_owner, to_owner=EXCLUDED.to_owner, '
-                'direction=EXCLUDED.direction',
-                ('|'.join(str(x) for x in e.key()), e.ts_utc, e.source, e.chain, e.symbol,
-                 e.ticker, e.amount, e.amount_usd, e.from_owner, e.to_owner, e.direction,
-                 e.tx_hash))
-            n += 1
-        cur.execute("DELETE FROM crypto_whale_events_live WHERE ts_utc < NOW() - INTERVAL '7 days'")
-    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            for e in events:
+                cur.execute(
+                    'INSERT INTO crypto_whale_events_live '
+                    '(event_key, ts_utc, source, chain, symbol, ticker, amount, amount_usd, '
+                    'from_owner, to_owner, direction, tx_hash) '
+                    'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                    'ON CONFLICT (event_key) DO UPDATE SET ts_utc=EXCLUDED.ts_utc, '
+                    'amount=EXCLUDED.amount, amount_usd=EXCLUDED.amount_usd, '
+                    'from_owner=EXCLUDED.from_owner, to_owner=EXCLUDED.to_owner, '
+                    'direction=EXCLUDED.direction',
+                    ('|'.join(str(x) for x in e.key()), e.ts_utc, e.source, e.chain, e.symbol,
+                     e.ticker, e.amount, e.amount_usd, e.from_owner, e.to_owner, e.direction,
+                     e.tx_hash))
+                n += 1
+            cur.execute("DELETE FROM crypto_whale_events_live WHERE ts_utc < NOW() - INTERVAL '7 days'")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return n
 
 
