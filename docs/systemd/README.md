@@ -53,6 +53,12 @@ installed only in-process cron rows exist; the `scheduled_jobs_overdue` system
 check (`src/system_checks/checks/scheduled_jobs.py`) judges whatever it sees.
 Mode-gated crons (registration gated in `cron-schedule.js`) keep WARNing for up to 30 days after a mode flip, until their last row ages out; this is expected.
 
+## Crypto flow tick (in-process cron, not a systemd unit)
+`crypto-flow-tick` (`*/15 * * * *` UTC) is registered in `src/engine/cron-schedule.js` and runs only when
+`OPENCLAW_CRYPTO_FLOWS=1`; it spawns `timeout 840 python3 scripts/run_crypto_flow_tick.py` inside a
+`systemd-run --scope -p MemoryMax=1G`. Health policy `('hours', 1)` in `scheduled_jobs.py`; log
+`logs/crypto_flows_<date>.log`. See `docs/reference/crypto-flow-data.md`.
+
 ## Six-repo epoch / flip units (installed by the operator, not by default)
 
 - `openclaw-pit-gap-flip.{service,timer}` — Tue-Fri 21:45 UTC guarded flip of

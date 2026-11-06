@@ -17,7 +17,9 @@ COINGECKO_URL = 'https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_curr
 CHAINS = {1: 'ETH', 42161: 'ARB', 137: 'POL', 43114: 'AVAX', 8453: 'BASE', 56: 'BNB'}
 CHAIN_NAMES = {1: 'ethereum', 42161: 'arbitrum', 137: 'polygon', 43114: 'avalanche', 8453: 'base', 56: 'bnb'}
 NATIVE_TICKER = {1: 'ETH-USD', 42161: 'ETH-USD', 8453: 'ETH-USD', 137: 'POL-USD', 43114: 'AVAX-USD'}
-_RATE = 5  # requests / second
+# Etherscan free tier: documented 5 req/s, but production answered "Max calls per sec rate limit
+# reached (3/sec)" on 2026-11-06 23:45Z (7/60 calls failed, cursor held) — default to 3, env-overridable.
+_RATE = float(os.environ.get('OPENCLAW_CRYPTO_ETHERSCAN_RPS', '3') or 3)  # requests / second
 
 
 def _min_usd() -> float:
