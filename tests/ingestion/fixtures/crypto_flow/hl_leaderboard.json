@@ -1,0 +1,27 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 ~21:15Z GET https://stats-data.hyperliquid.xyz/Mainnet/leaderboard (48314 rows); trimmed to 5 rows (top 4 by accountValue + 0x5b5d...), windowPerformances/prize/displayName dropped; EDIT: row order shuffled so tests prove sorting",
+ "payload": {
+  "leaderboardRows": [
+   {
+    "ethAddress": "0x24de6b77e8bc31c40aa452926daa6bbab7a71b0f",
+    "accountValue": "1712853949.6510829926"
+   },
+   {
+    "ethAddress": "0xa822a9ceb6d6cb5b565bd10098abcfa9cf18d748",
+    "accountValue": "14941312632.1233272552"
+   },
+   {
+    "ethAddress": "0x393d0b87ed38fc779fd9611144ae649ba6082109",
+    "accountValue": "787435618.9716010094"
+   },
+   {
+    "ethAddress": "0x1c498a93b145e7a73d69691e9023f6f308e1cc3f",
+    "accountValue": "6004533911.7771577835"
+   },
+   {
+    "ethAddress": "0x5b5d51203a0f9079f8aeb098a6523a13f298c060",
+    "accountValue": "212460762.209859997"
+   }
+  ]
+ }
+}

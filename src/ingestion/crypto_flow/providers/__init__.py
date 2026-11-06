@@ -11,4 +11,6 @@ def all_providers() -> list[Provider]:
     from src.ingestion.crypto_flow.providers.derivs import Derivs
     from src.ingestion.crypto_flow.providers.liquidations import Liquidations
     from src.ingestion.crypto_flow.providers.spot_tape import SpotTape
-    return [BtcOnchain(), EvmOnchain(), Derivs(), Liquidations(), SpotTape()]
+    from src.ingestion.crypto_flow.providers.deribit_vol import DeribitVol
+    from src.ingestion.crypto_flow.providers.hl_whales import HlWhales
+    return [BtcOnchain(), EvmOnchain(), Derivs(), Liquidations(), SpotTape(), DeribitVol(), HlWhales()]

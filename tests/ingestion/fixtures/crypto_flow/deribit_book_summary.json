@@ -1,0 +1,147 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 ~21:15Z GET https://www.deribit.com/api/v2/public/get_book_summary_by_currency?currency=BTC&kind=option (940 rows); trimmed to 20 options on 27NOV26 and 25DEC26 (3 strikes around spot + the strikes nearest 0.9x / 1.1x spot, both C and P) and to the fields instrument_name, mark_iv, open_interest, underlying_price, mark_price; no value edits",
+ "payload": {
+  "result": [
+   {
+    "instrument_name": "BTC-27NOV26-68000-P",
+    "mark_iv": 44.09,
+    "open_interest": 1121.5,
+    "underlying_price": 76043.34,
+    "mark_price": 0.00714519
+   },
+   {
+    "instrument_name": "BTC-27NOV26-84000-C",
+    "mark_iv": 36.46,
+    "open_interest": 1493.8,
+    "underlying_price": 76044.3,
+    "mark_price": 0.00558177
+   },
+   {
+    "instrument_name": "BTC-27NOV26-84000-P",
+    "mark_iv": 36.46,
+    "open_interest": 163.8,
+    "underlying_price": 76043.34,
+    "mark_price": 0.11021297
+   },
+   {
+    "instrument_name": "BTC-27NOV26-75000-P",
+    "mark_iv": 37.55,
+    "open_interest": 3170.2,
+    "underlying_price": 76044.13,
+    "mark_price": 0.02873801
+   },
+   {
+    "instrument_name": "BTC-27NOV26-75000-C",
+    "mark_iv": 37.55,
+    "open_interest": 318.6,
+    "underlying_price": 76043.34,
+    "mark_price": 0.04246015
+   },
+   {
+    "instrument_name": "BTC-27NOV26-68000-C",
+    "mark_iv": 44.09,
+    "open_interest": 0.5,
+    "underlying_price": 76044.3,
+    "mark_price": 0.11291994
+   },
+   {
+    "instrument_name": "BTC-27NOV26-77000-P",
+    "mark_iv": 36.59,
+    "open_interest": 746.4,
+    "underlying_price": 76044.3,
+    "mark_price": 0.04138438
+   },
+   {
+    "instrument_name": "BTC-27NOV26-77000-C",
+    "mark_iv": 36.59,
+    "open_interest": 699.6,
+    "underlying_price": 76043.34,
+    "mark_price": 0.02880579
+   },
+   {
+    "instrument_name": "BTC-27NOV26-76000-P",
+    "mark_iv": 36.86,
+    "open_interest": 982.8,
+    "underlying_price": 76043.34,
+    "mark_price": 0.0344772
+   },
+   {
+    "instrument_name": "BTC-27NOV26-76000-C",
+    "mark_iv": 36.86,
+    "open_interest": 163.9,
+    "underlying_price": 76044.13,
+    "mark_price": 0.03504898
+   },
+   {
+    "instrument_name": "BTC-25DEC26-76000-P",
+    "mark_iv": 38.07,
+    "open_interest": 770.9,
+    "underlying_price": 76362.76,
+    "mark_price": 0.05280326
+   },
+   {
+    "instrument_name": "BTC-25DEC26-84000-P",
+    "mark_iv": 37.36,
+    "open_interest": 269.7,
+    "underlying_price": 76362.76,
+    "mark_price": 0.120368
+   },
+   {
+    "instrument_name": "BTC-25DEC26-68000-P",
+    "mark_iv": 41.95,
+    "open_interest": 1298.2,
+    "underlying_price": 76362.76,
+    "mark_price": 0.01858601
+   },
+   {
+    "instrument_name": "BTC-25DEC26-68000-C",
+    "mark_iv": 41.95,
+    "open_interest": 1014.7,
+    "underlying_price": 76362.76,
+    "mark_price": 0.12809178
+   },
+   {
+    "instrument_name": "BTC-25DEC26-78000-P",
+    "mark_iv": 37.68,
+    "open_interest": 1587.3,
+    "underlying_price": 76361.8,
+    "mark_price": 0.0666785
+   },
+   {
+    "instrument_name": "BTC-25DEC26-75000-C",
+    "mark_iv": 38.38,
+    "open_interest": 1985.4,
+    "underlying_price": 76361.8,
+    "mark_price": 0.06460111
+   },
+   {
+    "instrument_name": "BTC-25DEC26-75000-P",
+    "mark_iv": 38.38,
+    "open_interest": 2402.2,
+    "underlying_price": 76362.53,
+    "mark_price": 0.04676386
+   },
+   {
+    "instrument_name": "BTC-25DEC26-84000-C",
+    "mark_iv": 37.36,
+    "open_interest": 1312.1,
+    "underlying_price": 76362.76,
+    "mark_price": 0.02034572
+   },
+   {
+    "instrument_name": "BTC-25DEC26-76000-C",
+    "mark_iv": 38.07,
+    "open_interest": 501.5,
+    "underlying_price": 76362.76,
+    "mark_price": 0.05754501
+   },
+   {
+    "instrument_name": "BTC-25DEC26-78000-C",
+    "mark_iv": 37.68,
+    "open_interest": 1781.4,
+    "underlying_price": 76362.76,
+    "mark_price": 0.04522925
+   }
+  ]
+ }
+}

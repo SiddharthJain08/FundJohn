@@ -1,0 +1,30 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 ~21:15Z GET https://www.deribit.com/api/v2/public/get_volatility_index_data?currency=BTC&resolution=3600&start_timestamp=<now-2h>&end_timestamp=<now>; trimmed to result.data, no edits",
+ "payload": {
+  "result": {
+   "data": [
+    [
+     1793991600000,
+     39.97,
+     39.98,
+     39.81,
+     39.81
+    ],
+    [
+     1793995200000,
+     39.81,
+     39.81,
+     39.5,
+     39.5
+    ],
+    [
+     1793998800000,
+     39.5,
+     39.62,
+     39.49,
+     39.58
+    ]
+   ]
+  }
+ }
+}

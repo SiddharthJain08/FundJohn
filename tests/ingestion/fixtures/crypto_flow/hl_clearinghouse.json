@@ -1,0 +1,47 @@
+{
+ "_fixture_notes": "real capture 2026-11-06 ~21:15Z POST https://api.hyperliquid.xyz/info {\"type\":\"clearinghouseState\",\"user\":\"0x5b5d51203a0f9079f8aeb098a6523a13f298c060\"}; trimmed to assetPositions for a few coins with fields coin/szi/positionValue only; no value edits",
+ "payload": {
+  "assetPositions": [
+   {
+    "type": "oneWay",
+    "position": {
+     "coin": "BTC",
+     "szi": "-2354.59675",
+     "positionValue": "178639723.5273750126"
+    }
+   },
+   {
+    "type": "oneWay",
+    "position": {
+     "coin": "ETH",
+     "szi": "-78109.878",
+     "positionValue": "174513089.4275999963"
+    }
+   },
+   {
+    "type": "oneWay",
+    "position": {
+     "coin": "SOL",
+     "szi": "-684799.77",
+     "positionValue": "61769624.0537699983"
+    }
+   },
+   {
+    "type": "oneWay",
+    "position": {
+     "coin": "BNB",
+     "szi": "-119.839",
+     "positionValue": "83081.98192"
+    }
+   },
+   {
+    "type": "oneWay",
+    "position": {
+     "coin": "DOGE",
+     "szi": "-49478955.0",
+     "positionValue": "3597862.2128249998"
+    }
+   }
+  ]
+ }
+}
