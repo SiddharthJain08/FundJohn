@@ -112,3 +112,21 @@ def test_read_latest_snapshot_latest_row_per_ticker_dict_or_json():
 def test_read_latest_snapshot_fail_open_rolls_back():
     c = _Conn(); c.cur = _RowsCur(boom=True)
     assert store.read_latest_snapshot(c) == {} and c.rolled == 1
+
+def test_read_snapshot_history_extracts_fields():
+    ts = datetime(2026,11,6,1,tzinfo=timezone.utc)
+    c = _Conn(); c.cur = _RowsCur([('BTC-USD', ts, '1e9', 'binance,okx', '70000')])
+    df = store.read_snapshot_history(c, ts - timedelta(days=2))
+    q, p = c.cur.sql[0]
+    assert 'crypto_flow_snapshot' in q and "features->>'oi_usd'" in q and "features->>'price_usd'" in q
+    assert "features->>'oi_venues'" in q and p[0] == ts - timedelta(days=2)
+    assert list(df.columns) == ['ticker', 'ts_utc', 'oi_usd', 'oi_venues', 'price_usd']
+    assert df.loc[0, 'oi_usd'] == 1e9 and df.loc[0, 'price_usd'] == 70000.0 and df.loc[0, 'oi_venues'] == 'binance,okx'
+
+def test_read_snapshot_history_empty_and_error():
+    ts = datetime(2026,11,6,1,tzinfo=timezone.utc)
+    c = _Conn(); c.cur = _RowsCur([])
+    df = store.read_snapshot_history(c, ts)
+    assert df.empty and list(df.columns) == ['ticker', 'ts_utc', 'oi_usd', 'oi_venues', 'price_usd']
+    c = _Conn(); c.cur = _RowsCur(boom=True)
+    assert store.read_snapshot_history(c, ts).empty and c.rolled == 1

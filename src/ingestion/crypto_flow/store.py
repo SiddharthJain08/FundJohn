@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from src.data import parquet_store
-from src.ingestion.crypto_flow.models import ProviderResult, WhaleEvent
+from src.ingestion.crypto_flow.models import MARKET_TICKER, ProviderResult, WhaleEvent
 
 EVENTS_PATH = Path('data/master/crypto_whale_events.parquet')
 FLOWS_PATH = Path('data/master/crypto_flows_1h.parquet')
@@ -141,6 +141,35 @@ def read_latest_snapshot(conn) -> dict[str, dict]:
         conn.rollback()
         return {}
     return {t: (json.loads(f) if isinstance(f, (str, bytes)) else dict(f or {})) for t, f in rows}
+
+
+_SNAP_TEXT_FIELDS = {'oi_venues'}
+
+
+def read_snapshot_history(conn, since: datetime, *,
+                          fields: tuple[str, ...] = ('oi_usd', 'oi_venues', 'price_usd')) -> pd.DataFrame:
+    """Per-ticker 15-min snapshot series (excl. __MARKET__) since `since`: ticker, ts_utc + `fields` pulled from
+    the features JSONB (text fields as str, the rest float). Fail-open: empty frame on any error."""
+    cols = ['ticker', 'ts_utc', *fields]
+    for f in fields:
+        if not f.isidentifier():
+            raise ValueError(f'bad snapshot field {f!r}')
+    sel = ', '.join(f"features->>'{f}' AS {f}" for f in fields)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT ticker, ts_utc, {sel} FROM crypto_flow_snapshot '
+                        f'WHERE ts_utc >= %s AND ticker <> %s ORDER BY ts_utc', (since, MARKET_TICKER))
+            df = pd.DataFrame(list(cur.fetchall()), columns=cols)
+    except Exception as e:  # noqa: BLE001
+        print(f'[crypto-flow] read_snapshot_history failed: {type(e).__name__}: {e}')
+        conn.rollback()
+        return pd.DataFrame(columns=cols)
+    if df.empty:
+        return df
+    df['ts_utc'] = pd.to_datetime(df['ts_utc'], utc=True)
+    for f in fields:
+        df[f] = df[f].astype(object) if f in _SNAP_TEXT_FIELDS else pd.to_numeric(df[f], errors='coerce').astype('float64')
+    return df
 
 
 def write_provider_health(conn, ts_utc: datetime, results: list[ProviderResult]) -> int:

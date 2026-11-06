@@ -133,7 +133,26 @@ def _oi_change(hist: pd.DataFrame, now: pd.Timestamp, back: timedelta, tol: time
     return (oi / prev - 1) * 100 if prev else None
 
 
-def compute_ticker_features(ticker, now, events, flows_hist, obs, agreement_share, thr=DEFAULT_THRESHOLDS) -> dict:
+def _snap_value(snap: pd.DataFrame, target: pd.Timestamp, tol: timedelta, col: str, venues=None, match_venues=False):
+    """`col` from the snapshot row nearest to `target` within ±`tol` (ties → earlier); optionally same oi_venues."""
+    if not len(snap) or col not in snap.columns:
+        return None
+    s = snap.dropna(subset=[col])
+    if match_venues:
+        s = s[s['oi_venues'] == venues] if 'oi_venues' in s.columns and venues is not None else s.iloc[0:0]
+    s = s[(s['ts_utc'] >= target - tol) & (s['ts_utc'] <= target + tol)]
+    if not len(s):
+        return None
+    dist = (s['ts_utc'] - target).abs()
+    return _f(s.assign(_d=dist).sort_values(['_d', 'ts_utc'])[col].iloc[0])
+
+
+def _pct(now_v, prev_v):
+    return (now_v / prev_v - 1) * 100 if now_v is not None and prev_v else None
+
+
+def compute_ticker_features(ticker, now, events, flows_hist, obs, agreement_share, thr=DEFAULT_THRESHOLDS, *,
+                            snap_hist: pd.DataFrame | None = None) -> dict:
     t = _ts(now)
     g = lambda k: _f(obs.get(k))  # noqa: E731
     h1, h24 = exchange_netflow(events, ticker, t, 1), exchange_netflow(events, ticker, t, 24)
@@ -147,9 +166,17 @@ def compute_ticker_features(ticker, now, events, flows_hist, obs, agreement_shar
         w = pd.to_numeric(hist[hist['ts_utc'] >= t - timedelta(days=30)]['whale_usd_24h'], errors='coerce').dropna()
         mean30 = float(w.mean()) if len(w) >= 24 else None
     oi, venues = g('oi_usd'), obs.get('oi_venues')
-    oi1 = _oi_change(hist, t, timedelta(hours=1), timedelta(minutes=30), oi, venues)
-    oi24 = _oi_change(hist, t, timedelta(hours=24), timedelta(hours=2), oi, venues)
-    ret1, ret24, imb = g('ret_1h'), g('ret_24h'), g('large_print_imbalance_1h')
+    snap = _rows(snap_hist, ticker) if snap_hist is not None else pd.DataFrame()
+    snap = snap[snap['ts_utc'] < t] if len(snap) else snap
+    if len(snap):  # 15-min snapshot series: exact-hour windows (the hour-floored flows rows hold HH:45 values)
+        oi1 = _pct(oi, _snap_value(snap, t - timedelta(hours=1), timedelta(minutes=5), 'oi_usd', venues, True))
+        oi24 = _pct(oi, _snap_value(snap, t - timedelta(hours=24), timedelta(minutes=30), 'oi_usd', venues, True))
+    else:
+        oi1 = _oi_change(hist, t, timedelta(hours=1), timedelta(minutes=30), oi, venues)
+        oi24 = _oi_change(hist, t, timedelta(hours=24), timedelta(hours=2), oi, venues)
+    ret1 = _pct(g('price_usd'), _snap_value(snap, t - timedelta(hours=1), timedelta(minutes=5), 'price_usd'))
+    ret1 = g('ret_1h') if ret1 is None else ret1
+    ret24, imb = g('ret_24h'), g('large_print_imbalance_1h')
     funding, ls, tk = g('funding_8h'), g('ls_ratio_global'), g('taker_buy_sell')
     sign = {'distributing': 1, 'accumulating': -1}.get(_direction(z, imb), 0)
     dc = deriv_confirm(sign, funding, ls, tk) if sign else None

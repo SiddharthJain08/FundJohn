@@ -113,3 +113,34 @@ def test_market_features_other_shocks_and_supply_chg():
                                                                   'stable_supply_usd': [100.0]}), now=NOW)
     assert any('kind=whale_score' in x for x in r['shock_lines']) and any('kind=delev' in x for x in r['shock_lines'])
     assert abs(r['stable_supply_chg_7d_pct'] - 10.0) < 1e-9 and r['providers_degraded'] == ['x']
+
+
+def test_oi_change_prefers_snapshot_history_exact_hour():
+    flows = pd.DataFrame({'ticker': ['BTC-USD'], 'ts_utc': [NOW - timedelta(hours=1)], 'oi_usd': [50.0], 'oi_venues': ['a,b']})
+    snap = pd.DataFrame({'ticker': ['BTC-USD'] * 3,
+                         'ts_utc': [NOW - timedelta(minutes=75), NOW - timedelta(minutes=60), NOW - timedelta(hours=24, minutes=20)],
+                         'oi_usd': [80.0, 100.0, 200.0], 'oi_venues': ['a,b'] * 3, 'price_usd': [None] * 3})
+    r = features.compute_ticker_features('BTC-USD', NOW, pd.DataFrame(), flows, {'oi_usd': 95.0, 'oi_venues': 'a,b'}, None,
+                                         snap_hist=snap)
+    assert abs(r['oi_chg_1h_pct'] - (-5.0)) < 1e-9          # the -60 min snapshot row, not the hour-floored flows row
+    assert abs(r['oi_chg_24h_pct'] - (-52.5)) < 1e-9        # within ±30 min of t-24h
+
+
+def test_oi_change_snapshot_requires_same_venues_and_tolerance():
+    snap = pd.DataFrame({'ticker': ['BTC-USD'] * 2, 'ts_utc': [NOW - timedelta(minutes=60), NOW - timedelta(minutes=70)],
+                         'oi_usd': [100.0, 100.0], 'oi_venues': ['a,b,c', 'a,b'], 'price_usd': [None, None]})
+    flows = pd.DataFrame({'ticker': ['BTC-USD'], 'ts_utc': [NOW - timedelta(hours=1)], 'oi_usd': [50.0], 'oi_venues': ['a,b']})
+    r = features.compute_ticker_features('BTC-USD', NOW, pd.DataFrame(), flows, {'oi_usd': 95.0, 'oi_venues': 'a,b'}, None,
+                                         snap_hist=snap)
+    assert r['oi_chg_1h_pct'] is None  # snapshot rows exist for the ticker → no fallback to flows_hist
+
+
+def test_ret_1h_from_snapshot_prices_overrides_carried_value():
+    snap = pd.DataFrame({'ticker': ['BTC-USD'], 'ts_utc': [NOW - timedelta(minutes=62)], 'oi_usd': [None],
+                         'oi_venues': [None], 'price_usd': [50000.0]})
+    obs = {'price_usd': 48000.0, 'ret_1h': 1.0}
+    r = features.compute_ticker_features('BTC-USD', NOW, pd.DataFrame(), pd.DataFrame(), obs, None, snap_hist=snap)
+    assert abs(r['ret_1h'] - (-4.0)) < 1e-9
+    r2 = features.compute_ticker_features('BTC-USD', NOW, pd.DataFrame(), pd.DataFrame(), obs, None,
+                                          snap_hist=snap.assign(ts_utc=[NOW - timedelta(minutes=70)]))
+    assert r2['ret_1h'] == 1.0  # no price within ±5 min of t-1h → macro_sent value

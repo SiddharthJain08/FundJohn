@@ -59,7 +59,7 @@ class _Cur:
     def __init__(s, rows=()):
         s.sql, s.rows = [], list(rows)
     def execute(s, q, p=None): s.sql.append((q, p))
-    def fetchall(s): return s.rows
+    def fetchall(s): return s.rows if 'DISTINCT ON' in s.sql[-1][0] else []  # latest-snapshot query only
     def __enter__(s): return s
     def __exit__(s, *a): pass
 
@@ -197,6 +197,49 @@ def test_slow_fields_carried_forward_from_previous_snapshot(tmp_path):
     snaps = {p[0]: json.loads(p[2]) for p in conn.inserts('crypto_flow_snapshot')}
     assert snaps['BTC-USD']['whale_perp_net_usd'] == -5e6
     assert snaps['BTC-USD']['funding_8h'] is None  # tick field is not carried forward
+
+
+def test_overlap_lock_skips_tick(tmp_path, capsys):
+    import fcntl
+    sp = tmp_path / 'state.json'
+    p = _Fake('derivs')
+    with open(str(sp) + '.lock', 'w') as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        c = t.run_tick(now_utc=NOW, assets=ASSETS, providers=[p], conn=_Conn(), state_path=sp, dry_run=False,
+                       **_paths(tmp_path))
+    assert p.calls == 0 and c['skipped'] == ['locked'] and c['providers_ok'] == 0
+    out = capsys.readouterr().out
+    assert '[crypto-flow] skipped=locked' in out and 'skipped=locked dt_s=' in out
+    t.run_tick(now_utc=NOW, assets=ASSETS, providers=[p], conn=_Conn(), state_path=sp, dry_run=False, **_paths(tmp_path))
+    assert p.calls == 1  # released lock → next tick runs
+
+
+def test_daily_provider_backs_off_one_hour_after_failure(tmp_path):
+    sp = tmp_path / 'state.json'
+    d = _Fake('cftc_cot', 'daily', boom=True)
+    t.run_tick(now_utc=NOW, assets=ASSETS, providers=[d], conn=_Conn(), state_path=sp, dry_run=False, **_paths(tmp_path))
+    st = json.loads(sp.read_text())
+    assert d.calls == 1 and 'cftc_cot' in st['last_attempt'] and 'cftc_cot' not in st['last_run']
+    assert t.due_providers([d], NOW + timedelta(minutes=59), st) == []
+    assert t.due_providers([d], NOW + timedelta(minutes=60), st) == [d]
+    h = _Fake('h', 'hourly')  # hourly/tick cadences ignore the failure backoff
+    assert t.due_providers([h], NOW + timedelta(minutes=15), {'last_attempt': {'h': NOW.isoformat()}}) == [h]
+
+
+def test_snapshot_history_passed_to_features(tmp_path, monkeypatch):
+    seen = []
+    real = t.F.compute_ticker_features
+    monkeypatch.setattr(t.F, 'compute_ticker_features', lambda *a, **k: seen.append(k.get('snap_hist')) or real(*a, **k))
+    sentinel = pd.DataFrame({'ticker': ['BTC-USD'], 'ts_utc': [NOW - timedelta(hours=1)], 'oi_usd': [1.0],
+                             'oi_venues': ['a'], 'price_usd': [1.0]})
+    monkeypatch.setattr(t.store, 'read_snapshot_history', lambda conn, since: sentinel)
+    t.run_tick(now_utc=NOW, assets=ASSETS, providers=[], conn=_Conn(), state_path=tmp_path / 's.json', dry_run=False,
+               **_paths(tmp_path))
+    assert len(seen) == 2 and all(s is sentinel for s in seen)
+    seen.clear()
+    t.run_tick(now_utc=NOW, assets=ASSETS, providers=[], conn=None, state_path=tmp_path / 's.json', dry_run=True,
+               **_paths(tmp_path))
+    assert seen == [None, None]
 
 
 def test_merge_observations_later_provider_wins_over_carry():

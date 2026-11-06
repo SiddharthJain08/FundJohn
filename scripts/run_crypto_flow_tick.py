@@ -13,6 +13,7 @@ throw-away copy, so on-chain cursors do not advance), DB not contacted.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import shutil
@@ -39,6 +40,8 @@ STATE_PATH = ROOT / 'data/master/.crypto_flow_state.json'
 TICK_DEADLINE_S = 600
 _ET = ZoneInfo('America/New_York')
 _MIN_GAP = {'hourly': timedelta(minutes=55), 'daily': timedelta(hours=23)}
+_DAILY_RETRY = timedelta(hours=1)  # a failed daily provider is retried no sooner than this
+_NOT_ATTEMPTED = ('deadline', 'skipped_dry_run')
 _STR_COLS = {'oi_venues', 'oi_price_divergence', 'whale_direction', 'whale_direction_btc', 'cot_report_date',
              'providers_degraded'}
 _BOOL_COLS = {'delev_1h', 'delev_market'}
@@ -61,12 +64,18 @@ def should_skip(now_utc: datetime, *, pgrep=_pgrep, force: bool = False) -> str 
 
 
 def due_providers(providers: list, now_utc: datetime, state: dict) -> list:
-    """'tick' always; 'hourly' when never run or ≥ 55 min ago; 'daily' when ≥ 23 h ago."""
+    """'tick' always; 'hourly' when never run or ≥ 55 min ago; 'daily' when ≥ 23 h ago — except a daily provider
+    whose last attempt failed (last_attempt newer than last_run) waits 1 h after that attempt."""
     last = (state or {}).get('last_run') or {}
+    attempts = (state or {}).get('last_attempt') or {}
     out = []
     for p in providers:
-        gap, prev = _MIN_GAP.get(p.cadence), last.get(p.name)
+        gap, prev, att = _MIN_GAP.get(p.cadence), last.get(p.name), attempts.get(p.name)
         try:
+            if p.cadence == 'daily' and att:
+                a = datetime.fromisoformat(att)
+                if (not prev or a > datetime.fromisoformat(prev)) and now_utc - a < _DAILY_RETRY:
+                    continue
             if gap is None or not prev or now_utc - datetime.fromisoformat(prev) >= gap:
                 out.append(p)
         except (TypeError, ValueError):
@@ -110,10 +119,11 @@ def _load_json(path: Path) -> dict:
         return {}
 
 
-def _save_state(path: Path, last_run: dict, slow_keys: set) -> None:
+def _save_state(path: Path, last_run: dict, last_attempt: dict, slow_keys: set) -> None:
     """Re-read the file (providers wrote their cursors into it during the tick) and merge only our keys."""
     state = _load_json(path)
     state['last_run'] = {**(state.get('last_run') or {}), **last_run}
+    state['last_attempt'] = {**(state.get('last_attempt') or {}), **last_attempt}
     state['slow_keys'] = sorted(slow_keys)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + '.tmp')
@@ -143,10 +153,37 @@ def _run_providers(due, *, assets, since, now_utc, hints, work_state, onchain_da
     return results
 
 
-def run_tick(*, now_utc: datetime, assets, providers, conn, state_path: Path, dry_run: bool,
-             since: datetime | None = None, deadline_s: float = TICK_DEADLINE_S, clock=time.monotonic,
-             events_path: Path | None = None, flows_path: Path | None = None,
-             onchain_daily_path: Path | None = None) -> dict:
+def _summary(c: dict) -> None:
+    print(f"[crypto-flow] ts={c['ts']} providers_ok={c['providers_ok']} providers_failed={c['providers_failed']} "
+          f"providers_skipped={c['providers_skipped']} events_new={c['events_new']} flows_rows={c['flows_rows']} "
+          f"snapshot_rows={c['snapshot_rows']} degraded={','.join(c['degraded']) or '-'} "
+          f"skipped={','.join(c['skipped']) or '-'} dt_s={c['dt_s']}")
+
+
+def run_tick(*, now_utc: datetime, state_path: Path, **kw) -> dict:
+    """Overlap guard: an exclusive non-blocking flock on <state_path>.lock; a held lock skips the tick."""
+    lock = Path(str(state_path) + '.lock')
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock, 'a') as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print('[crypto-flow] skipped=locked')
+            c = {'ts': now_utc.strftime('%Y-%m-%dT%H:%MZ'), 'providers_ok': 0, 'providers_failed': 0,
+                 'providers_skipped': 0, 'events_new': 0, 'flows_rows': 0, 'snapshot_rows': 0, 'degraded': [],
+                 'skipped': ['locked'], 'skipped_reasons': {}, 'dt_s': 0.0}
+            _summary(c)
+            return c
+        try:
+            return _tick(now_utc=now_utc, state_path=state_path, **kw)
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _tick(*, now_utc: datetime, assets, providers, conn, state_path: Path, dry_run: bool,
+          since: datetime | None = None, deadline_s: float = TICK_DEADLINE_S, clock=time.monotonic,
+          events_path: Path | None = None, flows_path: Path | None = None,
+          onchain_daily_path: Path | None = None) -> dict:
     t0 = clock()
     since = since or now_utc - timedelta(hours=1)
     events_path = Path(events_path or ROOT / store.EVENTS_PATH)
@@ -178,6 +215,7 @@ def run_tick(*, now_utc: datetime, assets, providers, conn, state_path: Path, dr
     degraded = [r.provider for r in results if not r.ok]
     skipped = {r.provider: r.skipped for r in results if r.ok and r.skipped}
     ok_names = [r.provider for r in results if r.ok and not r.skipped]
+    attempted = [r.provider for r in results if r.skipped not in _NOT_ATTEMPTED]
 
     if dry_run:
         events_new = len(events)
@@ -193,6 +231,7 @@ def run_tick(*, now_utc: datetime, assets, providers, conn, state_path: Path, dr
         new = store.events_to_frame(events)
         ev_df = new if ev_df.empty else pd.concat([ev_df, new], ignore_index=True)
     flows_hist = store.read_flows_window(window, path=flows_path)
+    snap_hist = None if dry_run or conn is None else store.read_snapshot_history(conn, now_utc - timedelta(days=2))
 
     active = [a for a in assets if a.role != 'stable']
     signs = {}
@@ -200,8 +239,8 @@ def run_tick(*, now_utc: datetime, assets, providers, conn, state_path: Path, dr
         nf = F.exchange_netflow(ev_df, a.ticker, now_utc, 24)['exch_netflow_usd']
         signs[a.ticker] = (nf > 0) - (nf < 0)
     share = F.agreement_share(signs, signs.get('BTC-USD', 0))
-    per = {a.ticker: F.compute_ticker_features(a.ticker, now_utc, ev_df, flows_hist, merged.get(a.ticker, {}), share)
-           for a in active}
+    per = {a.ticker: F.compute_ticker_features(a.ticker, now_utc, ev_df, flows_hist, merged.get(a.ticker, {}), share,
+                                               snap_hist=snap_hist) for a in active}
     market_obs = {**merged.get(MARKET_TICKER, {}), 'agreement_share': share, 'providers_degraded': degraded}
     market = F.compute_market_features(per, market_obs, flows_hist=flows_hist, now=now_utc)
 
@@ -215,16 +254,14 @@ def run_tick(*, now_utc: datetime, assets, providers, conn, state_path: Path, dr
     for line in market.get('shock_lines') or []:
         print(f'[crypto-flow] {line}')
     if not dry_run:
-        _save_state(state_path, {n: now_utc.isoformat() for n in ok_names}, slow_keys)
+        _save_state(state_path, {n: now_utc.isoformat() for n in ok_names},
+                    {n: now_utc.isoformat() for n in attempted}, slow_keys)
 
     c = {'ts': now_utc.strftime('%Y-%m-%dT%H:%MZ'), 'providers_ok': len(ok_names),
          'providers_failed': len(degraded), 'providers_skipped': len(skipped), 'events_new': events_new,
          'flows_rows': len(frame), 'snapshot_rows': snapshot_rows, 'degraded': degraded,
          'skipped': list(skipped), 'skipped_reasons': skipped, 'dt_s': round(clock() - t0, 1)}
-    print(f"[crypto-flow] ts={c['ts']} providers_ok={c['providers_ok']} providers_failed={c['providers_failed']} "
-          f"providers_skipped={c['providers_skipped']} events_new={c['events_new']} flows_rows={c['flows_rows']} "
-          f"snapshot_rows={c['snapshot_rows']} degraded={','.join(degraded) or '-'} "
-          f"skipped={','.join(skipped) or '-'} dt_s={c['dt_s']}")
+    _summary(c)
     if skipped:
         print('[crypto-flow] skip reasons: ' + '; '.join(f'{k}={v}' for k, v in skipped.items()))
     for r in results:
