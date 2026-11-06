@@ -9,8 +9,22 @@ BTC/ETH (or other high-correlation coins); other names get alpha discounted by t
 current *crypto* regime; all positions, equity and crypto, pool into one sizing. Idea sources:
 `kukapay/whale-tracker-mcp` (Whale Alert API) and `clawinfra/whalecli` (keyless on-chain + Hyperliquid, 0–100 whale score).
 
-Status: **DESIGN — nothing built.** Every item marked *(my call)* is a default the operator can overturn; everything
-else is the brief or a measured fact. Section 9 lists the decisions only the operator can make.
+Status: **DESIGN APPROVED WITH AMENDMENTS 2026-11-06 00:42Z — nothing built yet.** Every item marked *(my call)* is a
+default the operator can still overturn; everything else is the brief, an operator decision, or a measured fact.
+
+**Operator decisions (2026-11-06 00:42Z)** — these override anything below that says otherwise:
+- **No paid subscriptions** for crypto data; maximise free sources. Whale Alert is **rejected**. Etherscan free key
+  provided and stored (`ETHERSCAN_API_KEY` in `.env`, placeholder in `.env.example`); verified against the V2
+  multi-chain endpoint (55 chains, one key). §10 is the free-source catalogue and how to grant access to the rest.
+- **Benchmark = BTC only.** No ETH sleeve.
+- **Caps**: per-position and correlated-cluster caps for crypto are the **same rule and the same levels as equities**
+  (`0.10·(|S|+1)·λ·NAV` per ticker, same cluster cap). BTC sleeve cap **25 % NAV**. Crypto gross cap **50 % NAV**.
+- **Gross**: crypto fills the book **by conviction, the same way equities do**, inside the one normaliser, and may take
+  up **unused leverage/NAV on equity TRANSITIONING / HIGH_VOL / CRISIS days** (when equity floors shrink the equity
+  book). §5.3b is rewritten accordingly; crypto is not a subordinate cash reservation.
+- **Breaker: arm the drawdown triggers only** (`T4`). Crypto is already de-levered as a whole, so no flatten on
+  regime entry (`T1` removed) or on flow shocks (`T2`/`T3` become dashboard/strategy signals, not triggers).
+- **Separate Crypto page confirmed.**
 
 ---
 
@@ -46,17 +60,28 @@ else is the brief or a measured fact. Section 9 lists the decisions only the ope
 
 | Source | Key | What it gives | Notes |
 |---|---|---|---|
-| Whale Alert (`leviathan.whale-alert.io`) | **paid**: Alerts API $29.95/mo (websocket, min `min_value_usd` $100 000, 100 alerts/h, 14 chains, 2 ws conns); REST history = Enterprise $699/mo | Labelled transfers: `from.owner`/`to.owner`/`owner_type`/`address_type` (exchange hot/cold/deposit wallet), `transaction_type` transfer/mint/burn | `GET /status` keyless → 14 chains incl. bitcoin, ethereum, tron, solana, ripple, dogecoin, litecoin, bitcoin_cash, polygon, algorand. This is the only source with **entity attribution** at scale. 7-day trial. |
-| mempool.space | none | BTC blocks, mempool, per-tx outputs | ~1 req/s polite |
-| blockchain.info | none | `unconfirmed-transactions` (100 most recent, with values; top prints tonight 113 / 60 / 60 BTC), `rawblock` | ~1 req/s |
-| Etherscan | **free key, registration required** | ETH + ERC-20 transfers per address, 5 req/s | needed only for ETH wallet-level tracking |
-| Hyperliquid `api.hyperliquid.xyz/info` | none | 235 perps: OI, funding, premium, mark/oracle, 24h volume; per-wallet fills/positions | covers ~all 36 Alpaca names |
-| Binance futures `fapi.binance.com` | none | OI, funding, premium index, global + top-trader long/short ratios, taker buy/sell ratio; spot `aggTrades` (large prints) | **Answers from a US IP today; could be blocked without notice** → fallbacks below |
-| Bybit, OKX public | none | OI (USD), funding | fallbacks for Binance |
-| Coinbase Exchange public | none | trades, 24h stats | US-native spot tape |
-| DefiLlama `stablecoins.llama.fi` | none | stablecoin circulating supply (USDT $177.5 bn) | daily "dry powder" |
-| CoinGecko `/global` | none, rate-limited | total mcap, BTC dominance | daily |
+| ~~Whale Alert~~ | **paid** ($29.95/mo alerts, $699/mo REST) | labelled transfers with `owner_type` | **REJECTED 2026-11-06 (no paid subscriptions).** Only source with entity attribution at scale; we accept thinner attribution. |
+| mempool.space | none | BTC blocks, mempool, per-tx outputs, hashrate/difficulty/pools | ~1 req/s polite |
+| blockchain.info | none | `unconfirmed-transactions` (100 most recent, with values; top prints tonight 113 / 60 / 60 BTC), `rawblock` | ~1 req/s; `charts` endpoint returned 0 points (degraded) |
+| **Etherscan V2** `api.etherscan.io/v2/api?chainid=…` | **free key — STORED** | native + ERC-20 transfers per address, token holders, 5 req/s; **55 chains on one key** incl. Ethereum, Arbitrum, Polygon, Base, BNB, OP, Avalanche C-Chain | covers ETH ARB POL AVAX LINK UNI AAVE CRV LDO GRT SHIB PEPE SUSHI YFI BAT ONDO RENDER SKY USDC USDT USDG |
+| Hyperliquid `api.hyperliquid.xyz/info` + `stats-data…/leaderboard` | none | 235 perps: OI, funding, premium, mark/oracle, 24h volume; per-wallet positions (`clearinghouseState`); **leaderboard of 48 k traders with account value** → top-N whale perp positioning | covers ~all 36 Alpaca names |
+| **Deribit** `www.deribit.com/api/v2/public` | none | **DVOL** (BTC/ETH implied-vol index, hourly), 944 live BTC options with `mark_iv` and OI → ATM IV, 25Δ skew, put/call OI | the only implied-vol input available for crypto; feeds the regime monitor as an advisory column |
+| **CFTC COT** `publicreporting.cftc.gov/resource/gpe5-46if.json` | none | weekly Traders-in-Financial-Futures for BITCOIN / MICRO BITCOIN / NANO BITCOIN: leveraged funds, asset managers, dealers long/short | Tuesday positioning, released Friday; the regulated-whale signal |
+| Binance futures `fapi.binance.com` | none | OI, funding, premium index, global + top-trader long/short ratios, taker buy/sell ratio; spot `aggTrades` (large prints) | **Answers from a US IP today; could be blocked without notice** → fallbacks below. `allForceOrders` (liquidations) is retired. |
+| Bybit public | none | OI, funding, `account-ratio` (long/short) | fallback for Binance ratios |
+| OKX public | none | OI (USD), funding, **`liquidation-orders`** (filled liquidations by size/side) | primary liquidation feed |
+| Coinbase Exchange public | none | trades, 24h stats, hourly candles (350 bars/call) | US-native spot tape; 24/7 bar fallback |
+| Kraken public | none | 1 000 recent trades per call | second spot tape |
+| XRPL `xrplcluster.com` (JSON-RPC) | none | ledger stream; `account_tx` / payments ≥ threshold | XRP whale transfers |
+| Solana public RPC `api.mainnet-beta.solana.com` | none, rate-limited | slots, signatures/transactions for addresses | SOL BONK WIF TRUMP RENDER whale transfers (best-effort; a free Helius key lifts the limits, §10) |
+| BlockCypher `api.blockcypher.com/v1/{doge,ltc}/main` | none (3 req/s; free key raises) | blocks, large txs | DOGE LTC |
+| Blockchair `api.blockchair.com/{bitcoin-cash,…}` | none (low limit; free key raises) | stats, large txs | BCH, DOT fallback |
+| Koios `api.koios.rest` | none | Cardano tip, address txs | ADA |
+| DefiLlama `api.llama.fi`, `stablecoins.llama.fi` | none | stablecoin circulating supply (USDT $177.5 bn), chain TVL (421 chains), DEX 24h volume, fees | daily "dry powder" + on-chain activity |
+| CoinGecko `/global`, `/coins/markets` | none (keyless tier ~10–30 req/min; free Demo key raises, §10) | total mcap, BTC dominance, per-coin mcap/volume | daily |
+| CoinPaprika `api.coinpaprika.com/v1` | none | tickers, mcap | CoinGecko fallback |
 | alternative.me | none | Fear & Greed | daily |
+| Polymarket `gamma-api.polymarket.com` | none | crypto prediction markets (prices = crowd probabilities) | already have `polymarket_client.py` |
 
 ---
 
@@ -113,19 +138,29 @@ timeout 20 s, returns an empty list plus a counter on failure. Order of preferen
 | Provider | Produces | Cadence |
 |---|---|---|
 | `btc_onchain` (blockchain.info unconfirmed + mempool.space blocks) | `whale_event` rows for BTC transfers ≥ threshold (default **$1 M** *my call*), with input/output addresses; exchange attribution from the registry (§2.3) | every tick |
-| `eth_onchain` (Etherscan, **only if `ETHERSCAN_API_KEY` set**) | `whale_event` rows for ETH + tracked ERC-20 (LINK, UNI, AAVE …) transfers ≥ threshold **from/to registry addresses only** (we cannot scan all of ETH keylessly) | every tick |
-| `whale_alert` (**only if `WHALE_ALERT_API_KEY` set**) | websocket `subscribe_alerts` (min $1 M *my call*, all 14 chains, tx_types transfer/mint/burn) → `whale_event` rows with `owner`/`owner_type`; resume with `id` on drop | persistent ws inside the tick process **or** a small long-running unit *(builder's choice; see §8)* |
+| `evm_onchain` (Etherscan V2, key stored) | `whale_event` rows for native + ERC-20 transfers ≥ threshold **touching registry exchange addresses** on Ethereum, Arbitrum, Polygon, Avalanche C-Chain, Base, BNB (we cannot scan whole chains; we watch the exchange side, which is what netflow needs). Token contracts for the ~20 EVM names live in the universe map. 5 req/s budget shared across chains | every tick, round-robin by chain |
+| `sol_onchain` (public RPC; Helius key if provided) | `whale_event` rows for SOL/SPL transfers ≥ threshold touching registry exchange addresses (SOL BONK WIF TRUMP) | every tick, best-effort |
+| `xrp_onchain` (XRPL JSON-RPC) | `whale_event` rows for Payments ≥ threshold (XRPL exposes full payment history keylessly) | every tick |
+| `utxo_alts` (BlockCypher DOGE/LTC, Blockchair BCH) | `whale_event` rows for large transfers | hourly (rate limits) |
 | `derivs` (Hyperliquid → Binance → Bybit → OKX) | per-asset `observation`: `oi_usd`, `funding_8h`, `premium`, `ls_ratio_global`, `ls_ratio_top`, `taker_buy_sell`, `vol_24h_usd`; aggregated `oi_usd_total` across venues when ≥ 2 answer | every tick |
-| `spot_tape` (Binance `aggTrades` → Coinbase trades) | per-asset `observation`: `large_prints_n`, `large_prints_usd_buy`, `large_prints_usd_sell` for prints ≥ **$250 k** *my call*; 1 000 most recent per asset per tick (coverage %, recorded) | every tick |
-| `stables` (DefiLlama) | `observation` for USDT/USDC/USDG: `circulating_usd` | hourly |
-| `macro_sent` (CoinGecko global, alternative.me) | `observation`: `btc_dominance`, `total_mcap_usd`, `fear_greed` | hourly |
+| `liquidations` (OKX `liquidation-orders`; Bybit ws optional) | per-asset `observation`: `liq_long_usd_1h`, `liq_short_usd_1h` | every tick |
+| `hl_whales` (Hyperliquid leaderboard → `clearinghouseState` for the top-N by account value, N=200 *my call*) | per-asset `observation`: `whale_perp_net_usd` (Σ signed position value of top-N), `whale_perp_n_long/short` | hourly |
+| `deribit_vol` | BTC/ETH `observation`: `dvol`, `atm_iv_30d`, `skew_25d`, `put_call_oi`; **advisory to the regime monitor** | every tick |
+| `spot_tape` (Binance `aggTrades` → Coinbase → Kraken trades) | per-asset `observation`: `large_prints_n`, `large_prints_usd_buy`, `large_prints_usd_sell` for prints ≥ **$250 k** *my call*; 1 000 most recent per asset per tick (coverage %, recorded) | every tick |
+| `cftc_cot` (Socrata) | market `observation`: leveraged-funds / asset-manager net BTC futures position, weekly Δ | daily check, new row Fridays |
+| `stables_defi` (DefiLlama) | `observation` for USDT/USDC/USDG `circulating_usd`; market `tvl_usd`, `dex_vol_24h_usd` | hourly |
+| `macro_sent` (CoinGecko → CoinPaprika, alternative.me, Polymarket crypto markets) | `observation`: `btc_dominance`, `total_mcap_usd`, `fear_greed`, selected prediction-market probabilities | hourly |
 
 ### 2.3 Exchange-address registry
 `src/ingestion/crypto_flow/exchange_addresses.json`, seeded from whalecli's registry (ETH: Binance 8, Coinbase 5,
-Kraken 4, OKX 3, Bybit 2, Huobi 3, Bitfinex 3, FTX 2; BTC: Binance 3, Coinbase 2, Kraken 2, Bitfinex 2) plus any
-addresses Whale Alert labels over time (when the key exists, every `owner_type in {exchange}` address seen is appended
-with `source='whale_alert', first_seen`). Append-only. Attribution without Whale Alert is therefore **thin by
-construction**, and the dashboard says so (`attribution_coverage` = share of whale USD with a known owner on either side).
+Kraken 4, OKX 3, Bybit 2, Huobi 3, Bitfinex 3, FTX 2; BTC: Binance 3, Coinbase 2, Kraken 2, Bitfinex 2), extended
+with Etherscan's public **name tags** for the major exchanges' hot/cold wallets on every V2 chain (the `txlist`
+response for a tagged address is the cheap way to confirm a label), the exchanges' own published deposit addresses
+for XRP/SOL, and a weekly `scripts/refresh_exchange_addresses.py` that proposes new candidates (addresses receiving ≥
+50 large transfers/week from ≥ 20 distinct senders — the deposit-wallet fingerprint) for operator review in
+#trade-reports. Append-only; `source`, `first_seen`, `confidence` per row. Attribution without a paid labeller is
+**thin by construction**, and the dashboard says so (`attribution_coverage` = share of whale USD with a known owner
+on either side).
 
 ### 2.4 Storage (NEVER-DELETE invariant, both files; add to `CLAUDE.md` invariant list)
 - `data/master/crypto_whale_events.parquet` — raw events. Key `(source, chain, tx_hash, out_index)`, `append_insert_only`.
@@ -194,24 +229,28 @@ Runs from `_sched('crypto-breaker-tick', '*/5 * * * *', UTC)`, gate `OPENCLAW_CR
 evaluates, logs, posts a `[crypto_breaker] shadow` line to #trade-reports only when a trigger is hit; `1` = armed).
 Skips (counter) when there are no crypto positions.
 
-**Triggers** (any one, each with its own Redis cooldown `crypto_breaker:fired:{date}:{reason}`, 6 h *(my call)*):
-| id | condition | source |
-|---|---|---|
-| `T1 regime_crisis_entry` | crypto regime **confirmed** transition into `CRISIS` within the last tick window | `crypto_regime_states` |
-| `T2 deleveraging` | `delev_market=true` **and** BTC `ret_1h ≤ −5 %` | `crypto_flow_snapshot` |
-| `T3 exchange_inflow_shock` | BTC or ETH `exch_netflow_z_7d ≥ 3` with `attribution_coverage ≥ 0.25` **and** `whale_score ≥ 80 distributing` | snapshot |
-| `T4 crypto_book_drawdown` | crypto sleeve P&L from the sizer's last target ≤ **−8 %** *(my call)* or any single crypto position ≤ −15 % from entry | broker positions (normalised, D-1) + `alpaca_submissions` |
-| `T5 data_blackout` | regime **and** flow snapshots both > 3 h stale while holding crypto | freshness |
+**Triggers** — **operator decision 2026-11-06: drawdown triggers only.** Crypto is already de-levered as a whole; the
+regime redeploy already de-weights on transition. Each trigger has a Redis cooldown
+`crypto_breaker:fired:{date}:{reason}`, 6 h *(my call)*.
 
-**Actions**: `T1–T4` → `flatten_crypto(reason, dry_run)` = for each crypto position: `_cancel_open_crypto_stops`, then
-`_route_crypto_close(100 %)` via `execute_single(sess=None, …)` (the `redeploy_crypto.py` pattern), poll to terminal,
-audit row in `alpaca_liquidations` with `asset_class='crypto'`, Discord post `[crypto_breaker] FIRED reason=… n=…
-notional=…`. `T5` → **no orders**, loud alert only (anti-goal: never liquidate on missing data). After a fire, the
-crypto lane is held flat until the operator re-arms (`OPENCLAW_CRYPTO_BREAKER_REARM=<iso>`, mirroring the account
-breaker) **or** the crypto regime confirms a non-CRISIS state for ≥ 24 h *(my call)*.
+| id | condition | source | status |
+|---|---|---|---|
+| `T4a crypto_sleeve_drawdown` | crypto sleeve Σ unrealized_pl / Σ cost_basis ≤ **−8 %** *(my call)* | broker positions (normalised, D-1) | **ARMED** when `OPENCLAW_CRYPTO_BREAKER=1` |
+| `T4b crypto_position_drawdown` | any single crypto position `unrealized_plpc` ≤ **−15 %** *(my call)* → close **that position** only | broker positions | **ARMED** when `=1` |
+| `T5 data_blackout` | regime **and** flow snapshots both > 3 h stale while holding crypto | freshness | alert only, never orders |
+| ~~`T1 regime_crisis_entry`~~ | — | — | **removed** (operator) |
+| `delev_market`, `exch_netflow_z_7d`, `whale_score` shocks | the former `T2`/`T3` conditions | snapshot | **signals only**: shown on the Crypto page, available to strategies as aux features, logged as `[crypto_flow] shock` lines; they place no orders |
+
+**Actions**: `T4a` → `flatten_crypto(reason, dry_run)`; `T4b` → `close_crypto_position(ticker, reason, dry_run)`. Both =
+`_cancel_open_crypto_stops`, then `_route_crypto_close(100 %)` via `execute_single(sess=None, …)` (the
+`redeploy_crypto.py` pattern), poll to terminal, audit row in `alpaca_liquidations` with `asset_class='crypto'`, Discord
+post `[crypto_breaker] FIRED reason=… n=… notional=…`. `T5` → **no orders**, loud alert only (anti-goal: never
+liquidate on missing data). After a `T4a` fire the crypto lane is held flat (§5.3c) until the operator re-arms
+(`OPENCLAW_CRYPTO_BREAKER_REARM=<iso>`, mirroring the account breaker) **or** 24 h have passed *(my call)*; after a
+`T4b` fire only that ticker is held flat for 7 days (mirrors the equity stop-out cooldown).
 
 **Shadow exit criterion**: two weeks of shadow with every shadow fire reviewed and either justified or its threshold
-retuned, before `=1`. Rollout: shadow → armed for `T4` only → armed for all.
+retuned, before `=1`.
 
 **Reuse**: `regime_liquidator._load_broker_positions` (returns `asset_class`), `_poll_to_terminal`,
 `_write_liquidation_audit`, `_post_to_discord`; `account_breaker`'s re-arm/escalation shape. The RTH gate and
@@ -228,8 +267,7 @@ discounted by the benchmark's Sharpe in the current **crypto** regime; equity an
 - New strategy `S_beta_btc` (class `crypto`, `benchmark_sleeve=True`, long `BTC-USD`, eligible in **all** crypto
   regimes, `benchmark_sleeve_always_on`, hold 1 d re-minted daily, exit hook `regime_exit` on crypto CRISIS entry
   *(my call — mirrors `S_beta_spy`)*. Weight := `S_m_crypto` for the current crypto regime (Amendment-1 semantics).
-- `S_beta_eth` is **optional, off by default** *(my call)*; if the operator wants an ETH leg, the alt hurdle uses
-  `S_m` of whichever benchmark the alt has the higher 90-day return correlation with (precomputed in the universe map).
+- **BTC only** (operator 2026-11-06). No ETH sleeve; ETH is hurdled like every other alt.
 
 ### 5.2 `S_m_crypto`
 `benchmark_baseline.regime_benchmark_sharpe_by_horizon(benchmark='BTC-USD', regime_source='crypto', calendar=365,
@@ -261,10 +299,12 @@ The S_m cache in `pipeline_config.benchmark_regime_sharpe` becomes a dict keyed 
 ### 5.3 Rule C for crypto alts, inside one normaliser
 Inside `_sharpe_cadence_path`: each ticker carries `instrument_class`; the hurdle picks `S_m` by class
 (`equity/etp → SPY`, `crypto → BTC-USD`); benchmark tickers of either class keep their own S_adj. Everything then enters
-the **same** λ·NAV normaliser, per-ticker cap `0.10·(|S|+1)·λ·NAV`, cluster cap, D9 similarity, with benchmark
-exemptions as today. `benchmark_max_nav_frac` becomes per class (`pipeline_config.benchmark_max_nav_frac_crypto`,
-default **0.25** *(my call: BTC alone must not take a quarter of NAV without a conversation)*); the D-4′ clamp applies
-per class. A new `pipeline_config.crypto_sleeve_max_nav_frac` (default **0.30** *(my call)*) caps gross crypto.
+the **same** λ·NAV normaliser, **the same per-ticker cap `0.10·(|S|+1)·λ·NAV` and the same cluster cap at the same
+levels as equities** (operator 2026-11-06; crypto clusters come from the existing asset-correlation module run over the
+pooled return panel, so BTC/ETH/SOL-correlated alts share a cluster with each other, not with equities), D9 similarity,
+with benchmark exemptions as today. `benchmark_max_nav_frac` becomes per class:
+`pipeline_config.benchmark_max_nav_frac_crypto = 0.25` (**BTC sleeve cap 25 % NAV**, operator); the D-4′ clamp applies
+per class. `pipeline_config.crypto_gross_max_nav_frac = 0.50` (**crypto gross cap 50 % NAV**, operator).
 
 ### 5.3a Regime-of-record per class inside the mixed book *(my call)*
 `_sharpe_cadence_path` today takes one `regime_state`. Under pooling each ticker's strategy contributors carry a class,
@@ -276,14 +316,20 @@ nor vice versa). A confirmed crypto regime flip stamps `cadence_reset` for crypt
 therefore unchanged by construction (non-goal honoured); the only equity-visible effect is the shared normaliser and
 the funding pass in 5.3b.
 
-### 5.3b Funding: crypto is cash-only *(operator decision 9.5; default below)*
-Alpaca crypto is non-marginable: it draws on non-marginable buying power, and every crypto buy also reduces equity
-buying power 1:1, while the equity book is sized to λ=2.0·NAV on margin. One normaliser can therefore emit crypto
-targets the account cannot fill. Default *(my call, pending 9.5)*: **crypto is a cash reservation**. The pooled sizer
-sizes both classes in the one normaliser, clamps crypto gross to `crypto_sleeve_max_nav_frac`, then reserves that
-notional from cash and re-normalises the equity book to `λ·NAV − crypto_notional` so the equity book yields, not
-crypto. The executor gets a crypto buying-power guard (the DTBP guard is equity-only). The `crypto_sizing.shadow[…]`
-line prints both the unconstrained and the funded crypto targets so the shadow review can see how often funding binds.
+### 5.3b Funding and gross *(operator decision 2026-11-06)*
+Crypto **fills the book by conviction exactly as equities do**: both classes enter the one λ·NAV normaliser, each
+ticker's weight is its hurdled conviction, and the caps in §5.3 bound the result. Crypto is explicitly allowed to
+**take up unused leverage/NAV on equity TRANSITIONING / HIGH_VOL / CRISIS days**: on those days the equity conviction
+floors and regime weights shrink the equity gross, the normaliser's remaining budget is free, and crypto conviction
+may absorb it up to the 50 % gross cap. Crypto is **not** a subordinate cash reservation.
+
+The one physical constraint is that Alpaca crypto is non-marginable: crypto notional must be ≤ non-marginable buying
+power after the equity targets' Reg-T requirement (equity_gross / 2 under 2× λ). A **feasibility pass** after the
+normaliser checks this; if it binds (expected rarely — it needs equity gross near 2× NAV *and* crypto conviction near
+its cap on the same day) crypto is scaled pro-rata to the available cash, the shortfall is logged
+(`crypto_sizing.funding_bind=…`) and the Crypto page shows it. The executor gets a crypto buying-power guard (the
+DTBP guard is equity-only). The `crypto_sizing.shadow[…]` line prints the unconstrained and the feasible crypto
+targets so the shadow review can see how often funding binds.
 
 ### 5.3c Breaker hold-flat contract *(my call)*
 `crypto_breaker` writes `crypto_breaker:hold_flat = {since, reason}` (Redis, mirrored into `pipeline_config`). While
@@ -337,7 +383,7 @@ before build if they want it)*:
 5. **Whale Event Feed** — last 50 `crypto_whale_events` rows (time, chain, symbol, USD, from→to owners or "unknown
    wallet", direction tag), SSE-pushed (`crypto_event` on `/events`) so it ticks live.
 6. **Sizing & Risk Parameters** (read-only until the sizing phase lands): flags (`CRYPTO_FLOWS`, `CRYPTO_BREAKER`,
-   `CRYPTO_POOLED_SIZING`), λ, `benchmark_max_nav_frac_crypto`, `crypto_sleeve_max_nav_frac`, breaker thresholds,
+   `CRYPTO_POOLED_SIZING`), λ, `benchmark_max_nav_frac_crypto`, `crypto_gross_max_nav_frac`, breaker thresholds,
    last 10 breaker evaluations (shadow or armed), current crypto positions and open crypto signals.
 
 Endpoints: `GET /api/crypto/snapshot` (latest per ticker + market row), `GET /api/crypto/history/:ticker?days=7`,
@@ -355,7 +401,7 @@ Mobile: the board collapses to score / netflow / OI Δ / funding columns under 7
 | Phase | Ships | Flags | Done when |
 |---|---|---|---|
 | **P1 Flow layer + Crypto page** | §2, §3, §6 (board, tiles, feed, regime move; §6.6 shows "pending" for sizing params) | `OPENCLAW_CRYPTO_FLOWS=1` | 7 consecutive days of ticks with every provider ≥ 95 % ok, freshness green, page live; ≥ 30 days of history before any strategy uses the aux kind |
-| **P2 Crypto breaker (shadow)** | §4 | `OPENCLAW_CRYPTO_BREAKER` unset | two weeks of shadow, every shadow fire reviewed |
+| **P2 Crypto breaker (shadow → armed, `T4` only)** | §4 | `OPENCLAW_CRYPTO_BREAKER` unset → `1` | two weeks of shadow, every shadow fire reviewed |
 | **P3 Pooled sizing (shadow → live)** | §5 | `OPENCLAW_CRYPTO_POOLED_SIZING` | two clean shadow cycles; backtest mirror landed; fleet re-gate of the 7 crypto strategies |
 | **P4 Crypto strategy space** | separate brainstorm + spec | — | — |
 
@@ -373,8 +419,6 @@ normaliser over `BTCUSD`/`BTC/USD`/`BTC-USD`/`SPY`/OCC; API handlers return `{av
 ---
 
 ## 8. Left to the builder
-- Whale Alert websocket hosting: inside the 15-min tick with a 14-min lifetime and `id`-resume, or a tiny long-running
-  user-scope unit. Prefer the former unless alert loss > 1 % in the first week.
 - Exact provider fallback ordering per field; which of Binance's spot `aggTrades` vs Coinbase trades is primary for
   large prints (coverage decides).
 - JSONB shape of `features`; whether `crypto_flow_snapshot` keeps 90 or 30 days.
@@ -384,24 +428,64 @@ normaliser over `BTCUSD`/`BTC/USD`/`BTC-USD`/`SPY`/OCC; API handlers return `{av
 
 ---
 
-## 9. Decisions only the operator can make (answer changes what gets built)
+## 9. Operator decisions — RESOLVED 2026-11-06 00:42Z
 
-1. **Whale Alert subscription ($29.95/mo Alerts API, 7-day trial)** — yes now, later, or never? Without it we have
-   BTC large transfers and derivatives/tape/stablecoin data, but **almost no exchange attribution** (the registry is
-   ~40 addresses). The "exchange netflow" and `T3` trigger are weak without it. *Recommendation: start the trial in P1
-   week 2 once the keyless layer is stable, decide on the data.*
-2. **Etherscan free key** (registration, no cost) — register, or skip ETH wallet-level tracking? *Recommendation:
-   register; it is the only keyless-cost way to see ETH/ERC-20 exchange flows.*
-3. **Binance.com public data from a US IP** — accept it as the primary derivatives/tape source with Bybit/OKX/
-   Hyperliquid/Coinbase fallbacks, or exclude it on policy grounds? *Recommendation: accept with fallbacks; Hyperliquid
-   is primary for OI/funding anyway.*
-4. **Benchmark**: BTC only, or BTC + ETH basket (alt hurdled by its higher-correlation benchmark)? *Recommendation:
-   BTC only for P3; ETH sleeve as an amendment once the hurdle has shadow data.*
-5. **Crypto NAV caps and funding**: `benchmark_max_nav_frac_crypto` 0.25 and `crypto_sleeve_max_nav_frac` 0.30 are my
-   placeholders. What gross crypto exposure is acceptable at this stage of the paper account? And because Alpaca
-   crypto is cash-only while equities run at λ=2.0 on margin, who yields when cash is short: the equity book (my
-   default in §5.3b: crypto is a cash reservation up to its cap), or crypto scaled down to whatever cash is left after
-   equities?
-6. **Breaker arming scope**: is a flatten on confirmed CRISIS entry (`T1`) wanted at all, given the regime is CRISIS
-   today and the redeploy sizer already de-weights on transition? Or breaker on `T2–T4` only?
-7. **Crypto page vs Market section**: this design says separate page. Confirm, or fold into Market.
+| # | Question | Decision |
+|---|---|---|
+| 1 | Whale Alert subscription | **No paid subscriptions.** Maximise free sources (§10). |
+| 2 | Etherscan key | **Provided and stored** (`ETHERSCAN_API_KEY`). V2 multi-chain verified. |
+| 3 | Binance.com public data from a US IP | Not objected to under "maximise free data"; kept **with fallbacks** (Hyperliquid primary for OI/funding; Bybit/OKX ratios; Coinbase/Kraken tape). Flagged as fragile. |
+| 4 | Benchmark | **BTC only.** |
+| 5 | Caps and funding | Per-position and cluster caps **same rule, same levels as equities**; **BTC 25 % NAV**; **crypto gross 50 % NAV**; crypto fills the book by conviction like equities and may take **unused NAV on equity TRANS/HIGH_VOL/CRISIS days**; feasibility pass only for the non-marginable constraint (§5.3b). |
+| 6 | Breaker scope | **Drawdown triggers only** (`T4a` sleeve, `T4b` position). `T1` removed; flow shocks are signals, not triggers. |
+| 7 | Page | **Separate Crypto page confirmed.** |
+
+Still open: none that block Phase 1. (The threshold placeholders marked *(my call)* get reviewed in the shadow weeks.)
+
+## 10. Free data catalogue and how to grant access
+
+Every row below was probed from this box on 2026-11-05/06. "Operator action" is what you do to turn on the extra
+tier; everything marked *none* works today with no action. Keys go into `/root/openclaw/.env` as `NAME=value` (the
+file is root-only and git-ignored) — paste them in Discord and I add them, or add the line yourself; `.env.example`
+gets the empty placeholder. Nothing here costs money.
+
+### 10.1 Working now, no key (built into Phase 1)
+| Source | Signal it feeds | Limits |
+|---|---|---|
+| mempool.space, blockchain.info | BTC whale transfers; hashrate/difficulty | ~1 req/s |
+| Etherscan V2 (**your key**) | EVM whale transfers on 6 chains for ~20 Alpaca names; exchange netflow; token holders | 5 req/s, 100 k calls/day |
+| Hyperliquid info + leaderboard | perp OI/funding/premium for ~all names; **top-200 whale perp positioning** | unmetered public |
+| Deribit public | BTC/ETH implied vol (DVOL), ATM IV, skew, put/call OI → regime advisory | unmetered public |
+| CFTC COT (Socrata) | weekly leveraged-funds / asset-manager BTC futures positioning | unmetered |
+| Binance futures + spot | OI, funding, global & top-trader L/S, taker ratio, large prints | US-IP fragile |
+| Bybit, OKX public | OI, funding, L/S ratio, **liquidations** (OKX) | generous |
+| Coinbase, Kraken public | spot tape, 24/7 hourly candles | generous |
+| XRPL, Solana RPC, Koios, BlockCypher, Blockchair | XRP / SOL-ecosystem / ADA / DOGE / LTC / BCH whale transfers | Solana RPC and Blockchair are tight; see 10.2 |
+| DefiLlama | stablecoin supply, chain TVL, DEX volume, fees | unmetered |
+| CoinGecko (keyless), CoinPaprika | mcap, dominance, per-coin volume | CoinGecko ~10–30 req/min keyless |
+| alternative.me | Fear & Greed | daily |
+| Polymarket gamma | crypto prediction-market probabilities | existing client |
+
+### 10.2 Free registrations worth doing (operator action; each is a 2-minute signup, no card)
+| Service | Env var | What it adds | Why it matters |
+|---|---|---|---|
+| **CoinGecko Demo API** (coingecko.com → Developer Dashboard) | `COINGECKO_API_KEY` | 30 req/min, 10 k calls/month, stable auth | lifts the keyless throttle so per-coin mcap/volume for all 36 names fits in one tick |
+| **Helius** (helius.dev, free tier) | `HELIUS_API_KEY` | Solana RPC with 1 M credits/month, enhanced parsed transfers, address webhooks | the public Solana RPC is the weakest link for SOL/BONK/WIF/TRUMP whale transfers |
+| **Dune Analytics** (dune.com, free plan: 2 500 credits/month API) | `DUNE_API_KEY` | run community SQL dashboards (exchange netflows, ETF holdings, stablecoin mints) via API | the closest free substitute for Whale Alert's labelled exchange flows; 2 500 credits ≈ one daily refresh of 3–4 queries |
+| **Glassnode** (studio.glassnode.com, free "Standard" account) | `GLASSNODE_API_KEY` | API access to Tier-1 metrics at 24 h resolution (active addresses, exchange balance for BTC/ETH on the free tier, SOPR basics) | daily exchange-balance series = the netflow ground truth we otherwise approximate; the endpoint returned 401 keyless, so the key is required |
+| **Santiment SanAPI** (app.santiment.net, free) | `SANTIMENT_API_KEY` | GraphQL metrics (exchange_balance, whale transaction count, dev activity) — free tier restricts the time window to lagged data | useful for backtest history even if the live edge is lagged; the keyless probe confirmed the tier gate |
+| **BlockCypher** (blockcypher.com, free token) | `BLOCKCYPHER_TOKEN` | 3 → 200 req/s for DOGE/LTC | removes the hourly-only cadence for those two names |
+| **Blockchair** (blockchair.com/api, free key) | `BLOCKCHAIR_API_KEY` | higher limits for BCH and fallback chains | same |
+| **Subscan** (subscan.io, free key) | `SUBSCAN_API_KEY` | Polkadot transfers | the only DOT source; low priority |
+| **Messari** (messari.io, free) | `MESSARI_API_KEY` | asset metrics, supply schedules, unlock calendars | token-unlock dates for the alt names (supply shocks) |
+| **CryptoCompare / CoinDesk Data** (free key) | `CRYPTOCOMPARE_API_KEY` | exchange-level volumes, order-book snapshots, social stats | third-source fallback for prices and volume |
+
+### 10.3 Looked at and not usable for free
+- **Whale Alert** — paid only (rejected).
+- **CryptoQuant, Coinglass, Nansen, Arkham, Kaiko** — paid API tiers only (web UIs are free but not scrapeable in good faith).
+- **Spot BTC ETF flows** — Farside returns 403 to non-browser clients; iShares' holdings download returns the HTML
+  shell without a browser session. Substitute: Dune community queries on ETF holdings (10.2), or FMP ETF holdings via
+  the key we already have (checked in the plan; FMP `/stable/etf/holdings` coverage for IBIT/FBTC to be verified).
+- **Binance `allForceOrders`** (liquidations) — retired by Binance; OKX covers it.
+- **blockchain.com `charts`** — returned zero points; mempool.space covers hashrate/difficulty.
+- **Bitnodes** — non-JSON response from this box; node count is low value anyway.
