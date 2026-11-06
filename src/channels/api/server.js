@@ -3580,6 +3580,18 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 #strategies-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
 #research-page{display:none;position:absolute;inset:0;overflow:hidden;background:var(--bg)}
 
+/* Crypto page — whale flow board, crypto regime, hero strip */
+#crypto-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
+#crypto-inner{max-width:1600px;margin:0 auto;padding:14px 16px 28px;display:flex;flex-direction:column;gap:14px}
+.cr-hero{display:flex;flex-wrap:wrap;gap:14px;align-items:center}
+.cr-price{font-size:18px;font-weight:600}
+.cr-chip{font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);color:var(--muted)}
+.cr-chip-stale{color:var(--red);border-color:var(--red)}
+.cr-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;background:var(--dim)}
+.cr-dot-ok{background:var(--green)}
+.cr-dot-fail{background:var(--red)}
+.cr-dot-degraded{background:var(--yellow)}
+
 /* Pipeline Diagnostics — LangGraph run inspector */
 #pipeline-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
 #pipeline-inner{max-width:1600px;margin:0 auto;padding:14px 16px 28px;display:flex;flex-direction:column;gap:14px}
@@ -4827,6 +4839,7 @@ body.rs-chat-locked{overflow:hidden}
   <span class="dot" id="dot"></span>
   <h1>🦞 OpenClaw</h1>
   <button class="nav-btn active" id="nav-market" onclick="showMarket()">Market</button>
+  <button class="nav-btn" id="nav-crypto" onclick="showCrypto()">Crypto</button>
   <button class="nav-btn" id="nav-portfolio" onclick="showPortfolio()">Portfolio</button>
   <button class="nav-btn" id="nav-strategies" onclick="showStrategies()">Strategies</button>
   <button class="nav-btn" id="nav-research" onclick="showResearch()">Research</button>
@@ -5320,6 +5333,15 @@ body.rs-chat-locked{overflow:hidden}
   </div>
 </div><!-- #pipeline-page -->
 
+<div id="crypto-page"><div id="crypto-inner">
+  <div id="cr-hero" class="regime-panel"></div>
+  <div id="cr-regime"></div>
+  <div id="cr-tiles" class="ov-group"></div>
+  <div id="cr-board-wrap" class="regime-panel"><div class="regime-panel-header">Whale Flow Board</div><div id="cr-board"></div><div id="cr-detail"></div></div>
+  <div id="cr-feed" class="regime-panel"></div>
+  <div id="cr-risk" class="regime-panel"></div>
+</div></div><!-- #crypto-page -->
+
 <!-- Data usage panel (opened from the strategies page Data tile) -->
 <div class="paper-modal data-usage-modal" id="data-usage-modal">
   <div class="pm-card du-card">
@@ -5354,7 +5376,10 @@ async function loadMarket() {
   const st = document.getElementById('strategies-page');
   const onStrategies = st && st.style.display === 'block';
   const onPortfolio  = document.getElementById('portfolio-page').style.display === 'block';
-  const onMarket     = !onPortfolio && !onStrategies;
+  const onCrypto     = document.getElementById('crypto-page')?.style.display === 'block';
+  const onResearch   = document.getElementById('research-page')?.style.display === 'block';
+  const onPipelines  = document.getElementById('pipeline-page')?.style.display === 'block';
+  const onMarket     = !onPortfolio && !onStrategies && !onCrypto && !onResearch && !onPipelines;
   if (onMarket && !currentTicker) showOverview();
 }
 
@@ -5383,6 +5408,7 @@ async function loadMarket() {
   // to glance at to confirm the live regime engine is still healthy.
   setInterval(() => {
     if (document.getElementById('regime-panel')) loadRegime();
+    if (document.getElementById('crypto-page')?.style.display === 'block') loadCryptoRegime();
   }, 60_000);
   // Portfolio refresh: pulls live broker truth (unrealized_pl + plpc per
   // ticker) on every poll. 30s during RTH so the heatmap tracks intraday
@@ -5435,6 +5461,7 @@ async function loadMarket() {
       if (st && st.style.display === 'block') loadStrategies();
       if (document.getElementById('portfolio-page').style.display === 'block') loadPortfolio();
     }
+    if (d.type === 'crypto_event' && _cryptoState.initialized) _appendCryptoEvents(d.rows || []);
     if (d.type === 'strategy_transition') {
       const st = document.getElementById('strategies-page');
       if (st && st.style.display === 'block') loadStrategies();
@@ -5867,14 +5894,9 @@ function showOverview() {
     <div class="regime-panel-header">Volatility Regime Structure</div>
     <div class="empty" style="padding:10px 0;font-size:11px">Loading regime...</div>
   </div>\`;
-  const cryptoRegimePlaceholder = \`<div id="crypto-regime-panel" class="regime-panel">
-    <div class="regime-panel-header">Crypto Regime Structure</div>
-    <div class="empty" style="padding:10px 0;font-size:11px">Loading crypto regime...</div>
-  </div>\`;
-  ov.innerHTML = regimePlaceholder + cryptoRegimePlaceholder + (html || '<div class="empty">No market data yet — pipeline runs at 9:00 AM ET</div>') + newsHtml;
+  ov.innerHTML = regimePlaceholder + (html || '<div class="empty">No market data yet — pipeline runs at 9:00 AM ET</div>') + newsHtml;
   loadNewsSection('overview-news', null);
   loadRegime();
-  loadCryptoRegime();
 }
 
 // ── Regime Panel ─────────────────────────────────────────────────────────────
@@ -6145,6 +6167,17 @@ function _renderCryptoRegimeStructure(data) {
   const featHtml = _CRYPTO_FEATURE_TILES
     .map(([lbl, key, dp]) => \`<div class="regime-feat"><div class="regime-feat-label">\${lbl}</div><div class="regime-feat-val">\${fmt(f[key], dp)}</div></div>\`)
     .join('');
+  // Advisory flow columns (Task 13) — shown alongside, NOT HMM inputs.
+  const _fmtFunding = v => v == null || (typeof v === 'number' && isNaN(v)) ? '—' : (Number(v) * 100).toFixed(4) + '%';
+  const _delev = f.adv_delev_market;
+  const _delevHtml = _delev == null ? '—'
+    : (_delev ? '<span style="color:var(--red)">YES</span>' : '<span style="color:var(--muted)">no</span>');
+  const advHtml = [
+    ['BTC netflow z', fmt(f.adv_btc_netflow_z_7d, 2)],
+    ['Funding 8h',    _fmtFunding(f.adv_btc_funding_8h)],
+    ['Deleveraging',  _delevHtml],
+  ].map(([lbl, val]) => \`<div class="regime-feat"><div class="regime-feat-label">\${lbl}</div><div class="regime-feat-val">\${val}</div></div>\`)
+   .join('');
 
   // 24h state-path sparkline — hourly cadence → 24 buckets of 60 min each.
   const _C_BUCKETS  = 24;
@@ -6203,6 +6236,10 @@ function _renderCryptoRegimeStructure(data) {
           <div class="regime-section-header">HMM Model Inputs <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(5 features driving the classification)</span></div>
           <div class="regime-feat-grid">\${featHtml}</div>
         </div>
+        <div class="regime-section">
+          <div class="regime-section-header">Advisory Flow <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(not HMM inputs)</span></div>
+          <div class="regime-feat-grid">\${advHtml}</div>
+        </div>
       </div>
 
       <!-- RIGHT: 24h state path -->
@@ -6231,11 +6268,11 @@ async function loadRegime() {
   el.innerHTML = _renderRegimeStructure(intraday, daily);
 }
 
-async function loadCryptoRegime() {
-  const el = document.getElementById('crypto-regime-panel');
+async function loadCryptoRegime(prefetched) {
+  const el = document.getElementById('cr-regime');
   if (!el) return;
-  const data = await _safeFetch('/api/regime/crypto', { available: false }, { label: 'regime-crypto' });
-  el.innerHTML = _renderCryptoRegimeStructure(data);
+  const data = prefetched || await _safeFetch('/api/regime/crypto', { available: false }, { label: 'regime-crypto' });
+  el.innerHTML = '<div id="crypto-regime-panel" class="regime-panel">' + _renderCryptoRegimeStructure(data) + '</div>';
 }
 
 // ── Ticker Detail ─────────────────────────────────────────────────────────────
@@ -6550,7 +6587,7 @@ let regime90dData  = null;    // [{date, regime}]
 let regime1yData   = null;    // [{date, regime}]
 
 function _setNavActive(which) {
-  for (const k of ['market','portfolio','strategies','research','pipelines']) {
+  for (const k of ['market','crypto','portfolio','strategies','research','pipelines']) {
     const el = document.getElementById('nav-'+k);
     if (!el) continue;
     if (k === which) el.classList.add('active'); else el.classList.remove('active');
@@ -6565,6 +6602,8 @@ function _hideAllPages() {
   if (rp) rp.style.display = 'none';
   const pl = document.getElementById('pipeline-page');
   if (pl) pl.style.display = 'none';
+  const cp = document.getElementById('crypto-page');
+  if (cp) cp.style.display = 'none';
 }
 
 function showMarket() {
@@ -11319,6 +11358,117 @@ let _pipelineState = {
   streamCount: 0,
   refreshTimer: null,
 };
+
+// ── Crypto page ───────────────────────────────────────────────────────────────
+// Whale-flow board + crypto regime + hero strip. Data: /api/crypto/* (Task 14).
+const _cryptoState = {
+  initialized: false,
+  refreshTimer: null,
+  selected: null,
+  snapshot: null,
+  charts: [],
+};
+
+function _cryptoVisible() {
+  return document.getElementById('crypto-page')?.style.display === 'block';
+}
+
+async function showCrypto() {
+  _hideAllPages();
+  document.getElementById('crypto-page').style.display = 'block';
+  _setNavActive('crypto');
+  if (!_cryptoState.initialized) _initCrypto();
+  await _refreshCrypto();
+}
+
+function _initCrypto() {
+  _cryptoState.initialized = true;
+  // SSE 'crypto_event' is routed in _handleSSE → _appendCryptoEvents.
+  _cryptoState.refreshTimer = setInterval(() => {
+    if (_cryptoVisible()) _refreshCrypto();
+  }, 60_000);
+}
+
+async function _refreshCrypto() {
+  const [snap, regime, providers, risk, positions] = await Promise.all([
+    _safeFetch('/api/crypto/snapshot',  { available: false }, { label: 'crypto-snapshot' }),
+    _safeFetch('/api/regime/crypto',    { available: false }, { label: 'regime-crypto' }),
+    _safeFetch('/api/crypto/providers', { available: false }, { label: 'crypto-providers' }),
+    _safeFetch('/api/crypto/risk',      { available: false }, { label: 'crypto-risk' }),
+    _safeFetch('/api/crypto/positions', { available: false }, { label: 'crypto-positions' }),
+  ]);
+  _cryptoState.snapshot = snap;
+  await loadCryptoRegime(regime);
+  _renderCryptoHero(snap, regime, providers);
+  _renderCryptoBoard(snap);
+  _renderCryptoTiles(snap, regime);
+  _renderCryptoFeed(null);
+  _renderCryptoRisk(risk, positions);
+}
+
+function _renderCryptoHero(snap, regime, providers) {
+  const el = document.getElementById('cr-hero');
+  if (!el) return;
+  if (!snap || snap.available === false) {
+    el.innerHTML = '<div class="empty">No flow ticks yet — enable OPENCLAW_CRYPTO_FLOWS=1</div>';
+    return;
+  }
+  const tickers = snap.tickers || [];
+  const priceHtml = ['BTC', 'ETH'].map(sym => {
+    const t = tickers.find(r => r.ticker === sym || r.ticker === sym + '-USD' || r.ticker === sym + 'USD');
+    if (!t) return \`<span class="cr-price">\${sym} —</span>\`;
+    const px = t.price_usd != null
+      ? '$' + Number(t.price_usd).toLocaleString('en-US', { maximumFractionDigits: 0 }) : '—';
+    let ret = '';
+    if (t.ret_24h != null && !isNaN(Number(t.ret_24h))) {
+      const r = Number(t.ret_24h);  // already a percent (features.py _pct)
+      const col = r >= 0 ? 'var(--green)' : 'var(--red)';
+      ret = \` <span style="font-size:12px;color:\${col}">\${r >= 0 ? '+' : ''}\${r.toFixed(2)} %</span>\`;
+    }
+    return \`<span class="cr-price">\${sym} \${px}\${ret}</span>\`;
+  }).join('');
+
+  const L = (regime && regime.latest) || {};
+  const regimeHtml = (regime && regime.available !== false && L.state)
+    ? \`<span class="regime-state-badge \${_STATE_CLASS[L.state] || 'regime-state-NO_DATA'}">\${_STATE_SHORT[L.state] || L.state}</span>
+       <span class="cr-chip">conf \${L.confidence != null ? Number(L.confidence).toFixed(2) : '—'} · streak \${L.hysteresis_streak != null ? L.hysteresis_streak : '—'} · age \${_ageStr(L.ts_utc)}</span>\`
+    : '<span class="cr-chip">regime —</span>';
+
+  const breakerHtml = '<span class="cr-chip" style="color:var(--muted)" title="drawdown breaker — shadow until Phase 2">breaker: shadow (phase 2)</span>';
+
+  const flowAgeMs = snap.ts_utc ? Date.now() - new Date(snap.ts_utc).getTime() : Infinity;
+  const flowsHtml = \`<span class="cr-chip\${flowAgeMs > 45 * 60 * 1000 ? ' cr-chip-stale' : ''}" title="last flow tick \${snap.ts_utc || '—'}">flows \${_ageStr(snap.ts_utc)}</span>\`;
+
+  const degraded = new Set((providers && providers.degraded) || []);
+  const dotsHtml = (snap.provider_health || []).map(p => {
+    const cls = degraded.has(p.provider) ? 'cr-dot-degraded' : (p.ok ? 'cr-dot-ok' : 'cr-dot-fail');
+    const tip = String(p.provider) + ': ' + (p.err || 'ok');
+    return \`<span class="cr-dot \${cls}" title="\${tip.replace(/"/g, '&quot;')}"></span>\`;
+  }).join('');
+
+  el.innerHTML = \`<div class="cr-hero">\${priceHtml}\${regimeHtml}\${breakerHtml}\${flowsHtml}<span title="provider health">\${dotsHtml}</span></div>\`;
+}
+
+// Task 16 renderers — stubs so the page is never blank.
+function _renderCryptoBoard(snap) {
+  const el = document.getElementById('cr-board');
+  if (el) el.innerHTML = '<div class="empty">Whale flow board (Task 16)</div>';
+}
+function _renderCryptoTiles(snap, regime) {
+  const el = document.getElementById('cr-tiles');
+  if (el) el.innerHTML = '<div class="empty">Market flow tiles (Task 16)</div>';
+}
+function _renderCryptoFeed(events) {
+  const el = document.getElementById('cr-feed');
+  if (el) el.innerHTML = '<div class="empty">Whale event feed (Task 16)</div>';
+}
+function _renderCryptoRisk(risk, positions) {
+  const el = document.getElementById('cr-risk');
+  if (el) el.innerHTML = '<div class="empty">Crypto risk + positions (Task 16)</div>';
+}
+function _appendCryptoEvents(rows) {
+  // Task 16: prepend live SSE whale events to #cr-feed.
+}
 
 async function showPipelines() {
   _hideAllPages();
