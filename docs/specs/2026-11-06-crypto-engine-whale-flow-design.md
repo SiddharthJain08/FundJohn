@@ -418,6 +418,61 @@ normaliser over `BTCUSD`/`BTC/USD`/`BTC-USD`/`SPY`/OCC; API handlers return `{av
 
 ---
 
+## 7a. As built — Phase 1 (2026-11-06, branch `crypto-flow-p1`, 32 commits, 222 Python + 30 Node offline tests)
+
+Where the build deviated from §2–§6 above, the code is authoritative and this section records it (every item is a
+controller ruling in the SDD ledger, surfaced to the operator at finish):
+
+- **Whale-score netflow component** is `min(40, (40/7)·log10(max(|netflow|,1))·cov_w)` — saturates at $10 M/24 h — not
+  the `3.5·log10` written in §3 (that constant could not reach the spec's own score bound). REVISIT in the shadow weeks:
+  BTC/ETH netflow routinely exceeds $10 M, so the component pins at 40 for the majors; a per-asset normalisation (30-day
+  median |netflow| or the z-score) is the likely replacement.
+- **Snapshot cadence**: `crypto_flow_snapshot.ts_utc` is floored to **15 min** (the tick), not the hour — the PK +
+  `ON CONFLICT DO NOTHING` would otherwise keep only the :00 tick. The flows parquet stays hour-floored (replace).
+- **Snapshot retention**: append-only (no prune), overriding §2.4's "90 days". Growth ≈ 3.4 k rows/day (~2.5 GB/yr
+  JSONB). Revisit at 90 days with a prune migration if disk matters; the NEVER-DELETE spirit wins until then.
+- **Intra-hour features** (`oi_chg_1h`, `oi_chg_24h`, `ret_1h`, `ret_24h`) are computed from the 15-min snapshot history
+  (`store.read_snapshot_history`), not from the hour-floored flows rows; `price_usd` is the perp **mark** (Hyperliquid,
+  per tick) with the CoinGecko spot kept as `price_spot_usd`; macro_sent's raw fields are named `spot_px, spot_mcap_usd,
+  spot_vol_24h_usd, cg_ret_1h, cg_ret_24h` so they never collide with feature outputs.
+- **Slow-provider carry**: hourly/daily observations are carried between ticks from a raw `slow_obs` store in the state
+  file (with per-field timestamp and cadence), never from snapshot features; a carried field expires after 3× its
+  provider's cadence (3 h / 3 d).
+- **Tick guards** (`should_skip`): 15:00–15:50 ET Mon–Fri clock window; the shared Redis run lock
+  (`src/lib/run_lock`, checked for the ET and UTC dates); pgrep of the compute step scripts (`engine.py`,
+  `regime_blended_sizer_live.py`, `alpaca_executor`, `run_collector_once`, `pipeline_orchestrator.py`); and a
+  `MemAvailable` floor (`OPENCLAW_CRYPTO_FLOW_MIN_MEM_MB`, default 1500). `--force` bypasses all four, never the gate.
+- **Hard bound**: the spawn is wrapped in `timeout --signal=TERM --kill-after=30 840`; the driver's SIGTERM handler
+  releases the flock and prints the summary with `skipped=sigterm`; providers with long loops honour `deadline_at`
+  (clamped to the next 15:00 ET) and return partial results; an exclusive `flock` on `<state>.lock` serialises ticks and
+  a `skipped=locked` tick writes a `__tick__` provider-health row. Tick-level deadline `OPENCLAW_CRYPTO_FLOW_DEADLINE_S`
+  (600 s) gates provider starts.
+- **Memory cap** `OPENCLAW_CRYPTO_FLOW_MEMORY_MAX` default **1G** (not 600M): the Hyperliquid leaderboard is a 40 MB JSON
+  (48 k rows) and the measured tick peak was ≈457 MB RSS before the other reads.
+- **Provider order** (fallback preference under the deadline): btc_onchain, evm_onchain, derivs, liquidations,
+  spot_tape, deribit_vol, xrp_onchain, sol_onchain, utxo_alts, **hl_whales**, cftc_cot, stables_defi, macro_sent,
+  santiment. `sol_onchain` and `utxo_alts` are **hourly** (RPC budgets), not every tick.
+- **Exchange-address registry** is validated on-chain (format + activity: Etherscan ≥ 1000 txs, mempool.space
+  `tx_count ≥ 1000`, XRPL balance ≥ 1 M XRP, Solana ≥ 1000 signatures); rejects live in `_rejected` with reason/date.
+  Upstream whalecli held fabricated entries (`…Kzobserved`). EVM EOAs are chain-portable, so the ETH registry is watched
+  on every tracked EVM chain. The weekly `refresh_exchange_addresses.py` candidate-proposer is **deferred**.
+- **BTC block coverage** uses blockchain.info `rawblock` (whole block, ~8 MB) with the mempool.space 25-tx page as the
+  fallback; Binance FUTURES symbols for PEPE/BONK/SHIB are `1000…USDT` (spot keeps the plain symbol); Hyperliquid
+  `kBONK/kPEPE/kSHIB` are ×1000 units.
+- **Failure signalling**: a provider whose primary source returns None raises `ProviderFetchError` (health `ok=False`);
+  `providers_failed_this_tick` on the market row lists them; `/api/crypto/providers.degraded` is the 3-in-a-row rule.
+  URL-borne secrets (`api-key`, `apikey`, `key`, `token`, `access_token`) are redacted in `_http_retry` failure logs.
+- **Health policy** for `crypto-flow-tick` is `('hours', 1)` (the `intraday_min` kind is judged only in RTH).
+- **Regime advisory** uses `adv_btc_funding_8h` (per-8 h fraction), shown ×100 on the dashboard; the DVOL tile reads
+  `dvol_btc` derived from the BTC-USD Deribit observation.
+- **Thresholds** live in `features.DEFAULT_THRESHOLDS` and are mirrored in `/api/crypto/risk` (JS); the
+  `pipeline_config.crypto_flow_thresholds` indirection is deferred until the shadow review tunes them.
+- **Dashboard**: `large_print_imbalance_1h` spans the returned tape window (1 000 prints), not literally 1 h; the mobile
+  board keeps ticker/price/24 h/score/netflow/coverage; degraded provider dots are yellow; `S_m crypto by regime` cells
+  read `pending` until Phase 3.
+- **Deferred to a follow-up**: Polymarket crypto probabilities, ADA via Koios, `refresh_exchange_addresses.py`, strategy
+  aux-kind wiring (Phase 4), `ijson` streaming of the leaderboard, a prune migration for the snapshot table.
+
 ## 8. Left to the builder
 - Exact provider fallback ordering per field; which of Binance's spot `aggTrades` vs Coinbase trades is primary for
   large prints (coverage decides).

@@ -12,6 +12,8 @@
 
 ## Global Constraints
 
+> **As built (2026-11-06):** see spec §7a for the deviations landed by controller rulings — 15-min snapshot floor, 1G memory cap, `timeout 840` hard bound, run-lock/pgrep/memory skip guards, raw `slow_obs` carry, macro_sent field names, `(40/7)·log10` netflow constant, hourly sol/utxo, HlWhales ordered last among on-chain providers.
+
 - **NEVER-DELETE**: `data/master/crypto_whale_events.parquet` and `data/master/crypto_flows_1h.parquet` are append-only masters; writes go through `parquet_store.append_insert_only` / `append_dedup` (tmp + `os.replace`, file-locked). Add both to the CLAUDE.md invariant list (Task 2). The Postgres tables `crypto_flow_snapshot` and `crypto_flow_provider_health` are append-only; `crypto_whale_events_live` is an explicitly documented 7-day **cache** (parquet is the archive) and is the only table that prunes.
 - **No paid data sources.** Every provider is keyless or uses a free key from `.env`; a missing optional key disables that provider with a counter, never an error (`ETHERSCAN_API_KEY`, `HELIUS_API_KEY`, `SANTIMENT_API_KEY` are present in `.env` as of 2026-11-06 21:10Z; `COINGECKO_API_KEY`, `BLOCKCYPHER_TOKEN`, `BLOCKCHAIR_API_KEY` are optional and currently absent — the operator found CoinGecko Demo, Dune and Glassnode not free or trial-only, so no code path may require them).
 - **Memory**: the tick runs under `MemoryMax=600M`; never `pd.read_parquet` a whole master — use `parquet_store.read_filtered`/duckdb windowed reads; every HTTP call has `timeout ≤ 20 s`; process `nice -n 19`.
