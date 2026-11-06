@@ -172,3 +172,40 @@ def test_liquidations_provider_caches_ctval_and_raises_when_all_fail(monkeypatch
 def test_providers_registered():
     from src.ingestion.crypto_flow.providers import all_providers
     assert [p.name for p in all_providers()][-2:] == ['derivs', 'liquidations']
+
+
+def test_binance_futures_symbol_rule_and_mark_scaling(monkeypatch):
+    f = derivs._binance_futures_symbol
+    assert [f(A[t]) for t in ('PEPE-USD', 'BONK-USD', 'SHIB-USD', 'BTC-USD')] == [
+        '1000PEPEUSDT', '1000BONKUSDT', '1000SHIBUSDT', 'BTCUSDT']
+    assert f(A['USDG-USD']) is None
+    hl_none = {'api.hyperliquid.xyz': [{'universe': []}, []]}  # HL lists nothing -> Binance fills mark
+    r = patch(monkeypatch, {**hl_none, 'fapi/v1/openInterest': {'symbol': 'x', 'openInterest': '1000'},
+                            'premiumIndex': {'markPrice': '0.0123', 'lastFundingRate': '0.0001'}})
+    got = by_ticker(Derivs().fetch([A['PEPE-USD']], NOW, NOW))['PEPE-USD']
+    assert any('symbol=1000PEPEUSDT' in u for u in r.calls) and not any('symbol=PEPEUSDT' in u for u in r.calls)
+    assert got['mark_px'] == pytest.approx(0.0123 / 1000) and got['oi_usd'] == pytest.approx(1000 * 0.0123)
+
+
+def test_binance_error_dict_skips_asset_without_more_calls(monkeypatch):
+    r = patch(monkeypatch, {**HL, 'fapi/v1/openInterest': {'code': -1121, 'msg': 'Invalid symbol.'}})
+    sleeps = []
+    monkeypatch.setattr(derivs.time, 'sleep', sleeps.append)
+    res = Derivs().fetch([A['BTC-USD']], NOW, NOW)
+    f = by_ticker(res)
+    assert f['BTC-USD']['ls_ratio_global'] is None and f['BTC-USD']['venues'] == 'hyperliquid'
+    assert MARKET_TICKER not in f  # Binance answered; not degraded
+    assert sum('fapi.binance.com' in u for u in r.calls) == 1
+    assert sleeps == [0.1]  # only the inter-asset pause, none between the skipped calls
+
+
+def test_okx_outage_with_warm_cache_raises(monkeypatch, tmp_path):
+    import time
+    st = tmp_path / 's.json'
+    st.write_text(json.dumps({'okx_ctval': {'fetched_at': time.time(), 'map': {'BTC-USDT-SWAP': 0.01}}}))
+    r = patch(monkeypatch, {**HL})
+    p = Liquidations()
+    p.state_path = st
+    res = base.run_provider(p, [A['BTC-USD']], NOW, NOW)
+    assert not res.ok and 'okx None for all 1 calls' in res.err
+    assert not any('public/instruments' in u for u in r.calls)  # cache really was warm

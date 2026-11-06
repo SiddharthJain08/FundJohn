@@ -84,8 +84,9 @@ class Liquidations(Provider):
         hl = fetch_hl()
         vols = {t: d['vol_24h_usd'] for t, d in parse_hl(hl, assets).items()} if hl else {}
         n = int(os.environ.get('OPENCLAW_CRYPTO_LIQ_TOP_N', 12))
-        obs, answered = [], 0
+        obs, answered, attempted = [], 0, 0
         for a in select_top(assets, vols, 'okx', n):
+            attempted += 1
             payload = get_json(LIQ_URL.format(uly=a.okx.removesuffix('-SWAP')), label='okx_liq', timeout=15)
             if not isinstance(payload, dict) or payload.get('code') != '0':
                 continue
@@ -95,6 +96,8 @@ class Liquidations(Provider):
                 f = {'liq_long_usd_1h': 0.0, 'liq_short_usd_1h': 0.0, 'liq_n_1h': 0}
             if f is not None:
                 obs.append(Observation(now, a.ticker, self.name, f))
-        if not instr_ok and not answered:
-            raise ProviderFetchError('liquidations: okx instruments and liquidation calls all failed')
+        if attempted and not answered:  # regardless of a warm ctVal cache
+            raise ProviderFetchError(f'liquidations: okx None for all {attempted} calls')
+        if not attempted and not instr_ok:
+            raise ProviderFetchError('liquidations: okx instruments failed')
         return [], obs

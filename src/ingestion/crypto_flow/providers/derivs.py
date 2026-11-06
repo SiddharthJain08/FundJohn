@@ -38,6 +38,13 @@ def _unit_multiplier(venue_symbol: str | None) -> int:
     return 1000 if s.startswith('1000') or s.endswith('1000USDT') else 1
 
 
+def _binance_futures_symbol(a) -> str | None:
+    """Futures list the x1000 memecoins as 1000PEPEUSDT etc; the plain names are spot-only."""
+    if not a.binance:
+        return None
+    return '1000' + a.binance if a.ticker.split('-')[0] in ('PEPE', 'BONK', 'SHIB') else a.binance
+
+
 def top_n() -> int:
     return int(os.environ.get('OPENCLAW_CRYPTO_DERIVS_BINANCE_TOP_N', 12))
 
@@ -111,17 +118,19 @@ class Derivs(Provider):
 
     def _binance(self, a, rec) -> bool:
         """Fill Binance fields; False if the openInterest call failed."""
-        sym = a.binance
+        sym = _binance_futures_symbol(a)
         oi = get_json(f'{BINANCE}/fapi/v1/openInterest?symbol={sym}', label='binance_oi', timeout=15)
         if oi is None:
             return False
+        if not isinstance(oi, dict) or 'openInterest' not in oi:
+            return True  # error dict (e.g. -1121 invalid symbol): Binance is up, skip this asset
         prem = get_json(f'{BINANCE}/fapi/v1/premiumIndex?symbol={sym}', label='binance_premium', timeout=15)
         mark = _f((prem or {}).get('markPrice'))
-        coins = _f(oi.get('openInterest')) if isinstance(oi, dict) else None
+        coins = _f(oi.get('openInterest'))
         if coins is not None and mark is not None:
             rec['oi'].append(('binance', coins * mark))
         if rec['mark_px'] is None and mark is not None:
-            rec['mark_px'], rec['px_source'] = mark, 'binance'
+            rec['mark_px'], rec['px_source'] = mark / _unit_multiplier(sym), 'binance'
         if rec['funding_8h'] is None:
             rec['funding_8h'] = _f((prem or {}).get('lastFundingRate'))
         got = coins is not None and mark is not None
