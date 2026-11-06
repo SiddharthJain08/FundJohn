@@ -8,6 +8,7 @@ response bytes (or raises after final attempt). Logs each retry.
 import socket
 import sys
 import time
+from urllib.parse import urlsplit, urlunsplit
 from typing import Callable, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen, Request
@@ -46,7 +47,7 @@ def fetch_with_retry(
             last_exc = e
             retryable = e.code in RETRYABLE_STATUS
             if not retryable or attempt == attempts:
-                print(f'[{label}] HTTP {e.code} (final): {url_of(url_or_req)[:140]}', file=sys.stderr)
+                print(f'[{label}] HTTP {e.code} (final): {redact_url(url_of(url_or_req))[:140]}', file=sys.stderr)
                 return None
             delay = _retry_after(e) or base_delay * (2 ** (attempt - 1))
             print(f'[{label}] HTTP {e.code} attempt {attempt}/{attempts}; sleeping {delay:.1f}s', file=sys.stderr)
@@ -62,7 +63,7 @@ def fetch_with_retry(
         except (TimeoutError, socket.timeout) as e:
             last_exc = e
             if attempt == attempts:
-                print(f'[{label}] timeout (final, {timeout}s): {url_of(url_or_req)[:140]}', file=sys.stderr)
+                print(f'[{label}] timeout (final, {timeout}s): {redact_url(url_of(url_or_req))[:140]}', file=sys.stderr)
                 return None
             delay = base_delay * (2 ** (attempt - 1))
             print(f'[{label}] timeout attempt {attempt}/{attempts} ({timeout}s); sleeping {delay:.1f}s', file=sys.stderr)
@@ -94,3 +95,22 @@ def url_of(url_or_req) -> str:
     if isinstance(url_or_req, Request):
         return url_or_req.full_url
     return str(url_or_req)
+
+
+_SECRET_PARAMS = {'api-key', 'apikey', 'api_key', 'key', 'token', 'access_token'}
+
+
+def redact_url(url: str) -> str:
+    """Mask the VALUE of secret-bearing query params (api-key/apikey/api_key/key/token/access_token) with ***.
+    Other params are kept byte-for-byte; URLs without a query or unparsable strings are returned unchanged."""
+    try:
+        parts = urlsplit(url)
+        if not parts.query:
+            return url
+        out = []
+        for pair in parts.query.split('&'):
+            name, sep, _ = pair.partition('=')
+            out.append(f'{name}=***' if sep and name.lower() in _SECRET_PARAMS else pair)
+        return urlunsplit(parts._replace(query='&'.join(out)))
+    except ValueError:
+        return url

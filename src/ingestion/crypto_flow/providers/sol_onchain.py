@@ -95,7 +95,7 @@ class SolOnchain(StateMixin, Provider):
         return int(override) if override else (600 if os.environ.get('HELIUS_API_KEY') else 60)
 
     def _rpc(self, method, params):
-        """result or None. Counts every call against the budget. Never put the URL (api key) in an error."""
+        """result or None. Counts every call against the budget. URL secrets are redacted by `_http_retry.redact_url` on logging."""
         self.calls += 1
         data = get_json(self.rpc_url(), label=f'solana_{method}', method='POST',
                         body={'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params})

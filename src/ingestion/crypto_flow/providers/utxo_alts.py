@@ -74,7 +74,8 @@ class UtxoAlts(StateMixin, Provider):
         self.price_hints: dict[str, float] = {}
 
     def _bc(self, coin, path='', query=''):
-        """BlockCypher GET (token appended when set); paced for the 3 req/s keyless limit."""
+        """BlockCypher GET (token appended when set); paced for the 3 req/s keyless limit.
+        URL secrets are redacted by `_http_retry.redact_url` on logging."""
         token = os.environ.get('BLOCKCYPHER_TOKEN')
         time.sleep(0.05 if token else 0.4)
         q = '&'.join(x for x in (query, f'token={token}' if token else '') if x)
