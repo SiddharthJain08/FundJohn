@@ -9,7 +9,7 @@ ranges may only grow. **No code path is allowed to drop columns, drop
 tickers, truncate the date axis, deprecate columns, or delete rows from
 prices.parquet, options_eod.parquet, financials.parquet, macro.parquet,
 insider.parquet, earnings.parquet, prices_30m.parquet,
-historical_regimes.parquet, or crypto_bars_1h.parquet.** Same rule applies to the canonical
+historical_regimes.parquet, crypto_bars_1h.parquet, crypto_whale_events.parquet, crypto_flows_1h.parquet, or crypto_onchain_daily.parquet.** Same rule applies to the canonical
 Postgres tables (`execution_signals`, `signal_pnl`, `alpaca_submissions`,
 `data_coverage`, `data_columns`). The system's job is to grow the data
 forever and let strategies opt into whichever subset they need; it is
