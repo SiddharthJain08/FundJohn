@@ -829,8 +829,13 @@ function start(swarm, generateId, notifyDiscord) {
             const logDir = path.join(ROOT, 'logs');
             try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
             const logFd = fs.openSync(path.join(logDir, `crypto_flows_${today}.log`), 'a');
-            const w = capped.wrapCapped(PYTHON, ['scripts/run_crypto_flow_tick.py'],
-                { memoryMax: process.env.OPENCLAW_CRYPTO_FLOW_MEMORY_MAX || '600M', fallback: '600M' });
+            // Hard wall-clock bound (840 s < the 15-min cadence) wraps the python itself, so the uncapped
+            // pass-through path (no systemd scope) is bounded too; the driver's SIGTERM handler releases its
+            // flock and prints the summary (skipped=sigterm), KILL follows 30 s later.
+            // Cap 1G: hl_whales' ~40 MB leaderboard parse measured a 457 MB tick peak (final-review I5).
+            const w = capped.wrapCapped('timeout',
+                ['--signal=TERM', '--kill-after=30', '840', PYTHON, 'scripts/run_crypto_flow_tick.py'],
+                { memoryMax: process.env.OPENCLAW_CRYPTO_FLOW_MEMORY_MAX || '1G', fallback: '1G' });
             const child = spawn(w.cmd, w.args, {
                 cwd: ROOT,
                 env: { ...process.env, PYTHONPATH: ROOT },

@@ -66,7 +66,7 @@ def test_compute_ticker_features_values():
     hist = pd.DataFrame({'ticker': ['BTC-USD'] * 2, 'ts_utc': [NOW - timedelta(hours=1), NOW - timedelta(hours=24)],
                          'oi_usd': [100.0, 200.0], 'oi_venues': ['a,b', 'a,b']})
     obs = {'oi_usd': 95.0, 'oi_venues': 'a,b', 'funding_8h': 0.0001, 'large_prints_usd_buy': 3.0, 'large_prints_usd_sell': 4.0,
-           'ret_1h': -3.5, 'price_usd': 50000.0}
+           'cg_ret_1h': -3.5, 'spot_px': 50000.0}
     r = features.compute_ticker_features('BTC-USD', NOW, ev, hist, obs, None)
     assert r['whale_n_1h'] == 1 and r['whale_usd_24h'] == 3e6 and r['exch_netflow_usd_24h'] == 1e6
     assert abs(r['oi_chg_1h_pct'] - (-5.0)) < 1e-9 and abs(r['oi_chg_24h_pct'] - (-52.5)) < 1e-9
@@ -108,11 +108,13 @@ def test_market_features_shock_lines_only_above_thresholds():
 
 def test_market_features_other_shocks_and_supply_chg():
     pt = {'BTC-USD': _pt(0.0, 80, 'distributing'), 'ETH-USD': {**_pt(0.0), 'delev_1h': True}}
-    r = features.compute_market_features(pt, {'stable_supply_usd': 110.0, 'providers_degraded': ['x']},
+    r = features.compute_market_features(pt, {'stable_supply_usd': 110.0, 'providers_failed_this_tick': ['x'],
+                                              'stable_supply_missing': 'USDG', 'paprika_ambiguous': 2},
                                          flows_hist=pd.DataFrame({'ticker': ['__MARKET__'], 'ts_utc': [NOW - timedelta(days=7)],
                                                                   'stable_supply_usd': [100.0]}), now=NOW)
     assert any('kind=whale_score' in x for x in r['shock_lines']) and any('kind=delev' in x for x in r['shock_lines'])
-    assert abs(r['stable_supply_chg_7d_pct'] - 10.0) < 1e-9 and r['providers_degraded'] == ['x']
+    assert abs(r['stable_supply_chg_7d_pct'] - 10.0) < 1e-9 and r['providers_failed_this_tick'] == ['x']
+    assert r['stable_supply_missing'] == 'USDG' and r['paprika_ambiguous'] == 2.0
 
 
 def test_oi_change_prefers_snapshot_history_exact_hour():
@@ -139,7 +141,7 @@ def test_ret_1h_from_snapshot_prices_overrides_carried_value():
     # snapshot price_usd rows were written from the per-tick perp mark (mark_px), not the hourly spot
     snap = pd.DataFrame({'ticker': ['BTC-USD'] * 2, 'ts_utc': [NOW - timedelta(minutes=62), NOW - timedelta(hours=24, minutes=20)],
                          'oi_usd': [None] * 2, 'oi_venues': [None] * 2, 'price_usd': [50000.0, 40000.0]})
-    obs = {'mark_px': 48000.0, 'price_usd': 47000.0, 'ret_1h': 1.0, 'ret_24h': 2.0}
+    obs = {'mark_px': 48000.0, 'spot_px': 47000.0, 'cg_ret_1h': 1.0, 'cg_ret_24h': 2.0}
     r = features.compute_ticker_features('BTC-USD', NOW, pd.DataFrame(), pd.DataFrame(), obs, None, snap_hist=snap)
     assert abs(r['ret_1h'] - (-4.0)) < 1e-9 and abs(r['ret_24h'] - 20.0) < 1e-9
     assert r['price_usd'] == 48000.0 and r['price_spot_usd'] == 47000.0
@@ -150,12 +152,44 @@ def test_ret_1h_from_snapshot_prices_overrides_carried_value():
 
 def test_price_usd_prefers_mark_px_and_keeps_spot():
     f = lambda o: features.compute_ticker_features('BTC-USD', NOW, pd.DataFrame(), pd.DataFrame(), o, None)  # noqa: E731
-    r = f({'mark_px': 70100.0, 'price_usd': 70000.0})
+    r = f({'mark_px': 70100.0, 'spot_px': 70000.0})
     assert r['price_usd'] == 70100.0 and r['price_spot_usd'] == 70000.0
     for bad in (None, 0.0, -1.0, float('nan'), float('inf'), 'x'):
-        r = f({'mark_px': bad, 'price_usd': 70000.0})
+        r = f({'mark_px': bad, 'spot_px': 70000.0})
         assert r['price_usd'] == 70000.0 and r['price_spot_usd'] == 70000.0
     r = f({'mark_px': 70100.0})
     assert r['price_usd'] == 70100.0 and r['price_spot_usd'] is None
     i = features.FEATURE_COLS.index('price_usd')
     assert features.FEATURE_COLS[i + 1] == 'price_spot_usd'
+
+
+def test_raw_price_usd_and_ret_obs_are_ignored():
+    """macro_sent no longer emits price_usd / ret_*; a stray raw value under an OUTPUT name must not leak in."""
+    r = features.compute_ticker_features('BTC-USD', NOW, pd.DataFrame(), pd.DataFrame(),
+                                         {'price_usd': 1.0, 'ret_1h': 9.0, 'ret_24h': 9.0}, None)
+    assert r['price_usd'] is None and r['price_spot_usd'] is None and r['ret_1h'] is None and r['ret_24h'] is None
+
+
+def test_market_dvol_from_btc_ticker_obs():
+    """deribit_vol emits dvol/atm_iv_30d/skew_25d/put_call_oi on BTC-USD / ETH-USD — the market row reads them there."""
+    tobs = {'BTC-USD': {'dvol': 45.0, 'atm_iv_30d': 44.0, 'skew_25d': 2.5, 'put_call_oi': 0.7, 'options_degraded': False},
+            'ETH-USD': {'dvol': 60.0}}
+    r = features.compute_market_features({'BTC-USD': _pt(0.0)}, {}, ticker_obs=tobs)
+    assert (r['dvol_btc'], r['atm_iv_30d_btc'], r['skew_25d_btc'], r['put_call_oi_btc']) == (45.0, 44.0, 2.5, 0.7)
+    assert r['dvol_eth'] == 60.0 and r['options_degraded_btc'] is False
+    # market observation is the fallback when the ticker observation lacks the field
+    r = features.compute_market_features({}, {'dvol_btc': 50.0}, ticker_obs={'BTC-USD': {'options_degraded': True}})
+    assert r['dvol_btc'] == 50.0 and r['atm_iv_30d_btc'] is None and r['options_degraded_btc'] is True
+    r = features.compute_market_features({}, {})
+    assert r['dvol_btc'] is None and r['options_degraded_btc'] is None
+
+
+def test_market_oi_total_prefers_cross_venue_totals():
+    per = {'BTC-USD': {'oi_usd': 10.0}, 'ETH-USD': {'oi_usd': 5.0}, 'SOL-USD': {'oi_usd': None}}
+    tobs = {'BTC-USD': {'oi_usd_total': 30.0}, '__MARKET__': {'oi_usd_total': 999.0}, 'USDT-USD': {'oi_usd_total': 7.0}}
+    r = features.compute_market_features(per, {}, ticker_obs=tobs)
+    assert r['oi_usd_total'] == 35.0 and r['oi_usd_total_venues_mixed'] is True  # only per_ticker keys are summed
+    r = features.compute_market_features(per, {}, ticker_obs={})
+    assert r['oi_usd_total'] == 15.0 and r['oi_usd_total_venues_mixed'] is False
+    r = features.compute_market_features({'SOL-USD': {'oi_usd': None}}, {})
+    assert r['oi_usd_total'] is None and r['oi_usd_total_venues_mixed'] is False

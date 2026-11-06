@@ -20,6 +20,8 @@ def all_providers() -> list[Provider]:
     from src.ingestion.crypto_flow.providers.stables_defi import StablesDefi
     from src.ingestion.crypto_flow.providers.macro_sent import MacroSent
     from src.ingestion.crypto_flow.providers.santiment import Santiment
-    return [BtcOnchain(), EvmOnchain(), Derivs(), Liquidations(), SpotTape(), DeribitVol(), HlWhales(),
-            XrpOnchain(), SolOnchain(), UtxoAlts(),
+    # HlWhales (hourly positioning, ~200 sequential POSTs) runs AFTER the whale-event chains so that under the
+    # tick deadline positioning sheds before whale events do.
+    return [BtcOnchain(), EvmOnchain(), Derivs(), Liquidations(), SpotTape(), DeribitVol(),
+            XrpOnchain(), SolOnchain(), UtxoAlts(), HlWhales(),
             CftcCot(), StablesDefi(), MacroSent(), Santiment()]

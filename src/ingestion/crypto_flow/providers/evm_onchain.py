@@ -9,7 +9,7 @@ from pathlib import Path
 
 from src.ingestion.crypto_flow import registry
 from src.ingestion.crypto_flow.models import WhaleEvent
-from src.ingestion.crypto_flow.providers.base import Provider, ProviderFetchError, get_json
+from src.ingestion.crypto_flow.providers.base import Provider, ProviderFetchError, get_json, past_deadline
 
 API_URL = ('https://api.etherscan.io/v2/api?chainid={cid}&module=account&action={action}&address={addr}'
            '&startblock={start}&sort=desc&page=1&offset=100&apikey={key}')
@@ -109,6 +109,8 @@ class EvmOnchain(Provider):
     def __init__(self):
         self.price_hints: dict[str, float] = {}
         self.throttle = _Throttle()
+        self.deadline_at: float | None = None  # time.monotonic() bound, set by the tick driver
+        self.deadline = 0  # calls not made because the tick deadline hit
 
     def enabled(self):
         return (True, None) if os.environ.get('ETHERSCAN_API_KEY') else (False, 'no_key:ETHERSCAN_API_KEY')
@@ -153,6 +155,9 @@ class EvmOnchain(Provider):
         seen, last_err = last.get(code, 0), None
         for addr, owner in watched.items():
             for action in ('tokentx', 'txlist'):
+                if past_deadline(self.deadline_at):
+                    self.deadline += 1
+                    continue
                 self.throttle.wait()
                 calls += 1
                 # _http_retry truncates logged URLs at 140 chars; the apikey sits past that. Never put the URL in an error.
@@ -167,14 +172,17 @@ class EvmOnchain(Provider):
                 seen = max(seen, max_block(payload))
                 for e in evs:
                     found[(e.chain, e.tx_hash, e.out_index)] = e
-        if errs * 2 > calls:
+        if errs * 2 > calls and calls:
             raise ProviderFetchError(f'evm_onchain: {errs}/{calls} calls failed: {last_err}')
-        if errs == 0:
+        if errs == 0 and not self.deadline:
             last[code] = seen
+        elif self.deadline:  # an incomplete pass must not advance: un-fetched addresses would lose rows
+            print(f'[evm_onchain] chain={code} deadline={self.deadline} cursor not advanced')
         else:
             print(f'[evm_onchain] chain={code} {errs}/{calls} calls failed: {last_err}; cursor not advanced')
 
     def _fetch(self, assets, since, now):
+        self.deadline = 0
         key, reg, min_usd = os.environ['ETHERSCAN_API_KEY'], registry.load_registry(), _min_usd()
         abc, state = assets_by_contract(assets), self.load_state()
         order = list(CHAINS)
@@ -186,6 +194,9 @@ class EvmOnchain(Provider):
         found: dict[tuple, WhaleEvent] = {}
         failures = []
         for cid in chains:
+            if past_deadline(self.deadline_at):
+                print(f'[evm_onchain] deadline=1 chain={CHAINS[cid]} not scanned')
+                break
             last = dict(self.load_state().get('evm_last_block', {}))
             try:
                 self._pass(cid, key, abc, prices, min_usd, reg, found, last)

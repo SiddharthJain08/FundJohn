@@ -109,3 +109,12 @@ def test_no_venue_answers_raises(monkeypatch):
     patch(monkeypatch, {})
     with pytest.raises(ProviderFetchError):
         SpotTape().fetch([BTC], NOW, NOW)
+
+
+def test_deadline_stops_tape_loop_without_raising(monkeypatch):
+    import time as _time
+    p = SpotTape()
+    p.deadline_at = _time.monotonic() - 1  # already past: nothing fetched, not a failure
+    r = patch(monkeypatch, {'api.binance.com': fx('binance_aggtrades.json')})
+    res = p.fetch(list(A.values()), NOW, NOW)
+    assert res.ok and res.observations == [] and r.calls == [] and p.deadline >= 2

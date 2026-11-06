@@ -211,3 +211,58 @@ def test_more_than_half_accounts_failing_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(hl_whales, 'get_json', _hl_router(fx('hl_leaderboard.json'), None))
     with pytest.raises(ProviderFetchError, match=r'3/5 accounts failed'):
         p.fetch(SET, NOW, NOW)
+
+
+def test_deadline_at_stops_hl_whales_mid_loop(monkeypatch, tmp_path, capsys):
+    """The tick deadline passes after the 2nd account: the loop stops, partial aggregate returned, not a failure."""
+    p = HlWhales()
+    p.state_path = tmp_path / 's.json'
+    p.deadline_at = _time.monotonic() + 3600
+    n = {'posts': 0}
+
+    def state(url, kw):
+        n['posts'] += 1
+        if n['posts'] == 2:
+            p.deadline_at = _time.monotonic() - 1  # deadline passes during the 2nd call
+        return fx('hl_clearinghouse.json')
+    monkeypatch.setattr(hl_whales, 'get_json', _hl_router(fx('hl_leaderboard.json'), state))
+    monkeypatch.setenv('OPENCLAW_CRYPTO_HL_WHALES_TOP_N', '5')
+    res = base.run_provider(p, SET, NOW, NOW)
+    assert res.ok and n['posts'] == 2 and p.deadline == 3
+    by = {o.ticker: o.fields for o in res.observations}
+    assert by['BTC-USD']['whale_perp_accounts_seen'] == 2 and by['BTC-USD']['whale_perp_deadline_skipped'] == 3
+    assert 'deadline=1 accounts_seen=2 accounts_skipped=3' in capsys.readouterr().out
+
+
+def test_leaderboard_fetch_timeout_is_20s(monkeypatch, tmp_path):
+    seen = []
+
+    def r(url, **kw):
+        seen.append((url, kw.get('timeout')))
+        return fx('hl_leaderboard.json') if 'leaderboard' in url else fx('hl_clearinghouse.json')
+    monkeypatch.setattr(hl_whales, 'get_json', r)
+    p = HlWhales()
+    p.state_path = tmp_path / 's.json'
+    p.fetch(SET, NOW, NOW)
+    assert [t for u, t in seen if 'leaderboard' in u] == [20]
+
+
+def test_parse_leaderboard_peak_memory_bounded():
+    """~48k-row leaderboard: parse_leaderboard keeps at most top_n tuples alive (heap over a generator) — peak
+    allocation inside the call < 1 MB, and nothing beyond the 200 addresses is retained."""
+    import gc
+    import tracemalloc
+    payload = {'leaderboardRows': [{'ethAddress': f'0x{i:040x}', 'accountValue': str(float(i % 9973) * 1.5),
+                                    'displayName': None, 'prize': 0} for i in range(48_000)]}
+    gc.collect()
+    tracemalloc.start()
+    try:
+        base_cur, _ = tracemalloc.get_traced_memory()
+        tracemalloc.reset_peak()
+        addrs = parse_leaderboard(payload, 200)
+        cur, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert len(addrs) == 200
+    assert peak - base_cur < 1_000_000, peak - base_cur
+    assert cur - base_cur < 1_000_000, cur - base_cur

@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 
 from src.ingestion.crypto_flow.models import Observation
-from src.ingestion.crypto_flow.providers.base import Provider, ProviderFetchError, get_json
+from src.ingestion.crypto_flow.providers.base import Provider, ProviderFetchError, get_json, past_deadline
 from src.ingestion.crypto_flow.providers.derivs import fetch_hl, parse_hl, select_top
 
 BINANCE = 'https://api.binance.com/api/v3/aggTrades?symbol={}&limit=1000'
@@ -79,9 +79,13 @@ def kraken_pair(a) -> str:
 class SpotTape(Provider):
     name = 'spot_tape'
     cadence = 'tick'
+    deadline_at: float | None = None  # time.monotonic() bound, set by the tick driver
+    deadline = 0  # assets not fetched because the tick deadline hit
 
     def _tape(self, a, venues_down: set) -> tuple[str, list[tuple]] | None:
         """First venue that returns a non-empty tape for this asset; flags Binance down on a None."""
+        if past_deadline(self.deadline_at):
+            return None
         if a.binance and 'binance' not in venues_down:
             r = get_json(BINANCE.format(a.binance), label='spot_binance', timeout=15)
             if r is None:
@@ -89,11 +93,13 @@ class SpotTape(Provider):
             elif binance_trades(r):
                 return 'binance', binance_trades(r)
             time.sleep(0.1)
-        if a.coinbase:
+        if a.coinbase and not past_deadline(self.deadline_at):
             t = coinbase_trades(get_json(COINBASE.format(a.coinbase), label='spot_coinbase', timeout=15))
             time.sleep(0.1)
             if t:
                 return 'coinbase', t
+        if past_deadline(self.deadline_at):
+            return None
         pair = kraken_pair(a)
         t = kraken_trades(get_json(KRAKEN.format(pair), label='spot_kraken', timeout=15), pair)
         time.sleep(0.1)
@@ -102,7 +108,13 @@ class SpotTape(Provider):
     def _fetch(self, assets, since, now):
         vols = {t: d['vol_24h_usd'] for t, d in parse_hl(fetch_hl(), assets).items()}
         min_usd, down, obs = large_print_usd(), set(), []
-        for a in select_top(assets, vols, 'ticker', top_n()):
+        self.deadline = 0
+        top = select_top(assets, vols, 'ticker', top_n())
+        for i, a in enumerate(top):
+            if past_deadline(self.deadline_at):
+                self.deadline = len(top) - i
+                print(f'[spot_tape] deadline=1 assets_seen={i} assets_skipped={self.deadline}')
+                break
             got = self._tape(a, down)
             if not got:
                 continue
@@ -110,6 +122,6 @@ class SpotTape(Provider):
             ts = [t[3] for t in trades]
             obs.append(Observation(now, a.ticker, self.name, classify_prints(trades, min_usd) | {
                 'tape_coverage_s': max(ts) - min(ts), 'tape_venue': venue, 'tape_n': len(trades)}))
-        if not obs:
+        if not obs and not self.deadline:
             raise ProviderFetchError('spot_tape: no venue answered')
         return [], obs

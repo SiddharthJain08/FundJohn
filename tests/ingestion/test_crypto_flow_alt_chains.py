@@ -278,3 +278,21 @@ def test_utxo_alts_all_sources_none_raises(tmp_path, monkeypatch, assets):
     p, _ = _utxo(tmp_path, monkeypatch, lambda u: None)
     with pytest.raises(ProviderFetchError):
         p.fetch(assets, NOW, NOW)
+
+
+def test_sol_deadline_stops_loop_and_keeps_cursor_contiguous(tmp_path, monkeypatch, assets, capsys):
+    import time as _time
+    seen = []
+
+    def rpc(url, body):
+        seen.append(body['method'])
+        if seen.count('getTransaction') == 2:
+            p.deadline_at = _time.monotonic() - 1
+        return _rpc(url, body)
+    p, calls = _sol(tmp_path, monkeypatch, rpc)
+    p.deadline_at = _time.monotonic() + 3600
+    r = p.fetch(assets, NOW, NOW)
+    assert r.ok and seen.count('getTransaction') == 2 and p.deadline == 1
+    assert 'deadline=1' in capsys.readouterr().out
+    cur = p.load_state()['sol_last_sig']
+    assert len(cur) == 2  # only the two processed signatures advanced their address cursors

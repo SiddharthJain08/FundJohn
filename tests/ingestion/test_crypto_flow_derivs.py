@@ -172,8 +172,13 @@ def test_liquidations_provider_caches_ctval_and_raises_when_all_fail(monkeypatch
 def test_providers_registered():
     from src.ingestion.crypto_flow.providers import all_providers
     assert [p.name for p in all_providers()][-12:] == [
-        'derivs', 'liquidations', 'spot_tape', 'deribit_vol', 'hl_whales', 'xrp_onchain', 'sol_onchain', 'utxo_alts',
+        'derivs', 'liquidations', 'spot_tape', 'deribit_vol', 'xrp_onchain', 'sol_onchain', 'utxo_alts', 'hl_whales',
         'cftc_cot', 'stables_defi', 'macro_sent', 'santiment']
+
+
+def test_parse_okx_oi_fixture():
+    assert derivs.parse_okx_oi(fx('okx_oi.json')) == pytest.approx(2643830889.79186266616329)
+    assert derivs.parse_okx_oi({'data': []}) is None and derivs.parse_okx_oi(None) is None
 
 
 def test_binance_futures_symbol_rule_and_mark_scaling(monkeypatch):

@@ -18,7 +18,7 @@ const express = require('express');
 const router = express.Router();
 
 let dbQuery = require('../../database/postgres').query;
-let execFile = require('child_process').execFile;
+let { runAlpaca } = require('./alpaca_cli');  // shared wrapper: ALPACA_CLI_BIN, --quiet/--timeout
 
 const UNIVERSE = JSON.parse(fs.readFileSync(
   path.join(__dirname, '../../ingestion/crypto_flow/crypto_flow_universe.json'), 'utf8'));
@@ -138,20 +138,22 @@ router.get('/risk', (req, res) => {
   });
 });
 
-router.get('/positions', (req, res) => {
-  execFile('/root/go/bin/alpaca',
-    ['position', 'list', '-q', '--jq', '[.[]|select(.asset_class=="crypto")]'],
-    { timeout: 15000 }, (err, stdout) => {
-      if (err) return fail(res, err);
-      try {
-        const rows = JSON.parse(stdout || '[]').map((p) => ({
-          symbol: p.symbol, ticker: normalizeCryptoSymbol(p.symbol), qty: num(p.qty),
-          market_value: num(p.market_value), unrealized_pl: num(p.unrealized_pl),
-          unrealized_plpc: num(p.unrealized_plpc),
-        }));
-        res.json({ available: true, rows });
-      } catch (e) { fail(res, e); }
-    });
+router.get('/positions', async (req, res) => {
+  try {
+    const r = await runAlpaca(['position', 'list', '--jq', '[.[]|select(.asset_class=="crypto")]'],
+      { timeout: 15000 });
+    if (!r.ok) {
+      const msg = (r.error && r.error.error) || r.stderr || `alpaca exit ${r.exit_code}`;
+      return fail(res, new Error(String(msg)));
+    }
+    const list = typeof r.payload === 'string' ? JSON.parse(r.payload || '[]') : (r.payload || []);
+    const rows = list.map((p) => ({
+      symbol: p.symbol, ticker: normalizeCryptoSymbol(p.symbol), qty: num(p.qty),
+      market_value: num(p.market_value), unrealized_pl: num(p.unrealized_pl),
+      unrealized_plpc: num(p.unrealized_plpc),
+    }));
+    res.json({ available: true, rows });
+  } catch (e) { fail(res, e); }
 });
 
 // ── SSE watcher ─────────────────────────────────────────────────────────────
@@ -201,4 +203,4 @@ module.exports.startEventWatcher = startEventWatcher;
 module.exports.stopEventWatcher = stopEventWatcher;
 module.exports.normalizeCryptoSymbol = normalizeCryptoSymbol;
 module.exports._setQueryForTests = (fn) => { dbQuery = fn; };
-module.exports._setExecFileForTests = (fn) => { execFile = fn; };
+module.exports._setRunAlpacaForTests = (fn) => { runAlpaca = fn || require('./alpaca_cli').runAlpaca; };

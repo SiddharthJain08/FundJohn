@@ -1,4 +1,7 @@
-"""macro_sent: BTC dominance / total mcap, per-asset price+mcap+volume+returns, and Fear & Greed."""
+"""macro_sent: BTC dominance / total mcap, per-asset price+mcap+volume+returns, and Fear & Greed.
+
+Per-asset outputs are named spot_px / spot_mcap_usd / spot_vol_24h_usd / cg_ret_1h / cg_ret_24h so they never
+collide with the feature OUTPUTS price_usd / ret_1h / ret_24h (nor derivs' vol_24h_usd)."""
 from __future__ import annotations
 
 import os
@@ -41,10 +44,10 @@ class MacroSent(Provider):
             r = by_id.get(a.coingecko_id)
             if r:
                 r24 = r.get('price_change_percentage_24h_in_currency')
-                out[a.ticker] = {'price_usd': _f(r.get('current_price')), 'mcap_usd': _f(r.get('market_cap')),
-                                 'vol_24h_usd': _f(r.get('total_volume')),
-                                 'ret_1h': _f(r.get('price_change_percentage_1h_in_currency')),
-                                 'ret_24h': _f(r24 if r24 is not None else r.get('price_change_percentage_24h'))}
+                out[a.ticker] = {'spot_px': _f(r.get('current_price')), 'spot_mcap_usd': _f(r.get('market_cap')),
+                                 'spot_vol_24h_usd': _f(r.get('total_volume')),
+                                 'cg_ret_1h': _f(r.get('price_change_percentage_1h_in_currency')),
+                                 'cg_ret_24h': _f(r24 if r24 is not None else r.get('price_change_percentage_24h'))}
         return out
 
     def _per_asset_paprika(self, assets):
@@ -67,9 +70,9 @@ class MacroSent(Provider):
                 self.paprika_ambiguous += 1
             q = _get(row, 'quotes', 'USD')
             if q:
-                out[a.ticker] = {'price_usd': _f(q.get('price')), 'mcap_usd': _f(q.get('market_cap')),
-                                 'vol_24h_usd': _f(q.get('volume_24h')), 'ret_1h': _f(q.get('percent_change_1h')),
-                                 'ret_24h': _f(q.get('percent_change_24h'))}
+                out[a.ticker] = {'spot_px': _f(q.get('price')), 'spot_mcap_usd': _f(q.get('market_cap')),
+                                 'spot_vol_24h_usd': _f(q.get('volume_24h')), 'cg_ret_1h': _f(q.get('percent_change_1h')),
+                                 'cg_ret_24h': _f(q.get('percent_change_24h'))}
         return out
 
     def _fetch(self, assets, since, now):

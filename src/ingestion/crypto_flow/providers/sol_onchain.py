@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from src.ingestion.crypto_flow import registry
 from src.ingestion.crypto_flow.models import WhaleEvent
 from src.ingestion.crypto_flow.providers.base import (
-    Provider, ProviderFetchError, StateMixin, get_json, min_usd, resolve_prices)
+    Provider, ProviderFetchError, StateMixin, get_json, min_usd, past_deadline, resolve_prices)
 
 PUBLIC_RPC = 'https://api.mainnet-beta.solana.com'
 HELIUS_RPC = 'https://mainnet.helius-rpc.com/?api-key={key}'
@@ -85,6 +85,8 @@ class SolOnchain(StateMixin, Provider):
     def __init__(self):
         self.price_hints: dict[str, float] = {}
         self.calls = 0
+        self.deadline_at: float | None = None  # time.monotonic() bound, set by the tick driver
+        self.deadline = 0  # 1 once the tick deadline cut the loop (cursors stay contiguous)
 
     def rpc_url(self) -> str:
         key = os.environ.get('HELIUS_API_KEY')
@@ -106,6 +108,9 @@ class SolOnchain(StateMixin, Provider):
         for addr in watched:
             if self.calls >= budget:
                 break
+            if past_deadline(self.deadline_at):
+                self.deadline = 1
+                break
             cfg = {'limit': 50, **({'until': cursors[addr]} if cursors.get(addr) else {})}
             sigs = self._rpc('getSignaturesForAddress', [addr, cfg])
             if not isinstance(sigs, list):
@@ -126,7 +131,7 @@ class SolOnchain(StateMixin, Provider):
             return [], []
         state = self.load_state()
         cursors = dict(state.get('sol_last_sig', {}))
-        self.calls, budget, failed = 0, self.max_calls(), []
+        self.calls, budget, failed, self.deadline = 0, self.max_calls(), [], 0
         queues = self._queues(watched, cursors, budget, failed)
         if not queues and failed:
             raise ProviderFetchError(f'sol_onchain: getSignaturesForAddress failed for all {len(failed)} addresses')
@@ -139,6 +144,10 @@ class SolOnchain(StateMixin, Provider):
                     continue
                 if self.calls >= budget:
                     break
+                if past_deadline(self.deadline_at):
+                    self.deadline = 1
+                    queues.clear()
+                    break
                 entry = q[0]
                 if entry.get('err') is None:
                     tx = self._rpc('getTransaction', [entry['signature'], _TX_OPTS])
@@ -150,6 +159,8 @@ class SolOnchain(StateMixin, Provider):
                         found[e.key()] = e
                 q.popleft()
                 cursors[addr] = entry['signature']
+        if self.deadline:
+            print(f'[sol_onchain] deadline=1 calls={self.calls}')
         if any(queues.values()) and self.calls >= budget:
             print(f'[sol_onchain] budget_exhausted=True calls={self.calls} pending={sum(map(len, queues.values()))}')
         if cursors != state.get('sol_last_sig', {}):

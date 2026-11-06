@@ -1,6 +1,7 @@
 """hl_whales: aggregate perp positioning of the top-N Hyperliquid accounts by account value."""
 from __future__ import annotations
 
+import heapq
 import json
 import os
 import time
@@ -9,11 +10,12 @@ from pathlib import Path
 
 from src.ingestion.crypto_flow import universe
 from src.ingestion.crypto_flow.models import Observation
-from src.ingestion.crypto_flow.providers.base import Provider, ProviderFetchError, get_json
+from src.ingestion.crypto_flow.providers.base import Provider, ProviderFetchError, get_json, past_deadline
 
 LEADERBOARD_URL = 'https://stats-data.hyperliquid.xyz/Mainnet/leaderboard'
 INFO_URL = 'https://api.hyperliquid.xyz/info'
 LEADERBOARD_TTL = 24 * 3600
+LEADERBOARD_TIMEOUT_S = 20  # ~40 MB body; the tick deadline cannot afford a longer stall
 
 
 def _f(x) -> float | None:
@@ -28,14 +30,19 @@ def top_n() -> int:
 
 
 def parse_leaderboard(payload, top_n: int) -> list[str]:
-    """Addresses of the `top_n` largest accounts by accountValue; [] on a malformed payload."""
+    """Addresses of the `top_n` largest accounts by accountValue; [] on a malformed payload.
+
+    The leaderboard is ~48k rows / 40 MB: a bounded heap over a generator keeps at most top_n tuples alive
+    (no 48k-tuple list + sort). ijson is not installed, so the caller drops the parsed payload right after."""
     rows = payload.get('leaderboardRows') if isinstance(payload, dict) else None
-    ranked = []
-    for r in rows or []:
-        v = _f(r.get('accountValue')) if isinstance(r, dict) else None
-        if v is not None and r.get('ethAddress'):
-            ranked.append((v, r['ethAddress']))
-    return [a for _, a in sorted(ranked, reverse=True)[:top_n]]
+
+    def ranked():
+        for r in rows or []:
+            if isinstance(r, dict) and r.get('ethAddress'):
+                v = _f(r.get('accountValue'))
+                if v is not None:
+                    yield v, r['ethAddress']
+    return [a for _, a in heapq.nlargest(top_n, ranked())]
 
 
 def aggregate_positions(states: list[dict], coin_to_ticker: dict) -> dict[str, dict]:
@@ -63,6 +70,8 @@ class HlWhales(Provider):
     name = 'hl_whales'
     cadence = 'hourly'
     state_path = Path('data/master/.crypto_flow_state.json')
+    deadline_at: float | None = None  # time.monotonic() bound, set by the tick driver
+    deadline = 0  # accounts not fetched because the tick deadline hit
 
     def load_state(self) -> dict:
         try:
@@ -87,21 +96,30 @@ class HlWhales(Provider):
             age = None
         if age is not None and age < LEADERBOARD_TTL and cache.get('addresses'):
             return cache['addresses'][:n]
-        addrs = parse_leaderboard(get_json(LEADERBOARD_URL, label='hl_leaderboard', timeout=60), n)
+        addrs = []
+        if not past_deadline(self.deadline_at):
+            payload = get_json(LEADERBOARD_URL, label='hl_leaderboard', timeout=LEADERBOARD_TIMEOUT_S)
+            addrs = parse_leaderboard(payload, n)
+            del payload  # reduce to top-n first, then free the 48k-row parse before anything else allocates
         if not addrs:
             if cache.get('addresses'):  # stale cache beats no data
                 hours = f'{age / 3600:.1f}' if age is not None else '?'
                 print(f'[hl_whales] leaderboard refetch failed; using cached list age={hours}h')
                 return cache['addresses'][:n]
-            raise ProviderFetchError('hl_whales: leaderboard None')
+            raise ProviderFetchError('hl_whales: leaderboard None' + (' (deadline)' if past_deadline(self.deadline_at) else ''))
         self.save_state({**state, 'hl_whales_leaderboard': {
             'fetched_at': datetime.fromtimestamp(time.time(), timezone.utc).isoformat(), 'addresses': addrs}})
         return addrs
 
     def _fetch(self, assets, since, now):
+        self.deadline = 0
         addrs = self._addresses(top_n())
         states, failed = [], 0
         for i, addr in enumerate(addrs):
+            if past_deadline(self.deadline_at):  # tick deadline: aggregate what we have (not a failure)
+                self.deadline = len(addrs) - i
+                print(f'[hl_whales] deadline=1 accounts_seen={len(states)} accounts_skipped={self.deadline}')
+                break
             if i:
                 time.sleep(0.1)
             st = get_json(INFO_URL, label='hl_clearinghouse', timeout=15, method='POST',
@@ -114,5 +132,6 @@ class HlWhales(Provider):
                 raise ProviderFetchError(f'hl_whales: {failed}/{len(addrs)} accounts failed')
         coin_to_ticker = {a.hyperliquid: a.ticker for a in universe.load_universe() if a.hyperliquid}
         agg = aggregate_positions(states, coin_to_ticker)
-        return [], [Observation(now, t, self.name, rec | {'whale_perp_accounts_seen': len(states)})
+        return [], [Observation(now, t, self.name, rec | {'whale_perp_accounts_seen': len(states),
+                                                          'whale_perp_deadline_skipped': self.deadline or None})
                     for t, rec in agg.items()]

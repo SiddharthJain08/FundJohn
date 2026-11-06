@@ -188,3 +188,24 @@ def test_error_strings_never_contain_api_key(tmp_path, monkeypatch):
         with pytest.raises(evm_onchain.ProviderFetchError) as ei:
             p._fetch(universe.load_universe(), None, None)
         assert 'SECRETKEY123' not in str(ei.value)
+
+
+def test_deadline_mid_pass_returns_partial_and_does_not_advance_cursor(tmp_path, monkeypatch, capsys):
+    import time as _time
+    p = _provider(tmp_path, monkeypatch, [], None)
+    p.deadline_at = _time.monotonic() + 3600
+    n = []
+
+    def fake(url, **kw):
+        if 'coingecko' in url:
+            return {}
+        n.append(1)
+        if len(n) == 2:
+            p.deadline_at = _time.monotonic() - 1  # tick deadline passes during the 2nd call
+        return load('etherscan_txlist.json')
+    monkeypatch.setattr(evm_onchain, 'get_json', fake)
+    evs, _ = p._fetch(universe.load_universe(), None, None)
+    assert len(n) == 2 and isinstance(evs, list) and p.deadline > 0  # partial result returned, no raise
+    st = json.loads(p.state_path.read_text())
+    assert 'ETH' not in (st.get('evm_last_block') or {})  # un-fetched addresses would lose rows
+    assert 'cursor not advanced' in capsys.readouterr().out

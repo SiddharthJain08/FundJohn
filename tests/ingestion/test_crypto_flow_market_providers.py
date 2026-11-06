@@ -119,9 +119,9 @@ def test_macro_sent_global_and_fng_fields(monkeypatch):
     assert m['fear_greed'] == int(fx('fng.json')['data'][0]['value'])
     btc = next(r for r in fx('coingecko_markets.json') if r['id'] == 'bitcoin')
     assert fields_of(res, 'BTC-USD') == {
-        'price_usd': btc['current_price'], 'mcap_usd': btc['market_cap'], 'vol_24h_usd': btc['total_volume'],
-        'ret_1h': btc['price_change_percentage_1h_in_currency'],
-        'ret_24h': btc['price_change_percentage_24h_in_currency']}
+        'spot_px': btc['current_price'], 'spot_mcap_usd': btc['market_cap'], 'spot_vol_24h_usd': btc['total_volume'],
+        'cg_ret_1h': btc['price_change_percentage_1h_in_currency'],
+        'cg_ret_24h': btc['price_change_percentage_24h_in_currency']}
     assert not any(o.ticker == 'USDT-USD' for o in res.observations)
 
 
@@ -129,8 +129,8 @@ def test_macro_sent_paprika_fallback(monkeypatch):
     monkeypatch.setattr(macro_sent, 'get_json', _macro_router(**{'coins/markets': None}))
     res = MacroSent().fetch(SET, NOW, NOW)
     eth = next(r for r in fx('coinpaprika_tickers.json') if r['symbol'] == 'ETH')['quotes']['USD']
-    assert res.ok and fields_of(res, 'ETH-USD')['price_usd'] == eth['price']
-    assert fields_of(res, 'ETH-USD')['ret_24h'] == eth['percent_change_24h']
+    assert res.ok and fields_of(res, 'ETH-USD')['spot_px'] == eth['price']
+    assert fields_of(res, 'ETH-USD')['cg_ret_24h'] == eth['percent_change_24h']
     assert fields_of(res)['btc_dominance'] is not None
 
 
@@ -157,7 +157,7 @@ def test_paprika_symbol_collision_uses_id_match(monkeypatch):
     rows = _paprika([('sky-skycoin', 'SKY', 300, 1.0), ('sky-sky', 'SKY', 900, 2.0)])
     monkeypatch.setattr(macro_sent, 'get_json', _macro_router(**{'coins/markets': None, 'coinpaprika': rows}))
     res = MacroSent().fetch([sky], NOW, NOW)
-    assert fields_of(res, 'SKY-USD')['price_usd'] == 2.0 and fields_of(res)['paprika_ambiguous'] is None
+    assert fields_of(res, 'SKY-USD')['spot_px'] == 2.0 and fields_of(res)['paprika_ambiguous'] is None
     # a lone unranked 'sky-skycoin' must NOT be matched by substring of coingecko_id 'sky'
     lone = _paprika([('sky-skycoin', 'SKY', 0, 1.0)])
     monkeypatch.setattr(macro_sent, 'get_json', _macro_router(**{'coins/markets': None, 'coinpaprika': lone}))
@@ -224,3 +224,14 @@ def test_santiment_partial_failure_counts(monkeypatch, tmp_path):
     p.onchain_daily_path = tmp_path / 'onchain.parquet'
     f = fields_of(p.fetch([], NOW, NOW))
     assert f['santiment_queries_failed'] == 1 and f['santiment_rows_written'] == 27
+
+
+def test_macro_sent_per_asset_names_never_collide_with_feature_outputs(monkeypatch):
+    from src.ingestion.crypto_flow import features
+    r = Router({'coins/markets': fx('coingecko_markets.json'), 'api/v3/global': fx('coingecko_global.json'),
+                'alternative.me': fx('fng.json')})
+    monkeypatch.setattr(macro_sent, 'get_json', r)
+    res = MacroSent().fetch(SET, NOW, NOW)
+    keys = {k for o in res.observations if o.ticker != MARKET_TICKER for k in o.fields}
+    assert keys == {'spot_px', 'spot_mcap_usd', 'spot_vol_24h_usd', 'cg_ret_1h', 'cg_ret_24h'}
+    assert not keys & set(features.FEATURE_COLS) and 'vol_24h_usd' not in keys  # derivs owns vol_24h_usd

@@ -2,7 +2,7 @@
 // tests/test_routes_crypto.test.js — /api/crypto router + SSE event watcher.
 // Handlers are exercised through a tiny in-process Express app on an
 // ephemeral port (app.listen(0)) with global fetch; the DB `query` and
-// `execFile` are injected via router._setQueryForTests / _setExecFileForTests.
+// `runAlpaca` are injected via router._setQueryForTests / _setRunAlpacaForTests.
 const { test, beforeEach, after } = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
@@ -81,24 +81,35 @@ test('events clamps limit and never throws on db error', async () => {
   assert.match(body.error, /boom/);
 });
 
-test('positions normalises BTCUSD and BTC/USD to BTC-USD', async () => {
+test('positions normalises BTCUSD and BTC/USD to BTC-USD via the shared alpaca CLI wrapper', async () => {
   let args;
-  router._setExecFileForTests((bin, a, opts, cb) => {
-    args = { bin, a, opts };
-    cb(null, JSON.stringify([
+  router._setRunAlpacaForTests(async (a, opts) => {
+    args = { a, opts };
+    return { ok: true, exit_code: 0, payload: [
       { symbol: 'BTCUSD', qty: '1', market_value: '100', unrealized_pl: '1', unrealized_plpc: '0.01', asset_class: 'crypto' },
       { symbol: 'ETH/USD', qty: '2', market_value: '50', unrealized_pl: '0', unrealized_plpc: '0' },
       { symbol: 'ZZZUSD', qty: '2' },
-    ]), '');
+    ] };
   });
   const { body } = await get('/positions');
-  assert.equal(args.bin, '/root/go/bin/alpaca');
+  assert.deepEqual(args.a.slice(0, 2), ['position', 'list']);
   assert.equal(args.opts.timeout, 15000);
   assert.deepEqual(body.rows.map((r) => r.ticker), ['BTC-USD', 'ETH-USD', null]);
-  router._setExecFileForTests((b, a, o, cb) => cb(new Error('no alpaca')));
+  router._setRunAlpacaForTests(async () => ({ ok: false, exit_code: 1, stderr: '', payload: null,
+    error: { error: 'no alpaca', status: null } }));
   const f = await get('/positions');
   assert.equal(f.body.available, false);
   assert.equal(f.body.reason, 'error');
+  assert.match(f.body.error, /no alpaca/);
+  router._setRunAlpacaForTests(null);
+});
+
+test('positions binary honours ALPACA_CLI_BIN through alpaca_cli.js', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../src/channels/api/routes_crypto.js'), 'utf8');
+  assert.doesNotMatch(src, /\/root\/go\/bin\/alpaca/);  // no hard-coded binary left in the route
+  assert.match(src, /require\('\.\/alpaca_cli'\)/);
+  const { ALPACA_CLI } = require('../src/channels/api/alpaca_cli');
+  assert.equal(ALPACA_CLI, process.env.ALPACA_CLI_BIN || '/root/go/bin/alpaca');
 });
 
 test('providers degraded needs three consecutive failures', async () => {

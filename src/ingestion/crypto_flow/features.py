@@ -174,13 +174,14 @@ def compute_ticker_features(ticker, now, events, flows_hist, obs, agreement_shar
     else:
         oi1 = _oi_change(hist, t, timedelta(hours=1), timedelta(minutes=30), oi, venues)
         oi24 = _oi_change(hist, t, timedelta(hours=24), timedelta(hours=2), oi, venues)
-    # per-tick price: the derivs perp mark (every tick) when sane, else macro_sent's hourly spot
-    spot, mark = g('price_usd'), g('mark_px')
+    # per-tick price: the derivs perp mark (every tick) when sane, else macro_sent's hourly spot (raw `spot_px`;
+    # macro_sent's per-asset names never collide with these outputs, so a carried slow value is always raw)
+    spot, mark = g('spot_px'), g('mark_px')
     price = mark if mark is not None and math.isfinite(mark) and mark > 0 else spot
     ret1 = _pct(price, _snap_value(snap, t - timedelta(hours=1), timedelta(minutes=5), 'price_usd'))
-    ret1 = g('ret_1h') if ret1 is None else ret1
+    ret1 = g('cg_ret_1h') if ret1 is None else ret1
     ret24 = _pct(price, _snap_value(snap, t - timedelta(hours=24), timedelta(minutes=30), 'price_usd'))
-    ret24 = g('ret_24h') if ret24 is None else ret24
+    ret24 = g('cg_ret_24h') if ret24 is None else ret24
     imb = g('large_print_imbalance_1h')
     funding, ls, tk = g('funding_8h'), g('ls_ratio_global'), g('taker_buy_sell')
     sign = {'distributing': 1, 'accumulating': -1}.get(_direction(z, imb), 0)
@@ -206,8 +207,28 @@ def compute_ticker_features(ticker, now, events, flows_hist, obs, agreement_shar
         'whale_score_components': comps}
 
 
-def compute_market_features(per_ticker: dict, market_obs: dict, thr=DEFAULT_THRESHOLDS, *, flows_hist=None, now=None) -> dict:
+def _market_oi_total(per_ticker: dict, ticker_obs: dict | None) -> tuple[float | None, bool]:
+    """Sum over tickers of the derivs cross-venue `oi_usd_total` where present, else the single-venue `oi_usd`.
+    Second value: True when the sum mixes multi-venue totals with single-venue values."""
+    total, multi, single = 0.0, 0, 0
+    for tk, p in per_ticker.items():
+        v = _f(((ticker_obs or {}).get(tk) or {}).get('oi_usd_total'))
+        if v is not None:
+            total, multi = total + v, multi + 1
+            continue
+        v = _f(p.get('oi_usd'))
+        if v is not None:
+            total, single = total + v, single + 1
+    return (total if multi or single else None), bool(multi and single)
+
+
+def compute_market_features(per_ticker: dict, market_obs: dict, thr=DEFAULT_THRESHOLDS, *, flows_hist=None, now=None,
+                            ticker_obs: dict | None = None) -> dict:
+    """`ticker_obs`: the per-ticker RAW merged observations (driver `merged`); deribit_vol emits its fields on
+    BTC-USD / ETH-USD, so the market's dvol/IV/skew/put-call keys come from there (market obs = fallback)."""
     mo = market_obs or {}
+    tobs = ticker_obs or {}
+    btc_o, eth_o = tobs.get('BTC-USD') or {}, tobs.get('ETH-USD') or {}
     btc, eth = per_ticker.get('BTC-USD', {}), per_ticker.get('ETH-USD', {})
     supply, supply_chg = _f(mo.get('stable_supply_usd')), None
     if supply is not None and flows_hist is not None and now is not None:
@@ -217,8 +238,7 @@ def compute_market_features(per_ticker: dict, market_obs: dict, thr=DEFAULT_THRE
             h = h[(h['ts_utc'] <= t) & (h['ts_utc'] >= t - timedelta(hours=12))].dropna(subset=['stable_supply_usd'])
             prev = _f(h.sort_values('ts_utc')['stable_supply_usd'].iloc[-1]) if len(h) else None
             supply_chg = (supply / prev - 1) * 100 if prev else None
-    ois = [_f(p.get('oi_usd')) for p in per_ticker.values()]
-    ois = [o for o in ois if o is not None]
+    oi_total, oi_mixed = _market_oi_total(per_ticker, tobs)
     delev = bool(btc.get('delev_1h') or eth.get('delev_1h'))
     shocks = []
     for tk, p in per_ticker.items():
@@ -229,16 +249,23 @@ def compute_market_features(per_ticker: dict, market_obs: dict, thr=DEFAULT_THRE
             shocks.append(f"shock ticker={tk} kind=whale_score value={p['whale_score']}")
     if delev:
         shocks.append('shock ticker=__MARKET__ kind=delev value=1')
-    out = {'stable_supply_usd': supply, 'stable_supply_chg_7d_pct': supply_chg}
+    out = {'stable_supply_usd': supply, 'stable_supply_chg_7d_pct': supply_chg,
+           'stable_supply_missing': mo.get('stable_supply_missing') or None,
+           'paprika_ambiguous': _f(mo.get('paprika_ambiguous'))}
     for k in ('btc_dominance', 'total_mcap_usd', 'fear_greed', 'tvl_usd', 'dex_vol_24h_usd'):
         out[k] = _f(mo.get(k))
-    out.update({'oi_usd_total': float(sum(ois)) if ois else None, 'delev_market': delev,
+    out.update({'oi_usd_total': oi_total, 'oi_usd_total_venues_mixed': oi_mixed, 'delev_market': delev,
                 'whale_score_btc': btc.get('whale_score'), 'whale_score_eth': eth.get('whale_score'),
                 'whale_direction_btc': btc.get('whale_direction'), 'agreement_share': _f(mo.get('agreement_share')),
                 'cot_report_date': mo.get('cot_report_date')})
-    for k in ('cot_lev_net', 'cot_lev_net_chg_1w', 'dvol_btc', 'atm_iv_30d_btc', 'skew_25d_btc', 'put_call_oi_btc',
-              'san_btc_exchange_balance_30d_lag', 'san_eth_exchange_balance_30d_lag'):
+    for k in ('cot_lev_net', 'cot_lev_net_chg_1w', 'san_btc_exchange_balance_30d_lag', 'san_eth_exchange_balance_30d_lag'):
         out[k] = _f(mo.get(k))
-    out['providers_degraded'] = list(mo.get('providers_degraded') or [])
+    for src, o, sfx in (('dvol', btc_o, '_btc'), ('atm_iv_30d', btc_o, '_btc'), ('skew_25d', btc_o, '_btc'),
+                        ('put_call_oi', btc_o, '_btc'), ('dvol', eth_o, '_eth')):
+        v = _f(o.get(src))
+        out[src + sfx] = v if v is not None else _f(mo.get(src + sfx))
+    deg = btc_o.get('options_degraded', mo.get('options_degraded_btc'))
+    out['options_degraded_btc'] = None if deg is None else bool(deg)
+    out['providers_failed_this_tick'] = list(mo.get('providers_failed_this_tick') or [])
     out['shock_lines'] = shocks
     return out

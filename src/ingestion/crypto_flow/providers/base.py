@@ -84,6 +84,12 @@ class StateMixin:
         os.replace(tmp, path)
 
 
+def past_deadline(deadline_at: float | None) -> bool:
+    """True once the tick's hard deadline (a time.monotonic() value set by the tick driver) has passed.
+    Loop providers check this before each HTTP call and return partial results."""
+    return deadline_at is not None and time.monotonic() >= deadline_at
+
+
 class ProviderFetchError(RuntimeError):
     """Raised by a provider when its PRIMARY source returns None/garbage so run_provider records ok=False."""
 
