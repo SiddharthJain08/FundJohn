@@ -46,7 +46,7 @@ def test_registry_direction_exchange_in(fixture_json):
 
 
 def test_parse_block_txs(block_fx):
-    evs = btc_onchain.parse_block_txs(block_fx['txs'], block_fx['height'], price=76000.0,
+    evs = btc_onchain.parse_block_txs(block_fx['txs'], price=76000.0,
                                       reg=registry.load_registry(), min_usd=1_000_000,
                                       ts=datetime.fromtimestamp(block_fx['timestamp'], tz=timezone.utc))
     assert len(evs) == 1 and evs[0].out_index == 0 and evs[0].tx_hash == block_fx['txs'][0]['txid']
@@ -84,6 +84,8 @@ def test_fetch_blocks_state_and_dedupe(monkeypatch, tmp_path, fixture_json, bloc
             return fixture_json
         if u.endswith('/api/blocks'):
             return blocks
+        if 'rawblock' in u:
+            return None
         if '/api/block/b2/txs' in u:
             return block_fx['txs']
         return None
@@ -108,3 +110,43 @@ def test_no_price_raises(monkeypatch, tmp_path, fixture_json):
     now = datetime.now(timezone.utc)
     with pytest.raises(base.ProviderFetchError):
         p._fetch([], now, now)
+
+
+def _blocks_routes(raw_fx, block_fx, calls, raw):
+    h = raw_fx['height']
+    blocks = [{'id': 'b2', 'height': h, 'timestamp': raw_fx['time']}]
+
+    def routes(u):
+        calls.append(u)
+        if 'blockchain.info/unconfirmed' in u:
+            return {'txs': []}
+        if u.endswith('/api/blocks'):
+            return blocks
+        if 'rawblock' in u:
+            return raw
+        if '/api/block/b2/txs' in u:
+            return block_fx['txs']
+        return None
+    return routes
+
+
+def test_block_path_uses_rawblock_full_coverage(monkeypatch, tmp_path, block_fx):
+    raw_fx = json.loads((FX / 'blockchain_info_rawblock.json').read_text())
+    calls = []
+    p = _provider(tmp_path, monkeypatch, _blocks_routes(raw_fx, block_fx, calls, raw_fx))
+    now = datetime.now(timezone.utc)
+    evs, _ = p._fetch([], now, now)
+    assert len(evs) == 1 and evs[0].tx_hash == raw_fx['tx'][0]['hash']
+    assert not any('/api/block/b2/txs' in u for u in calls)
+    assert p.load_state()['btc_last_height'] == raw_fx['height']
+
+
+def test_block_path_falls_back_to_mempool_page_when_rawblock_none(monkeypatch, tmp_path, block_fx, capsys):
+    raw_fx = json.loads((FX / 'blockchain_info_rawblock.json').read_text())
+    calls = []
+    p = _provider(tmp_path, monkeypatch, _blocks_routes(raw_fx, block_fx, calls, None))
+    now = datetime.now(timezone.utc)
+    evs, _ = p._fetch([], now, now)
+    assert any('/api/block/b2/txs' in u for u in calls)
+    assert len(evs) == 1 and evs[0].tx_hash == block_fx['txs'][0]['txid']
+    assert 'rawblock miss' in capsys.readouterr().out

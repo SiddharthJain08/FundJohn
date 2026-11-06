@@ -1,0 +1,86 @@
+{
+ "_fixture_notes": "Captured 2026-11-06 from blockchain.info/rawblock/<hash>, 3 txs slimmed to used fields. Edit: tx0 out[0].value=1.4e9 sat (>=$1M @76000). Other outputs small.",
+ "hash": "00000000000000000000ba9e86c2b431734eb1c3d1f97135e4acd55931671dd5",
+ "height": 974859,
+ "time": 1794000294,
+ "tx": [
+  {
+   "hash": "37979146f802ce9714a8f0ba4591f128ac3659a331c749064bf2de4e32e73d8b",
+   "time": 1794000059,
+   "inputs": [
+    {
+     "prev_out": {
+      "addr": "37yrzHSnUHEipGnqu2MpNGGcxNr44vjCmz",
+      "value": 119155
+     }
+    },
+    {
+     "prev_out": {
+      "addr": "37yrzHSnUHEipGnqu2MpNGGcxNr44vjCmz",
+      "value": 26600
+     }
+    }
+   ],
+   "out": [
+    {
+     "n": 0,
+     "addr": "bc1qy0q2yvc93re9ha4jfkm2l6nudlva7dpdkfm925",
+     "value": 1400000000
+    },
+    {
+     "n": 1,
+     "addr": "37yrzHSnUHEipGnqu2MpNGGcxNr44vjCmz",
+     "value": 46355
+    }
+   ]
+  },
+  {
+   "hash": "8bbb5c99811a6bf1bde2acae472f326ae3317011292293aff78d39a88eea0d73",
+   "time": 1794000015,
+   "inputs": [
+    {
+     "prev_out": {
+      "addr": "bc1qtkjylud839636ghshu269paxmjvulmk0kv43m2",
+      "value": 172211100
+     }
+    }
+   ],
+   "out": [
+    {
+     "n": 0,
+     "addr": "bc1q4csact05kg3986avcgaag20n503lkja6awlxp4",
+     "value": 20000000
+    },
+    {
+     "n": 1,
+     "addr": "bc1qtkjylud839636ghshu269paxmjvulmk0kv43m2",
+     "value": 152208200
+    }
+   ]
+  },
+  {
+   "hash": "1507c746c71aa576738f3fa928808bf470230bfa586767f2f473669d1a69421b",
+   "time": 1794000116,
+   "inputs": [
+    {
+     "prev_out": {
+      "addr": "bc1qw8wrek2m7nlqldll66ajnwr9mh64syvkt67zlu",
+      "value": 2435474
+     }
+    }
+   ],
+   "out": [
+    {
+     "n": 0,
+     "addr": "bc1qnhjdsv06uhjhk3zj2mzprxaskxm68ue7se78vk",
+     "value": 138281
+    },
+    {
+     "n": 1,
+     "addr": "bc1qw8wrek2m7nlqldll66ajnwr9mh64syvkt67zlu",
+     "value": 2294373
+    }
+   ]
+  }
+ ]
+}

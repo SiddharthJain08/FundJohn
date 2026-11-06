@@ -12,6 +12,7 @@ from src.ingestion.crypto_flow.providers.base import Provider, ProviderFetchErro
 
 UNCONFIRMED_URL = 'https://blockchain.info/unconfirmed-transactions?format=json'
 BLOCKS_URL = 'https://mempool.space/api/blocks'
+RAWBLOCK_URL = 'https://blockchain.info/rawblock/{id}'
 BLOCK_TXS_URL = 'https://mempool.space/api/block/{id}/txs'
 SPOT_URL = 'https://api.coinbase.com/v2/prices/BTC-USD/spot'
 SAT = 1e8
@@ -57,7 +58,7 @@ def parse_unconfirmed(payload, *, price, reg, min_usd) -> list[WhaleEvent]:
     return events
 
 
-def parse_block_txs(txs, height, *, price, reg, min_usd, ts=None) -> list[WhaleEvent]:
+def parse_block_txs(txs, *, price, reg, min_usd, ts=None) -> list[WhaleEvent]:
     ts = ts or datetime.now(timezone.utc)
     events = []
     for tx in txs or []:
@@ -117,11 +118,17 @@ class BtcOnchain(Provider):
             new = new[:1] if last is None else new[:MAX_BLOCKS_PER_TICK]
             done = last
             for b in sorted(new, key=lambda b: b['height']):
-                txs = get_json(BLOCK_TXS_URL.format(id=b['id']), label='mempool_block_txs')
-                if not isinstance(txs, list):
-                    break  # retry this block next tick; keep heights contiguous
-                for e in parse_block_txs(txs, b['height'], price=price, reg=reg, min_usd=min_usd,
-                                         ts=_utc(b['timestamp'])):
+                ts = _utc(b['timestamp'])
+                raw = get_json(RAWBLOCK_URL.format(id=b['id']), label='blockchain_info_rawblock', timeout=20)
+                if isinstance(raw, dict) and isinstance(raw.get('tx'), list):
+                    evs = parse_unconfirmed({'txs': raw['tx']}, price=price, reg=reg, min_usd=min_usd)
+                else:
+                    print(f"[btc_onchain] rawblock miss height={b['height']} fallback=mempool_page")
+                    txs = get_json(BLOCK_TXS_URL.format(id=b['id']), label='mempool_block_txs')
+                    if not isinstance(txs, list):
+                        break  # retry this block next tick; keep heights contiguous
+                    evs = parse_block_txs(txs, price=price, reg=reg, min_usd=min_usd, ts=ts)
+                for e in evs:
                     found[(e.tx_hash, e.out_index)] = e
                 done = b['height']
             if done != last:
