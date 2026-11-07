@@ -397,6 +397,22 @@ _IMPL_MAP = {
     'S_insider_drawdown_confirmation': ('strategies.implementations.S_insider_drawdown_confirmation', 'InsiderDrawdownConfirmation'),
     # Ravagnani et al. 2026: AR forecast-error uncertainty robust hedge ratio (ETP pairs)
     'S_robust_min_variance_hedge': ('strategies.implementations.S_robust_min_variance_hedge', 'RobustMinVarHedge'),
+    # Benhamou/Ohana/Guez/Setrouk/Saadi/Jacquot 2026 arXiv:2611.03453: penalize a cross-asset
+    # ETF momentum book's projection onto the panel's leading eigenportfolio (crowded common trade)
+    'S_eigenportfolio_collision_penalty': ('strategies.implementations.S_eigenportfolio_collision_penalty', 'EigenportfolioCollisionPenalty'),
+    # Benhamou/Ohana/Guez/Setrouk/Saadi/Jacquot 2026 arXiv:2611.03453, variant 2 of 2: continuous
+    # 21d cross-sectional reversal book, tolled per-asset by squared loading on the panel's leading
+    # eigenportfolio (covariance-based, 156w window), weekly rebalance
+    'S_eigenportfolio_collision_penalty_tv2': ('strategies.implementations.S_eigenportfolio_collision_penalty_tv2', 'EigenportfolioCollisionPenaltyTv2'),
+    # Varner 2026 arXiv:2611.03022: bounded trend/beta/market-direction preference score
+    # selects + weights a long-only equity book; monthly horizon / GBM forecast-band
+    # breach / basket drawdown stop rebalance trigger, whichever fires first
+    'S_mpc_score_rebalanced_equity': ('strategies.implementations.S_mpc_score_rebalanced_equity', 'MpcScoreRebalancedEquity'),
+    # Varner 2026 arXiv:2611.03022, variant 2 of 2: 12-1 momentum + full-year beta (soft-capped,
+    # not hard-excluded) + quarterly market-direction preference score; equal-weights a score-
+    # quantile selection; quarterly horizon / GBM forecast-band breach on the market index /
+    # basket drawdown stop rebalance trigger, whichever fires first
+    'S_mpc_score_rebalanced_equity_tv2': ('strategies.implementations.S_mpc_score_rebalanced_equity_tv2', 'MpcScoreRebalancedEquityTv2'),
     # Keim & Stambaugh 1984: Weekend effect — Monday equity returns systematically negative
     'S_weekend_effect_monday_short': ('strategies.implementations.S_weekend_effect_monday_short', 'WeekendEffectMondayShort'),
     # Singha et al. 2026 substack: 20-day Donchian breakout + EMA trend filter on GLD, Chandelier stop
@@ -519,6 +535,21 @@ _IMPL_MAP = {
     # scale (6 markets: SPY/IEF/GLD/DBC/FXE/VNQ); variant 2 of 2 (252d lookback, literal
     # Kelly mu/sigma^2 sizing, weekly rebalance, explicit FLAT)
     'S_retail_scale_multimarket_trend_tv2': ('strategies.implementations.S_retail_scale_multimarket_trend_tv2', 'RetailScaleMultimarketTrendTv2'),
+    # Dong/Ge/Li/Su 2026 (arXiv 2611.03391) S-LASSO characteristics pricing, variant 2 of 2:
+    # Lasso group-selection (hard drop) + unpenalized OLS refit on surviving design;
+    # 1m reversal / 12-1 momentum / size^3 / vol-size & momentum-leverage interactions;
+    # quarterly refit, rank-based confidence tiers
+    'S_characteristics_lasso_pricing_tv2': ('strategies.implementations.S_characteristics_lasso_pricing_tv2', 'CharacteristicsLassoPricingTv2'),
+    # do Nascimento de Freitas et al. 2026 (arXiv 2611.06919) B3 quality/value + SMA(9/46)
+    # crossover hybrid; variant 1 of 2: balance-sheet P/BV route, working_capital/total_assets
+    # liquidity proxy for Current Ratio, rank-based composite, top-quintile screen, literal
+    # crossover events (not a held-state test)
+    'S_br_quality_value_sma_crossover': ('strategies.implementations.S_br_quality_value_sma_crossover', 'BrQualityValueSmaCrossover'),
+    # do Nascimento de Freitas et al. 2026 (arXiv 2611.06919), variant 2 of 2: income-implied
+    # P/BV route (book_equity = net_income/roe), assets/liabilities solvency proxy for Current
+    # Ratio, z-score composite, median-split screen, continuously-held SMA state test
+    # (force-flattens on screen dropout), monthly rebalance of the full rule
+    'S_br_quality_value_sma_crossover_tv2': ('strategies.implementations.S_br_quality_value_sma_crossover_tv2', 'BrQualityValueSmaCrossoverTv2'),
 }
 
 

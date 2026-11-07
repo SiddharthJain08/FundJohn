@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_eigenportfolio_collision_penalty_tv2",
+  "required": ["prices"],
+  "optional": []
+}

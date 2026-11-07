@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_br_quality_value_sma_crossover",
+  "required": ["prices", "financials"],
+  "optional": []
+}
