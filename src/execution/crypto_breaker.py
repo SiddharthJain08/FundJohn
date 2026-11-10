@@ -421,3 +421,248 @@ def fmt_blackout_msg(ev) -> str:
                                      if t.get('id') == 'T5'), None) or {}
     return (f"[crypto_breaker] BLACKOUT regime_age_h={ages.get('regime')} flow_age_h={ages.get('flow')} "
             f"holding={ev.get('n_positions', '?')} — alert only, no orders")
+
+
+# --------------------------------------------------------------------------
+# Orchestration: one tick. Every DB/Redis step is fail-open; a failure there
+# never blocks an armed T4 action and never causes an action when not armed.
+# --------------------------------------------------------------------------
+FAKE_POS_ENV = 'OPENCLAW_CRYPTO_BREAKER_FAKE_POSITIONS'
+_EVAL_COLS = ('ts_utc', 'mode', 'n_positions', 'sleeve_cost_basis', 'sleeve_unrealized_pl',
+              'sleeve_dd', 'worst_ticker', 'worst_plpc', 'triggers', 'action', 'skipped',
+              'hold_flat', 'note')
+
+
+def write_eval(conn, row: dict) -> None:
+    if conn is None:
+        print('[crypto_breaker] no DB connection; eval row not written')
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO crypto_breaker_evals ({', '.join(_EVAL_COLS)}) "
+                        f"VALUES ({', '.join(['%s'] * len(_EVAL_COLS))})",
+                        tuple(row.get(c) for c in _EVAL_COLS))
+        conn.commit()
+    except Exception as e:  # noqa: BLE001
+        print(f'[crypto_breaker] eval row write failed: {e}')
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _default_conn():
+    try:
+        import psycopg2
+        return psycopg2.connect(os.environ['POSTGRES_URI'])
+    except Exception as e:  # noqa: BLE001
+        print(f'[crypto_breaker] DB unavailable: {e}')
+        return None
+
+
+def _default_equity() -> float:
+    from execution.alpaca_trader import _alpaca_session, _fetch_account_state
+    return float(_fetch_account_state(_alpaca_session())['equity'])
+
+
+def _parse_ts(v):
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        ts = v
+    else:
+        ts = datetime.fromisoformat(str(v).replace('Z', '+00:00'))
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _default_regime_ts():
+    from regime.crypto_regime import load_crypto_regime_state
+    return _parse_ts(load_crypto_regime_state()['regime_data'].get('ts_utc'))
+
+
+def _flow_ts_from(conn):
+    if conn is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute('SELECT MAX(ts_utc) FROM crypto_flow_snapshot')
+        row = cur.fetchone()
+    return _parse_ts(row[0]) if row else None
+
+
+def _try(fn, what, default=None):
+    try:
+        return fn()
+    except Exception as e:  # noqa: BLE001 - fail open
+        print(f'[crypto_breaker] {what} failed: {e}')
+        return default
+
+
+def _load_fake_positions(path):
+    try:
+        with open(path) as fh:
+            payload = json.load(fh)
+        if not isinstance(payload, list):
+            raise ValueError('fake positions file must hold a JSON list')
+        return parse_positions(payload)
+    except Exception as e:  # noqa: BLE001
+        print(f'[crypto_breaker] fake positions unreadable: {e}')
+        return None, {}
+
+
+def run_once(*, now=None, env=None, dry_run=False, force=False, deps: dict | None = None) -> dict:
+    deps = dict(deps or {})
+    env = os.environ if env is None else env
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    fake_path = (env.get(FAKE_POS_ENV) or '').strip()
+    if fake_path:
+        print(f'[crypto_breaker] FAKE POSITIONS from {fake_path} — dry_run forced')
+        dry_run = True
+    m = mode(env, dry_run)
+    r = deps['redis'] if 'redis' in deps else _redis()
+    conn = deps['conn'] if 'conn' in deps else _default_conn()
+    poster = deps.get('poster')
+    act_deps = {k: deps[k] for k in ('executor', 'poller', 'audit') if k in deps}
+    res = {'mode': m, 'n': 0, 'skipped': None, 'action': 'none', 'hold': None, 'ev': None}
+
+    def _eval_row(**kw):
+        row = {'ts_utc': now, 'mode': m, 'n_positions': 0, 'triggers': '[]',
+               'hold_flat': bool(res['hold'])}
+        row.update(kw)
+        write_eval(conn, row)
+
+    def _summary():
+        ev = res['ev'] or {}
+        dd, w = ev.get('sleeve_dd'), ev.get('worst_plpc')
+        trig = ','.join(t['id'] for t in ev.get('triggers', [])) or '-'
+        print(f"[crypto_breaker] mode={m} n={res['n']} "
+              f"dd={'n/a' if dd is None else f'{dd:.2%}'} "
+              f"worst={ev.get('worst_ticker') or '-'}@{'n/a' if w is None else f'{w:.2%}'} "
+              f"triggers={trig} action={res['skipped'] and 'skipped:' + res['skipped'] or res['action']} "
+              f"hold={(res['hold'] or {}).get('since') or '-'}")
+        return res
+
+    # (2) hold + re-arm
+    hold = hold_flat_get(r)
+    if rearm_requested(env, hold):
+        clear_hold(r)
+        post(f"[crypto_breaker] re-armed (cleared hold_flat since={hold.get('since')} "
+             f"reason={hold.get('reason')})", poster)
+        hold = None
+        if conn is not None:
+            mirror_hold_to_pipeline_config(conn, None)
+    res['hold'] = hold
+
+    # (3) positions
+    if fake_path:
+        pos, _counters = _load_fake_positions(fake_path)
+    else:
+        pos, _counters = load_crypto_positions(deps.get('run_cli'))
+    if pos is None:
+        res['skipped'] = 'positions_unavailable'
+        _eval_row(action='skipped', skipped='positions_unavailable')
+        return _summary()
+    if conn is not None and not pos:
+        mirror_hold_to_pipeline_config(conn, hold)
+    if not pos:
+        print('[crypto_breaker] no crypto positions')
+        res['skipped'] = 'no_positions'
+        return _summary()
+    res['n'] = len(pos)
+
+    # (4) daily lane's crypto execution window
+    if in_exec_window(now) and not force:
+        res['skipped'] = 'exec_window'
+        _eval_row(n_positions=len(pos), action='skipped', skipped='exec_window')
+        if conn is not None:
+            mirror_hold_to_pipeline_config(conn, hold)
+        return _summary()
+
+    # (5) evaluate
+    regime_ts = _try(deps.get('regime_ts') or _default_regime_ts, 'regime ts')
+    flow_ts = _try(deps.get('flow_ts') or (lambda: _flow_ts_from(conn)), 'flow ts')
+    ev = evaluate(pos, now=now, regime_ts=regime_ts, flow_ts=flow_ts)
+    ev['n_positions'] = len(pos)
+    res['ev'] = ev
+    notes, actions = [], []
+    # non-armed modes keep their own cooldown keys so a shadow/dry-run post can
+    # never consume (and so suppress) the first real armed fire.
+    cd = (lambda reason: reason) if m == 'armed' else (lambda reason: f'{m}:{reason}')
+
+    # (6) T5 blackout: alert only, never orders
+    if ev['blackout']:
+        if cooldown_active(r, cd('data_blackout'), now):
+            notes.append('cooldown:data_blackout')
+        else:
+            post(fmt_blackout_msg(ev), poster)
+            set_cooldown(r, cd('data_blackout'), now)
+            notes.append('blackout_alert')
+
+    # (7) T4 drawdown triggers
+    live = []
+    for t in (t for t in ev['triggers'] if t['id'] in ('T4a', 'T4b')):
+        if cooldown_active(r, cd(t['reason']), now):
+            notes.append(f"cooldown:{t['reason']}")
+        else:
+            live.append(t)
+    if live and m != 'armed':
+        post(fmt_shadow_msg(ev, live), poster)
+        for t in live:
+            set_cooldown(r, cd(t['reason']), now)
+        actions.append('shadow')
+    elif live:
+        run_date = now.astimezone(_ET).date().isoformat()
+        equity = _try(deps.get('account_equity') or _default_equity, 'account equity', 0.0)
+        for t in live:
+            if t['id'] == 'T4a':
+                # hold BEFORE orders: a SIGTERM mid-flatten still leaves the lane held
+                hold = hold_flat_set(r, t['reason'], now)
+                res['hold'] = hold
+                set_cooldown(r, t['reason'], now)
+                results = flatten_crypto(pos, equity=equity, run_date=run_date,
+                                         reason=t['reason'], **act_deps)
+                post(fmt_fire_msg(m, [t], results, hold), poster)
+                actions.append('flatten')
+            else:
+                p = next(p for p in pos if p.ticker == t['ticker'])
+                th = hold_ticker_set(r, p.ticker, t['reason'], now)
+                set_cooldown(r, t['reason'], now)
+                result = close_position(p, equity=equity, run_date=run_date,
+                                        reason=t['reason'], **act_deps)
+                post(fmt_fire_msg(m, [t], [result], th), poster)
+                actions.append(f'close:{p.ticker}')
+    res['action'] = ','.join(actions) or 'none'
+
+    # (8) eval row, (9) mirror, (10) summary
+    _eval_row(n_positions=len(pos), sleeve_cost_basis=ev['sleeve_cost'],
+              sleeve_unrealized_pl=ev['sleeve_pl'], sleeve_dd=ev['sleeve_dd'],
+              worst_ticker=ev['worst_ticker'], worst_plpc=ev['worst_plpc'],
+              triggers=json.dumps(ev['triggers'], default=str), action=res['action'],
+              note=','.join(notes) or None)
+    if conn is not None:
+        mirror_hold_to_pipeline_config(conn, hold)
+    return _summary()
+
+
+def main(argv=None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description='Crypto drawdown circuit breaker (one tick)')
+    ap.add_argument('--dry-run', action='store_true', help='evaluate + post, never order')
+    ap.add_argument('--force', action='store_true', help='ignore the 15:55-16:05 ET exec window')
+    a = ap.parse_args(argv)
+    try:
+        os.nice(10)
+    except Exception:  # noqa: BLE001
+        pass
+    res = run_once(dry_run=a.dry_run, force=a.force)
+    return 1 if res.get('skipped') == 'positions_unavailable' and res.get('mode') == 'armed' else 0
+
+
+if __name__ == '__main__':
+    import sys
+    from pathlib import Path
+    _root = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(_root / 'src'))
+    sys.path.insert(0, str(_root))
+    sys.exit(main())
