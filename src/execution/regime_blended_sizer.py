@@ -173,6 +173,13 @@ def _size_positions_impl(
         passed = list(signals)
         logger.info('regime_blended_sizer: EOD mode — cadence gate bypassed, %d carried signals', len(passed))
     else:
+        # Crypto engine Phase 3 (fix round 3): no equity signals + a crypto
+        # regime ⇒ crypto block alone, BEFORE the force-fire check, so an
+        # empty-handoff cycle never consumes regime:transition:fresh (the next
+        # equity cycle's cadence bypass).
+        if not signals and crypto_regime_state is not None:
+            return _crypto_alone_orders(account_state, regime_params, confirmer,
+                                        crypto_regime_state, crypto_params)
         # Legacy path — untouched. Cadence gate guards against stacking on
         # long-horizon strategies. Bypassed for one cycle on regime transition.
         force_all = _check_force_fire_flag()

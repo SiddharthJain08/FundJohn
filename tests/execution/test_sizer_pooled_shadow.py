@@ -458,41 +458,109 @@ def test_equity_early_returns_still_run_the_crypto_block(monkeypatch, case):
     assert len(shadow_lines(h2, 'apply')) == 1
 
 
-def test_live_empty_handoff_sizes_crypto_only_when_crypto_regime_known(monkeypatch):
+class _LCur:
+    def __init__(self, regime_row): self.q, self.regime_row = '', regime_row
+    def execute(self, sql, args=None): self.q = sql
+    def fetchone(self): return self.regime_row if 'market_regime' in self.q else None
+    def fetchall(self): return []
+    def close(self): pass
+
+
+class _LConn:
+    def __init__(self, regime_row): self.regime_row = regime_row
+    def cursor(self, *a, **k): return _LCur(self.regime_row)
+    def close(self): pass
+    def rollback(self): pass
+
+
+def _live_env(monkeypatch, *, account='ok', regime_row=None, crypto=(CR_REGIME, {'liquidity_param': 1.0}),
+              sizer=None):
+    """Same-day live wrapper on an EMPTY handoff; returns (drv, size calls, posts)."""
     import execution.regime_blended_sizer_live as drv
     import execution.pooled_sizing as _ps
     import execution.alpaca_trader as _at
-
-    class _Cur:
-        def __init__(self): self.q = ''
-        def execute(self, sql, args=None): self.q = sql
-        def fetchone(self): return {'state': 'LOW_VOL'} if 'market_regime' in self.q else None
-        def fetchall(self): return []
-        def close(self): pass
-
-    class _Conn:
-        def cursor(self, *a, **k): return _Cur()
-        def close(self): pass
-        def rollback(self): pass
-
+    import execution.pipeline_orchestrator as _po
     monkeypatch.setenv('POSTGRES_URI', 'postgresql://test/test')
     monkeypatch.delenv('OPENCLAW_EOD_SIGNAL_REGISTER', raising=False)
     monkeypatch.delenv('OPENCLAW_SAMEDAY_SIGNAL_TARGET', raising=False)
-    monkeypatch.setattr(drv.psycopg2, 'connect', lambda *a, **k: _Conn())
+    monkeypatch.setattr(drv.psycopg2, 'connect', lambda *a, **k: _LConn(regime_row))
     monkeypatch.setattr(_at, '_alpaca_session', lambda: object(), raising=False)
-    monkeypatch.setattr(_at, '_fetch_account_state',
-                        lambda sess: {'equity': NAV, 'regt_buying_power': 2 * NAV,
-                                      'long_market_value': 0.0, 'cash': NAV}, raising=False)
+    acct = {'equity': NAV, 'regt_buying_power': 2 * NAV, 'long_market_value': 0.0, 'cash': NAV}
+    if account == 'violation':
+        acct['trading_blocked'] = True
+
+    def _fetch(sess):
+        if account == 'fail':
+            raise RuntimeError('alpaca down')
+        return dict(acct)
+    monkeypatch.setattr(_at, '_fetch_account_state', _fetch, raising=False)
+    monkeypatch.setattr(drv, '_account_state_violations',
+                        lambda a, params=None: ['trading_blocked=true'] if a.get('trading_blocked') else [])
+    posts = []
+    monkeypatch.setattr(_po, 'post_channel', lambda *a, **k: posts.append(a))
     monkeypatch.setattr(drv, 'read_handoff', lambda *a, **k: {'regime': {'state': 'LOW_VOL'}, 'signals': []})
     monkeypatch.setattr(sys, 'argv', ['regime_blended_sizer_live', '--date', '2026-11-10'])
     calls = []
-    monkeypatch.setattr(drv, 'size_positions', lambda **k: calls.append(k) or [])
-    monkeypatch.setattr(_ps, 'load_crypto_regime_and_params', lambda conn=None: (None, None))
-    assert drv.main() == 0 and calls == []                  # no crypto regime ⇒ today's return
-    monkeypatch.setattr(_ps, 'load_crypto_regime_and_params',
-                        lambda conn=None: (CR_REGIME, {'liquidity_param': 1.0}))
-    assert drv.main() == 0 and len(calls) == 1
-    assert calls[0]['signals'] == [] and calls[0]['crypto_regime_state'] == CR_REGIME
+    monkeypatch.setattr(drv, 'size_positions', sizer or (lambda **k: calls.append(k) or []))
+    monkeypatch.setattr(_ps, 'load_crypto_regime_and_params', lambda conn=None: crypto)
+    return drv, calls, posts
+
+
+def test_live_empty_handoff_without_crypto_regime_is_todays_return(monkeypatch):
+    drv, calls, posts = _live_env(monkeypatch, crypto=(None, None))
+    monkeypatch.delenv(POOL_ENV, raising=False)
+    assert drv.main() == 0 and calls == [] and posts == []
+
+
+def test_live_empty_handoff_shadow_sizes_crypto_only(monkeypatch, capsys):
+    monkeypatch.delenv(POOL_ENV, raising=False)
+    drv, calls, posts = _live_env(monkeypatch)         # NO market_regime row: pre-change this day exited 0
+    assert drv.main() == 0 and posts == []
+    assert len(calls) == 1 and calls[0]['signals'] == [] and calls[0]['crypto_regime_state'] == CR_REGIME
+
+
+@pytest.mark.parametrize('account,reason', [('fail', 'account_fetch'), ('violation', 'account_state')])
+def test_live_empty_handoff_shadow_failures_are_silent(monkeypatch, capsys, account, reason):
+    monkeypatch.delenv(POOL_ENV, raising=False)
+    drv, calls, posts = _live_env(monkeypatch, account=account)
+    assert drv.main() == 0
+    assert posts == [] and calls == []
+    assert 'crypto_sizing.shadow: skipped (reason=%s)' % reason in capsys.readouterr().out
+
+
+def test_live_empty_handoff_shadow_sizer_error_is_silent(monkeypatch, capsys):
+    monkeypatch.delenv(POOL_ENV, raising=False)
+    def boom(**k): raise RuntimeError('x')
+    drv, _, posts = _live_env(monkeypatch, sizer=boom)
+    assert drv.main() == 0 and posts == []
+    assert 'crypto_sizing.shadow: skipped (reason=error:RuntimeError)' in capsys.readouterr().out
+
+
+def test_live_empty_handoff_apply_runs_full_path_with_alerts(monkeypatch):
+    monkeypatch.setenv(POOL_ENV, '1')
+    drv, calls, posts = _live_env(monkeypatch, regime_row={'state': 'LOW_VOL'})
+    assert drv.main() == 0 and len(calls) == 1 and calls[0]['crypto_regime_state'] == CR_REGIME
+    drv, calls, posts = _live_env(monkeypatch, regime_row={'state': 'LOW_VOL'}, account='fail')
+    drv.main()
+    assert calls == [] and len(posts) == 1 and 'ABORT' in posts[0][1]   # crypto orders need the account
+
+
+def test_empty_signals_with_crypto_regime_never_consumes_force_fire_key(monkeypatch):
+    fired = []
+    monkeypatch.delenv('OPENCLAW_EOD_SIGNAL_REGISTER', raising=False)
+    monkeypatch.delenv('OPENCLAW_SAMEDAY_SIGNAL_TARGET', raising=False)
+    monkeypatch.delenv(POOL_ENV, raising=False)
+    monkeypatch.setattr(_sizer, '_check_force_fire_flag', lambda: fired.append(1) or False)
+    alone = []
+    monkeypatch.setattr(_sizer, '_crypto_alone_orders', lambda *a, **k: alone.append(a) or [])
+    out = _sizer.size_positions(signals=[], account_state=_account(), regime={'state': EQ_REGIME},
+                                run_date=date(2026, 11, 10), strategy_state={}, regime_params=_params(),
+                                crypto_regime_state=CR_REGIME, crypto_params=_params())
+    assert out == [] and fired == [] and len(alone) == 1
+    # no crypto regime ⇒ today's behaviour (the check runs, then the empty return)
+    out = _sizer.size_positions(signals=[], account_state=_account(), regime={'state': EQ_REGIME},
+                                run_date=date(2026, 11, 10), strategy_state={}, regime_params=_params())
+    assert out == [] and fired == [1] and len(alone) == 1
 
 
 # ── fix round 2 ─────────────────────────────────────────────────────────────

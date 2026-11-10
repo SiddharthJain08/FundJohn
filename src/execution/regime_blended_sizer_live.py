@@ -468,6 +468,33 @@ def _account_state_violations(account, params=None):
     return v
 
 
+def _crypto_shadow_only(handoff, run_date, crypto_regime_state, crypto_params) -> int:
+    """Empty same-day handoff, OPENCLAW_CRYPTO_POOLED_SIZING unset: compute
+    the crypto shadow line only. BEST-EFFORT — any failure (account fetch,
+    account-state violation, sizer error) prints one
+    `crypto_sizing.shadow: skipped (reason=…)` line and returns 0, posting
+    nothing; exactly the pre-Phase-3 exit of an empty-handoff day. Reads no
+    market_regime row (the crypto block does not use the equity regime)."""
+    tag = '[regime_blended_sizer_live] crypto_sizing.shadow: skipped (reason=%s)'
+    try:
+        account = _resolve_account_or_none()
+        if account is None or account.get('fetched') is False:
+            print(tag % 'account_fetch')
+            return 0
+        if _account_state_violations(account):
+            print(tag % 'account_state')
+            return 0
+        hr = (handoff or {}).get('regime') if isinstance(handoff, dict) else None
+        regime = {'state': hr.get('state') if isinstance(hr, dict) else None}
+        size_positions(signals=[], account_state=account, regime=regime, run_date=run_date,
+                       strategy_state={}, regime_params={'liquidity_param': 1.0},
+                       crypto_regime_state=crypto_regime_state, crypto_params=crypto_params)
+        print('[regime_blended_sizer_live] no signals in handoff; crypto shadow line computed')
+    except Exception as e:  # noqa: BLE001
+        print(tag % f'error:{type(e).__name__}')
+    return 0
+
+
 def _resolve_account_or_none(session_fn=None, fetch_fn=None):
     """Fetch the Alpaca account dict, returning None on any failure.
 
@@ -543,13 +570,18 @@ def main():
             # sizer then runs the crypto block alone (equity sizes nothing).
             try:
                 from execution.pooled_sizing import load_crypto_regime_and_params
-                _cr_state = load_crypto_regime_and_params()[0]
+                _cr_state, _cr_params = load_crypto_regime_and_params()
             except Exception:  # noqa: BLE001
-                _cr_state = None
+                _cr_state, _cr_params = None, None
             if not _cr_state:
                 print('[regime_blended_sizer_live] crypto_sizing: no crypto regime state — crypto block skipped')
                 print('[regime_blended_sizer_live] no signals in handoff; nothing to do')
                 return 0
+            from execution.pooled_sizing import pooled_sizing_enabled
+            if not pooled_sizing_enabled():
+                # SHADOW (fix round 3): best-effort, side-effect free — never an
+                # exit 2 / ABORT / HALT the empty-handoff day did not have before.
+                return _crypto_shadow_only(handoff, run_date, _cr_state, _cr_params)
             print('[regime_blended_sizer_live] no equity signals in handoff; sizing the crypto book only')
 
     # Field aliasing — handoff uses entry/stop/t1; consolidator+sizer uses
