@@ -100,17 +100,26 @@ def fetch_all_assets(timeout: int = 60, *,
     'class' forced to 'crypto'; ``crypto_universe`` (list of crypto_flow
     Assets) is injectable for tests."""
     equities, eq_ms = fetch_alpaca_assets(timeout=timeout, asset_class='us_equity')
-    counts = {'us_equity': len(equities), 'crypto': 0, 'crypto_skipped': 0,
-              'crypto_error': None}
+    counts = {'us_equity': len(equities), 'crypto_fetched': 0, 'crypto': 0,
+              'crypto_skipped_non_usd': 0, 'crypto_unmapped_usd': 0,
+              'crypto_unmapped_symbols': [], 'crypto_error': None}
     crypto_rows: list[dict] = []
     cr_ms = 0
     try:
         from ingestion.crypto_flow.universe import normalize_broker_symbol
         raw, cr_ms = fetch_alpaca_assets(timeout=timeout, asset_class='crypto')
+        counts['crypto_fetched'] = len(raw)
         for a in raw:
-            internal = normalize_broker_symbol(a.get('symbol') or '', crypto_universe)
+            sym = a.get('symbol') or ''
+            internal = normalize_broker_symbol(sym, crypto_universe)
             if not internal:
-                counts['crypto_skipped'] += 1
+                if _quote_currency(sym) != 'USD':
+                    counts['crypto_skipped_non_usd'] += 1       # BTC/USDT, ETH/BTC …
+                else:
+                    # a /USD pair the internal crypto universe does not map —
+                    # append it via scripts/refresh_crypto_flow_universe.py
+                    counts['crypto_unmapped_usd'] += 1
+                    counts['crypto_unmapped_symbols'].append(sym)
                 continue
             crypto_rows.append({**a, 'symbol': internal, 'class': 'crypto'})
     except Exception as e:  # noqa: BLE001 — crypto is additive; equities must still refresh
@@ -120,12 +129,35 @@ def fetch_all_assets(timeout: int = 60, *,
     return equities + crypto_rows, eq_ms + cr_ms, counts
 
 
+def _quote_currency(sym: str) -> str:
+    """'BTC/USDT' -> 'USDT'; 'BTC/USD' / 'BTCUSD' -> 'USD'; else ''."""
+    sym = (sym or '').upper()
+    if '/' in sym:
+        return sym.rsplit('/', 1)[1]
+    return 'USD' if sym.endswith('USD') else ''
+
+
+def crypto_notes(counts: dict) -> str:
+    """refresh_log.notes payload: crypto fetched/upserted/skip split + error,
+    so a daily-failing crypto pull is visible to the system_checks digest."""
+    parts = [f"crypto fetched={counts.get('crypto_fetched', 0)}",
+             f"upserted={counts.get('crypto', 0)}",
+             f"skipped_non_usd={counts.get('crypto_skipped_non_usd', 0)}",
+             f"unmapped_usd={counts.get('crypto_unmapped_usd', 0)}"]
+    if counts.get('crypto_unmapped_symbols'):
+        parts.append('unmapped=' + ','.join(counts['crypto_unmapped_symbols'][:20]))
+    if counts.get('crypto_error'):
+        parts.append(f"crypto_error={counts['crypto_error']}"[:500])
+    return ' '.join(parts)
+
+
 def _asset_class(value) -> str:
     """NULL / missing class ≡ us_equity (every pre-crypto row)."""
     return value or 'us_equity'
 
 
-def upsert_universe(conn, assets: Iterable[dict], dry_run: bool = False) -> dict:
+def upsert_universe(conn, assets: Iterable[dict], dry_run: bool = False,
+                    notes: str | None = None) -> dict:
     """Upsert today's pull. Returns diff stats dict.
 
     Stats:
@@ -252,7 +284,7 @@ def upsert_universe(conn, assets: Iterable[dict], dry_run: bool = False) -> dict
         VALUES (%s,%s,%s,%s,%s,%s,%s)
         """,
         (total_active, total_tradable, newly_listed, newly_inactive,
-         status_changes, None, None),
+         status_changes, None, notes),
     )
     conn.commit()
 
@@ -291,15 +323,22 @@ def main() -> int:
         return 2
 
     _log(f'fetched {counts["us_equity"]} us_equity + {counts["crypto"]} crypto assets '
-         f'({counts["crypto_skipped"]} crypto pairs outside the internal universe skipped) '
-         f'in {api_ms}ms')
+         f'(crypto fetched={counts["crypto_fetched"]}) in {api_ms}ms')
+    if counts['crypto_skipped_non_usd']:
+        _log(f'crypto: skipped {counts["crypto_skipped_non_usd"]} non-USD-quote pairs (expected)')
+    if counts['crypto_unmapped_usd']:
+        _log(f'WARN crypto: {counts["crypto_unmapped_usd"]} /USD pairs absent from '
+             f'crypto_flow_universe.json, NOT stored: '
+             f'{", ".join(counts["crypto_unmapped_symbols"][:20])} — run '
+             f'scripts/refresh_crypto_flow_universe.py')
     if counts['crypto_error']:
-        _log(f'crypto asset list failed ({counts["crypto_error"]}) — equities only; '
-             f'stored crypto rows left untouched')
+        _log(f'WARN crypto asset list failed ({counts["crypto_error"]}) — equities only; '
+             f'stored crypto rows left untouched (recorded in refresh_log.notes)')
 
     conn = psycopg2.connect(uri)
     try:
-        stats = upsert_universe(conn, assets, dry_run=args.dry_run)
+        stats = upsert_universe(conn, assets, dry_run=args.dry_run,
+                                notes=crypto_notes(counts))
     except Exception as e:
         conn.rollback()
         _log(f'upsert failed: {type(e).__name__}: {e}')

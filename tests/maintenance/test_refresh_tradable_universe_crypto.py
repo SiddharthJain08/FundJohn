@@ -72,7 +72,10 @@ def test_crypto_rows_inserted_with_internal_symbol_and_class():
     assert called == ['us_equity', 'crypto']
     syms = {a['symbol']: a['class'] for a in assets}
     assert syms == {'AAPL': 'us_equity', 'BTC-USD': 'crypto', 'ETH-USD': 'crypto'}
-    assert stats['crypto_skipped'] == 2 and stats['crypto'] == 2 and stats['us_equity'] == 1
+    assert stats['crypto_fetched'] == 4 and stats['crypto'] == 2 and stats['us_equity'] == 1
+    assert stats['crypto_skipped_non_usd'] == 1          # BTC/USDT
+    assert stats['crypto_unmapped_usd'] == 1             # ZZZ/USD — the one that matters
+    assert stats['crypto_unmapped_symbols'] == ['ZZZ/USD']
 
     conn, _cur = _conn([])
     with patch.object(rtu.psycopg2.extras, 'execute_values') as bulk:
@@ -135,3 +138,46 @@ def test_class_blind_readers_are_equity_scoped():
                 'scripts/build_backfill_universe.py'):
         src = (ROOT / rel).read_text()
         assert guard in src, rel
+
+
+def test_crypto_counts_and_error_written_to_refresh_log_notes():
+    ok = {'crypto_fetched': 40, 'crypto': 3, 'crypto_skipped_non_usd': 37,
+          'crypto_unmapped_usd': 0, 'crypto_unmapped_symbols': [], 'crypto_error': None}
+    notes = rtu.crypto_notes(ok)
+    assert notes == 'crypto fetched=40 upserted=3 skipped_non_usd=37 unmapped_usd=0'
+
+    bad = dict(ok, crypto_fetched=0, crypto=0, crypto_skipped_non_usd=0,
+               crypto_error='CalledProcessError: boom')
+    assert 'crypto_error=CalledProcessError: boom' in rtu.crypto_notes(bad)
+    unm = dict(ok, crypto_unmapped_usd=1, crypto_unmapped_symbols=['ZZZ/USD'])
+    assert 'unmapped_usd=1' in rtu.crypto_notes(unm) and 'ZZZ/USD' in rtu.crypto_notes(unm)
+
+    conn, cur = _conn([])
+    with patch.object(rtu.psycopg2.extras, 'execute_values'):
+        rtu.upsert_universe(conn, [_eq('AAPL')], notes=notes)
+    log = [c for c in cur.execute.call_args_list
+           if 'alpaca_tradable_universe_refresh_log' in c.args[0]]
+    assert len(log) == 1 and log[0].args[1][-1] == notes
+
+
+def test_main_crypto_failure_warns_records_notes_and_exits_zero(monkeypatch, capsys):
+    counts = {'us_equity': rtu.SUSPICIOUS_FLOOR, 'crypto_fetched': 0, 'crypto': 0,
+              'crypto_skipped_non_usd': 0, 'crypto_unmapped_usd': 0,
+              'crypto_unmapped_symbols': [], 'crypto_error': 'RuntimeError: down'}
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://stub/stub')
+    monkeypatch.setattr(rtu, 'fetch_all_assets', lambda: ([_eq('AAPL')], 5, counts))
+    seen = {}
+
+    def fake_upsert(conn, assets, dry_run=False, notes=None):
+        seen['notes'] = notes
+        return {'total_active': 1, 'total_tradable': 1, 'newly_listed': 0,
+                'newly_inactive': 0, 'status_changes': 0, 'dry_run': dry_run}
+
+    monkeypatch.setattr(rtu, 'upsert_universe', fake_upsert)
+    monkeypatch.setattr(rtu.psycopg2, 'connect', lambda *a, **k: MagicMock())
+    monkeypatch.setattr(rtu.subprocess, 'run', lambda *a, **k: None)   # metadata chain
+    monkeypatch.setattr(sys, 'argv', ['refresh_tradable_universe'])
+    assert rtu.main() == 0
+    assert 'crypto_error=RuntimeError: down' in seen['notes']
+    out = capsys.readouterr().out
+    assert 'WARN crypto asset list failed' in out

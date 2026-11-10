@@ -27,14 +27,17 @@ def _universe_table_populated():
     auth failure or aborted refresh — handoff filter will fail-open."""
     conn = _connect()
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM alpaca_tradable_universe WHERE tradable = TRUE AND status = 'active'")
+    # us_equity only (NULL ≡ us_equity, legacy rows): crypto rows share the
+    # table since crypto engine Phase 3 and must not pad the 5,000 floor.
+    cur.execute("SELECT COUNT(*) FROM alpaca_tradable_universe WHERE tradable = TRUE AND status = 'active' "
+                "AND COALESCE(asset_class, 'us_equity') = 'us_equity'")
     n = cur.fetchone()[0]
     conn.close()
     if n == 0:
         return Status.FAIL, 'table empty — refresh has never run successfully'
     if n < 5000:
         return Status.WARN, f'only {n} tradable rows (expected ~12k); refresh may have aborted'
-    return Status.PASS, f'{n:,} tradable symbols loaded'
+    return Status.PASS, f'{n:,} tradable us_equity symbols loaded'
 
 
 @check(name='universe_freshness', tags=['universe', 'broker'], requires=['db'])
@@ -67,7 +70,7 @@ def _universe_recent_diff():
     cur = conn.cursor()
     cur.execute(
         """SELECT total_active, total_tradable, newly_listed, newly_inactive,
-                  status_changes, run_at
+                  status_changes, run_at, notes
            FROM alpaca_tradable_universe_refresh_log
            ORDER BY run_at DESC LIMIT 1"""
     )
@@ -75,12 +78,20 @@ def _universe_recent_diff():
     conn.close()
     if not row:
         return Status.SKIP, 'no refresh log yet'
-    total_active, total_tradable, newly_listed, newly_inactive, status_changes, run_at = row
+    (total_active, total_tradable, newly_listed, newly_inactive, status_changes,
+     run_at, notes) = row
     summary = (f'last run {run_at:%Y-%m-%d %H:%M UTC}: '
                f'{total_active:,} active, {total_tradable:,} tradable, '
                f'+{newly_listed} listed / -{newly_inactive} inactive / {status_changes} flips')
     # The diff itself is informational — WARN only on suspiciously-large daily drop
     # which usually indicates a CLI auth issue manifesting as a full re-sync.
+    # Crypto pull is best-effort (equities still refresh, exit 0) — its
+    # failure / unmapped /USD pairs are only visible through notes.
+    notes = notes or ''
+    if 'crypto_error=' in notes:
+        return Status.WARN, f'crypto asset pull failed — stored crypto rows not refreshed ({notes}). {summary}'
+    if 'unmapped_usd=' in notes and 'unmapped_usd=0' not in notes:
+        return Status.WARN, f'crypto /USD pairs missing from crypto_flow_universe.json ({notes}). {summary}'
     if newly_inactive > 200:
         return Status.WARN, f'{newly_inactive} symbols newly inactive — verify Alpaca pull integrity. {summary}'
     return Status.PASS, summary
