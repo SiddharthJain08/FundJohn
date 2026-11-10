@@ -372,8 +372,18 @@ def load_prices_panels(calendar: str = 'union', tickers=None) -> tuple[pd.DataFr
     return close_wide, bars_by_ticker
 
 
-def load_regimes() -> pd.Series:
-    """Return a Series of regime_state indexed by date (datetime)."""
+def load_regimes(instrument_class: str = 'equity') -> pd.Series:
+    """Return a Series of regime_state indexed by date (datetime).
+
+    instrument_class='crypto' partitions on the crypto realised-vol tier table
+    (strategies/crypto_historical_regimes.py; 24/7 calendar, BTC-USD bench) —
+    crypto engine Phase 3, D-2. Every other class reads the equity VIX-tier
+    table exactly as before."""
+    if instrument_class == 'crypto':
+        from strategies import crypto_historical_regimes as _chr
+        s = _chr.regime_series(_chr.load_table()['date'])
+        s.index = pd.DatetimeIndex(pd.to_datetime(s.index), name='date')
+        return s.sort_index().astype(str)
     r = pd.read_parquet(REGIMES_PARQUET)
     r['date'] = pd.to_datetime(r['date'])
     r = r.sort_values('date').set_index('date')
@@ -1765,7 +1775,7 @@ def run_backtest(strategy_id: str, *,
         _log(f'prices: manifest backtest_tickers={_bt_tickers} (filtered panel read)')
     close_wide, bars_by_ticker = load_prices_panels(calendar=_calendar_for(instrument_class),
                                                     tickers=_bt_tickers)
-    regimes = load_regimes()
+    regimes = load_regimes(instrument_class)
     _log(f'prices: {close_wide.shape[0]} dates × {close_wide.shape[1]} tickers; '
          f'regimes: {len(regimes)} days')
 

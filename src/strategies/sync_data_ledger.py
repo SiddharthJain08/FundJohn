@@ -43,6 +43,8 @@ PARQUET_MAP = {
     'crypto_flows_1h':          'crypto_flows_1h',
     'crypto_whale_events':      'crypto_whale_events',
     'crypto_onchain_daily':     'crypto_onchain_daily',
+    # crypto backtest regime partition (Phase 3, src/strategies/crypto_historical_regimes.py)
+    'crypto_historical_regimes': 'crypto_historical_regimes',
 }
 
 # Derived columns computable from prices — inherit prices coverage
@@ -93,6 +95,7 @@ PROVIDERS = {
     'crypto_flows_1h':          'keyless-multi+etherscan+helius+santiment',
     'crypto_whale_events':      'keyless-multi+etherscan+helius+santiment',
     'crypto_onchain_daily':     'keyless-multi+etherscan+helius+santiment',
+    'crypto_historical_regimes': 'computed',   # derived from alpaca-crypto BTC-USD closes
 }
 
 

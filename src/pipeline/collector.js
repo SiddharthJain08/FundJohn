@@ -2602,6 +2602,18 @@ async function runDailyCollection() {
     notify('✅ Prices (market): all current — skipped');
   }
 
+  // Phase 2b': re-derive crypto_historical_regimes.parquet (BTC-USD 30-day
+  // realised-vol tiers — the crypto backtest regime partition, crypto engine
+  // Phase 3 / D-2) from the fresh BTC-USD daily bar. Runs AFTER the market
+  // price fill (that is where BTC-USD's daily bar lands) and unconditionally —
+  // the upsert is idempotent, so an "all current" skip above still rebuilds.
+  // Cheap: one ticker-filtered read (~3.8k rows) + append_dedup upsert.
+  await _runIngestPhase(
+    '🪙', 'Crypto historical regimes rebuild',
+    ['src/strategies/crypto_historical_regimes.py', '--rebuild'],
+    'crypto_historical_regimes', 3 * 60_000,
+  );
+
   // Phase 2c: 30-minute equity bars (top-250 by avg_dollar_volume_30d)
   // via Polygon REST aggregates. ~1-2 min wall-clock at 4 calls/sec.
   // Strategies str04 (intraday SPY) + str06 (EOD reversal) read this file.

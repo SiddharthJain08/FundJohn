@@ -47,6 +47,7 @@ _CADENCES: dict[str, tuple[str | None, int]] = {
     'trading_calendar.parquet':   ('fetched_at', 45),
     'prices_30m.parquet':         ('date', 7),
     'historical_regimes.parquet': ('date', 7),
+    'crypto_historical_regimes.parquet': ('date', 5),  # BTC rv30 tiers; collector hook after prices
     'crypto_bars_1h.parquet':     ('ts_utc', 3),    # 24/7 market
     # crypto flow engine (scripts/run_crypto_flow_tick.py, every 15 min, flag-gated):
     # missing until OPENCLAW_CRYPTO_FLOWS=1 has run once -> WARN, not FAIL.
