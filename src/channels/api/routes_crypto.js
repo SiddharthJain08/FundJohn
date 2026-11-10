@@ -120,8 +120,37 @@ router.get('/providers', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
-router.get('/risk', (req, res) => {
+router.get('/risk', async (req, res) => {
   const flag = (k) => (process.env[k] === '1' ? '1' : process.env[k] === '0' ? '0' : 'unset');
+  const envNum = (k, d) => { const n = Number(process.env[k]); return process.env[k] !== undefined && process.env[k] !== '' && Number.isFinite(n) ? n : d; };
+  let holdFlat = null;
+  let lastEvals = [];
+  try {
+    const h = await dbQuery(`SELECT value FROM pipeline_config WHERE key='crypto_breaker_hold_flat'`);
+    const raw = h.rows && h.rows[0] ? h.rows[0].value : null;
+    if (raw && typeof raw === 'object') holdFlat = raw;
+    else if (typeof raw === 'string' && raw.trim()) holdFlat = JSON.parse(raw);
+  } catch (_) { holdFlat = null; }
+  try {
+    const e = await dbQuery(
+      `SELECT ts_utc, mode, n_positions, sleeve_dd, worst_ticker, worst_plpc, triggers, action, skipped, hold_flat, note
+         FROM crypto_breaker_evals ORDER BY ts_utc DESC LIMIT 10`);
+    lastEvals = e.rows || [];
+  } catch (_) { lastEvals = []; }
+  const tick = flag('OPENCLAW_CRYPTO_BREAKER_TICK');
+  const armed = flag('OPENCLAW_CRYPTO_BREAKER');
+  const breaker = {
+    tick_enabled: tick,
+    armed,
+    status: process.env.OPENCLAW_CRYPTO_BREAKER_TICK !== '1' ? 'off' : (process.env.OPENCLAW_CRYPTO_BREAKER === '1' ? 'armed' : 'shadow'),
+    hold_flat: holdFlat,
+    thresholds: {
+      sleeve_dd: envNum('OPENCLAW_CRYPTO_BREAKER_SLEEVE_DD', -0.08),
+      position_dd: envNum('OPENCLAW_CRYPTO_BREAKER_POSITION_DD', -0.15),
+      blackout_h: envNum('OPENCLAW_CRYPTO_BREAKER_BLACKOUT_H', 3),
+    },
+    last_evals: lastEvals,
+  };
   res.json({
     flags: {
       CRYPTO_FLOWS: flag('OPENCLAW_CRYPTO_FLOWS'),
@@ -133,7 +162,7 @@ router.get('/risk', (req, res) => {
       large_print_usd: Number(process.env.OPENCLAW_CRYPTO_LARGE_PRINT_USD || 250000),
       thresholds: { delev_oi_chg_1h_pct: -5, delev_ret_1h_pct: -3, netflow_z_shock: 3, coverage_floor: 0.25, score_alert: 70 },
     },
-    breaker: { status: 'pending_phase_2', triggers: ['T4a sleeve −8 %', 'T4b position −15 %'] },
+    breaker,
     sizing: { status: 'pending_phase_3', benchmark: 'BTC-USD', bench_cap_nav: 0.25, gross_cap_nav: 0.50 },
   });
 });

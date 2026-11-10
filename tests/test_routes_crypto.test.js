@@ -137,7 +137,8 @@ test('risk flags reflect env', async () => {
     assert.deepEqual(body.flags, { CRYPTO_FLOWS: '1', CRYPTO_BREAKER: '0', CRYPTO_POOLED_SIZING: 'unset' });
     assert.equal(body.params.whale_min_usd, 2000000);
     assert.equal(body.params.large_print_usd, 250000);
-    assert.equal(body.breaker.status, 'pending_phase_2');
+    assert.equal(body.breaker.status, 'off');
+    assert.deepEqual(body.breaker.thresholds, { sleeve_dd: -0.08, position_dd: -0.15, blackout_h: 3 });
     assert.equal(body.sizing.gross_cap_nav, 0.5);
   } finally {
     keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
@@ -189,4 +190,41 @@ test('watcher skips ticks while a poll is in flight', async () => {
   assert.equal(calls, 1);
   release();
   router.stopEventWatcher();
+});
+
+test('risk breaker: status tri-state from env, evals + hold_flat from DB', async () => {
+  const keys = ['OPENCLAW_CRYPTO_BREAKER_TICK', 'OPENCLAW_CRYPTO_BREAKER', 'OPENCLAW_CRYPTO_BREAKER_SLEEVE_DD'];
+  const saved = keys.map((k) => process.env[k]);
+  try {
+    router._setQueryForTests(async (sql) => {
+      if (/pipeline_config/.test(sql)) return { rows: [{ value: '{"since":"2026-11-10T10:00:00Z","scope":"sleeve"}' }] };
+      if (/crypto_breaker_evals/.test(sql)) return { rows: [{ ts_utc: '2026-11-10T10:05:00Z', mode: 'shadow', action: 'none' }] };
+      return { rows: [] };
+    });
+    delete process.env.OPENCLAW_CRYPTO_BREAKER_TICK; delete process.env.OPENCLAW_CRYPTO_BREAKER;
+    let { body } = await get('/risk');
+    assert.equal(body.breaker.status, 'off');
+    assert.equal(body.breaker.tick_enabled, 'unset');
+    assert.equal(body.breaker.hold_flat.scope, 'sleeve');
+    assert.equal(body.breaker.last_evals.length, 1);
+    process.env.OPENCLAW_CRYPTO_BREAKER_TICK = '1';
+    process.env.OPENCLAW_CRYPTO_BREAKER_SLEEVE_DD = '-0.05';
+    ({ body } = await get('/risk'));
+    assert.equal(body.breaker.status, 'shadow');
+    assert.equal(body.breaker.thresholds.sleeve_dd, -0.05);
+    process.env.OPENCLAW_CRYPTO_BREAKER = '1';
+    ({ body } = await get('/risk'));
+    assert.equal(body.breaker.status, 'armed');
+    assert.equal(body.breaker.armed, '1');
+  } finally {
+    keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
+  }
+});
+
+test('risk breaker: DB error -> 200 with hold_flat null, last_evals []', async () => {
+  router._setQueryForTests(async () => { throw new Error('boom'); });
+  const { status, body } = await get('/risk');
+  assert.equal(status, 200);
+  assert.equal(body.breaker.hold_flat, null);
+  assert.deepEqual(body.breaker.last_evals, []);
 });

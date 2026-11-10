@@ -849,6 +849,35 @@ function start(swarm, generateId, notifyDiscord) {
         }
     }, { timezone: 'UTC' });
 
+    // Crypto drawdown breaker (Phase 2) — every 5 min, 24/7 UTC. Inert unless OPENCLAW_CRYPTO_BREAKER_TICK=1;
+    // orders only when OPENCLAW_CRYPTO_BREAKER=1 (else shadow). Small cap, hard 240 s bound: a risk control,
+    // not a batch job (the script renices to 10 itself and skips cheaply with no crypto positions).
+    _sched('crypto-breaker-tick', '*/5 * * * *', () => {
+        if (process.env.OPENCLAW_CRYPTO_BREAKER_TICK !== '1') return;
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            const capped = require('../lib/capped_spawn');
+            const today = new Date().toISOString().slice(0, 10);
+            const logDir = path.join(ROOT, 'logs');
+            try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+            const logFd = fs.openSync(path.join(logDir, `crypto_breaker_${today}.log`), 'a');
+            const w = capped.wrapCapped('timeout',
+                ['--signal=TERM', '--kill-after=15', '240', PYTHON, 'src/execution/crypto_breaker.py'],
+                { memoryMax: process.env.OPENCLAW_CRYPTO_BREAKER_MEMORY_MAX || '400M', fallback: '400M' });
+            const child = spawn(w.cmd, w.args, {
+                cwd: ROOT,
+                env: { ...process.env, PYTHONPATH: ROOT },
+                detached: true,
+                stdio: ['ignore', logFd, logFd],
+            });
+            child.unref();
+            fs.closeSync(logFd);
+        } catch (e) {
+            log(`Crypto breaker tick spawn error: ${e.message}`);
+        }
+    }, { timezone: 'UTC' });
+
     // Daily 18:00 ET — intraday HMM refit attempt. Trains a fresh HMM on
     // the accumulated intraday_features.parquet; the detector reads
     // hmm_intraday_latest.pkl on its next tick. Bootstrap-safe (no-op if

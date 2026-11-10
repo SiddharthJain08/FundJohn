@@ -11434,14 +11434,14 @@ async function _refreshCrypto() {
     const el = document.getElementById('cr-regime');
     if (el) el.innerHTML = '<div class="empty">render error</div>';
   }
-  guard('cr-hero',  () => _renderCryptoHero(snap, regime, providers));
+  guard('cr-hero',  () => _renderCryptoHero(snap, regime, providers, risk));
   guard('cr-board', () => _renderCryptoBoard(snap));
   guard('cr-tiles', () => _renderCryptoTiles(snap, regime));
   guard('cr-feed',  () => _renderCryptoFeed(events && events.available !== false && Array.isArray(events.rows) ? events.rows : []));
   guard('cr-risk',  () => _renderCryptoRisk(risk, positions));
 }
 
-function _renderCryptoHero(snap, regime, providers) {
+function _renderCryptoHero(snap, regime, providers, risk) {
   const el = document.getElementById('cr-hero');
   if (!el) return;
   if (!snap || snap.available === false) {
@@ -11469,7 +11469,11 @@ function _renderCryptoHero(snap, regime, providers) {
        <span class="cr-chip">conf \${L.confidence != null ? Number(L.confidence).toFixed(2) : '—'} · streak \${L.hysteresis_streak != null ? L.hysteresis_streak : '—'} · age \${_ageStr(L.ts_utc)}</span>\`
     : '<span class="cr-chip">regime —</span>';
 
-  const breakerHtml = '<span class="cr-chip" style="color:var(--muted)" title="drawdown breaker — shadow until Phase 2">breaker: shadow (phase 2)</span>';
+  const _bk = (risk && risk.breaker) || null;
+  const _bkHold = _bk && _bk.hold_flat ? _bk.hold_flat : null;
+  const breakerHtml = _bk
+    ? \`<span class="cr-chip\${_bkHold ? ' cr-chip-stale' : ''}" style="\${_bkHold ? '' : 'color:var(--muted)'}" title="drawdown breaker (tick \${escapeHtml(_bk.tick_enabled || '—')}, armed \${escapeHtml(_bk.armed || '—')})">breaker: \${escapeHtml(_bk.status || '—')}\${_bkHold ? ' · HOLD FLAT since ' + _ageStr(_bkHold.since) : ''}</span>\`
+    : '<span class="cr-chip" style="color:var(--muted)">breaker: —</span>';
 
   const flowAgeMs = snap.ts_utc ? Date.now() - new Date(snap.ts_utc).getTime() : Infinity;
   const flowsHtml = \`<span class="cr-chip\${flowAgeMs > 45 * 60 * 1000 ? ' cr-chip-stale' : ''}" title="last flow tick \${snap.ts_utc || '—'}">flows \${_ageStr(snap.ts_utc)}</span>\`;
@@ -11819,7 +11823,25 @@ function _renderCryptoRisk(risk, positions) {
     .map(x => '<tr><td>' + x[0] + '</td><td>' + x[1] + '</td></tr>').join('');
 
   const b = r.breaker || {};
-  const trig = (b.triggers || []).map(t => '<li>' + escapeHtml(t) + '</li>').join('');
+  const bth = b.thresholds || {};
+  const bPct = v => { const n = _crNum(v); return n == null ? '—' : (n * 100).toFixed(1) + ' %'; };
+  const bHold = b.hold_flat || null;
+  const bStatusLine = 'breaker: ' + escapeHtml(b.status || '—')
+    + (bHold ? ' · <span style="color:var(--red)">HOLD FLAT since ' + escapeHtml(_ageStr(bHold.since)) + '</span>' : '');
+  const bThLine = 'sleeve DD ' + bPct(bth.sleeve_dd) + ' · position DD ' + bPct(bth.position_dd)
+    + ' · blackout ' + escapeHtml(bth.blackout_h != null ? bth.blackout_h : '—') + ' h';
+  const bEvals = Array.isArray(b.last_evals) ? b.last_evals : [];
+  const bEvalsHtml = bEvals.length
+    ? '<table class="cr-table" style="margin-top:6px"><thead><tr><th>When</th><th>Mode</th><th>DD</th><th>Worst</th><th>Action</th></tr></thead><tbody>'
+      + bEvals.map(e => {
+        const dd = _crNum(e.sleeve_dd);
+        const wp = _crNum(e.worst_plpc);
+        const worst = e.worst_ticker ? escapeHtml(e.worst_ticker) + '@' + (wp == null ? '—' : (wp * 100).toFixed(1) + '%') : '—';
+        return '<tr><td>' + escapeHtml(_ageStr(e.ts_utc)) + '</td><td>' + escapeHtml(e.mode || '—') + '</td><td>'
+          + (dd == null ? '—' : (dd * 100).toFixed(1) + '%') + '</td><td>' + worst + '</td><td>'
+          + escapeHtml(e.skipped ? 'skip:' + e.skipped : (e.action || '—')) + '</td></tr>';
+      }).join('') + '</tbody></table>'
+    : '<div style="font-size:12px;color:var(--muted)">no evaluations yet</div>';
   const sz = r.sizing || {};
   const pctOf = v => { const n = _crNum(v); return n == null ? '—' : (n * 100).toFixed(0) + ' %'; };
   const benchSym = sz.benchmark ? String(sz.benchmark).split('-')[0] : 'bench';
@@ -11828,8 +11850,9 @@ function _renderCryptoRisk(risk, positions) {
 
   const left = '<div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">' + chips + '</div>'
     + '<table class="cr-table" style="margin-bottom:10px"><tbody>' + paramRows + '</tbody></table>'
-    + '<div style="font-size:12px">breaker: ' + escapeHtml(b.status || '—') + '</div>'
-    + (trig ? '<ul style="font-size:12px;color:var(--muted);margin:4px 0 8px 18px">' + trig + '</ul>' : '')
+    + '<div style="font-size:12px">' + bStatusLine + '</div>'
+    + '<div style="font-size:12px;color:var(--muted)">' + bThLine + '</div>'
+    + bEvalsHtml
     + '<div style="font-size:12px">' + sizingLine + '</div></div>';
 
   const pos = (positions && positions.available !== false && Array.isArray(positions.rows)) ? positions.rows : [];

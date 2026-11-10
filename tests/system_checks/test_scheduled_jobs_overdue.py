@@ -141,7 +141,7 @@ def test_systemd_policies_keys_template_instance(tmp_path):
 
 def test_cron_policy_keys_equal_cron_schedule_names():
     names = set(re.findall(r"_sched\('([a-z0-9-]+)'", (ROOT / 'src/engine/cron-schedule.js').read_text()))
-    assert names == set(chk.CRON_POLICIES) and len(names) == 27
+    assert names == set(chk.CRON_POLICIES) and len(names) == 28
 
 
 def test_installer_never_installs_job_stat_dropin():

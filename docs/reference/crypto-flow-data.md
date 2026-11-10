@@ -74,3 +74,18 @@ Exchange attribution is thin (validated registry: ETH 30, BTC 6, SOL 7, XRP 3 ad
 activity rule); EVM watch = newest 100 rows per address per pass; SOL best-effort; OKX liquidation `limit=100` undercounts
 cascades; netflow score component saturates for BTC/ETH (per-asset normalisation owed); Polymarket, Koios/ADA,
 `refresh_exchange_addresses.py`, `ijson` streaming, snapshot prune migration all deferred.
+
+## Breaker (Phase 2)
+`src/execution/crypto_breaker.py`, scheduled by `cron-schedule.js` `crypto-breaker-tick` (`*/5 * * * *` UTC, `timeout 240`,
+MemoryMax 400M, renices to 10). Drawdown-only (operator decision).
+- Flags: `OPENCLAW_CRYPTO_BREAKER_TICK=1` enables the job (unset = inert); `OPENCLAW_CRYPTO_BREAKER=1` ARMS orders, otherwise
+  shadow (evaluate, record, post a would-fire, no orders). `--dry-run` forces shadow. Dashboard chip: `off | shadow | armed`.
+- Triggers: `T4a` sleeve Σunrealized_pl / Σcost_basis ≤ −8 % (flatten all crypto, hold flat); `T4b` single position
+  `unrealized_plpc` ≤ −15 % (close that position, hold ticker); `T5` data blackout > 3 h (Discord alert only, never orders).
+  Env overrides `_SLEEVE_DD`, `_POSITION_DD`, `_BLACKOUT_H`. Skips in the 15:55–16:05 ET crypto execution window.
+- Hold-flat: Redis `crypto_breaker:hold_flat` (24 h) and `crypto_breaker:hold_ticker:<T>` (7 d), mirrored to `pipeline_config`
+  `crypto_breaker_hold_flat` each tick (dashboard + Phase 3 sizer read the mirror). Clear with
+  `OPENCLAW_CRYPTO_BREAKER_REARM=<iso of since>` (scoped to that halt) or TTL expiry.
+- Consumers: `/api/crypto/risk` `breaker` block (status, hold_flat, thresholds, last 10 evals) → Crypto page hero chip + risk panel.
+- Audit: `crypto_breaker_evals` (append-only, mig 169), `alpaca_liquidations` (`asset_class='crypto'`, `source='crypto_breaker'`).
+- Log: `logs/crypto_breaker_<YYYY-MM-DD>.log`. Health: `scheduled_jobs` `crypto-breaker-tick` `('hours', 1)`.

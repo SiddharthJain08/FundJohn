@@ -218,12 +218,24 @@ test('risk panel reads caps and flags from the payload', () => {
   api._renderCryptoRisk({
     flags: { CRYPTO_FLOWS: '1', CRYPTO_BREAKER: '0', CRYPTO_POOLED_SIZING: 'unset' },
     params: { whale_min_usd: 1e6, large_print_usd: 250000, thresholds: { score_alert: 70 } },
-    breaker: { status: 'pending_phase_2', triggers: ['T4a sleeve −8 %'] },
+    breaker: { status: 'shadow', hold_flat: { since: '2026-11-10T10:00:00Z' }, thresholds: { sleeve_dd: -0.08, position_dd: -0.15, blackout_h: 3 },
+      last_evals: [{ ts_utc: '2026-11-10T10:05:00Z', mode: 'shadow', sleeve_dd: -0.091, worst_ticker: 'SOL-USD', worst_plpc: -0.16, action: 'shadow' }] },
     sizing: { status: 'pending_phase_3', benchmark: 'BTC-USD', bench_cap_nav: 0.25, gross_cap_nav: 0.5 },
   }, { available: true, rows: [{ ticker: 'BTC-USD', qty: 0.5, market_value: 37000, unrealized_plpc: -0.021 }] });
   const h = els['cr-risk'].innerHTML;
   assert.ok(h.includes('CRYPTO_FLOWS: on') && h.includes('CRYPTO_BREAKER: off') && h.includes('CRYPTO_POOLED_SIZING: unset'));
   assert.ok(h.includes('sizing: pending_phase_3 — benchmark BTC-USD, BTC cap 25 %, crypto gross cap 50 %'));
-  assert.ok(h.includes('breaker: pending_phase_2'));
+  assert.ok(h.includes('breaker: shadow') && h.includes('HOLD FLAT since'));
+  assert.ok(h.includes('sleeve DD -8.0 %') && h.includes('SOL-USD@-16.0%') && h.includes('-9.1%'));
   assert.ok(h.includes('-2.10 %'));
+});
+
+test('breaker: hero chip reads risk.breaker.status + HOLD FLAT; risk panel lists last_evals; null-safe', () => {
+  const hero = fnBody('_renderCryptoHero');
+  assert.ok(hero.includes('risk.breaker') && hero.includes('.status') && hero.includes('HOLD FLAT'));
+  assert.ok(!hero.includes('pending phase 2') && !hero.includes('phase 2)'));
+  assert.ok(fnBody('_renderCryptoRisk').includes('last_evals'));
+  const { api, els } = crSandbox();
+  api._renderCryptoRisk({ flags: {}, params: {}, sizing: {} }, { available: false });   // old payload, no breaker
+  assert.ok(els['cr-risk'].innerHTML.includes('breaker: —'));
 });
