@@ -1658,7 +1658,8 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
     from execution import benchmark_sizing as _bsz
 
     res = {'targets': {}, 'ticker_meta': {}, 'gate_net_sharpe': {}, 'rows': [],
-           'crypto_ids': set(), 'active': [], 'bench_tkrs': set(), 'bench_ids': set(), 'gross_w': 0.0,
+           'crypto_ids': set(), 'active': [], 'bench_tkrs': set(), 'bench_ids': set(), 'eff_by': {},
+           'gross_w': 0.0,
            'line': None, 'empty_reason': None}
     crypto_ids_all = {s for s, c in classes.items() if c == 'crypto'}
     res['crypto_ids'] = crypto_ids_all
@@ -1693,9 +1694,7 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
               if s.get('strategy_id') in w_by
               and not ((s.get('signal_params') or {}).get('option_spec'))]
     stables = _ps.stable_tickers()
-    n_stable = sum(1 for s in active if s.get('ticker') in stables)
-    active = [s for s in active if s.get('ticker') not in stables]
-    res['active'] = active
+    res['active'] = [s for s in active if s.get('ticker') not in stables]
 
     _stop_norm = _ortho_enabled('OPENCLAW_STRATEGY_CADENCE_STOP_NORM')
     if _stop_norm:
@@ -1715,6 +1714,10 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
             _st, _t1, _t2 = _bs.daily_normalized_levels(_e, _st, _t1, _t2, cad_by.get(sid, 1.0))
         meta[tkr]['brackets'].append({'sid': sid, 'direction': d, 'weight': w_by[sid],
                                       'entry': _e, 'stop': _st, 't1': _t1, 't2': _t2})
+    # Stablecoins are never conviction names (controller ruling): dropped per
+    # TICKER before S_adj / hurdle / caps; stable_excluded counts tickers.
+    meta, n_stable = _ps.drop_stables(meta, stables)
+    naive_w = {t: v for t, v in naive_w.items() if t in meta}
     s_m = None
     dropped: list = []
     before_usd: dict = {}
@@ -1817,10 +1820,12 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
     res['gate_net_sharpe'] = {t: v for t, v in gate_net.items() if t in targets}
     res['bench_tkrs'] = set(bench_cr)
     res['bench_ids'] = set(bench_ids or ())
+    res['eff_by'] = dict(eff_by)
     res['line'] = _ps.shadow_line(
         crypto_regime_state, s_m, before_usd, targets, dropped, bench_cr, lam_global * nav,
         gross_cap_shaved=shaved, funding_shortfall=shortfall, hold_flat=hold, mode=mode,
-        nav=nav, stable_excluded=n_stable, hold_zeroed=n_held, short_clamped=n_short)
+        nav=nav, stable_excluded=n_stable, hold_zeroed=n_held, short_clamped=n_short,
+        eq_scale_ratio=(eq_gross / (eq_gross + res['gross_w'])) if eq_gross > 0 else None)
     logger.info(res['line'])
     if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
         _post_corr_cumsharpe_log(res['line'])
@@ -1845,6 +1850,10 @@ def _crypto_book(crypto_regime_state, crypto_params, *, nav, lam_global, eq_gros
         return None
 
 
+def _log_crypto_held(reason: str) -> None:
+    logger.warning('crypto_sizing: block unavailable (reason=%s) — crypto HELD', reason)
+
+
 def _crypto_only_orders(cb, flatten_orders, *, crypto_regime_state,
                         nav, confirmer, ortho_groups, account_state):
     """APPLY mode, equity book empty: emit the crypto sub-book against the
@@ -1852,22 +1861,24 @@ def _crypto_only_orders(cb, flatten_orders, *, crypto_regime_state,
     flatten already produced their closes in `flatten_orders`)."""
     out = list(flatten_orders or [])
     if cb is None:
+        _log_crypto_held('block_failed')
         return out
     rows = cb['rows']
     w = {r['strategy_id']: float(r['daily_weight']) for r in rows}
     sh = {r['strategy_id']: float(r['effective_sharpe']) for r in rows}
+    eff = dict(cb['eff_by']) or w
     if cb['targets']:
         broker = _filter_broker_by_class(_load_broker_positions_usd(), 'crypto')
         out += _emit_orders_from_targets(
             dict(cb['targets']), dict(cb['ticker_meta']), nav, confirmer, ortho_groups,
-            sh, w, [], w, 0.0, account_state, broker=broker,
+            sh, eff, [], w, 0.0, account_state, broker=broker,
             gate_net_sharpe=cb['gate_net_sharpe'], bench_ids=cb['bench_ids'], bench_tkrs=cb['bench_tkrs'])
     elif cb['empty_reason'] == 'gated':
         # Healthy crypto set fully gated ⇒ per-class flatten (its own floor +
         # kill-switch checks); a data-absent crypto day HOLDs.
         fl = _maybe_flatten_zero_conviction(
             cb['active'], crypto_regime_state, {}, nav, confirmer, ortho_groups,
-            sh, w, w, account_state, [], instrument_class='crypto')
+            sh, eff, w, account_state, [], instrument_class='crypto')
         out += fl or []
     return out
 
@@ -1882,7 +1893,10 @@ def _crypto_alone_orders(account_state, params, confirmer, crypto_regime_state, 
     liq = float(params.get('liquidity_param', 1.0)) if params else 1.0
     cb = _crypto_book(crypto_regime_state, crypto_params, nav=nav, lam_global=_load_lambda(),
                       eq_gross=0.0, liq_eq=liq, account_state=account_state)
-    if not (pooled_sizing_enabled() and cb is not None):
+    if not pooled_sizing_enabled():
+        return []
+    if cb is None:
+        _log_crypto_held('block_failed')
         return []
     return _crypto_only_orders(cb, [], crypto_regime_state=crypto_regime_state, nav=nav,
                                confirmer=confirmer, ortho_groups=None,
@@ -1908,8 +1922,7 @@ def _emit_pooled(cb, target_usd, ticker_meta, nav, confirmer, ortho_groups,
     w = {r['strategy_id']: float(r['daily_weight']) for r in merged}
     sh = {r['strategy_id']: float(r['effective_sharpe']) for r in merged}
     eff = dict(eff_weight_by_strat)
-    for r in cb['rows']:
-        eff[r['strategy_id']] = float(r['daily_weight'])
+    eff.update(cb['eff_by'])          # size-scalar-adjusted, exactly what sized the crypto book
     tgt = dict(target_usd)
     meta = ticker_meta
     extra: list = []
@@ -2427,10 +2440,19 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             return _crypto_only_orders(_cb, _flatten_orders, crypto_regime_state=crypto_regime_state,
                                        nav=nav, confirmer=confirmer, ortho_groups=_ortho_groups,
                                        account_state=account_state)
-        _flatten_orders = _maybe_flatten_zero_conviction(
-            active, regime_state, ticker_meta, nav, confirmer, _ortho_groups,
-            sharpe_by_strat, eff_weight_by_strat, weight_by_strat, account_state,
-            opt_active)
+        if pooled_sizing_enabled():
+            # Flag ON but no crypto regime (wrapper failed open): HOLD crypto —
+            # the flatten is equity-scoped. Flag unset ⇒ the call below, unchanged.
+            _log_crypto_held('no_crypto_regime')
+            _flatten_orders = _maybe_flatten_zero_conviction(
+                active, regime_state, ticker_meta, nav, confirmer, _ortho_groups,
+                sharpe_by_strat, eff_weight_by_strat, weight_by_strat, account_state,
+                opt_active, instrument_class='equity')
+        else:
+            _flatten_orders = _maybe_flatten_zero_conviction(
+                active, regime_state, ticker_meta, nav, confirmer, _ortho_groups,
+                sharpe_by_strat, eff_weight_by_strat, weight_by_strat, account_state,
+                opt_active)
         if _flatten_orders is not None:
             return _flatten_orders
         _warn_options_dropped_no_equity_scale(opt_active, 'no equity tickers cleared the acting-strategy gate')
@@ -2667,6 +2689,13 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             except Exception:  # noqa: BLE001
                 pass
 
+    if pooled_sizing_enabled() and _cb is None:
+        # I1 (review round 2): flag ON with no crypto book (block raised, or no
+        # crypto regime) ⇒ HOLD crypto: net the tail against the EQUITY-only
+        # broker book so the pooled orphan pass cannot close held crypto.
+        _log_crypto_held('block_failed' if _crypto_on else 'no_crypto_regime')
+        _qp_broker = _filter_broker_by_class(
+            _qp_broker if _qp_broker is not None else _load_broker_positions_usd(), 'equity')
     if _pooled and _cb is not None:
         return _emit_pooled(
             _cb, target_usd, ticker_meta, nav, confirmer, _ortho_groups,

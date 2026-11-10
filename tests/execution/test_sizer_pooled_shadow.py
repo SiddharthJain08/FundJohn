@@ -64,7 +64,7 @@ class H:
 def run(monkeypatch, *, crypto=True, pooled=False, bench_flag=False, s_m_eq=2.0, s_m_cr=0.8,
         broker=None, nmbp=None, hold=None, eq_frac=10.0, btc_frac=0.25, gross_frac=0.50,
         eq_carried=None, cr_params=None, eq_params=None, lane='eod', eq_rows=None, cr_carried=None,
-        sigs=None, h=None):
+        sigs=None, scalars=None, h=None):
     h = h if h is not None else H()
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
     if lane == 'eod':
@@ -135,7 +135,9 @@ def run(monkeypatch, *, crypto=True, pooled=False, bench_flag=False, s_m_eq=2.0,
     monkeypatch.setattr(_sizer, '_maybe_flatten_zero_conviction', _flat)
     monkeypatch.setattr(_sizer, 'PER_TICKER_CAP_SHARPE_FRAC', 10.0)
     import execution.regime_param_resolver as _rpr
-    monkeypatch.setattr(_rpr, 'size_scalars_for_regime', lambda r: {})
+    monkeypatch.setattr(_rpr, 'size_scalars_for_regime', lambda r: dict((scalars or {}).get(r, {})))
+    if scalars:
+        monkeypatch.setenv('OPENCLAW_STRATEGY_SIZE_SCALAR', '1')
     import execution.strategy_similarity as _ss
     monkeypatch.setattr(_ss, 'load_groups', lambda r: None)
     kw = {}
@@ -491,3 +493,56 @@ def test_live_empty_handoff_sizes_crypto_only_when_crypto_regime_known(monkeypat
                         lambda conn=None: (CR_REGIME, {'liquidity_param': 1.0}))
     assert drv.main() == 0 and len(calls) == 1
     assert calls[0]['signals'] == [] and calls[0]['crypto_regime_state'] == CR_REGIME
+
+
+# ── fix round 2 ─────────────────────────────────────────────────────────────
+
+BROKER_MIX = {'BTC-USD': 5_000.0, 'ETH-USD': 2_000.0, 'ZZTA': 1_000.0}
+
+
+def test_flag_on_block_failure_holds_crypto(monkeypatch, caplog):
+    import logging
+    base, _ = run(monkeypatch, crypto=False, broker=BROKER_MIX)          # flag unset, equity-only
+    monkeypatch.setattr(_sizer, '_crypto_pooled_block',
+                        lambda **k: (_ for _ in ()).throw(RuntimeError('boom')))
+    with caplog.at_level(logging.WARNING, logger='execution.regime_blended_sizer'):
+        out, _ = run(monkeypatch, crypto=True, pooled=True, broker=BROKER_MIX)
+    assert not any(o['ticker'] in CRYPTO_TKRS for o in out)                # no orphan close of crypto
+    assert out == base
+    assert 'crypto_sizing: block unavailable (reason=block_failed) — crypto HELD' in caplog.text
+
+
+def test_flag_on_without_crypto_regime_holds_crypto(monkeypatch, caplog):
+    import logging
+    base, _ = run(monkeypatch, crypto=False, broker=BROKER_MIX)
+    with caplog.at_level(logging.WARNING, logger='execution.regime_blended_sizer'):
+        out, _ = run(monkeypatch, crypto=False, pooled=True, broker=BROKER_MIX)
+    assert not any(o['ticker'] in CRYPTO_TKRS for o in out) and out == base
+    assert 'reason=no_crypto_regime' in caplog.text
+
+
+def test_flag_on_without_crypto_regime_flatten_is_equity_scoped(monkeypatch):
+    kw = dict(eq_params=_params(min_acting=2), eq_carried=[_carried('S_lo', 'ZZTB')], broker=BROKER_MIX)
+    _, h0 = run(monkeypatch, crypto=False, **kw)
+    assert h0.flatten == [None]                                           # flag unset: unchanged call
+    _, h1 = run(monkeypatch, crypto=False, pooled=True, **kw)
+    assert h1.flatten == ['equity']
+
+
+def test_stable_excluded_counts_tickers(monkeypatch):
+    cr = CR_CARRIED + [_carried('S_cr_b', 'USDC-USD'), _carried('S_beta_btc', 'USDT-USD')]
+    _, h = run(monkeypatch, cr_carried=cr)
+    assert 'stable_excluded=2' in shadow_lines(h)[0]                      # USDC (2 rows) + USDT
+
+
+def test_shadow_line_eq_scale_ratio(monkeypatch):
+    _, h = run(monkeypatch)
+    assert 'eq_scale_ratio=%.4f' % (6.1 / (6.1 + 2.2)) in shadow_lines(h)[0]
+
+
+def test_pooled_attribution_uses_size_scalar_adjusted_weights(monkeypatch):
+    orders, _ = run(monkeypatch, pooled=True, s_m_cr=None, gross_frac=10.0,
+                    scalars={CR_REGIME: {'S_cr_a': 0.5}})
+    eth = [o for o in orders if o['ticker'] == 'ETH-USD'][0]
+    contrib = {c['strategy_id']: c['contribution'] for c in eth['contributions']}
+    assert abs(contrib['S_cr_a'] - 1.0) < 1e-9                            # 2.0 × 0.5, what sized it

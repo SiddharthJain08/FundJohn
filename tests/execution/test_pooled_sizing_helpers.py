@@ -14,20 +14,6 @@ def test_pooled_sizing_enabled_only_on_1():
     assert not ps.pooled_sizing_enabled({})
 
 
-def test_ticker_classes_crypto_if_any_contributor_is_crypto():
-    meta = {'BTC-USD': {'strategies': ['S_beta_btc']},
-            'MIX': {'strategies': ['S_eq', 'S_cr']},
-            'AAPL': {'strategies': ['S_eq', 'S_beta_spy']}}
-    cls = {'S_beta_btc': 'crypto', 'S_cr': 'crypto', 'S_beta_spy': 'etp'}
-    out = ps.ticker_classes(meta, lambda s: cls.get(s, 'equity'))
-    assert out == {'BTC-USD': 'crypto', 'MIX': 'crypto', 'AAPL': 'equity'}   # 'etp' is equity
-
-
-def test_split_by_class():
-    eq, cr = ps.split_by_class({'A': 1.0, 'BTC-USD': 2.0, 'Z': 3.0}, {'BTC-USD': 'crypto', 'A': 'equity'})
-    assert eq == {'A': 1.0, 'Z': 3.0} and cr == {'BTC-USD': 2.0}
-
-
 def test_merge_weights_crypto_ids_take_crypto_row():
     eq = [{'strategy_id': 'S_eq', 'daily_weight': 1.0}, {'strategy_id': 'S_cr', 'daily_weight': 9.0}]
     cr = [{'strategy_id': 'S_cr', 'daily_weight': 2.0}, {'strategy_id': 'S_eq', 'daily_weight': 7.0},
@@ -103,6 +89,7 @@ def test_shadow_line_format():
                           200_000.0, gross_cap_shaved=10_000.0, funding_shortfall=None,
                           hold_flat=False, mode='shadow', nav=100_000.0, stable_excluded=2)
     assert line.startswith('crypto_sizing.shadow[CRISIS]: S_m=-0.40 ')
+    assert 'eq_scale_ratio=na' in line
     for tok in ('n=2', 'gross=40000', 'unconstrained=50000', 'cap_shaved=10000',
                 'funding_bind=unknown', 'hold=0', 'stable_excluded=2', 'dropped=1', "bench=['BTC-USD']"):
         assert tok in line, tok
@@ -181,3 +168,9 @@ def test_shadow_line_reports_short_clamped():
     line = ps.shadow_line('LOW_VOL', 0.1, {}, {}, [], set(), 0.0, gross_cap_shaved=0.0,
                           funding_shortfall=0.0, hold_flat=False, mode='shadow', short_clamped=3)
     assert 'short_clamped=3' in line and 'funding_bind=0' in line
+
+
+def test_shadow_line_eq_scale_ratio():
+    line = ps.shadow_line('LOW_VOL', 0.1, {}, {}, [], set(), 0.0, gross_cap_shaved=0.0,
+                          funding_shortfall=0.0, hold_flat=False, mode='shadow', eq_scale_ratio=0.73499)
+    assert 'eq_scale_ratio=0.7350' in line

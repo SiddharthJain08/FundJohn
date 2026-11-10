@@ -547,6 +547,7 @@ def main():
             except Exception:  # noqa: BLE001
                 _cr_state = None
             if not _cr_state:
+                print('[regime_blended_sizer_live] crypto_sizing: no crypto regime state — crypto block skipped')
                 print('[regime_blended_sizer_live] no signals in handoff; nothing to do')
                 return 0
             print('[regime_blended_sizer_live] no equity signals in handoff; sizing the crypto book only')
@@ -612,6 +613,8 @@ def main():
         print(f'[regime_blended_sizer_live] crypto regime load failed ({_ce}); crypto block skipped')
     if crypto_regime_state:
         print(f'[regime_blended_sizer_live] crypto regime: {crypto_regime_state}')
+    else:
+        print('[regime_blended_sizer_live] crypto_sizing: no crypto regime state — crypto block skipped')
 
     cur.execute("SELECT * FROM strategy_state")
     strategy_state = {r['strategy_id']: dict(r) for r in cur.fetchall()}

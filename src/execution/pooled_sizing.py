@@ -31,28 +31,6 @@ def pooled_sizing_enabled(env=os.environ) -> bool:
     return env.get('OPENCLAW_CRYPTO_POOLED_SIZING', '') == '1'
 
 
-def _norm_class(c) -> str:
-    """'crypto' or 'equity' — every class other than crypto (equity, etp, …) is equity."""
-    return CRYPTO if str(c or '').strip().lower() == CRYPTO else EQUITY
-
-
-def ticker_classes(ticker_meta: dict, instrument_class_for) -> dict[str, str]:
-    """{ticker: 'crypto'|'equity'}: 'crypto' if ANY contributor strategy is crypto."""
-    out = {}
-    for tkr, meta in (ticker_meta or {}).items():
-        sids = (meta or {}).get('strategies') or []
-        out[tkr] = CRYPTO if any(_norm_class(instrument_class_for(s)) == CRYPTO for s in sids) else EQUITY
-    return out
-
-
-def split_by_class(d: dict, classes: dict[str, str]) -> tuple[dict, dict]:
-    """(equity_part, crypto_part); a key absent from `classes` is equity."""
-    eq, cr = {}, {}
-    for k, v in (d or {}).items():
-        (cr if classes.get(k) == CRYPTO else eq)[k] = v
-    return eq, cr
-
-
 def load_crypto_regime_and_params(conn=None) -> tuple[str | None, dict | None]:
     """(crypto regime label, its regime_sizer_params row) — same table as the
     equity row, keyed by the crypto label. Fail-open: no state / any error ⇒
@@ -133,6 +111,7 @@ def stable_tickers() -> set[str]:
 
 
 def drop_stables(d: dict, stables: set[str]) -> tuple[dict, int]:
+    """(d without stablecoin keys, number of keys dropped) — keyed by ticker."""
     kept = {k: v for k, v in (d or {}).items() if k not in stables}
     return kept, len(d or {}) - len(kept)
 
@@ -215,10 +194,14 @@ def shadow_line(crypto_regime, s_m_crypto, before: dict, after: dict, dropped: l
                 bench_tkrs: set, lam_nav: float, *, gross_cap_shaved: float,
                 funding_shortfall: float | None, hold_flat: bool, mode: str,
                 nav: float | None = None, stable_excluded: int = 0,
-                hold_zeroed: int = 0, short_clamped: int = 0) -> str:
+                hold_zeroed: int = 0, short_clamped: int = 0,
+                eq_scale_ratio: float | None = None) -> str:
     """One line per cycle. `before` = unconstrained crypto USD targets (post
     normaliser, pre caps); `after` = feasible targets (post caps, funding,
-    hold-flat) — the shadow review sees both (spec §5.3b)."""
+    hold-flat) — the shadow review sees both (spec §5.3b). `eq_scale_ratio` =
+    pooled equity scale ÷ equity-only scale (the equity under-leverage the
+    pooled denominator costs; crypto conviction counts pre-cap/pre-hold —
+    "shave, never redistribute"); None ⇒ 'na'."""
     g0 = sum(abs(v) for v in (before or {}).values())
     g1 = sum(abs(v) for v in (after or {}).values())
     n = sum(1 for v in (after or {}).values() if v)
@@ -227,8 +210,8 @@ def shadow_line(crypto_regime, s_m_crypto, before: dict, after: dict, dropped: l
     top = sorted(((t, round(v)) for t, v in (after or {}).items() if v), key=lambda x: -abs(x[1]))[:8]
     return ('crypto_sizing.%s[%s]: S_m=%s n=%d gross=%.0f%s unconstrained=%.0f lam_nav=%.0f '
             'cap_shaved=%.0f funding_bind=%s hold=%d hold_zeroed=%d short_clamped=%d '
-            'stable_excluded=%d dropped=%d bench=%s top=%s' % (
+            'stable_excluded=%d eq_scale_ratio=%s dropped=%d bench=%s top=%s' % (
                 mode, crypto_regime, _fmt_s_m(s_m_crypto), n, g1, pct, g0, lam_nav,
                 gross_cap_shaved, fb, 1 if hold_flat else 0, hold_zeroed, short_clamped,
-                stable_excluded,
+                stable_excluded, 'na' if eq_scale_ratio is None else '%.4f' % eq_scale_ratio,
                 len(dropped or []), sorted(bench_tkrs or ()), top))
