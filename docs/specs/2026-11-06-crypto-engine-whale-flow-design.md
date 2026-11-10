@@ -481,6 +481,30 @@ controller ruling in the SDD ledger, surfaced to the operator at finish):
 - **Deferred to a follow-up**: Polymarket crypto probabilities, ADA via Koios, `refresh_exchange_addresses.py`, strategy
   aux-kind wiring (Phase 4), `ijson` streaming of the leaderboard, a prune migration for the snapshot table.
 
+## 7b. As built — Phase 2 breaker (2026-11-10, branch `crypto-breaker-p2`, merged `28323490`, 145 Python + 36 Node offline tests)
+
+- **Live since 2026-11-10 21:31Z in SHADOW**: `OPENCLAW_CRYPTO_BREAKER_TICK=1` (5-min `crypto-breaker-tick` in johnbot `_sched`,
+  `timeout 240`, MemoryMax 400M, `os.nice(10)`); the arm flag `OPENCLAW_CRYPTO_BREAKER` stays unset until Phase 3 sizes crypto
+  positions and two weeks of shadow evals are clean. First tick 21:35Z: `no crypto positions`; `/api/crypto/risk.breaker.status = shadow`;
+  dry run with a fake-positions file (dd −11.5 %) wrote one `mode='dry_run'` eval row and posted the shadow line.
+- **Triggers as decided in §9**: T4a sleeve drawdown ≤ −8 % (flatten every crypto position; subsumes T4b), T4b position ≤ −15 %
+  (close that ticker), T5 regime+flow both > 3 h stale = alert only. Thresholds env-overridable, clamped to (−1, 0).
+- **Orders** go through `alpaca_executor.execute_single(... close_only=True, strategy_id='__crypto_breaker__')`, polled to terminal,
+  audited in `alpaca_liquidations` (+ `asset_class`, mig 169) and `crypto_breaker_evals` (mig 169). Evidence trail precedes the first
+  order: eval row `flatten:started`/`close_started:<T>` → hold + cooldown → mirror → FIRING post → orders → FIRED (with `remain_open=`).
+- **Hold contract** (deviation from the plan's bare-sleeve mirror): Redis `crypto_breaker:hold_flat` (24 h) and
+  `crypto_breaker:hold_ticker:{T}` (7 d) are the source; the `pipeline_config.crypto_breaker_hold_flat` mirror is `{sleeve, tickers}` JSON
+  (or `''`), never overwritten while Redis is unreachable, and read back (sleeve AND tickers) when Redis is down or its scan fails.
+  Consumers: `crypto_hold.hold_state()` → redeploy sizer zeroes targets, executor refuses crypto BUYs. Re-arm:
+  `OPENCLAW_CRYPTO_BREAKER_REARM=<since iso>` (sleeve) / `OPENCLAW_CRYPTO_BREAKER_REARM_TICKER=<T>` (one ticker; unset after one tick).
+- **Cooldowns**: `crypto_breaker:fired:{date}:{reason}` 6 h; shadow/dry-run scoped `{mode}:` so a shadow would-fire never suppresses
+  the first armed fire; armed cooldown falls back to `crypto_breaker_evals` when Redis is down. A hold does not gate a re-fire — the
+  cooldown does; a position still past the threshold re-fires after 6 h (intended retry).
+- **Blindness is loud**: `positions_unavailable` posts DEGRADED (6 h cooldown; every tick when Redis is down) and exits 1 when armed;
+  system check `crypto_breaker_evaluating` (tag `broker`) WARNs when the newest eval is > 30 min old while crypto is held.
+- **Known limits**: mirror-sourced holds carry no TTL during a long Redis outage; the system check fails open when it cannot reach
+  the DB; duplicate broker rows where only one carries a cost basis merge to `plpc=None` (counted, T4a still covers them).
+
 ## 8. Left to the builder
 - Exact provider fallback ordering per field; which of Binance's spot `aggTrades` vs Coinbase trades is primary for
   large prints (coverage decides).
