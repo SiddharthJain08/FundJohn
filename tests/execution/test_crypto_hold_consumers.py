@@ -103,9 +103,16 @@ def test_executor_refuses_crypto_buy_under_hold_but_allows_close():
     close = {'ticker': 'BTC-USD', 'close_only': True, 'notional_usd': 25000.0, 'current_usd': 25000.0}
     responses = {'order list': (True, [], None),
                  'position close': (True, {'id': 'close-1'}, None)}
+    fake = _fake_cli(responses)
+    calls = []
+
+    def _rec(args, timeout=30):
+        calls.append(args)
+        return fake(args, timeout)
     with patch.object(ch, 'hold_state', return_value=held), \
-            patch.object(ae, '_run_alpaca_cli', side_effect=_fake_cli(responses)):
+            patch.object(ae, '_run_alpaca_cli', side_effect=_rec):
         res = ae._route_crypto_order(buy, 100000.0, 'C1')
+        assert calls == []
         assert res['status'] == 'refused' and res['reason'] == 'hold_flat'
         assert res['ticker'] == 'BTC/USD' and res['client_order_id'] == 'C1'
         res = ae._route_crypto_order(close, 100000.0, 'C2')
@@ -115,3 +122,11 @@ def test_executor_refuses_crypto_buy_under_hold_but_allows_close():
         res = ae._route_crypto_order({'ticker': 'BTC-USD', 'direction': 'long', 'pct_nav': 0.0},
                                      100000.0, 'C3')
     assert res['status'] == 'SKIP'
+
+
+def test_disable_flag_ignored_outside_pytest(monkeypatch):
+    sleeve = {'since': 'x', 'reason': 'r', 'scope': 'sleeve'}
+    r = FakeRedis({'crypto_breaker:hold_flat': json.dumps(sleeve)})
+    monkeypatch.setenv('OPENCLAW_CRYPTO_HOLD_DISABLE', '1')
+    monkeypatch.delenv('PYTEST_CURRENT_TEST')
+    assert ch.hold_state(redis=r)['sleeve'] == sleeve

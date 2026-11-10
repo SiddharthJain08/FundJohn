@@ -4,7 +4,7 @@ Reads the state written by the crypto breaker (src/execution/crypto_breaker.py)
 without importing it. Key names are DUPLICATED from the breaker (HOLD_KEY /
 the `crypto_breaker:hold_ticker:{ticker}` f-string / mirror key); keep in sync.
 Fail-open: any error yields the empty state; never raises.
-Env OPENCLAW_CRYPTO_HOLD_DISABLE=1 forces the empty state (tests)."""
+Env OPENCLAW_CRYPTO_HOLD_DISABLE=1 forces the empty state, honoured ONLY under pytest."""
 from __future__ import annotations
 
 import json
@@ -66,7 +66,9 @@ def hold_state(conn=None, redis=None) -> dict:
     pipeline_config mirror (sleeve only) when Redis cannot be asked."""
     try:
         if os.environ.get('OPENCLAW_CRYPTO_HOLD_DISABLE') == '1':
-            return _empty()
+            if 'PYTEST_CURRENT_TEST' in os.environ:
+                return _empty()
+            print('[crypto_hold] OPENCLAW_CRYPTO_HOLD_DISABLE ignored outside pytest')
         r = redis if redis is not None else _default_redis()
         if r is not None:
             try:
