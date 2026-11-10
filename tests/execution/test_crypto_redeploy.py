@@ -8,6 +8,14 @@ sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / 'src'))
 from execution import crypto_redeploy_sizer as crs  # noqa: E402
 
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_hold_redis(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_CRYPTO_HOLD_DISABLE', '1')  # never reach Redis/DB
+
+
 def test_equity_positions_never_touched():
     broker = {'SPY': 150_000.0, 'AAPL': 80_000.0, 'BTC-USD': 20_000.0}
     weights = [{'strategy_id': 'S_btc', 'daily_weight': 1.0, 'effective_sharpe': 2.0, 'cadence_days': 5}]

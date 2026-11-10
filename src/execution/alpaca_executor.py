@@ -1313,6 +1313,19 @@ def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
     if order.get('close_only'):
         return _route_crypto_close(order, api_symbol, raw_ticker, coid)
 
+    # Crypto breaker hold-flat: refuse new buys (closes/sells above are never checked).
+    if str(order.get('direction') or '').lower() == 'long':
+        try:
+            from execution import crypto_hold as _ch
+            _held = _ch.is_held(raw_ticker, _ch.hold_state())
+        except Exception as _e:   # noqa: BLE001 - fail-open: never block on a read error
+            log(f'[crypto] hold_flat check failed (allowing): {_e}')
+            _held = False
+        if _held:
+            log(f'[crypto] refused:hold_flat {raw_ticker}')
+            return {'ticker': api_symbol, 'status': 'refused', 'reason': 'hold_flat',
+                    'tif': _CRYPTO_TIF, 'order_class': 'simple', 'client_order_id': coid}
+
     pct_nav = float(order.get('pct_nav') or 0.0)
     notional = equity * pct_nav
     if notional <= 0:

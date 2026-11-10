@@ -11,6 +11,14 @@ sys.path.insert(0, str(ROOT / 'src'))
 from execution import alpaca_executor as ae  # noqa: E402
 
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_hold_redis(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_CRYPTO_HOLD_DISABLE', '1')  # never reach Redis/DB
+
+
 def test_is_crypto_ticker():
     assert ae._is_crypto_ticker('BTC-USD') is True
     assert ae._is_crypto_ticker('eth-usd') is True

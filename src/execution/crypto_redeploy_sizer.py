@@ -36,7 +36,8 @@ def _dir_to_int(d) -> int:
 
 def size_crypto_positions(account_state: dict, crypto_regime_state: dict, *,
                           broker_loader=None, weights_loader=None, signals_loader=None,
-                          crypto_strategy_ids=None, all_live_weight_sum=None) -> list[dict]:
+                          crypto_strategy_ids=None, all_live_weight_sum=None,
+                          hold_state: dict | None = None) -> list[dict]:
     """Return crypto order dicts (ticker, direction, notional_usd, strategy_id, close_only).
     All loaders are injectable for testing; defaults wire to the live sources."""
     regime = crypto_regime_state.get('state')
@@ -83,6 +84,20 @@ def size_crypto_positions(account_state: dict, crypto_regime_state: dict, *,
     abs_w = sum(abs(w) for w in ticker_w.values())
     target_usd = {t: (w * crypto_budget / abs_w) for t, w in ticker_w.items()} if abs_w else {}
 
+    # Crypto breaker hold-flat: zero targets (sleeve hold) or the held tickers'.
+    if hold_state is None:
+        from execution import crypto_hold as _ch
+        hold_state = _ch.hold_state()
+    sleeve_hold = bool((hold_state or {}).get('sleeve'))
+    held_tickers = set((hold_state or {}).get('tickers') or {})
+    if sleeve_hold:
+        logger.info('[crypto_redeploy] hold_flat active: targets zeroed (sleeve)')
+        target_usd = {t: 0.0 for t in target_usd}
+    elif held_tickers & set(target_usd):
+        logger.info('[crypto_redeploy] hold_flat active: targets zeroed (tickers: %s)',
+                    sorted(held_tickers & set(target_usd)))
+        target_usd = {t: (0.0 if t in held_tickers else v) for t, v in target_usd.items()}
+
     if broker_loader is None:
         from execution.regime_blended_sizer import _load_broker_positions_usd
         broker_loader = _load_broker_positions_usd
@@ -101,6 +116,12 @@ def size_crypto_positions(account_state: dict, crypto_regime_state: dict, *,
         delta = tgt - cur
         if abs(delta) < 1.0:
             continue
+        if tgt == 0.0 and (sleeve_hold or tkr in held_tickers):
+            # held: only a close, tagged so the audit shows the breaker hold
+            orders.append({'ticker': tkr, 'direction': 'short' if cur > 0 else 'long',
+                           'notional_usd': abs(cur), 'strategy_id': '__crypto_breaker_hold__',
+                           'close_only': True, 'current_usd': cur})
+            continue
         # Emit BOTH notional_usd AND pct_nav (matches the equity sizer contract,
         # regime_blended_sizer.py): the executor's crypto OPEN path computes
         # notional = equity × pct_nav, so a missing pct_nav would SKIP the order.
@@ -111,6 +132,7 @@ def size_crypto_positions(account_state: dict, crypto_regime_state: dict, *,
         if tkr in target_usd or cur == 0.0:
             continue
         orders.append({'ticker': tkr, 'direction': 'short' if cur > 0 else 'long',
-                       'notional_usd': abs(cur), 'strategy_id': '__close_orphan_crypto__',
+                       'notional_usd': abs(cur), 'strategy_id': ('__crypto_breaker_hold__' if (sleeve_hold or tkr in held_tickers)
+                                        else '__close_orphan_crypto__'),
                        'close_only': True, 'current_usd': cur})
     return orders
