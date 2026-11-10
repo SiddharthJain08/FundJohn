@@ -104,3 +104,33 @@ def test_rearm_token_scoped_to_since():
     old = (NOW - timedelta(days=1)).isoformat()
     assert not cb.rearm_requested({cb.REARM_ENV: old}, hold)
     assert not cb.rearm_requested({cb.REARM_ENV: old}, None)
+
+
+def test_parse_survives_normaliser_failure(monkeypatch):
+    import ingestion.crypto_flow.universe as u
+
+    def boom(*a, **k):
+        raise FileNotFoundError('universe.json')
+    monkeypatch.setattr(u, 'normalize_broker_symbol', boom)
+    pos, c = cb.parse_positions([_row('ETH/USD'), _row('AAPL', 'us_equity')])
+    assert [p.ticker for p in pos] == ['ETH-USD']
+    assert c['normaliser_errors'] >= 1
+
+
+import importlib
+import pytest
+
+
+@pytest.mark.parametrize('raw,expected', [('0.08', -0.08), ('nan', -0.08), ('abc', -0.08),
+                                          ('-0.05', -0.05)])
+def test_env_threshold_rejects_positive_and_nan(monkeypatch, raw, expected):
+    monkeypatch.setenv('OPENCLAW_CRYPTO_BREAKER_SLEEVE_DD', raw)
+    assert cb._env_threshold('OPENCLAW_CRYPTO_BREAKER_SLEEVE_DD', -0.08) == expected
+    monkeypatch.setenv('OPENCLAW_CRYPTO_BREAKER_BLACKOUT_H', raw)
+    assert cb._env_threshold('OPENCLAW_CRYPTO_BREAKER_BLACKOUT_H', 3.0,
+                             must_be_negative=False) == (0.08 if raw == '0.08' else 3.0)
+
+
+def test_zero_qty_row_skipped():
+    pos, c = cb.parse_positions([_row('BTCUSD', qty='0', unrealized_plpc='-0.5')])
+    assert pos == [] and c['zero_qty'] == 1

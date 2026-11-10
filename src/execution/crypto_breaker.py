@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,16 +17,25 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 
 
-def _envf(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name) or default)
-    except ValueError:
+def _env_threshold(name: str, default: float, *, must_be_negative: bool = True) -> float:
+    """Finite env float with the required sign, else the default (never a
+    positive DD threshold: that would flatten every tick)."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
         return default
+    try:
+        v = float(raw)
+        if math.isfinite(v) and (v < 0 if must_be_negative else v > 0):
+            return v
+    except ValueError:
+        pass
+    print(f'[crypto_breaker] ignoring invalid {name}={raw}; using {default}')
+    return default
 
 
-SLEEVE_DD = _envf('OPENCLAW_CRYPTO_BREAKER_SLEEVE_DD', -0.08)
-POSITION_DD = _envf('OPENCLAW_CRYPTO_BREAKER_POSITION_DD', -0.15)
-BLACKOUT_H = _envf('OPENCLAW_CRYPTO_BREAKER_BLACKOUT_H', 3.0)
+SLEEVE_DD = _env_threshold('OPENCLAW_CRYPTO_BREAKER_SLEEVE_DD', -0.08)
+POSITION_DD = _env_threshold('OPENCLAW_CRYPTO_BREAKER_POSITION_DD', -0.15)
+BLACKOUT_H = _env_threshold('OPENCLAW_CRYPTO_BREAKER_BLACKOUT_H', 3.0, must_be_negative=False)
 COOLDOWN_TTL_S = 6 * 3600
 HOLD_FLAT_TTL_S = 24 * 3600
 HOLD_TICKER_TTL_S = 7 * 86400
@@ -60,12 +70,18 @@ def _f(v):
 def parse_positions(payload: list[dict]) -> tuple[list[CryptoPos], dict]:
     from ingestion.crypto_flow.universe import normalize_broker_symbol
     out: list[CryptoPos] = []
-    c = {'equity_rows': 0, 'crypto_rows': 0, 'unparsed': 0, 'unmapped': 0}
+    c = {'equity_rows': 0, 'crypto_rows': 0, 'unparsed': 0, 'unmapped': 0,
+         'zero_qty': 0, 'normaliser_errors': 0}
     for p in payload or []:
         if not isinstance(p, dict):
             continue
         sym = str(p.get('symbol') or '')
-        tkr = normalize_broker_symbol(sym)
+        try:
+            tkr = normalize_broker_symbol(sym)
+        except Exception as e:  # noqa: BLE001 - universe file missing/corrupt
+            logger.warning('[crypto_breaker] normaliser failed for %s: %s', sym, e)
+            tkr = None
+            c['normaliser_errors'] += 1
         is_crypto = p.get('asset_class') == 'crypto'
         if not is_crypto and tkr is None:
             c['equity_rows'] += 1
@@ -76,6 +92,9 @@ def parse_positions(payload: list[dict]) -> tuple[list[CryptoPos], dict]:
         qty, mv = _f(p.get('qty')), _f(p.get('market_value'))
         if qty is None or mv is None:
             c['unparsed'] += 1
+            continue
+        if qty <= 0:
+            c['zero_qty'] += 1
             continue
         avg = _f(p.get('avg_entry_price'))
         cost = _f(p.get('cost_basis'))
@@ -103,7 +122,11 @@ def load_crypto_positions(run_cli=None) -> tuple[list[CryptoPos] | None, dict]:
     if not ok or not isinstance(payload, list):
         logger.warning('[crypto_breaker] position list failed: %s', (err or {}).get('error'))
         return None, {}
-    return parse_positions(payload)
+    try:
+        return parse_positions(payload)
+    except Exception as e:  # noqa: BLE001
+        logger.warning('[crypto_breaker] position parse failed: %s', e)
+        return None, {'error': str(e)}
 
 
 def sleeve_drawdown(pos: list[CryptoPos]) -> tuple[float | None, float, float]:
