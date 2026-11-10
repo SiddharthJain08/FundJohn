@@ -75,9 +75,16 @@ def test_rate_limiter_spaces_calls(monkeypatch):
     assert sum(slept) >= 0.2 and len(slept) == 5
 
 
-def test_rate_default_is_three_per_second():
-    assert evm_onchain._RATE == 3.0
-    assert abs(evm_onchain._Throttle().interval - 1/3) < 1e-9
+def test_rate_default_is_two_per_second():
+    assert evm_onchain._RATE == 2.0
+    assert abs(evm_onchain._Throttle().interval - 0.5) < 1e-9
+
+
+def test_enabled_chains_default_excludes_unsupported_free_tier_chains(monkeypatch):
+    monkeypatch.delenv('OPENCLAW_CRYPTO_EVM_CHAINS', raising=False)
+    assert evm_onchain.enabled_chain_ids() == [1, 42161, 137]
+    monkeypatch.setenv('OPENCLAW_CRYPTO_EVM_CHAINS', 'arb,base,bogus')
+    assert evm_onchain.enabled_chain_ids() == [1, 42161, 8453]
 
 
 def test_watched_set_falls_back_to_eth_registry_on_arb():

@@ -470,6 +470,14 @@ controller ruling in the SDD ledger, surfaced to the operator at finish):
 - **Dashboard**: `large_print_imbalance_1h` spans the returned tape window (1 000 prints), not literally 1 h; the mobile
   board keeps ticker/price/24 h/score/netflow/coverage; degraded provider dots are yellow; `S_m crypto by regime` cells
   read `pending` until Phase 3.
+- **Soak (2026-11-06 23:45Z → 11-10 20:10Z, 3.85 days)**: 363 ticks, 0 errors, 0 OOM; 96/96 ticks on 11-07 and 11-08,
+  90/96 on 11-09 and 80/80 on 11-10 to 19:45Z (the 7 skips were `compute_window` ×5 and `run_lock_held` ×2 — the guards
+  working as designed); every provider ≥ 99.2 % ok (Deribit DVOL None ×3, XRPL ×1, Etherscan unsupported-chain ×2);
+  4 925 whale events, 3 128 hourly flow rows, 180 Santiment rows; snapshot table 15 MB. Calibrations landed from the soak:
+  Etherscan free tier serves ETH/ARB/POL only (`OPENCLAW_CRYPTO_EVM_CHAINS`, default `ETH,ARB,POL`; AVAX/BASE/BNB
+  transfers are therefore not watched) and the throttle is 2 req/s (`OPENCLAW_CRYPTO_ETHERSCAN_RPS`; 3/s still tripped).
+  First signals: XRP-USD whale score 74 accumulating (shock line fired), ETH-USD 62 distributing, BTC-USD 42
+  accumulating with −$41.7 M exchange netflow/24 h at 0.26 % attribution coverage (thin by construction).
 - **Deferred to a follow-up**: Polymarket crypto probabilities, ADA via Koios, `refresh_exchange_addresses.py`, strategy
   aux-kind wiring (Phase 4), `ijson` streaming of the leaderboard, a prune migration for the snapshot table.
 

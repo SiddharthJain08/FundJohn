@@ -19,7 +19,16 @@ CHAIN_NAMES = {1: 'ethereum', 42161: 'arbitrum', 137: 'polygon', 43114: 'avalanc
 NATIVE_TICKER = {1: 'ETH-USD', 42161: 'ETH-USD', 8453: 'ETH-USD', 137: 'POL-USD', 43114: 'AVAX-USD'}
 # Etherscan free tier: documented 5 req/s, but production answered "Max calls per sec rate limit
 # reached (3/sec)" on 2026-11-06 23:45Z (7/60 calls failed, cursor held) — default to 3, env-overridable.
-_RATE = float(os.environ.get('OPENCLAW_CRYPTO_ETHERSCAN_RPS', '3') or 3)  # requests / second
+_RATE = float(os.environ.get('OPENCLAW_CRYPTO_ETHERSCAN_RPS', '2') or 2)  # requests / second (3/s still tripped on 11-10)
+
+
+def enabled_chain_ids() -> list[int]:
+    """Chain rotation. Etherscan's FREE tier answers "Free API access is not supported for this chain" for
+    Avalanche, Base and BNB (observed 2026-11-07..10, 60/60 calls burned per rotation), so the default is
+    ETH,ARB,POL. Env `OPENCLAW_CRYPTO_EVM_CHAINS` (comma list of codes) overrides; unknown codes ignored; ETH always kept."""
+    raw = os.environ.get('OPENCLAW_CRYPTO_EVM_CHAINS', 'ETH,ARB,POL')
+    want = {c.strip().upper() for c in raw.split(',') if c.strip()} | {'ETH'}
+    return [cid for cid, code in CHAINS.items() if code in want]
 
 
 def _min_usd() -> float:
@@ -187,7 +196,7 @@ class EvmOnchain(Provider):
         self.deadline = 0
         key, reg, min_usd = os.environ['ETHERSCAN_API_KEY'], registry.load_registry(), _min_usd()
         abc, state = assets_by_contract(assets), self.load_state()
-        order = list(CHAINS)
+        order = enabled_chain_ids()
         idx = state.get('evm_next_chain_idx', 0) % len(order)
         state['evm_next_chain_idx'] = (idx + 1) % len(order)
         self.save_state(state)  # advance first so a failing chain cannot starve the others
