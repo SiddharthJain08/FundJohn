@@ -187,3 +187,19 @@ def _no_corporate_action_lookup(request, monkeypatch):
         return
     ar = importlib.import_module("execution.alpaca_reconcile")
     monkeypatch.setattr(ar, 'fetch_activities_since', lambda *a, **k: [])
+
+
+@pytest.fixture(autouse=True)
+def _crypto_bp_guard_hermetic(request, monkeypatch):
+    """Crypto Phase 3 Task 6: _route_crypto_order's buying-power guard fetches
+    GET /v2/account once per process (module memo) via the executor's OWN
+    _alpaca_session/_fetch_account_state names. .env loads at import, so an
+    unstubbed crypto BUY test would hit the REAL paper broker, and the memo
+    would make results test-order dependent. Reset the memo and pin the
+    lookup to "unknown" (guard fails open). SKIPPED for the guard's own test
+    file, which stubs the fetch itself."""
+    if request.path.name == 'test_executor_crypto_bp_guard.py':
+        return
+    ae = importlib.import_module("execution.alpaca_executor")
+    ae._reset_crypto_account_memo()
+    monkeypatch.setattr(ae, '_crypto_nmbp', lambda: None)

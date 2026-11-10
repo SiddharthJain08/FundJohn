@@ -55,6 +55,10 @@ def _fetch_account_state(sess):
         'short_market_value':    0.0,
         'buying_power':          PAPER_PORTFOLIO,
         'regt_buying_power':     PAPER_PORTFOLIO,
+        # non_marginable_buying_power (crypto Phase 3): None = UNKNOWN (absent,
+        # unparseable, or fetch failed) — deliberately not 0.0, so consumers
+        # can tell "unknown" (fail open) from "zero" (no crypto funding).
+        'non_marginable_buying_power': None,
         # daytrading_buying_power: deliberately NO default — Alpaca removes
         # the field 2026-07-06 (PDT retirement); it is set below only while
         # the API still provides it. A fabricated default would re-cap the
@@ -71,7 +75,7 @@ def _fetch_account_state(sess):
         j = r.json()
         for key in ('equity', 'cash', 'long_market_value', 'short_market_value',
                     'buying_power', 'regt_buying_power', 'daytrading_buying_power',
-                    'initial_margin', 'maintenance_margin', 'multiplier',
+                    'non_marginable_buying_power', 'initial_margin', 'maintenance_margin', 'multiplier',
                     'daytrade_count'):
             v = j.get(key)
             if v is not None:

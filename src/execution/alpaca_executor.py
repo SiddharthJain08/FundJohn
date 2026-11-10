@@ -1297,6 +1297,35 @@ def _crypto_latest_price(api_symbol: str) -> float | None:
     return p if p > 0 else None
 
 
+# Crypto Phase 3: non-marginable buying power is the ONLY funding constraint
+# for crypto (operator rule). Fetched once per process; 'loaded' is separate
+# from 'value' so an unknown (None) result is memoised too, not refetched.
+_CRYPTO_ACCT_MEMO: dict = {'loaded': False, 'nmbp': None}
+
+
+def _reset_crypto_account_memo() -> None:
+    _CRYPTO_ACCT_MEMO['loaded'] = False
+    _CRYPTO_ACCT_MEMO['nmbp'] = None
+
+
+def _crypto_nmbp() -> float | None:
+    """Non-marginable buying power for this process, or None when unknown
+    (fetch raised, account not fetched, field absent/unparseable)."""
+    if not _CRYPTO_ACCT_MEMO['loaded']:
+        val = None
+        try:
+            st = _fetch_account_state(_alpaca_session())
+            if st.get('fetched') is not False:
+                raw = st.get('non_marginable_buying_power')
+                val = float(raw) if raw is not None else None
+        except Exception as _e:   # noqa: BLE001 - fail-open: never block on a read error
+            log(f'[crypto] buying_power fetch failed (guard open): {_e}')
+            val = None
+        _CRYPTO_ACCT_MEMO['nmbp'] = val
+        _CRYPTO_ACCT_MEMO['loaded'] = True
+    return _CRYPTO_ACCT_MEMO['nmbp']
+
+
 def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
     """SP-3.1 Phase A: handle a crypto order, or return None to fall through
     to the equity path. Crypto is 24/7, fractional-qty, market+gtc, simple
@@ -1332,6 +1361,19 @@ def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
         return {'ticker': api_symbol, 'status': 'SKIP',
                 'reason': 'crypto: non-positive notional',
                 'client_order_id': coid, 'tif': _CRYPTO_TIF, 'order_class': 'simple'}
+    # Crypto buying-power guard: refuse a BUY whose notional exceeds
+    # non-marginable buying power. Sells/closes are exempt (close_only
+    # returned above). Unknown nmbp ⇒ fail OPEN with a logged line.
+    if side == 'buy':
+        nmbp = _crypto_nmbp()
+        if nmbp is None:
+            log(f'[crypto] buying_power unknown (guard open) {raw_ticker} ~${notional:,.0f}')
+        elif notional > nmbp:
+            log(f'[crypto] refused:crypto_buying_power {raw_ticker} '
+                f'notional=${notional:,.2f} > nmbp=${nmbp:,.2f}')
+            return {'ticker': api_symbol, 'status': 'refused', 'reason': 'crypto_buying_power',
+                    'notional': notional, 'non_marginable_buying_power': nmbp,
+                    'tif': _CRYPTO_TIF, 'order_class': 'simple', 'client_order_id': coid}
     price = _crypto_latest_price(api_symbol)
     if price is None:
         return {'ticker': api_symbol, 'status': 'SKIP',

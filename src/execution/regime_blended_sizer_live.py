@@ -121,6 +121,15 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
 
     nav = max(equity, 1.0)  # guard against zero-division
 
+    # Per-build memo of instrument_class_for (each call parses the manifest);
+    # calls the module-global name so tests can monkeypatch it.
+    _class_cache: dict = {}
+
+    def _class_of(sid):
+        if sid not in _class_cache:
+            _class_cache[sid] = instrument_class_for(sid)
+        return _class_cache[sid]
+
     for o in orders:
         # Direction: legacy consolidate/independent paths emit int (+1/-1);
         # sharpe_cadence path emits 'long'/'short' string.
@@ -253,7 +262,16 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
             _sid_for_class = (_contribs[0].get('strategy_id')
                               if _contribs else o.get('strategy_id'))
             if _sid_for_class:
-                _ic = instrument_class_for(_sid_for_class)
+                _ic = _class_of(_sid_for_class)
+                if _ic != 'crypto':
+                    # Crypto Phase 3: crypto if ANY contributor is crypto —
+                    # every contributions[*].strategy_id, else the parts of the
+                    # top-level '|'-joined composite (sharpe_cadence path).
+                    # Non-crypto classes keep first-contributor semantics.
+                    _other = ([c.get('strategy_id') for c in _contribs[1:]] if _contribs
+                              else str(_sid_for_class).split('|'))
+                    if any(s and _class_of(s) == 'crypto' for s in _other):
+                        _ic = 'crypto'
                 if _ic not in ('equity', 'etp'):
                     o = apply_instrument_class_sizing(o, _ic)
                     notional = abs(float(o['notional_usd']))
