@@ -187,3 +187,71 @@ def test_guard_fails_open_on_unfetched_state(monkeypatch):
     with patch.object(ae, '_run_alpaca_cli', side_effect=call):
         res = ae._route_crypto_order(dict(BUY_5K), 100000.0, 'C9')
     assert res['status'] == 'submitted'
+
+
+# ── fix round 1: seed from main()'s snapshot, cause in log, counters ───────
+def _logs(monkeypatch):
+    lines = []
+    monkeypatch.setattr(ae, 'log', lambda m, *a, **k: lines.append(str(m)))
+    return lines
+
+
+def test_seeded_memo_makes_no_account_fetch(monkeypatch):
+    calls = _stub_account(monkeypatch, nmbp=10000.0)
+    ae._seed_crypto_account_memo({'fetched': True, 'non_marginable_buying_power': '1000'})
+    call, _ = _cli()
+    with patch.object(ae, '_run_alpaca_cli', side_effect=call):
+        res = ae._route_crypto_order(dict(BUY_5K), 100000.0, 'S1')
+    assert res['reason'] == 'crypto_buying_power'   # seeded $1k, not the fetch's $10k
+    assert calls == []
+
+
+def test_main_seeds_memo_from_its_account_snapshot():
+    import inspect
+    src = inspect.getsource(ae.main)
+    i_fetch = src.index('account = _fetch_account_state(sess)')
+    i_seed = src.index('_seed_crypto_account_memo(account)')
+    assert i_fetch < i_seed
+
+
+def test_seed_from_unfetched_snapshot_logs_fetch_error(monkeypatch):
+    calls = _stub_account(monkeypatch, nmbp=0.0)
+    lines = _logs(monkeypatch)
+    ae._seed_crypto_account_memo({'fetched': False, 'non_marginable_buying_power': None})
+    call, _ = _cli()
+    with patch.object(ae, '_run_alpaca_cli', side_effect=call):
+        res = ae._route_crypto_order(dict(BUY_5K), 100000.0, 'S2')
+    assert res['status'] == 'submitted'
+    assert calls == []
+    assert any('guard open' in l and 'cause=fetch_error' in l for l in lines)
+
+
+def test_lazy_fetch_exception_logs_fetch_error(monkeypatch):
+    _stub_account(monkeypatch, exc=RuntimeError('down'))
+    lines = _logs(monkeypatch)
+    call, _ = _cli()
+    with patch.object(ae, '_run_alpaca_cli', side_effect=call):
+        ae._route_crypto_order(dict(BUY_5K), 100000.0, 'S3')
+    assert any('guard open' in l and 'cause=fetch_error' in l for l in lines)
+
+
+def test_absent_field_logs_field_absent(monkeypatch):
+    lines = _logs(monkeypatch)
+    ae._seed_crypto_account_memo({'fetched': True})
+    call, _ = _cli()
+    with patch.object(ae, '_run_alpaca_cli', side_effect=call):
+        ae._route_crypto_order(dict(BUY_5K), 100000.0, 'S4')
+    assert any('guard open' in l and 'cause=field_absent' in l for l in lines)
+
+
+def test_summary_line_counts_refused_and_open(monkeypatch):
+    assert ae._crypto_bp_guard_summary_line() == ''
+    call, _ = _cli()
+    with patch.object(ae, '_run_alpaca_cli', side_effect=call):
+        ae._seed_crypto_account_memo({'fetched': True, 'non_marginable_buying_power': 6000.0})
+        ae._route_crypto_order(dict(BUY_5K), 100000.0, 'T1')                 # allowed
+        ae._route_crypto_order(dict(BUY_5K, pct_nav=0.1), 100000.0, 'T2')    # $10k > $6k refused
+        ae._route_crypto_order(dict(BUY_5K, pct_nav=0.2), 100000.0, 'T3')    # refused
+        ae._seed_crypto_account_memo({'fetched': False})
+        ae._route_crypto_order(dict(BUY_5K), 100000.0, 'T4')                 # open
+    assert ae._crypto_bp_guard_summary_line() == 'crypto_bp_guard: refused=2 open=1 allowed=1'

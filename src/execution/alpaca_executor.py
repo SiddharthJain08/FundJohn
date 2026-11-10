@@ -1300,30 +1300,56 @@ def _crypto_latest_price(api_symbol: str) -> float | None:
 # Crypto Phase 3: non-marginable buying power is the ONLY funding constraint
 # for crypto (operator rule). Fetched once per process; 'loaded' is separate
 # from 'value' so an unknown (None) result is memoised too, not refetched.
-_CRYPTO_ACCT_MEMO: dict = {'loaded': False, 'nmbp': None}
+_CRYPTO_ACCT_MEMO: dict = {'loaded': False, 'nmbp': None, 'cause': None,
+                           'refused': 0, 'allowed': 0, 'open': 0}
 
 
 def _reset_crypto_account_memo() -> None:
-    _CRYPTO_ACCT_MEMO['loaded'] = False
-    _CRYPTO_ACCT_MEMO['nmbp'] = None
+    _CRYPTO_ACCT_MEMO.update(loaded=False, nmbp=None, cause=None,
+                             refused=0, allowed=0, open=0)
+
+
+def _nmbp_from_state(st) -> tuple:
+    """(nmbp, cause) from an account-state dict. cause is None when known,
+    'fetch_error' when the snapshot was not fetched, 'field_absent' when the
+    field is missing/unparseable."""
+    if not isinstance(st, dict) or st.get('fetched') is False:
+        return None, 'fetch_error'
+    raw = st.get('non_marginable_buying_power')
+    try:
+        return (float(raw), None) if raw is not None else (None, 'field_absent')
+    except (TypeError, ValueError):
+        return None, 'field_absent'
+
+
+def _seed_crypto_account_memo(account) -> None:
+    """main() already holds the run's account snapshot: seed the memo from it
+    so the guard makes no second GET /v2/account (no extra failure window)."""
+    nmbp, cause = _nmbp_from_state(account)
+    _CRYPTO_ACCT_MEMO.update(loaded=True, nmbp=nmbp, cause=cause)
 
 
 def _crypto_nmbp() -> float | None:
     """Non-marginable buying power for this process, or None when unknown
-    (fetch raised, account not fetched, field absent/unparseable)."""
+    (fetch raised, account not fetched, field absent/unparseable). Seeded by
+    main(); the lazy fetch is the fallback for in-process callers."""
     if not _CRYPTO_ACCT_MEMO['loaded']:
-        val = None
         try:
-            st = _fetch_account_state(_alpaca_session())
-            if st.get('fetched') is not False:
-                raw = st.get('non_marginable_buying_power')
-                val = float(raw) if raw is not None else None
+            nmbp, cause = _nmbp_from_state(_fetch_account_state(_alpaca_session()))
         except Exception as _e:   # noqa: BLE001 - fail-open: never block on a read error
             log(f'[crypto] buying_power fetch failed (guard open): {_e}')
-            val = None
-        _CRYPTO_ACCT_MEMO['nmbp'] = val
-        _CRYPTO_ACCT_MEMO['loaded'] = True
+            nmbp, cause = None, 'fetch_error'
+        _CRYPTO_ACCT_MEMO.update(loaded=True, nmbp=nmbp, cause=cause)
     return _CRYPTO_ACCT_MEMO['nmbp']
+
+
+def _crypto_bp_guard_summary_line() -> str:
+    """Run-summary counter line, or '' when the guard never evaluated a buy."""
+    m = _CRYPTO_ACCT_MEMO
+    if not (m['refused'] or m['allowed'] or m['open']):
+        return ''
+    return (f"crypto_bp_guard: refused={m['refused']} open={m['open']} "
+            f"allowed={m['allowed']}")
 
 
 def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
@@ -1367,13 +1393,18 @@ def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
     if side == 'buy':
         nmbp = _crypto_nmbp()
         if nmbp is None:
-            log(f'[crypto] buying_power unknown (guard open) {raw_ticker} ~${notional:,.0f}')
+            _CRYPTO_ACCT_MEMO['open'] += 1
+            log(f'[crypto] buying_power unknown (guard open) {raw_ticker} ~${notional:,.0f} '
+                f"cause={_CRYPTO_ACCT_MEMO.get('cause') or 'unknown'}")
         elif notional > nmbp:
+            _CRYPTO_ACCT_MEMO['refused'] += 1
             log(f'[crypto] refused:crypto_buying_power {raw_ticker} '
                 f'notional=${notional:,.2f} > nmbp=${nmbp:,.2f}')
             return {'ticker': api_symbol, 'status': 'refused', 'reason': 'crypto_buying_power',
                     'notional': notional, 'non_marginable_buying_power': nmbp,
                     'tif': _CRYPTO_TIF, 'order_class': 'simple', 'client_order_id': coid}
+        else:
+            _CRYPTO_ACCT_MEMO['allowed'] += 1
     price = _crypto_latest_price(api_symbol)
     if price is None:
         return {'ticker': api_symbol, 'status': 'SKIP',
@@ -2930,6 +2961,7 @@ def main():
     long_mv = account['long_market_value']
     regt_bp = account['regt_buying_power']
     _bp_snapshot(account, run_date)
+    _seed_crypto_account_memo(account)   # crypto bp guard: no second account GET
 
     # Reset per-run unsupported-asset + asset-meta caches.
     _unsupported_assets.clear()
@@ -3065,6 +3097,9 @@ def main():
         _clear_close_inflight(run_date)
 
     log(f'Done — submitted={len(submitted)}  skipped={len(skipped)}  new_notional=${new_notional_total:,.0f}')
+    _cbp_line = _crypto_bp_guard_summary_line()
+    if _cbp_line:
+        log(_cbp_line)
     if skipped:
         for s in skipped[:10]:
             log(f'  SKIP {s["ticker"]}: {s["reason"]}')
@@ -3120,6 +3155,9 @@ def _post_executor_summary(run_date, submitted, skipped, notional):
     _bp_line = _dtbp_summary_line(skipped)
     if _bp_line:
         lines.append(_bp_line)
+    _cbp_line = _crypto_bp_guard_summary_line()
+    if _cbp_line:
+        lines.append(f'• {_cbp_line}')
     msg = '\n'.join(lines)[:1900]
     headers = {'Authorization': f'Bot {token}'}
     try:
