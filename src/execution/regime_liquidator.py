@@ -966,31 +966,31 @@ def _write_liquidation_audit(row: dict) -> str | None:
         'avg_fill_price': row.get('avg_fill_price'),
     })
     side_closed = ('long_close' if row.get('direction') == 'long' else 'short_close')
-    params = (
-        row['run_date'], row['regime_from'], row['regime_to'],
-        row.get('ticker'), row.get('qty'),
-        side_closed,
-        close_result_payload,
-        row['result_status'],
-    )
-    insert_sql = """
+    try:
+        params = (
+            row['run_date'], row['regime_from'], row['regime_to'],
+            row.get('ticker'), row.get('qty'),
+            side_closed,
+            close_result_payload,
+            row['result_status'],
+        )
+        insert_sql = """
                 INSERT INTO alpaca_liquidations
                     (run_date, regime_from, regime_to, symbol, qty,
                      side_closed, close_result, result_status)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """
-    if row.get('asset_class'):
-        # migration 169 column; only written when the caller supplies it.
-        insert_sql = """
+        if row.get('asset_class'):
+            # migration 169 column; only written when the caller supplies it.
+            insert_sql = """
                 INSERT INTO alpaca_liquidations
                     (run_date, regime_from, regime_to, symbol, qty,
                      side_closed, close_result, result_status, asset_class)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """
-        params = params + (row['asset_class'],)
-    try:
+            params = params + (row['asset_class'],)
         with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
             cur.execute(insert_sql, params)
             new_id = cur.fetchone()[0]

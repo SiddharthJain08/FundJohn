@@ -47,3 +47,12 @@ def test_write_liquidation_audit_default_source_unchanged(monkeypatch):
     assert 'asset_class' not in sql
     assert len(params) == 8
     assert json.loads(params[6])['source'] == 'close_subset'
+
+
+def test_write_liquidation_audit_missing_key_returns_none(monkeypatch):
+    import psycopg2
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://x')
+    monkeypatch.setattr(psycopg2, 'connect', lambda dsn: _Conn())
+    row = _row()
+    del row['run_date']
+    assert rl._write_liquidation_audit(row) is None
