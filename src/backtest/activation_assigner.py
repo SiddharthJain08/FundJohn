@@ -132,6 +132,7 @@ CONFIG_KEY_BENCH_SHARPE = 'strategy_activation_bench_sharpe'
 # only if the registry lookup fails").
 BENCH_SLEEVE_PARAM_KEY = 'benchmark_sleeve'
 BENCH_SLEEVE_FALLBACK_ID = 'S_beta_spy'
+BENCH_SLEEVE_CLASS_KEY = 'instrument_class'   # registry parameters key; absent = equity
 # min_trades resolution order (most specific wins):
 #   explicit min_trades= / --min-trades  >  pipeline_config  >  class gate (100)
 # The pipeline_config key makes the sample-size floor dashboard-adjustable, like
@@ -464,7 +465,8 @@ def _load_pipeline_config_bench_vector(conn) -> dict:
     return {}
 
 
-def resolve_bench_sleeve_id(conn, sleeve_id: Optional[str] = None) -> tuple[str, str]:
+def resolve_bench_sleeve_id(conn, sleeve_id: Optional[str] = None,
+                            instrument_class: str = 'equity') -> tuple[str, str]:
     """Resolve the registry's benchmark-sleeve strategy id (`parameters ->>
     'benchmark_sleeve' = 'true'`; S_beta_spy today) -- factored out of
     load_bench_sharpe (Task 2, spec 2026-09-25-activation-bench-relative)
@@ -485,14 +487,27 @@ def resolve_bench_sleeve_id(conn, sleeve_id: Optional[str] = None) -> tuple[str,
     lookup succeeded, OR `sleeve_id` was already supplied by the caller --
     trusted as-if-registry, no query issued -- matches load_bench_sharpe's
     pre-existing contract for that case) or 'literal_fallback' (the lookup
-    returned nothing / raised, and BENCH_SLEEVE_FALLBACK_ID was used)."""
+    returned nothing / raised, and BENCH_SLEEVE_FALLBACK_ID was used).
+
+    instrument_class (crypto engine Phase 3, Task 3): the registry can hold
+    one sleeve per class (S_beta_spy + S_beta_btc). 'equity' (default) means
+    "NOT crypto" -- S_beta_spy is registered with instrument_class='etp'
+    (08-29 runbook) and older rows carry none, so an `= 'equity'` predicate
+    would drop the very sleeve the activation bench vector is built from
+    (ruling: the bench vector stays the EQUITY sleeve's). Any other value
+    matches that class exactly. Filtered in SQL so the tie-break below only
+    ever sees same-class ids. Ignored when `sleeve_id` is supplied."""
     if sleeve_id is not None:
         return sleeve_id, 'registry'
     cur = conn.cursor()
     ids: set = set()
     try:
-        cur.execute("SELECT id FROM strategy_registry WHERE (parameters ->> %s) = 'true'",
-                    (BENCH_SLEEVE_PARAM_KEY,))
+        cls = str(instrument_class or 'equity').strip().lower()
+        op = '<>' if cls == 'equity' else '='
+        cur.execute("SELECT id FROM strategy_registry WHERE (parameters ->> %s) = 'true' "
+                    "AND COALESCE(LOWER(parameters ->> %s), %s) " + op + " %s",
+                    (BENCH_SLEEVE_PARAM_KEY, BENCH_SLEEVE_CLASS_KEY, 'equity',
+                     'crypto' if cls == 'equity' else cls))
         ids = {row[0] for row in cur.fetchall()}
     except Exception as e:
         _log(f'bench sleeve id lookup failed ({e}); using literal {BENCH_SLEEVE_FALLBACK_ID}')
@@ -1267,11 +1282,34 @@ def main() -> int:
     # bench=None so load_bench_sharpe resolves it itself and, failing that,
     # falls back to the literal (spec §1: "not hard-coded ... literal only
     # if the registry lookup fails").
+    #
+    # Crypto engine Phase 3 (Task 3): only EQUITY (= non-crypto) sleeves are
+    # candidates for the bench vector -- S_beta_btc sorts before S_beta_spy,
+    # so without this filter a missing SPY row would silently make the BTC
+    # sleeve the equity activation comparator, and two registered sleeves
+    # would WARN every run. Classes come from registry parameters (same
+    # reader/default as the sizer: execution.benchmark_sleeve.sleeve_benchmark);
+    # a params read failure returns {} => every id defaults to equity (the
+    # pre-Phase-3 behaviour, literal still preferred).
+    _equity_bench_ids: set = set()
     if bench_ids:
-        sleeve_id_for_bench = (BENCH_SLEEVE_FALLBACK_ID if BENCH_SLEEVE_FALLBACK_ID in bench_ids
-                               else sorted(bench_ids)[0])
-        if len(bench_ids) > 1:
-            _log(f'WARN: multiple benchmark sleeves in the registry {sorted(bench_ids)}; '
+        try:
+            from execution.benchmark_sleeve import load_benchmark_sleeve_params, sleeve_benchmark
+            _bparams = load_benchmark_sleeve_params(conn) or {}
+            _equity_bench_ids = {s for s in bench_ids
+                                 if sleeve_benchmark(_bparams.get(s))[1] != 'crypto'}
+        except Exception as e:
+            _log(f'benchmark sleeve params lookup failed ({e}); treating every sleeve as equity')
+            _equity_bench_ids = set(bench_ids)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    if _equity_bench_ids:
+        sleeve_id_for_bench = (BENCH_SLEEVE_FALLBACK_ID if BENCH_SLEEVE_FALLBACK_ID in _equity_bench_ids
+                               else sorted(_equity_bench_ids)[0])
+        if len(_equity_bench_ids) > 1:
+            _log(f'WARN: multiple benchmark sleeves in the registry {sorted(_equity_bench_ids)}; '
                  f'using {sleeve_id_for_bench} for the activation bench vector')
     else:
         sleeve_id_for_bench = None

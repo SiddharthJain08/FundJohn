@@ -459,6 +459,8 @@ _IMPL_MAP = {
     'S_inflation_compass_sector_rotation': ('strategies.implementations.S_inflation_compass_sector_rotation', 'InflationCompassSectorRotation'),
     # Beta sleeve: long SPY every bar, hold 21; sized on the market regime Sharpe (spec §2.4)
     'S_beta_spy': ('strategies.implementations.S_beta_spy', 'BetaSpy'),
+    # Crypto beta sleeve: long BTC-USD every bar, hold 21; sized on the crypto-regime S_m (crypto engine Phase 3)
+    'S_beta_btc': ('strategies.implementations.S_beta_btc', 'BetaBtc'),
     # Jakub 2026: monthly-refresh Granger-causal lead-lag pairs, LONG/SHORT the follower in the leader's prior-move direction
     'S_lead_lag_granger_causality': ('strategies.implementations.S_lead_lag_granger_causality', 'LeadLagGrangerCausality'),
     # Jakub 2026 (variant 2): weekly-refresh Granger-causal lead-lag pairs on low-vol candidates, full 2yr estimation window

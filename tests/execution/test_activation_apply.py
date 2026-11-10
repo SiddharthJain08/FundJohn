@@ -367,3 +367,21 @@ def test_main_db_connect_failure_rc1():
         raise RuntimeError('no db')
     rc = aa.main([], env={'OPENCLAW_ACTIVATION_ASSIGNER': '1', 'POSTGRES_URI': 'x'}, connect=bad)
     assert rc == 1
+
+
+def test_bench_sleeve_run_id_resolves_the_equity_sleeve_only(monkeypatch):
+    # Crypto engine Phase 3 Task 3: with S_beta_spy + S_beta_btc both
+    # registered, the re-apply trigger tracks the sleeve the activation
+    # bench vector is built from -- the EQUITY one (S_beta_btc is always_on,
+    # so its own run never changes any eligibility).
+    from backtest import activation_assigner as assigner
+    seen = {}
+    real = assigner.resolve_bench_sleeve_id
+
+    def _spy(conn, sleeve_id=None, instrument_class='equity'):
+        seen['instrument_class'] = instrument_class
+        return real(conn, sleeve_id, instrument_class=instrument_class)
+    monkeypatch.setattr(assigner, 'resolve_bench_sleeve_id', _spy)
+    conn = FakeConn([], sleeve_ids=('S_beta_spy',), sleeve_run_id='r7')
+    assert aa._bench_sleeve_run_id(conn) == 'r7'
+    assert seen['instrument_class'] == 'equity'

@@ -130,7 +130,10 @@ def _bench_sleeve_run_id(conn) -> Optional[str]:
     own resolution of "the sleeve's latest run"."""
     try:
         from backtest.activation_assigner import resolve_bench_sleeve_id
-        sleeve_id, _source = resolve_bench_sleeve_id(conn)
+        # Multi-sleeve (crypto engine Phase 3): the EQUITY sleeve, explicitly --
+        # it is the one the assigner builds the bench vector from; a crypto
+        # sleeve is always_on, so its runs never change any eligibility.
+        sleeve_id, _source = resolve_bench_sleeve_id(conn, instrument_class='equity')
         cur = conn.cursor()
         cur.execute("""SELECT run_id FROM strategy_backtest_runs
                         WHERE strategy_id = %s AND primary_window = TRUE
