@@ -62,3 +62,16 @@ def test_size_wiring(monkeypatch):
 
     mod._size(100_000.0, 'LOW_VOL', True)
     assert os.environ.get('OPENCLAW_BENCH_RELATIVE_SIZING') == '1'
+
+
+def test_max_nav_frac_override_is_equity_only():
+    seen = []
+    def orig(default=1.0, conn=None, *, instrument_class='equity'):
+        seen.append(instrument_class)
+        return 0.25 if instrument_class == 'crypto' else 1.0
+    f = mod._max_nav_frac_override(orig, 0.6)
+    assert f() == 0.6 and f(instrument_class='equity') == 0.6 and seen == []
+    assert f(instrument_class='crypto') == 0.25 and seen == ['crypto']
+    # re-patching unwraps to the original (no chaining); negatives floor at 0
+    g = mod._max_nav_frac_override(f, -1)
+    assert g() == 0.0 and g(instrument_class='crypto') == 0.25 and g._replay_original is orig

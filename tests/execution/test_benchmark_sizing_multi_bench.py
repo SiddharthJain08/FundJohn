@@ -245,3 +245,11 @@ def test_sleeve_params_loader_and_resolution():
     assert bs.sleeve_benchmark(None) == ('SPY', 'equity')
     assert bs.sleeve_benchmark({'instrument_class': 'crypto'}) == ('BTC-USD', 'crypto')
     assert bs.load_benchmark_sleeve_params(conn=_PConn(rows, fail=True)) == {}
+
+
+def test_sleeve_benchmark_infers_class_from_ticker():
+    from execution import benchmark_sleeve as bs
+    assert bs.sleeve_benchmark({'benchmark_sleeve': True, 'benchmark_ticker': 'BTC-USD'}) == ('BTC-USD', 'crypto')
+    assert bs.sleeve_benchmark({'benchmark_sleeve': True, 'benchmark_ticker': 'SPY'}) == ('SPY', 'equity')
+    # an explicit class always wins
+    assert bs.sleeve_benchmark({'benchmark_ticker': 'BTC-USD', 'instrument_class': 'equity'}) == ('BTC-USD', 'equity')

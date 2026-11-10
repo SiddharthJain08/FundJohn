@@ -74,6 +74,23 @@ def _current_regime() -> str:
             return row[0] if row else 'LOW_VOL'
 
 
+def _max_nav_frac_override(current, max_nav_frac):
+    """A stand-in for benchmark_sizing.benchmark_max_nav_frac that returns the
+    operator's --max-nav-frac (floored at 0) for the EQUITY class only; any
+    other instrument_class (crypto: benchmark_max_nav_frac_crypto, default
+    0.25) delegates to the ORIGINAL reader. `current` may itself be a prior
+    override (repeated _size() calls): its original is unwrapped, never chained."""
+    original = getattr(current, '_replay_original', current)
+    v = max(0.0, float(max_nav_frac))
+
+    def _override(default=1.0, conn=None, *, instrument_class='equity'):
+        if instrument_class == 'equity':
+            return v
+        return original(default, conn, instrument_class=instrument_class)
+    _override._replay_original = original
+    return _override
+
+
 def _size(nav: float, regime: str, flag_on: bool, *, budget=False, max_nav_frac=None) -> dict:
     import execution.regime_blended_sizer as _sizer
     from execution import benchmark_sizing as bz
@@ -92,7 +109,7 @@ def _size(nav: float, regime: str, flag_on: bool, *, budget=False, max_nav_frac=
         # Final fix wave (2026-08-30) #12: a negative override would make the
         # sizer's cap flip the benchmark's SIGN (math.copysign(_max, _usd) with
         # _max < 0), silently replacing the beta base with a short. Floor at 0.
-        bz.benchmark_max_nav_frac = lambda default=1.0, conn=None, _v=max(0.0, float(max_nav_frac)): _v
+        bz.benchmark_max_nav_frac = _max_nav_frac_override(bz.benchmark_max_nav_frac, max_nav_frac)
     _sizer._load_broker_positions_usd = lambda: {}
     _sizer._post_corr_cumsharpe_log = lambda line: None
     _sizer._post_flatten_alert = lambda *a, **k: None

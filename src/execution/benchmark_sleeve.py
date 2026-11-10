@@ -81,10 +81,20 @@ def load_benchmark_sleeve_params(conn=None) -> dict[str, dict]:
 def sleeve_benchmark(params: dict | None) -> tuple[str, str]:
     """(benchmark_ticker, instrument_class) for one sleeve's registry
     parameters. Absent -> ('SPY', 'equity'); a crypto sleeve without an
-    explicit ticker -> 'BTC-USD'."""
+    explicit ticker -> 'BTC-USD'; a ticker without an explicit class infers
+    it from the ticker's regime partition (BTC-USD -> 'crypto', SPY ->
+    'equity'), so the S_m partition and the crypto floor_zero can never
+    disagree. An explicit class always wins."""
     p = params or {}
-    cls = str(p.get('instrument_class') or 'equity').strip().lower()
     tkr = p.get('benchmark_ticker')
+    raw_cls = p.get('instrument_class')
+    if raw_cls:
+        cls = str(raw_cls).strip().lower()
+    elif tkr:
+        from execution.benchmark_sizing import benchmark_regime_source
+        cls = 'crypto' if benchmark_regime_source(str(tkr)) == 'crypto' else 'equity'
+    else:
+        cls = 'equity'
     if not tkr:
         tkr = 'BTC-USD' if cls == 'crypto' else 'SPY'
     return str(tkr), cls
