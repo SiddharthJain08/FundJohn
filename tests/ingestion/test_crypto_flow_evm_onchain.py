@@ -115,13 +115,14 @@ def test_round_robin_one_chain_per_tick_plus_eth(tmp_path, monkeypatch):
     p = _provider(tmp_path, monkeypatch, calls, {'status': '0', 'message': 'No transactions found', 'result': []})
     assets = universe.load_universe()
     chains = []
-    for _ in range(7):
+    monkeypatch.delenv('OPENCLAW_CRYPTO_EVM_CHAINS', raising=False)  # default rotation = ETH, ARB, POL
+    for _ in range(4):
         calls.clear()
         p._fetch(assets, None, None)
         chains.append(sorted({u.split('chainid=')[1].split('&')[0] for u in calls}))
     assert chains[0] == ['1']  # idx 0 is ETH itself
-    assert chains[1] == ['1', '42161'] and chains[2] == ['1', '137'] and chains[5] == ['1', '56']
-    assert chains[6] == ['1']  # wrapped around
+    assert chains[1] == ['1', '42161'] and chains[2] == ['1', '137']
+    assert chains[3] == ['1']  # wrapped around after the 3 enabled chains
     assert json.loads(p.state_path.read_text())['evm_next_chain_idx'] == 1
 
 
