@@ -82,7 +82,8 @@ import psycopg2.extras
 import math
 
 from execution.cadence import cadence_days
-from execution.benchmark_sleeve import load_benchmark_sleeve_ids
+from execution.benchmark_sleeve import (load_benchmark_sleeve_ids, load_benchmark_sleeve_params,
+                                        sleeve_benchmark)
 
 logger = logging.getLogger(__name__)
 
@@ -708,7 +709,8 @@ def _effective_sharpe(bt: dict | None, live: dict | None):
 
 
 def _benchmark_sleeve_effective_sharpe(strategy_id: str, regime: str, eff,
-                                       bench_ids: set, s_m_by_regime: dict):
+                                       bench_ids: set, s_m_by_regime: dict, *,
+                                       floor_zero: bool = False):
     """Benchmark sleeves are weighted on S_m, not on their own backtest sleeve.
 
     Operator ruling 2026-08-30: the beta sleeve must BE the buy-and-hold SPY
@@ -723,27 +725,35 @@ def _benchmark_sleeve_effective_sharpe(strategy_id: str, regime: str, eff,
     bt_sharpe keeps the backtest value (dashboard shows both).
 
     Pure. Returns (effective_sharpe, overridden). Fail-open: a sleeve whose
-    regime has no S_m keeps its backtest value."""
+    regime has no S_m keeps its backtest value.
+
+    floor_zero (crypto class, Phase 3): the sleeve weight is max(S_m, 0) — a
+    negative BTC S_m yields (0.0, True), i.e. an unsizeable row, never a
+    fallback to the (possibly positive) backtest value."""
     if strategy_id not in bench_ids:
         return eff, False
     v = s_m_by_regime.get(regime)
     if v is None or not math.isfinite(float(v)):
         return eff, False
-    return float(v), True
+    v = float(v)
+    if floor_zero:
+        v = max(v, 0.0)
+    return v, True
 
 
-def _load_benchmark_regime_sharpe(conn, regimes) -> dict:
+def _load_benchmark_regime_sharpe(conn, regimes, *, benchmark: str = 'SPY') -> dict:
     """{regime: S_m or None} for the given regimes, via the sizer's provider
-    (schema-2 pipeline_config cache; computes + persists the grid once per
-    run_date if stale). Any failure -> {} (the sleeve keeps its backtest
-    value; logged)."""
+    (benchmark-keyed schema-3 pipeline_config cache; computes + persists the
+    benchmark's grid once per run_date if stale). `benchmark` selects the
+    partition by the provider's default (BTC-USD -> crypto regimes, 365-day).
+    Any failure -> {} (the sleeve keeps its backtest value; logged)."""
     try:
         from datetime import date as _date
         from execution.benchmark_sizing import (regime_benchmark_sharpe_for_sizing,
                                                 load_benchmark_horizon)
         h = load_benchmark_horizon(conn=conn)
         today = _date.today()
-        return {R: regime_benchmark_sharpe_for_sizing(R, today, conn=conn, horizon=h)
+        return {R: regime_benchmark_sharpe_for_sizing(R, today, benchmark=benchmark, conn=conn, horizon=h)
                 for R in regimes}
     except Exception as e:
         logger.warning('strategy_weights: S_m unavailable for benchmark sleeves (%s: %s); '
@@ -784,12 +794,29 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
         # weighted on S_m[regime] rather than their own cost-charged backtest
         # sleeve — see _benchmark_sleeve_effective_sharpe. Loaded once; the
         # S_m provider is never touched when there are no sleeves.
+        #
+        # Crypto engine Phase 3: each sleeve resolves its benchmark + class
+        # from registry parameters (benchmark_ticker / instrument_class;
+        # default SPY / equity). S_m is loaded once PER BENCHMARK over the
+        # union of its sleeves' regimes. A crypto sleeve's rows carry the same
+        # four labels but are read as CRYPTO-partition regimes (the sizer
+        # picks the row by passing the crypto regime), and are weighted
+        # max(S_m, 0).
         bench_ids = load_benchmark_sleeve_ids(conn)
-        s_m_by_regime = {}
+        sleeve_bench: dict[str, tuple[str, str]] = {}
+        s_m_by_bench: dict[str, dict] = {}
         if bench_ids:
-            _bench_regimes = sorted({R for s in active if s['strategy_id'] in bench_ids
-                                     for R in s['eligible_regimes']})
-            s_m_by_regime = _load_benchmark_regime_sharpe(conn, _bench_regimes)
+            _params = load_benchmark_sleeve_params(conn) or {}
+            sleeve_bench = {sid: sleeve_benchmark(_params.get(sid)) for sid in bench_ids}
+            _regimes_by_bench: dict[str, set] = {}
+            for s in active:
+                if s['strategy_id'] in bench_ids:
+                    _b = sleeve_bench[s['strategy_id']][0]
+                    _regimes_by_bench.setdefault(_b, set()).update(s['eligible_regimes'])
+            for _b, _rs in _regimes_by_bench.items():
+                # SPY keeps the pre-Phase-3 two-argument call.
+                s_m_by_bench[_b] = (_load_benchmark_regime_sharpe(conn, sorted(_rs)) if _b == 'SPY'
+                                    else _load_benchmark_regime_sharpe(conn, sorted(_rs), benchmark=_b))
 
         if verbose:
             print(f'active strategies: {len(active)}, backtest rows: {len(bt)}, '
@@ -807,11 +834,13 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
             for R in s['eligible_regimes']:
                 eff, bt_s, bt_n, lv_s, lv_n = _effective_sharpe(bt.get((s['strategy_id'], R)),
                                                                 live.get((s['strategy_id'], R)))
+                _sb, _sc = sleeve_bench.get(s['strategy_id'], ('SPY', 'equity'))
                 eff, _bench_override = _benchmark_sleeve_effective_sharpe(
-                    s['strategy_id'], R, eff, bench_ids, s_m_by_regime)
+                    s['strategy_id'], R, eff, bench_ids, s_m_by_bench.get(_sb) or {},
+                    floor_zero=(_sc == 'crypto'))
                 if _bench_override:
-                    logger.info('strategy_weights: %s/%s benchmark sleeve weighted on S_m=%.3f '
-                                '(backtest sleeve %s)', s['strategy_id'], R, eff,
+                    logger.info('strategy_weights: %s/%s benchmark sleeve weighted on S_m[%s]=%.3f '
+                                '(backtest sleeve %s)', s['strategy_id'], R, _sb, eff,
                                 'n/a' if bt_s is None else f'{bt_s:.3f}')
                 if not _is_sizeable_sharpe(eff):
                     continue

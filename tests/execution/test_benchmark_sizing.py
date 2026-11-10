@@ -81,7 +81,8 @@ def test_computes_persists_schema2_and_reuses_cache():
     v = bz.regime_benchmark_sharpe_for_sizing('LOW_VOL', date(2026, 8, 31), conn=conn, compute=compute)
     assert v == 0.80 and calls == [('2016-04-11', '2026-08-31', 'SPY')]
     payload = json.loads(store[bz.CONFIG_KEY])
-    assert payload['schema'] == bz.CACHE_SCHEMA == 2
+    assert payload['schema'] == bz.CACHE_SCHEMA == 3          # Phase 3: benchmark-keyed cache
+    payload = payload['benchmarks']['SPY']
     assert payload['horizons'] == [1, 2, 3, 5, 10, 21]
     assert payload['by_regime']['LOW_VOL']['5'] == 0.57 and payload['by_regime']['CRISIS']['1'] is None
     # same day: cache hit, no recompute; explicit horizon selects a column
@@ -104,7 +105,7 @@ def test_schema1_cache_is_a_miss_and_is_rewritten():
     conn = _Conn(store)
     assert bz.regime_benchmark_sharpe_for_sizing('LOW_VOL', date(2026, 8, 31), conn=conn, compute=compute) == 0.80
     assert calls == [1]
-    assert json.loads(store[bz.CONFIG_KEY])['schema'] == 2
+    assert json.loads(store[bz.CONFIG_KEY])['schema'] == 3     # Phase 3: rewritten as schema 3
 
 
 def test_horizon_config_selects_column_and_falls_back_to_1():

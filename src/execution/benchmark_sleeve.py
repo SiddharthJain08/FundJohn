@@ -42,6 +42,54 @@ def load_benchmark_sleeve_ids(conn=None) -> set[str]:
                 pass
 
 
+def load_benchmark_sleeve_params(conn=None) -> dict[str, dict]:
+    """{strategy_id: registry parameters} for every benchmark sleeve (crypto
+    engine Phase 3). Sibling of load_benchmark_sleeve_ids (whose set contract
+    is unchanged); callers read `instrument_class` (default 'equity') and
+    `benchmark_ticker` (default 'SPY') from it via sleeve_benchmark().
+    Same fail-open contract: a DB failure returns {} (logged)."""
+    own = conn is None
+    try:
+        if own:
+            import psycopg2
+            conn = psycopg2.connect(os.environ['POSTGRES_URI'])
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, parameters FROM strategy_registry WHERE (parameters ->> %s) = 'true'",
+                        (PARAM_KEY,))
+            out: dict[str, dict] = {}
+            for r in cur.fetchall():
+                p = r[1]
+                if isinstance(p, str):
+                    import json
+                    try:
+                        p = json.loads(p)
+                    except Exception:
+                        p = {}
+                out[r[0]] = dict(p) if isinstance(p, dict) else {}
+            return out
+    except Exception as e:
+        logger.warning('[bench_sleeve] registry params read failed (%s); sleeves default to SPY/equity', e)
+        return {}
+    finally:
+        if own and conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def sleeve_benchmark(params: dict | None) -> tuple[str, str]:
+    """(benchmark_ticker, instrument_class) for one sleeve's registry
+    parameters. Absent -> ('SPY', 'equity'); a crypto sleeve without an
+    explicit ticker -> 'BTC-USD'."""
+    p = params or {}
+    cls = str(p.get('instrument_class') or 'equity').strip().lower()
+    tkr = p.get('benchmark_ticker')
+    if not tkr:
+        tkr = 'BTC-USD' if cls == 'crypto' else 'SPY'
+    return str(tkr), cls
+
+
 def benchmark_tickers(ticker_meta: dict, bench_ids: set[str], net_sign: dict | None = None) -> set[str]:
     """Tickers with at least one benchmark-sleeve contributor: any direction
     unless net_sign is given; then only a contributor acting in the ticker's

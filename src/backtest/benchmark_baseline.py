@@ -50,6 +50,10 @@ PRICES_PARQUET = "/root/openclaw/data/master/prices.parquet"
 CANONICAL_REGIMES = ("LOW_VOL", "TRANSITIONING", "HIGH_VOL", "CRISIS")
 
 TRADING_DAYS_PER_YEAR = 252
+# Crypto engine Phase 3 (2026-11-10): BTC-USD trades every calendar day, so
+# its S_m is annualised on 365 and charged rf per CALENDAR day (annual / 365).
+CRYPTO_TRADING_DAYS_PER_YEAR = 365
+REGIME_SOURCES = ('equity', 'crypto')
 # Extra calendar-day lookback pulled before start_date so the FIRST tagged
 # trading day in-window still yields a close-to-close return (weekends/
 # holidays mean a handful of trading days can span >7 calendar days).
@@ -96,6 +100,27 @@ def load_regime_tags(start_date, end_date) -> dict[str, str]:
     return dict(zip(r["date"].dt.strftime("%Y-%m-%d"), r["regime"].astype(str)))
 
 
+def load_crypto_regime_tags(dates) -> dict[str, str]:
+    """{'YYYY-MM-DD': regime} for the given dates from the crypto regime tier
+    table (strategies.crypto_historical_regimes.regime_series — ffilled inside
+    the table span, 'UNKNOWN' outside; UNKNOWN days are omitted, so they
+    never tag an entry). regime_series is indexed by datetime.date; keys are
+    re-stringified here so they match load_benchmark_closes' string keys
+    (a type mismatch would silently yield an all-None grid). Called through
+    the module attribute so tests can monkeypatch regime_series."""
+    from strategies import crypto_historical_regimes as _chr
+    ds = sorted(dates)
+    if not ds:
+        return {}
+    ser = _chr.regime_series(ds)
+    out: dict[str, str] = {}
+    for k, v in zip(ser.index, ser.values):
+        lab = str(v)
+        if lab in CANONICAL_REGIMES:
+            out[_to_date_str(k)] = lab
+    return out
+
+
 def load_benchmark_closes(start_date, end_date, benchmark: str) -> dict[str, float]:
     """{'YYYY-MM-DD': close} for `benchmark` in prices.parquet, sliced via
     pyarrow predicate pushdown (ticker + date range) — never loads the full
@@ -134,11 +159,38 @@ def _excess_sharpe(rets: list[float], min_obs: int, dates=None) -> float | None:
     return _rf_excess_sharpe(rets, dates, min_obs=max(min_obs, 2))
 
 
+def _excess_sharpe_days(rets: list[float], min_obs: int, dates, trading_days: int) -> float | None:
+    """_excess_sharpe on a `trading_days`-per-year calendar. 252 delegates to
+    the engine estimator unchanged (equity semantics byte-identical). Any
+    other calendar (crypto: 365) re-bases backtest.risk_free's per-252-day
+    rf to per-`trading_days` (rf_daily_for(...) · 252 / trading_days — same
+    source, OPENCLAW_RF_SOURCE, const or DGS3MO) and annualises on
+    √trading_days."""
+    if int(trading_days) == TRADING_DAYS_PER_YEAR:
+        return _excess_sharpe(rets, min_obs, dates=dates)
+    import math
+    import numpy as np
+    from backtest.risk_free import TRADING_DAYS as _RF_DAYS, rf_daily_for
+    r = np.asarray(list(rets), dtype=float)
+    n = len(r)
+    if n < max(min_obs, 2):
+        return None
+    sd = float(r.std(ddof=1))
+    if not math.isfinite(sd) or sd < 1e-9:
+        return None
+    rfv = rf_daily_for(dates) * (_RF_DAYS / float(trading_days))
+    if len(rfv) != n:
+        raise ValueError(f'benchmark_baseline: {len(rfv)} rf dates for {n} returns')
+    return float((r - rfv).mean() / sd * math.sqrt(float(trading_days)))
+
+
 def regime_benchmark_sharpe_by_horizon(start_date, end_date,
                                        benchmark: str = "SPY",
                                        min_obs: int = 40,
                                        horizons=BENCH_HORIZONS,
-                                       record_shadow: bool = True) -> dict[str, dict[int, float | None]]:
+                                       record_shadow: bool = True,
+                                       *, regime_source: str = 'equity',
+                                       trading_days: int | None = None) -> dict[str, dict[int, float | None]]:
     """Forward, entry-tagged benchmark Sharpe per (regime, horizon).
 
     For each canonical regime and each H in `horizons`: a synthetic lot of
@@ -171,10 +223,31 @@ def regime_benchmark_sharpe_by_horizon(start_date, end_date,
     in the SAME logs/rf_shadow.log the rf flip gate reads and permanently
     trip its 'dirty' check, blocking scripts/rf_flip_after_fleet.sh on
     evidence that has nothing to do with the live path.
+
+    regime_source (crypto engine Phase 3, 2026-11-10): 'equity' (default) tags
+    days from historical_regimes.parquet (unchanged); 'crypto' tags each
+    close date from strategies.crypto_historical_regimes (the BTC realised-
+    vol tier table) — the partition crypto sleeves are backtested on.
+    trading_days: annualisation calendar; default 252 for equity, 365 for
+    crypto (rf is charged per calendar day, see _excess_sharpe_days). The rf
+    shadow line is equity-only: backtest.risk_free.sharpe_pair is 252-based,
+    and a thin crypto partition's n/a regimes would trip the rf flip gate's
+    dirty check on logs/rf_shadow.log. Unknown regime_source -> {} (logged).
     """
+    if regime_source not in REGIME_SOURCES:
+        logger.warning("[bench_baseline] unknown regime_source %r", regime_source)
+        return {}
+    if trading_days is None:
+        trading_days = (CRYPTO_TRADING_DAYS_PER_YEAR if regime_source == 'crypto'
+                        else TRADING_DAYS_PER_YEAR)
     try:
-        tags = load_regime_tags(start_date, end_date)
-        closes = load_benchmark_closes(start_date, end_date, benchmark)
+        if regime_source == 'crypto':
+            closes = load_benchmark_closes(start_date, end_date, benchmark)
+            lo, hi = _to_date_str(start_date), _to_date_str(end_date)
+            tags = load_crypto_regime_tags([d for d in closes if lo <= d <= hi])
+        else:
+            tags = load_regime_tags(start_date, end_date)
+            closes = load_benchmark_closes(start_date, end_date, benchmark)
     except Exception as e:
         logger.warning("[bench_baseline] benchmark load failed: %s: %s", type(e).__name__, e)
         return {}
@@ -210,10 +283,11 @@ def regime_benchmark_sharpe_by_horizon(start_date, end_date,
             ds = [dates[j] for j in js]
             if h == DEFAULT_HORIZON:
                 default_h[regime] = (xs, ds)
-            out[regime][h] = _excess_sharpe(xs, min_obs, dates=ds)
+            out[regime][h] = _excess_sharpe_days(xs, min_obs, ds, trading_days)
     # Spec C.4: this site emits its rf shadow too — ONE line per regime, for
     # the DEFAULT_HORIZON column only (the one the sizer actually reads).
-    if DEFAULT_HORIZON in hs:
+    # Equity only (see docstring).
+    if DEFAULT_HORIZON in hs and regime_source == 'equity':
         for regime in CANONICAL_REGIMES:
             xs, ds = default_h.get(regime, ([], []))
             try:
