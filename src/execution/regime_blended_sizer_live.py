@@ -590,6 +590,18 @@ def main():
         'position_circuit_breaker_pct': 0.02,
     }
 
+    # Crypto engine Phase 3 (spec §5.3a): the crypto regime-of-record and its
+    # regime_sizer_params row (same table, keyed by the crypto label). Fail-open
+    # to (None, None) ⇒ the sizer skips its crypto block entirely.
+    crypto_regime_state, crypto_params = None, None
+    try:
+        from execution.pooled_sizing import load_crypto_regime_and_params
+        crypto_regime_state, crypto_params = load_crypto_regime_and_params(conn)
+    except Exception as _ce:  # noqa: BLE001
+        print(f'[regime_blended_sizer_live] crypto regime load failed ({_ce}); crypto block skipped')
+    if crypto_regime_state:
+        print(f'[regime_blended_sizer_live] crypto regime: {crypto_regime_state}')
+
     cur.execute("SELECT * FROM strategy_state")
     strategy_state = {r['strategy_id']: dict(r) for r in cur.fetchall()}
 
@@ -658,6 +670,8 @@ def main():
         run_date=run_date,
         strategy_state=strategy_state,
         regime_params=params,
+        crypto_regime_state=crypto_regime_state,
+        crypto_params=crypto_params,
     )
     print(f'[regime_blended_sizer_live] size_positions produced {len(orders)} orders')
 

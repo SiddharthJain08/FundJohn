@@ -135,8 +135,14 @@ def _size_positions_impl(
     strategy_state: dict,
     regime_params: dict,
     confirmer=None,
+    crypto_regime_state: str | None = None,
+    crypto_params: dict | None = None,
 ) -> list[dict]:
     """Returns list of sized orders for the cycle.
+
+    crypto_regime_state / crypto_params (crypto engine Phase 3): the crypto
+    regime-of-record and its regime_sizer_params row. None ⇒ the crypto block
+    is skipped and sizing is exactly as before Phase 3.
 
     Pipeline:
       1. Cadence gate (filter_by_cadence) — drops signals from strategies
@@ -183,8 +189,13 @@ def _size_positions_impl(
     # owned by the pre-market news gate (premarket_gate.py, OPENCLAW_EOD_PREMARKET_GATE),
     # which scores news/sentiment on the day's signals before the trade step. The
     # `confirmer` param is kept (tests inject stubs) but is None in production.
+    if crypto_regime_state is None:
+        return _sharpe_cadence_path(passed, account_state, regime_state,
+                                    regime_params, confirmer)
     return _sharpe_cadence_path(passed, account_state, regime_state,
-                                regime_params, confirmer)
+                                regime_params, confirmer,
+                                crypto_regime_state=crypto_regime_state,
+                                crypto_params=crypto_params)
 
 
 @functools.wraps(_size_positions_impl)
@@ -666,7 +677,9 @@ def _tradable_classes() -> tuple[str, ...]:
 
 def _load_approved_carried_signals(weight_by_strat: dict[str, float],
                                    cadence_by_strat: dict[str, float] | None = None,
-                                   regime_state: str | None = None) -> list[dict]:
+                                   regime_state: str | None = None,
+                                   *, strategy_ids: set[str] | None = None,
+                                   tradable_classes: tuple[str, ...] | None = None) -> list[dict]:
     """SP-6 Phase A — load the APPROVED carried set for today's reconcile.
 
     CADENCE WINDOW (operator directive 2026-07-25). Previously this was
@@ -701,6 +714,13 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float],
     loop at L469 anyway, so this is a no-op guard, not a narrowing filter.
     Applies the same fail-open alpaca_tradable_universe filter as the legacy
     loader — dropped tickers are logged, not fatal.
+
+    Crypto engine Phase 3 (crypto block only; equity call sites pass neither):
+    `strategy_ids` restricts the query to those ids AND scopes the weights-gap
+    audit to them (a crypto-regime call must not flag every equity strategy
+    when the two regime labels coincide); `tradable_classes` overrides
+    _tradable_classes() so the SHADOW crypto block can load crypto signals
+    while the equity universe stays us_equity-only.
     """
     import psycopg2
     import psycopg2.extras
@@ -722,6 +742,11 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float],
     earliest = today - _timedelta(days=max(0, _math.ceil(max_cad) - 1))
 
     sids = list(weight_by_strat.keys())
+    if strategy_ids is not None:
+        sids = [s for s in sids if s in strategy_ids]
+        if not sids:
+            return []
+    _classes = tradable_classes if tradable_classes is not None else _tradable_classes()
     out = []
     tradable_symbols: set[str] = set()
     try:
@@ -745,7 +770,7 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float],
                 ''', (today, earliest, sids, regime_state, regime_state) if regime_state
                      else (today, earliest, sids))
                 rows = cur.fetchall()
-                tradable_symbols = load_tradable_symbols(c, classes=_tradable_classes())
+                tradable_symbols = load_tradable_symbols(c, classes=_classes)
                 # Weights-gap audit (2026-07 S_prism_vq incident): a registry-approved
                 # strategy that is ELIGIBLE in this regime, has in-window APPROVED
                 # signals, but NO is_current weights row is invisible to the whole gate
@@ -755,9 +780,10 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float],
                 # join suppresses honest dormancy (eligible=false strategies whose old
                 # signals are still in a long cadence window — expected absence).
                 gap_sids: list[str] = []
+                _scope = '' if strategy_ids is None else 'AND es.strategy_id = ANY(%s)'
                 if regime_state:
                     try:
-                        cur.execute('''
+                        cur.execute(f'''
                             SELECT DISTINCT es.strategy_id
                             FROM execution_signals es
                             JOIN strategy_registry sr ON sr.id = es.strategy_id
@@ -770,8 +796,10 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float],
                               AND es.target_date <= %s
                               AND es.target_date >= %s
                               AND NOT (es.strategy_id = ANY(%s))
+                              {_scope}
                             ORDER BY 1
-                        ''', (regime_state, regime_state, today, earliest, sids))
+                        ''', (regime_state, regime_state, today, earliest, sids)
+                             + (() if strategy_ids is None else (sorted(strategy_ids),)))
                         gap_sids = [g[0] for g in cur.fetchall()]
                     except Exception as ge:
                         logger.warning('sharpe_cadence EOD: weights-gap audit failed (%s)', ge)
@@ -828,7 +856,9 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float],
 
 
 def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, float],
-                                cadence_by_strat: dict[str, float]):
+                                cadence_by_strat: dict[str, float],
+                                *, strategy_ids: set[str] | None = None,
+                                tradable_classes: tuple[str, ...] | None = None):
     """Pull every open signal still within its strategy's cadence window.
 
     "Information staying relevant in the period" per design spec: a
@@ -842,6 +872,9 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
 
     Returns list of {strategy_id, ticker, direction} dicts ready for
     the ticker_weight aggregation loop.
+
+    `strategy_ids` / `tradable_classes`: crypto block only — see
+    _load_approved_carried_signals.
     """
     import psycopg2
     import psycopg2.extras
@@ -865,6 +898,11 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
     earliest = today - _timedelta(days=_math.ceil(max_cad))
 
     sids = list(weight_by_strat.keys())
+    if strategy_ids is not None:
+        sids = [s for s in sids if s in strategy_ids]
+        if not sids:
+            return []
+    _classes = tradable_classes if tradable_classes is not None else _tradable_classes()
     out = []
     tradable_symbols: set[str] = set()
     try:
@@ -899,7 +937,7 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
                 # filter doesn't apply here because the sharpe_cadence path
                 # reads execution_signals directly. Fail-open on empty
                 # set so a missing universe table can't halt trading.
-                tradable_symbols = load_tradable_symbols(c, classes=_tradable_classes())
+                tradable_symbols = load_tradable_symbols(c, classes=_classes)
     except Exception as e:
         logger.warning('sharpe_cadence: active-window fetch failed (%s); falling back to today-only', e)
         return []
@@ -1454,7 +1492,8 @@ def _scaled_target_diff(survivors: dict, weight_by_strat: dict, size_scalars: di
 
 def _maybe_flatten_zero_conviction(active, regime_state, ticker_meta, nav, confirmer,
                                    _ortho_groups, sharpe_by_strat, eff_weight_by_strat,
-                                   weight_by_strat, account_state, opt_active):
+                                   weight_by_strat, account_state, opt_active,
+                                   instrument_class: str | None = None):
     """FLATTEN-on-genuine-zero-conviction (both daily signal-target lanes).
 
     Called from the post-conviction-gate empty check (`if not ticker_w:`) when a
@@ -1487,14 +1526,23 @@ def _maybe_flatten_zero_conviction(active, regime_state, ticker_meta, nav, confi
 
     Reuses the SAME order-emission tail the normal path uses (_emit_orders_from_targets
     with target_usd={}), so orphan_close order dicts are field-identical to the normal
-    orphan path — no hand-rolled dicts. opt_active is passed empty."""
+    orphan path — no hand-rolled dicts. opt_active is passed empty.
+
+    instrument_class (crypto engine Phase 3, spec §5.3a — the flatten is
+    evaluated PER CLASS): None ⇒ today's behaviour (whole book); 'equity' ⇒
+    only non-crypto broker rows are flattened (crypto conviction neither keeps
+    the equity flatten from firing nor is flattened by it); 'crypto' ⇒ only
+    crypto rows, and only when pooled sizing is applied (flag unset ⇒ the
+    legacy crypto lane owns crypto positions ⇒ None)."""
     from execution.signal_target_mode import sameday_signal_target_on
+    if instrument_class == 'crypto' and not pooled_sizing_enabled():
+        return None
     if not ((_eod_signal_register_lane() or sameday_signal_target_on())
             and os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1'
             and os.environ.get('OPENCLAW_FLATTEN_ON_ZERO_CONVICTION') == '1'
             and len(active) >= SIGNAL_SET_MIN_FLOOR):
         return None
-    broker = _load_broker_positions_usd()
+    broker = _filter_broker_by_class(_load_broker_positions_usd(), instrument_class)
     if not broker:
         # Already flat, or the broker fetch failed (fail-safe: empty dict). Nothing
         # to flatten and we must not act on an unknown book → HOLD.
@@ -1513,7 +1561,348 @@ def _maybe_flatten_zero_conviction(active, regime_state, ticker_meta, nav, confi
         eff_weight_by_strat, [], weight_by_strat, 0.0, account_state, broker=broker)
 
 
-def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer):
+# ── Crypto pooled sizing block (crypto engine Phase 3, spec §5.3–§5.3c) ──────
+# Everything below runs ONLY when _sharpe_cadence_path is handed a crypto
+# regime (crypto_regime_state is not None). It computes the crypto sub-book on
+# its own copies; the caller merges it into the emitted book only when
+# OPENCLAW_CRYPTO_POOLED_SIZING=1. Each touchpoint is a module-level name so
+# tests can stub it without reaching Postgres / Redis.
+
+CRYPTO_SIZING_LAST_LINE_KEY = 'crypto_sizing_last_line'
+
+
+def _strategy_classes() -> dict[str, str]:
+    """{strategy_id: 'crypto'|'equity'} parsed ONCE per sizer run from the
+    manifest (strategies.instrument_class.instrument_class_for re-parses it per
+    call). Every class other than 'crypto' (equity, etp, …) is equity.
+    Fail-open: {} (every strategy equity ⇒ empty crypto book), logged."""
+    try:
+        from strategies.instrument_class import LifecycleStateMachine, _DEFAULT_MANIFEST
+        sm = LifecycleStateMachine.from_manifest(_DEFAULT_MANIFEST)
+        return {sid: ('crypto' if str(getattr(rec, 'instrument_class', '') or '').lower() == 'crypto'
+                      else 'equity')
+                for sid, rec in sm._records.items()}
+    except Exception as e:  # noqa: BLE001
+        logger.warning('crypto_sizing: manifest class read failed (%s); no crypto strategies', e)
+        return {}
+
+
+def _load_crypto_hold_state() -> dict:
+    from execution import crypto_hold as _ch
+    return _ch.hold_state()
+
+
+def _write_crypto_sizing_last_line(line: str) -> None:
+    """pipeline_config.crypto_sizing_last_line (dashboard Task 9 reads it).
+    Fail-open: never raises into sizing."""
+    try:
+        import psycopg2
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            cur.execute(
+                """INSERT INTO pipeline_config (key, value, description, updated_at)
+                   VALUES (%s, %s, %s, NOW())
+                   ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()""",
+                (CRYPTO_SIZING_LAST_LINE_KEY, line[:4000],
+                 'Last crypto_sizing.{shadow|apply} line from the pooled sizer (Phase 3)'))
+    except Exception as e:  # noqa: BLE001
+        logger.warning('crypto_sizing: last-line write skipped (%s)', e)
+
+
+def _broker_key_is_crypto(tkr) -> bool:
+    ac = _broker_asset_classes.get(tkr)
+    return (ac == _CRYPTO_CLASS) if ac else _is_crypto_key(tkr)
+
+
+def _filter_broker_by_class(broker: dict, instrument_class: str | None) -> dict:
+    """'crypto' ⇒ crypto keys only; 'equity' ⇒ everything else; None ⇒ as-is."""
+    if instrument_class is None or not broker:
+        return broker
+    want = instrument_class == 'crypto'
+    return {k: v for k, v in broker.items() if _broker_key_is_crypto(k) == want}
+
+
+def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
+                         eq_gross, liq_eq, account_state, bench_ids, classes,
+                         mode) -> dict:
+    """Crypto sub-book of the pooled sizer. Pure w.r.t. the equity book (reads
+    nothing the equity path mutates, mutates nothing it reads).
+
+    Order of operations (controller ruling 2026-11-10):
+      weights load_current(crypto_regime) for crypto-class ids → crypto signals
+      (explicit crypto tradable classes, so SHADOW mode can see them while the
+      equity universe stays us_equity-only) → stablecoins dropped → S_adj
+      (crypto-regime similarity) → acting gate (crypto params) → S_m_crypto
+      hurdle (floor_zero; applied only with a qualified BTC sleeve ticker) →
+      beta budget (per class; OFF in production) → pooled normaliser → dust →
+      per-ticker cap → cluster cap → BTC corr removal → BTC D-4′ clamp
+      (benchmark_max_nav_frac_crypto) → crypto_gross_cap → funding_pass →
+      hold-flat. Then the shadow/apply line (log + #botjohn-log + pipeline_config).
+
+    Returns {'targets', 'ticker_meta', 'gate_net_sharpe', 'rows', 'crypto_ids',
+    'active', 'bench_tkrs', 'gross_w', 'line', 'empty_reason'}."""
+    from collections import defaultdict
+    from execution import pooled_sizing as _ps
+    from execution import strategy_weights as _sw
+    from execution import benchmark_sleeve as _bsl
+    from execution import benchmark_sizing as _bsz
+
+    res = {'targets': {}, 'ticker_meta': {}, 'gate_net_sharpe': {}, 'rows': [],
+           'crypto_ids': set(), 'active': [], 'bench_tkrs': set(), 'bench_ids': set(), 'gross_w': 0.0,
+           'line': None, 'empty_reason': None}
+    crypto_ids_all = {s for s, c in classes.items() if c == 'crypto'}
+    res['crypto_ids'] = crypto_ids_all
+    rows = [r for r in (_sw.load_current(crypto_regime_state) or [])
+            if r.get('strategy_id') in crypto_ids_all]
+    res['rows'] = rows
+    w_by = {r['strategy_id']: float(r['daily_weight']) for r in rows}
+    sh_by = {r['strategy_id']: float(r['effective_sharpe']) for r in rows}
+    cad_by = {r['strategy_id']: float(r['cadence_days']) for r in rows}
+    n_by = {r['strategy_id']: r.get('bt_n') for r in rows}
+    try:
+        from execution import regime_param_resolver as _rpr
+        _scal = _rpr.size_scalars_for_regime(crypto_regime_state)
+    except Exception as e:  # noqa: BLE001
+        logger.warning('crypto_sizing: size_scalar load failed (%s); 1.0', e)
+        _scal = {}
+    eff_by = _apply_size_scalars(w_by, _scal, os.environ.get('OPENCLAW_STRATEGY_SIZE_SCALAR') == '1')
+
+    # Signals: execution_signals.regime_state carries the EQUITY label for
+    # every row (engine.write_signals stamps one regime per run), so scoping by
+    # the crypto label would drop crypto signals on any day the labels differ.
+    # Crypto eligibility is decided at mint (engine uses the crypto regime);
+    # here the cadence window alone bounds the set (regime_state=None).
+    active = []
+    if w_by:
+        _kw = dict(strategy_ids=crypto_ids_all, tradable_classes=('crypto',))
+        if _eod_signal_register_lane():
+            active = _load_approved_carried_signals(w_by, cad_by, regime_state=None, **_kw)
+        else:
+            active = _load_active_window_signals(None, w_by, cad_by, **_kw)
+    active = [s for s in (active or [])
+              if s.get('strategy_id') in w_by
+              and not ((s.get('signal_params') or {}).get('option_spec'))]
+    stables = _ps.stable_tickers()
+    n_stable = sum(1 for s in active if s.get('ticker') in stables)
+    active = [s for s in active if s.get('ticker') not in stables]
+    res['active'] = active
+
+    _stop_norm = _ortho_enabled('OPENCLAW_STRATEGY_CADENCE_STOP_NORM')
+    if _stop_norm:
+        from execution import bracket_stacking as _bs
+    meta = defaultdict(lambda: {'strategies': [], 'directions': [], 'brackets': []})
+    naive_w = defaultdict(float)
+    for s in active:
+        sid, tkr = s.get('strategy_id'), s.get('ticker')
+        d = _dir_to_int(s.get('direction'))
+        if not tkr or d == 0:
+            continue
+        naive_w[tkr] += eff_by[sid] * d
+        meta[tkr]['strategies'].append(sid)
+        meta[tkr]['directions'].append(d)
+        _e, _st, _t1, _t2 = s.get('entry_price'), s.get('stop_loss'), s.get('target_1'), s.get('target_2')
+        if _stop_norm:
+            _st, _t1, _t2 = _bs.daily_normalized_levels(_e, _st, _t1, _t2, cad_by.get(sid, 1.0))
+        meta[tkr]['brackets'].append({'sid': sid, 'direction': d, 'weight': w_by[sid],
+                                      'entry': _e, 'stop': _st, 't1': _t1, 't2': _t2})
+    s_m = None
+    dropped: list = []
+    before_usd: dict = {}
+    targets: dict = {}
+    shaved = 0.0
+    shortfall = None
+    hold = False
+    n_held = 0
+    bench_cr: set = set()
+    gate_net: dict = {}
+    if meta:
+        try:
+            from execution import strategy_similarity as _ss
+            groups = _ss.load_groups(crypto_regime_state)
+        except Exception as e:  # noqa: BLE001
+            logger.warning('crypto_sizing: load_groups failed (%s)', e)
+            groups = None
+        _sim = (groups or {}).get('matrix') or {}
+        from execution import orthogonalization as _ogtf
+        _twf_on = trade_weight_factor_enabled()
+        _anchor = _load_trade_factor_anchor() if _twf_on else None
+        _f = {sid: (_ogtf.trade_weight_factor(n_by.get(sid), anchor=_anchor) if _twf_on else 1.0)
+              for sid in w_by}
+        _gamma = _tangency_gamma_for_cycle(groups) if _tangency_sadj_enabled() else None
+        gate_net, size_adj, _, _ = _corr_adjusted_maps(
+            meta, {s: w * _f[s] for s, w in w_by.items()},
+            {s: w * _f.get(s, 1.0) for s, w in eff_by.items()}, _sim, gamma=_gamma, diag={})
+        net_sign = _net_signs(gate_net, dict(naive_w))
+        acting = _acting_counts(meta, net_sign)
+        bench_cr = _bsl.benchmark_tickers(meta, bench_ids, net_sign=net_sign)
+        w = dict(size_adj)
+        min_acting = _resolve_min_acting_strategies(crypto_params)
+        if min_acting > MIN_ACTING_STRATEGIES_LO:
+            for t in [t for t in w if acting.get(t, 0) < min_acting and t not in bench_cr]:
+                w.pop(t, None)
+        # S_m_crypto hurdle (None ⇒ no hurdle, fail-open like the SPY path).
+        try:
+            _h = _bsz.load_benchmark_horizon()
+            s_m = _bsz.regime_benchmark_sharpe_for_sizing(
+                crypto_regime_state, date.today(), benchmark='BTC-USD', horizon=_h)
+        except Exception as e:  # noqa: BLE001
+            logger.warning('crypto_sizing: S_m_crypto failed (%s); no hurdle', e)
+            s_m = None
+        hurdle_applied = bool(bench_cr) and s_m is not None
+        if hurdle_applied:
+            hurdled, dropped = _bsz.apply_benchmark_hurdle(w, s_m, bench_cr, floor_zero=True)
+            if _bsz.beta_budget_enabled():
+                hurdled, _ = _bsz.apply_beta_budget(w, hurdled, max(float(s_m), 0.0), bench_cr)
+            w = hurdled
+        w = {t: v for t, v in w.items() if v}
+        res['gross_w'] = sum(abs(v) for v in w.values())
+        if w:
+            liq_cr = float((crypto_params or {}).get('liquidity_param', 1.0))
+            _, scale_cr = _ps.pooled_scales(eq_gross=eq_gross, cr_gross=res['gross_w'],
+                                            lam_global=lam_global, liq_eq=liq_eq,
+                                            liq_cr=liq_cr, nav=nav)
+            targets = {t: v * scale_cr for t, v in w.items()}
+            for t in _dust_tickers(targets, DUST_FLOOR_USD):
+                targets.pop(t, None)
+            before_usd = dict(targets)
+            exempt = bench_cr if hurdle_applied else set()
+            if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1' or os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1':
+                for t, usd in list(targets.items()):
+                    gs = gate_net.get(t)
+                    if t in exempt or gs is None:
+                        continue
+                    cap = PER_TICKER_CAP_SHARPE_FRAC * (abs(gs) + 1.0) * lam_global * nav
+                    if abs(usd) > cap:
+                        targets[t] = math.copysign(cap, usd)
+            targets = _apply_asset_corr_cap(targets, gate_net, nav, lam=lam_global, exclude=exempt)
+            targets = _apply_benchmark_corr_removal(targets, exempt, nav)
+            max_btc = _bsz.benchmark_max_nav_frac(instrument_class='crypto') * nav
+            for t in bench_cr:
+                usd = targets.get(t)
+                if usd is not None and abs(usd) > max_btc:
+                    targets[t] = math.copysign(max_btc, usd)
+            targets, shaved = _ps.crypto_gross_cap(targets, nav, _bsz.crypto_gross_max_nav_frac())
+            targets, shortfall = _ps.funding_pass(targets, (account_state or {}).get('non_marginable_buying_power'))
+            if shortfall is None:
+                logger.info('crypto_sizing.funding_bind=unknown (non_marginable_buying_power absent)')
+            elif shortfall > 0:
+                logger.warning('crypto_sizing.funding_bind=%.0f (crypto scaled pro-rata to nmbp)', shortfall)
+        else:
+            res['empty_reason'] = 'gated'
+    else:
+        res['empty_reason'] = 'no_signals'
+    try:
+        hs = _load_crypto_hold_state()
+    except Exception as e:  # noqa: BLE001
+        logger.warning('crypto_sizing: hold-state read failed (%s); not held', e)
+        hs = {}
+    hold = bool((hs or {}).get('sleeve'))
+    targets, n_held = _ps.apply_hold_flat(targets, hs)
+    res['targets'] = targets
+    res['ticker_meta'] = {t: m for t, m in meta.items() if t in targets}
+    res['gate_net_sharpe'] = {t: v for t, v in gate_net.items() if t in targets}
+    res['bench_tkrs'] = set(bench_cr)
+    res['bench_ids'] = set(bench_ids or ())
+    res['line'] = _ps.shadow_line(
+        crypto_regime_state, s_m, before_usd, targets, dropped, bench_cr, lam_global * nav,
+        gross_cap_shaved=shaved, funding_shortfall=shortfall, hold_flat=hold, mode=mode,
+        nav=nav, stable_excluded=n_stable, hold_zeroed=n_held)
+    logger.info(res['line'])
+    if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
+        _post_corr_cumsharpe_log(res['line'])
+    _write_crypto_sizing_last_line(res['line'])
+    return res
+
+
+def _crypto_book(crypto_regime_state, crypto_params, *, nav, lam_global, eq_gross,
+                 liq_eq, account_state):
+    """Fail-open wrapper: any error ⇒ None (equity path untouched, logged)."""
+    try:
+        from execution import benchmark_sleeve as _bsl
+        return _crypto_pooled_block(
+            crypto_regime_state=crypto_regime_state, crypto_params=crypto_params, nav=nav,
+            lam_global=lam_global, eq_gross=eq_gross, liq_eq=liq_eq,
+            account_state=account_state, bench_ids=_bsl.load_benchmark_sleeve_ids(),
+            classes=_strategy_classes(),
+            mode='apply' if pooled_sizing_enabled() else 'shadow')
+    except Exception as e:  # noqa: BLE001
+        logger.warning('crypto_sizing: block failed (%s: %s); crypto skipped this cycle',
+                       type(e).__name__, e)
+        return None
+
+
+def _crypto_only_orders(cb, flatten_orders, *, crypto_regime_state,
+                        nav, confirmer, ortho_groups, account_state):
+    """APPLY mode, equity book empty: emit the crypto sub-book against the
+    CRYPTO-ONLY broker book (held equities stay on HOLD unless the equity
+    flatten already produced their closes in `flatten_orders`)."""
+    out = list(flatten_orders or [])
+    if cb is None:
+        return out
+    rows = cb['rows']
+    w = {r['strategy_id']: float(r['daily_weight']) for r in rows}
+    sh = {r['strategy_id']: float(r['effective_sharpe']) for r in rows}
+    if cb['targets']:
+        broker = _filter_broker_by_class(_load_broker_positions_usd(), 'crypto')
+        out += _emit_orders_from_targets(
+            dict(cb['targets']), dict(cb['ticker_meta']), nav, confirmer, ortho_groups,
+            sh, w, [], w, 0.0, account_state, broker=broker,
+            gate_net_sharpe=cb['gate_net_sharpe'], bench_ids=cb['bench_ids'], bench_tkrs=cb['bench_tkrs'])
+    elif cb['empty_reason'] == 'gated':
+        # Healthy crypto set fully gated ⇒ per-class flatten (its own floor +
+        # kill-switch checks); a data-absent crypto day HOLDs.
+        fl = _maybe_flatten_zero_conviction(
+            cb['active'], crypto_regime_state, {}, nav, confirmer, ortho_groups,
+            sh, w, w, account_state, [], instrument_class='crypto')
+        out += fl or []
+    return out
+
+
+def _emit_pooled(cb, target_usd, ticker_meta, nav, confirmer, ortho_groups,
+                 sharpe_by_strat, eff_weight_by_strat, opt_active, weight_by_strat, scale,
+                 account_state, broker, gate_net_sharpe, bench_ids, bench_tkrs, *,
+                 crypto_regime_state):
+    """APPLY mode emission of the pooled book: equity + crypto targets through
+    the one emission tail. Crypto ids take their crypto-regime weight rows
+    (pooled_sizing.merge_weights) for brackets/attribution. No crypto target
+    this cycle ⇒ crypto positions are HELD (dropped from the broker book the
+    tail nets against) unless the per-class crypto flatten fires.
+    (The equity beta-budget shed alert stays on the non-pooled path; the budget
+    is OFF in production.)"""
+    from execution import pooled_sizing as _ps
+    merged = _ps.merge_weights(
+        [{'strategy_id': s, 'daily_weight': weight_by_strat[s],
+          'effective_sharpe': sharpe_by_strat.get(s, 0.0)} for s in weight_by_strat],
+        cb['rows'], cb['crypto_ids'])
+    w = {r['strategy_id']: float(r['daily_weight']) for r in merged}
+    sh = {r['strategy_id']: float(r['effective_sharpe']) for r in merged}
+    eff = dict(eff_weight_by_strat)
+    for r in cb['rows']:
+        eff[r['strategy_id']] = float(r['daily_weight'])
+    tgt = dict(target_usd)
+    meta = ticker_meta
+    extra: list = []
+    if cb['targets']:
+        tgt.update(cb['targets'])
+        for t, m in cb['ticker_meta'].items():
+            meta[t] = m
+    else:
+        broker = _filter_broker_by_class(
+            broker if broker is not None else _load_broker_positions_usd(), 'equity')
+        extra = _crypto_only_orders(cb, [], crypto_regime_state=crypto_regime_state, nav=nav,
+                                    confirmer=confirmer, ortho_groups=ortho_groups,
+                                    account_state=account_state)
+    gns = dict(gate_net_sharpe)
+    gns.update(cb['gate_net_sharpe'])
+    return _emit_orders_from_targets(
+        tgt, meta, nav, confirmer, ortho_groups, sh, eff, opt_active, w, scale,
+        account_state, broker=broker, gate_net_sharpe=gns,
+        bench_ids=set(bench_ids or ()) | cb['bench_ids'],
+        bench_tkrs=set(bench_tkrs or ()) | cb['bench_tkrs']) + extra
+
+
+def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer,
+                         crypto_regime_state: str | None = None,
+                         crypto_params: dict | None = None):
     """Sharpe × cadence × direction sizer with cadence-window aggregation
     AND broker-position netting.
 
@@ -1537,8 +1926,17 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     The `signals` parameter (today's emissions) is now ignored in favour
     of the DB query — anything emitted today is already persisted to
     execution_signals by the signals step earlier in the pipeline.
+
+    Crypto engine Phase 3 (spec §5.3a): crypto_regime_state None ⇒ the whole
+    crypto block is skipped (sizing exactly as before). Given ⇒ the crypto
+    sub-book is computed by _crypto_book on its own regime/params/S_m and
+    logged as `crypto_sizing.{shadow|apply}[…]`; it joins target_usd (one
+    λ·NAV normaliser) ONLY when OPENCLAW_CRYPTO_POOLED_SIZING=1. With the flag
+    unset nothing the equity path reads or emits is touched.
     """
     from execution import strategy_weights as _sw
+    _crypto_on = crypto_regime_state is not None
+    _pooled = _crypto_on and pooled_sizing_enabled()
 
     nav = float(account_state.get('equity') or 100_000.0)
     rows = _sw.load_current(regime_state)
@@ -1665,6 +2063,20 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.info('regime_blended_sizer.sharpe_cadence: partitioned %d option-class '
                     'contributor(s) out of the equity book', len(opt_active))
 
+    # Crypto engine Phase 3: with pooled sizing APPLIED the equity loaders admit
+    # crypto symbols (_tradable_classes); crypto-class strategies and crypto
+    # symbols are sized ONLY by the crypto block (own regime, S_m, caps), never
+    # in the equity book. Flag unset ⇒ skipped (equity inputs untouched).
+    if pooled_sizing_enabled():
+        _cls_eq = _strategy_classes()
+        _n0 = len(active)
+        active = [s for s in active
+                  if _cls_eq.get(s.get('strategy_id')) != 'crypto'
+                  and not _is_crypto_key(s.get('ticker'))]
+        if len(active) != _n0:
+            logger.info('crypto_sizing: %d crypto contribution(s) moved out of the equity book',
+                        _n0 - len(active))
+
     # Strategy similarity matrix — loaded unconditionally because the
     # corr-adjusted S_adj sizing always needs it; also consumed by the
     # FOLD / ORTHO_SHADOW / BRACKET_STACK features when their flags are on.
@@ -1736,6 +2148,13 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     if not ticker_w:
         logger.info('regime_blended_sizer.sharpe_cadence: no eligible signals after weight filter')
         _warn_options_dropped_no_equity_scale(opt_active, 'no eligible equity signals after weight filter')
+        if _crypto_on:
+            _cb = _crypto_book(crypto_regime_state, crypto_params, nav=nav, lam_global=lam_global,
+                               eq_gross=0.0, liq_eq=liq_regime, account_state=account_state)
+            if _pooled:
+                return _crypto_only_orders(_cb, [], crypto_regime_state=crypto_regime_state, nav=nav,
+                                           confirmer=confirmer, ortho_groups=_ortho_groups,
+                                           account_state=account_state)
         return []
 
     # Sizing quantity: the correlation-adjusted cumulative Sharpe (closed-form
@@ -1954,6 +2373,19 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         # check ("no eligible signals after weight filter", above) and the Case-B
         # empty-carried check are DELIBERATELY untouched — those are data-absence,
         # not conviction-rejection.
+        if _crypto_on:
+            _cb = _crypto_book(crypto_regime_state, crypto_params, nav=nav, lam_global=lam_global,
+                               eq_gross=0.0, liq_eq=liq_regime, account_state=account_state)
+        if _pooled:
+            # Per-class flatten (§5.3a): equity rows only; the crypto sub-book
+            # is emitted against the crypto-only broker book.
+            _flatten_orders = _maybe_flatten_zero_conviction(
+                active, regime_state, ticker_meta, nav, confirmer, _ortho_groups,
+                sharpe_by_strat, eff_weight_by_strat, weight_by_strat, account_state,
+                opt_active, instrument_class='equity')
+            return _crypto_only_orders(_cb, _flatten_orders, crypto_regime_state=crypto_regime_state,
+                                       nav=nav, confirmer=confirmer, ortho_groups=_ortho_groups,
+                                       account_state=account_state)
         _flatten_orders = _maybe_flatten_zero_conviction(
             active, regime_state, ticker_meta, nav, confirmer, _ortho_groups,
             sharpe_by_strat, eff_weight_by_strat, weight_by_strat, account_state,
@@ -1966,8 +2398,23 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     gross = sum(abs(w) for w in ticker_w.values())
     if gross <= 0:
         _warn_options_dropped_no_equity_scale(opt_active, 'equity gross is zero')
+        if _crypto_on:
+            _cb = _crypto_book(crypto_regime_state, crypto_params, nav=nav, lam_global=lam_global,
+                               eq_gross=0.0, liq_eq=liq_regime, account_state=account_state)
+            if _pooled:
+                return _crypto_only_orders(_cb, [], crypto_regime_state=crypto_regime_state, nav=nav,
+                                           confirmer=confirmer, ortho_groups=_ortho_groups,
+                                           account_state=account_state)
         return []
+    _cb = None
+    if _crypto_on:
+        _cb = _crypto_book(crypto_regime_state, crypto_params, nav=nav, lam_global=lam_global,
+                           eq_gross=gross, liq_eq=liq_regime, account_state=account_state)
     scale = (lam * nav) / gross
+    if _pooled and _cb is not None and _cb['gross_w'] > 0:
+        # One λ·NAV normaliser over both classes (pooled_sizing.pooled_scales):
+        # reduces to the line above when the crypto gross is zero.
+        scale = (lam * nav) / (gross + _cb['gross_w'])
 
     # Pure formulation (2026-05-14): target_usd = ticker_w × (λ × NAV / Σ|ticker_w|).
     # High-conviction tickers (sum of contributing strategy weights × direction)
@@ -2178,6 +2625,13 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                 _qps.emit_status(f'error:{type(_e).__name__}')
             except Exception:  # noqa: BLE001
                 pass
+
+    if _pooled and _cb is not None:
+        return _emit_pooled(
+            _cb, target_usd, ticker_meta, nav, confirmer, _ortho_groups,
+            sharpe_by_strat, eff_weight_by_strat, opt_active, weight_by_strat, scale,
+            account_state, _qp_broker, gate_net_sharpe, _bench_ids, _bench_tkrs,
+            crypto_regime_state=crypto_regime_state)
 
     _orders = _emit_orders_from_targets(
         target_usd, ticker_meta, nav, confirmer, _ortho_groups,
