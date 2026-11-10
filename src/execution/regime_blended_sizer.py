@@ -1007,7 +1007,10 @@ def _is_crypto_key(tkr) -> bool:
     """Shape test on an engine/broker key (sizer convention, cf. the '-USD' /
     '/' checks in the eligibility + margin paths)."""
     t = str(tkr or '')
-    return '/' in t or t.upper().endswith('-USD')
+    if '/' in t or t.upper().endswith('-USD'):
+        return True
+    from ingestion.crypto_flow import universe as _u
+    return _u.is_crypto_symbol(t)  # compact 'BTCUSD' from a custom broker_loader
 
 
 def _load_broker_positions_usd_with_class() -> tuple[dict, dict]:

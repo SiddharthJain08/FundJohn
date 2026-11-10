@@ -2771,6 +2771,7 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date, *,
     # branch), loaded lazily at most once per update_pnl call. Every other
     # class receives the identical `regime` object, as before.
     _crypto_regime_hook = None
+    _hook_class_memo: dict = {}  # strat_id -> instrument class (instrument_class_for re-parses the manifest per call)
     if _hook_on:
         logger.info('[exit_hook] enabled (OPENCLAW_EXIT_HOOK_LIVE=1); %d strategy instances', len(_by_id))
 
@@ -2901,7 +2902,9 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date, *,
                         'stop_loss': stop_loss, 'target_1': target_1, 'signal_params': _sp,
                     }
                     _hook_regime = regime
-                    if instrument_class_for(strat_id) == 'crypto':
+                    if strat_id not in _hook_class_memo:
+                        _hook_class_memo[strat_id] = instrument_class_for(strat_id)
+                    if _hook_class_memo[strat_id] == 'crypto':
                         if _crypto_regime_hook is None:
                             _crypto_regime_hook = load_crypto_regime_state()
                         _hook_regime = _crypto_regime_hook
