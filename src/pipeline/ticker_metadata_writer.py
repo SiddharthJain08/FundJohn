@@ -179,7 +179,8 @@ def build_today_snapshot_via_builder(
     with pg.cursor() as cur:
         cur.execute(
             "SELECT symbol FROM alpaca_tradable_universe "
-            "WHERE status='active' AND tradable=TRUE"
+            "WHERE status='active' AND tradable=TRUE "
+            "AND COALESCE(asset_class, 'us_equity') = 'us_equity'"
         )
         universe = [r[0] for r in cur.fetchall()]
 

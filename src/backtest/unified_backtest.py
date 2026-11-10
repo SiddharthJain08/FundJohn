@@ -152,6 +152,7 @@ def load_bt_asset_gate() -> Optional[dict]:
                        (tradable AND status = 'active' AND easy_to_borrow AND fractionable),
                        (tradable AND status = 'active' AND easy_to_borrow AND shortable)
                 FROM alpaca_tradable_universe
+                WHERE COALESCE(asset_class, 'us_equity') = 'us_equity'
             """)
             rows = cur.fetchall()
     except Exception as e:

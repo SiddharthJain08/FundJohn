@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """refresh_tradable_universe.py
 
-Pulls Alpaca's master `us_equity` asset list and upserts it into
+Pulls Alpaca's master `us_equity` asset list (plus, since crypto engine
+Phase 3, the active `crypto` pairs) and upserts it into
 `alpaca_tradable_universe` so the trade pipeline can filter out
 delisted / halted / non-tradable tickers BEFORE submission.
+
+Crypto rows are stored under the INTERNAL symbol ('BTC/USD' -> 'BTC-USD',
+via ingestion.crypto_flow.universe.normalize_broker_symbol) with
+asset_class='crypto'; pairs outside the internal crypto universe (non-USD
+quotes, unknown bases) are skipped and counted. Consumers read the table
+through execution.tradable_universe.load_tradable_symbols(classes=...) —
+default us_equity only.
 
 Designed to run on a daily timer (13:30 UTC, ~30 min before the 14:00
 UTC pipeline cycle) and also as a BotJohn maintenance step.
@@ -15,6 +23,8 @@ Behaviour:
     tradable/shortable/marginable flags.
   - Any symbol previously stored but absent from today's pull is marked
     status='inactive', tradable=false (NEVER deleted — master-data rule).
+    Scoped to the asset classes PRESENT in this run: a failed / empty
+    crypto pull never deactivates crypto rows, and vice versa.
   - Writes a row to `alpaca_tradable_universe_refresh_log` with diff counts.
   - Prints a one-line summary + non-zero exit code on failure so a
     systemd timer / pipeline ExecStartPre will surface the failure.
@@ -52,13 +62,14 @@ def _log(msg: str) -> None:
     print(f'[refresh_tradable_universe] {msg}', flush=True)
 
 
-def fetch_alpaca_assets(timeout: int = 60) -> tuple[list[dict], int]:
+def fetch_alpaca_assets(timeout: int = 60,
+                        asset_class: str = 'us_equity') -> tuple[list[dict], int]:
     """Return (assets, elapsed_ms). Raises subprocess.CalledProcessError
     on CLI failure, ValueError if stdout isn't valid JSON list."""
     started = time.monotonic()
     proc = subprocess.run(
         [ALPACA_BIN, 'asset', 'list',
-         '--asset-class', 'us_equity', '--status', 'active'],
+         '--asset-class', asset_class, '--status', 'active'],
         capture_output=True, text=True, timeout=timeout,
         env=os.environ.copy(),
     )
@@ -77,6 +88,43 @@ def fetch_alpaca_assets(timeout: int = 60) -> tuple[list[dict], int]:
     return data, elapsed_ms
 
 
+def fetch_all_assets(timeout: int = 60, *,
+                     crypto_universe=None) -> tuple[list[dict], int, dict]:
+    """Equities + crypto pairs. Returns (assets, elapsed_ms, counts).
+
+    The us_equity fetch raises exactly like fetch_alpaca_assets. The crypto
+    fetch is best-effort: on failure the run carries equities only
+    (counts['crypto_error'] set) — the class-scoped deactivation in
+    upsert_universe then leaves the stored crypto rows untouched.
+    Crypto symbols are rewritten to the INTERNAL form ('BTC-USD') and
+    'class' forced to 'crypto'; ``crypto_universe`` (list of crypto_flow
+    Assets) is injectable for tests."""
+    equities, eq_ms = fetch_alpaca_assets(timeout=timeout, asset_class='us_equity')
+    counts = {'us_equity': len(equities), 'crypto': 0, 'crypto_skipped': 0,
+              'crypto_error': None}
+    crypto_rows: list[dict] = []
+    cr_ms = 0
+    try:
+        from ingestion.crypto_flow.universe import normalize_broker_symbol
+        raw, cr_ms = fetch_alpaca_assets(timeout=timeout, asset_class='crypto')
+        for a in raw:
+            internal = normalize_broker_symbol(a.get('symbol') or '', crypto_universe)
+            if not internal:
+                counts['crypto_skipped'] += 1
+                continue
+            crypto_rows.append({**a, 'symbol': internal, 'class': 'crypto'})
+    except Exception as e:  # noqa: BLE001 — crypto is additive; equities must still refresh
+        counts['crypto_error'] = f'{type(e).__name__}: {e}'
+        crypto_rows = []
+    counts['crypto'] = len(crypto_rows)
+    return equities + crypto_rows, eq_ms + cr_ms, counts
+
+
+def _asset_class(value) -> str:
+    """NULL / missing class ≡ us_equity (every pre-crypto row)."""
+    return value or 'us_equity'
+
+
 def upsert_universe(conn, assets: Iterable[dict], dry_run: bool = False) -> dict:
     """Upsert today's pull. Returns diff stats dict.
 
@@ -90,21 +138,27 @@ def upsert_universe(conn, assets: Iterable[dict], dry_run: bool = False) -> dict
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
     # Snapshot of prior state (before this run) to compute diffs.
-    cur.execute("SELECT symbol, tradable, status FROM alpaca_tradable_universe")
-    prior = {r['symbol']: (r['tradable'], r['status']) for r in cur}
+    cur.execute("SELECT symbol, tradable, status, asset_class FROM alpaca_tradable_universe")
+    prior = {}
+    prior_class = {}
+    for r in cur:
+        prior[r['symbol']] = (r['tradable'], r['status'])
+        prior_class[r['symbol']] = _asset_class(r.get('asset_class'))
 
     today_symbols: set[str] = set()
+    run_classes: set[str] = set()
     rows = []
     for a in assets:
         sym = a.get('symbol')
         if not sym:
             continue
         today_symbols.add(sym)
+        run_classes.add(_asset_class(a.get('class')))
         rows.append((
             sym,
             a.get('id'),
             a.get('name'),
-            a.get('class'),
+            _asset_class(a.get('class')),
             a.get('exchange'),
             'active',
             bool(a.get('tradable', False)),
@@ -125,10 +179,12 @@ def upsert_universe(conn, assets: Iterable[dict], dry_run: bool = False) -> dict
         if s in prior and prior[s] != today_state[s]
     )
     # Symbols previously seen with status='active' or tradable=true but
-    # absent from today's pull → newly inactive.
+    # absent from today's pull → newly inactive. Only classes present in
+    # this run can deactivate (a crypto-only run never touches equities).
     newly_inactive = sum(
         1 for s, (tr, st) in prior.items()
         if s not in today_symbols and (st == 'active' or tr)
+        and prior_class[s] in run_classes
     )
 
     if dry_run:
@@ -182,8 +238,9 @@ def upsert_universe(conn, assets: Iterable[dict], dry_run: bool = False) -> dict
                 updated_at = NOW()
             WHERE symbol <> ALL(%s::text[])
               AND (status = 'active' OR tradable = TRUE)
+              AND COALESCE(asset_class, 'us_equity') = ANY(%s)
             """,
-            (list(today_symbols),),
+            (list(today_symbols), sorted(run_classes)),
         )
 
     # Append audit row.
@@ -223,17 +280,22 @@ def main() -> int:
         return 1
 
     try:
-        assets, api_ms = fetch_alpaca_assets()
+        assets, api_ms, counts = fetch_all_assets()
     except Exception as e:
         _log(f'alpaca asset list failed: {type(e).__name__}: {e}')
         return 1
 
-    if len(assets) < SUSPICIOUS_FLOOR:
-        _log(f'CLI returned {len(assets)} rows (< floor {SUSPICIOUS_FLOOR}); '
+    if counts['us_equity'] < SUSPICIOUS_FLOOR:
+        _log(f'CLI returned {counts["us_equity"]} us_equity rows (< floor {SUSPICIOUS_FLOOR}); '
              f'refusing to write — likely an auth or upstream issue')
         return 2
 
-    _log(f'fetched {len(assets)} us_equity assets in {api_ms}ms')
+    _log(f'fetched {counts["us_equity"]} us_equity + {counts["crypto"]} crypto assets '
+         f'({counts["crypto_skipped"]} crypto pairs outside the internal universe skipped) '
+         f'in {api_ms}ms')
+    if counts['crypto_error']:
+        _log(f'crypto asset list failed ({counts["crypto_error"]}) — equities only; '
+             f'stored crypto rows left untouched')
 
     conn = psycopg2.connect(uri)
     try:

@@ -25,6 +25,7 @@ def fetch_alpaca_universe():
                    fractionable, easy_to_borrow, first_seen_at, last_seen_at
             FROM alpaca_tradable_universe
             WHERE status='active'
+              AND COALESCE(asset_class, 'us_equity') = 'us_equity'
         """)
         cols = [d.name for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]

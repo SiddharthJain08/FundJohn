@@ -25,6 +25,8 @@ import psycopg2
 from execution.signal_cadence_gate import filter_by_cadence, advance_last_fire
 from execution.alpaca_executor import _spot_price
 import execution.qp_shadow_sizer as _qps  # B6: no cvxpy import at import time
+from execution.pooled_sizing import pooled_sizing_enabled
+from execution.tradable_universe import load_tradable_symbols
 
 logger = logging.getLogger(__name__)
 
@@ -655,6 +657,13 @@ _REGIME_SCOPE_CLAUSE = '''AND (
                                              AND srp.eligible)))'''
 
 
+def _tradable_classes() -> tuple[str, ...]:
+    """Asset classes the signal loaders admit from alpaca_tradable_universe:
+    crypto rows only once pooled crypto sizing is applied (flag unset ⇒ the
+    universe stays us_equity-only, exactly as before crypto rows existed)."""
+    return ('us_equity', 'crypto') if pooled_sizing_enabled() else ('us_equity',)
+
+
 def _load_approved_carried_signals(weight_by_strat: dict[str, float],
                                    cadence_by_strat: dict[str, float] | None = None,
                                    regime_state: str | None = None) -> list[dict]:
@@ -736,9 +745,7 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float],
                 ''', (today, earliest, sids, regime_state, regime_state) if regime_state
                      else (today, earliest, sids))
                 rows = cur.fetchall()
-                cur.execute("""SELECT symbol FROM alpaca_tradable_universe
-                              WHERE status='active' AND tradable=TRUE""")
-                tradable_symbols = {r[0] for r in cur.fetchall()}
+                tradable_symbols = load_tradable_symbols(c, classes=_tradable_classes())
                 # Weights-gap audit (2026-07 S_prism_vq incident): a registry-approved
                 # strategy that is ELIGIBLE in this regime, has in-window APPROVED
                 # signals, but NO is_current weights row is invisible to the whole gate
@@ -892,9 +899,7 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
                 # filter doesn't apply here because the sharpe_cadence path
                 # reads execution_signals directly. Fail-open on empty
                 # set so a missing universe table can't halt trading.
-                cur.execute("""SELECT symbol FROM alpaca_tradable_universe
-                              WHERE status='active' AND tradable=TRUE""")
-                tradable_symbols = {r[0] for r in cur.fetchall()}
+                tradable_symbols = load_tradable_symbols(c, classes=_tradable_classes())
     except Exception as e:
         logger.warning('sharpe_cadence: active-window fetch failed (%s); falling back to today-only', e)
         return []
@@ -2145,6 +2150,9 @@ def _load_asset_eligibility(symbols):
     blip must not brick the whole trade step). Symbols the table has never
     seen map to False: 'asked and absent' is a real answer, unlike
     'couldn't ask'."""
+    # crypto pairs ('BTC-USD') are never marginable/borrowable by design —
+    # out of the equity gate's scope, never asked
+    symbols = [s for s in symbols if not str(s).endswith('-USD')]
     if not symbols:
         return {}
     try:
@@ -2171,11 +2179,13 @@ def _apply_asset_eligibility_gate(target_usd, broker, eligibility=None):
     dies); same-sign larger target → capped at the held size (no growth);
     same-sign smaller target → untouched (reduction is an exit). Orphan
     closes never enter target_usd, so exits are structurally unblockable.
-    OCC option symbols and crypto pairs ('/') are out of scope. Returns a
-    new dict; `eligibility` is injectable for tests."""
+    OCC option symbols and crypto pairs ('/' broker form, '-USD' internal
+    form) are out of scope. Returns a new dict; `eligibility` is injectable
+    for tests."""
     if not _asset_gate_enabled() or not target_usd:
         return target_usd
-    equity_syms = [t for t in target_usd if not _is_occ_symbol(t) and '/' not in t]
+    equity_syms = [t for t in target_usd if not _is_occ_symbol(t) and '/' not in t
+                   and not str(t).endswith('-USD')]
     if eligibility is None:
         eligibility = _load_asset_eligibility(equity_syms)
     if eligibility is None:                     # lookup failure → fail-open

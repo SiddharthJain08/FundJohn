@@ -41,7 +41,8 @@ def _load_active_tradable(conn) -> set[str]:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT symbol FROM alpaca_tradable_universe "
-            "WHERE status='active' AND tradable=TRUE"
+            "WHERE status='active' AND tradable=TRUE "
+            "AND COALESCE(asset_class, 'us_equity') = 'us_equity'"
         )
         return {row[0] for row in cur.fetchall()}
 

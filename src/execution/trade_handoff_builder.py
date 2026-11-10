@@ -34,6 +34,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'src'))
 
 from execution.handoff import write_handoff, read_handoff  # noqa: E402
+from execution.tradable_universe import load_tradable_symbols  # noqa: E402
 from backtest.risk_free import RISK_FREE_ANNUAL_CONST as _RF_CONST  # noqa: E402
 
 TRADING_DAYS_PER_YEAR = 252
@@ -470,10 +471,12 @@ def load_yesterdays_performance_outliers(uri: str, run_date: str) -> tuple[list[
     return overperformers, underperformers
 
 
-def load_tradable_universe(uri: str) -> set[str]:
+def load_tradable_universe(uri: str, *, classes=('us_equity',)) -> set[str]:
     """Return the set of symbols Alpaca currently reports tradable + active.
 
     Populated by src/maintenance/refresh_tradable_universe.py (daily timer).
+    Default ``classes`` = us_equity only: crypto rows (internal 'BTC-USD')
+    share the table since crypto engine Phase 3 and are not handoff inputs.
     Returns an empty set on any failure — the caller treats empty as
     "fail-open" and skips the tradability filter, so a missing universe
     table can't halt trading. Staleness is surfaced separately by the
@@ -483,14 +486,10 @@ def load_tradable_universe(uri: str) -> set[str]:
         return set()
     try:
         conn = psycopg2.connect(uri)
-        cur = conn.cursor()
-        cur.execute(
-            """SELECT symbol FROM alpaca_tradable_universe
-               WHERE tradable = TRUE AND status = 'active'"""
-        )
-        out = {r[0] for r in cur.fetchall()}
-        conn.close()
-        return out
+        try:
+            return load_tradable_symbols(conn, classes=classes)
+        finally:
+            conn.close()
     except Exception as e:
         print(f'[handoff] load_tradable_universe failed ({type(e).__name__}: {e})')
         return set()
