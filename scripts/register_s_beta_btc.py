@@ -9,7 +9,7 @@ Shape follows the 08-29 runbook's S_beta_spy registration
     INSERT INTO strategy_registry (id, name, description, tier,
         implementation_path, parameters, universe, signal_frequency, status)
     VALUES (..., %s::jsonb, ARRAY['BTC-USD'], 'daily', 'pending_approval')
-    ON CONFLICT (id) DO UPDATE SET parameters = strategy_registry.parameters || EXCLUDED.parameters, ...
+    ON CONFLICT (id) DO UPDATE SET parameters = COALESCE(strategy_registry.parameters, '{}'::jsonb) || EXCLUDED.parameters, ...
 
 parameters = {'benchmark_sleeve': True, 'instrument_class': 'crypto',
 'benchmark_ticker': 'BTC-USD'} — exactly the keys
@@ -48,7 +48,7 @@ INSERT INTO strategy_registry (id, name, description, tier, implementation_path,
                                parameters, universe, signal_frequency, status)
 VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::text[], %s, 'pending_approval')
 ON CONFLICT (id) DO UPDATE SET
-    parameters          = strategy_registry.parameters || EXCLUDED.parameters,
+    parameters          = COALESCE(strategy_registry.parameters, '{}'::jsonb) || EXCLUDED.parameters,
     universe            = EXCLUDED.universe,
     implementation_path = EXCLUDED.implementation_path
 """.strip()

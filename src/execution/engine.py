@@ -2766,6 +2766,11 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date, *,
                                  'rows_evaluated': 0})
     _by_id = {getattr(s, 'id', None): s for s in (strategies or [])}
     _loaded: dict = {}
+    # Crypto engine Phase 3: a crypto-class exit_hook strategy's should_exit
+    # receives the CRYPTO regime (mirrors run_strategies' `ic == 'crypto'`
+    # branch), loaded lazily at most once per update_pnl call. Every other
+    # class receives the identical `regime` object, as before.
+    _crypto_regime_hook = None
     if _hook_on:
         logger.info('[exit_hook] enabled (OPENCLAW_EXIT_HOOK_LIVE=1); %d strategy instances', len(_by_id))
 
@@ -2895,8 +2900,13 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date, *,
                         'entry_date': _entry_dt, 'days_held': _bars,
                         'stop_loss': stop_loss, 'target_1': target_1, 'signal_params': _sp,
                     }
+                    _hook_regime = regime
+                    if instrument_class_for(strat_id) == 'crypto':
+                        if _crypto_regime_hook is None:
+                            _crypto_regime_hook = load_crypto_regime_state()
+                        _hook_regime = _crypto_regime_hook
                     try:
-                        _reason = _strat.should_exit(position, prices, regime, aux_data)
+                        _reason = _strat.should_exit(position, prices, _hook_regime, aux_data)
                     except Exception as _e:
                         _reason = None
                         LAST_EXIT_HOOK_STATS['hook_raised'] += 1

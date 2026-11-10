@@ -30,7 +30,7 @@ def test_upsert_is_idempotent_and_never_resets_status():
     sql, _ = reg.build_statement()
     assert "'pending_approval'" in sql
     assert 'ON CONFLICT (id) DO UPDATE SET' in sql
-    assert 'strategy_registry.parameters || EXCLUDED.parameters' in sql
+    assert "COALESCE(strategy_registry.parameters, '{}'::jsonb) || EXCLUDED.parameters" in sql
     update_clause = sql.split('DO UPDATE SET', 1)[1]
     assert 'status' not in update_clause
 

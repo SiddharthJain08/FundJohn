@@ -15,17 +15,11 @@ Signal shape: ONE LONG BTC-USD per bar, hold_days = 21 (ruling: same as SPY;
 the sizer re-targets daily anyway). Stop/targets never bind.
 
 Exit hook: flatten when the CRYPTO regime differs from the lot's entry regime
-(recorded in signal_params at signal time — run_strategies hands crypto-class
-strategies the crypto regime, engine.py run_strategies `ic == 'crypto'`).
-The LIVE hook (engine.update_pnl -> `_strat.should_exit(position, prices,
-regime, aux_data)`) passes the cycle's EQUITY regime (engine.load_regime) to
-every exit_hook strategy, equity or crypto. That contract is left untouched;
-instead should_exit recognises the engine's equity dict (it alone carries
-`vix_level`) and substitutes the live crypto regime
-(regime.crypto_regime.load_crypto_regime_state, read once per update_pnl
-call: cached on the identity of the regime object passed in). The backtest
-payload (unified_backtest._regime_payload_full on the crypto partition) is
-used as-is and never triggers a live-file read.
+(recorded in signal_params at signal time). Both engine paths hand a
+crypto-class strategy the crypto regime: run_strategies (`ic == 'crypto'`)
+for generate_signals, and update_pnl's exit-hook glue for should_exit
+(load_crypto_regime_state, once per update_pnl call). The backtest passes the
+crypto-partition payload (unified_backtest.load_regimes('crypto')).
 
 benchmark_sleeve / instrument_class / benchmark_ticker are mirrored into
 strategy_registry.parameters by scripts/register_s_beta_btc.py (the sizer
@@ -49,11 +43,6 @@ HOLD_DAYS        = 21
 STOP_FRAC        = 0.60    # stop 40% below entry: never binds inside a 21-day lot
 TARGET_FRACS     = (5.0, 6.0, 7.0)
 
-# The only key that distinguishes execution.engine.load_regime()'s EQUITY dict
-# from both the backtest payload and load_crypto_regime_state()'s dict.
-_EQUITY_LIVE_MARKER = 'vix_level'
-
-
 class BetaBtc(BaseStrategy):
     id                = STRATEGY_ID
     name              = 'Beta sleeve — long BTC-USD'
@@ -68,11 +57,6 @@ class BetaBtc(BaseStrategy):
     benchmark_sleeve  = True
     exit_hook         = True
     BENCHMARK         = BENCHMARK
-
-    def __init__(self, *a, **kw):
-        super().__init__(*a, **kw)
-        self._live_regime_key = None     # the equity regime object last substituted
-        self._live_crypto_state = None
 
     def generate_signals(
         self,
@@ -107,32 +91,12 @@ class BetaBtc(BaseStrategy):
             signal_params     = {'hold_days': HOLD_DAYS, 'benchmark_sleeve': True, 'regime': state},
         )]
 
-    def _crypto_state(self, regime) -> str | None:
-        """The crypto regime state for this hook call. Engine equity dict ->
-        live crypto regime (one read per update_pnl batch); anything else ->
-        its own 'state'. A read failure -> None (hold)."""
-        if not isinstance(regime, dict):
-            return None
-        if _EQUITY_LIVE_MARKER not in regime:
-            return regime.get('state')
-        if self._live_regime_key is not regime:
-            state = None
-            try:
-                from regime import crypto_regime as _cr
-                state = (_cr.load_crypto_regime_state() or {}).get('state')
-            except Exception as e:
-                print(f'[S_beta_btc] crypto regime read failed ({type(e).__name__}: {e}); holding',
-                      file=sys.stderr)
-            self._live_regime_key = regime
-            self._live_crypto_state = state
-        return self._live_crypto_state
-
     def should_exit(self, position: dict, prices: pd.DataFrame,
                     regime: dict, aux_data: dict = None):
         """Flatten at today's close when the CRYPTO regime differs from the
         lot's entry regime. Missing / non-canonical state on either side =>
         hold (the hold cap still protects). No price reads."""
-        state = self._crypto_state(regime)
+        state = regime.get('state') if isinstance(regime, dict) else None
         entry = ((position or {}).get('signal_params') or {}).get('regime')
         if state not in CANONICAL_REGIMES or entry not in CANONICAL_REGIMES:
             return None

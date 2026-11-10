@@ -1,10 +1,8 @@
 """S_beta_btc — crypto benchmark sleeve (crypto engine Phase 3, Task 3).
 
 Clones tests/strategies/test_beta_spy.py + test_beta_spy_exit_hook.py for
-BTC-USD, plus the live-hook regime substitution: engine.update_pnl passes the
-EQUITY regime (load_regime dict) to every exit_hook strategy, so BetaBtc reads
-the crypto regime itself when it sees that dict; the backtest's crypto-partition
-payload is used as-is (and must never trigger a live-file read).
+BTC-USD, should_exit reads the regime it is handed: the engine routes the crypto
+regime to crypto-class hooks (tests/execution/test_update_pnl_exit_hook_crypto.py).
 """
 from __future__ import annotations
 
@@ -39,31 +37,12 @@ def _pos(entry_regime):
             'signal_params': {'hold_days': HOLD_DAYS, 'benchmark_sleeve': True, 'regime': entry_regime}}
 
 
-def _equity_live_regime(state):
-    """Exact key shape of execution.engine.load_regime()'s return."""
-    return {'state': state, 'vix_level': 18.0, 'vix_percentile': 40.0,
-            'regime_data': {'state': state}, 'updated_at': '2026-11-10T14:00:00+00:00'}
-
-
 def _backtest_payload(state):
     """Exact key shape of unified_backtest._regime_payload_full."""
     return {'state': state, 'date': '2026-01-08',
             'one_hot': {r: (1.0 if r == state else 0.0) for r in CANONICAL_REGIMES},
             'transition_probs': {r1: {r2: (1.0 if r1 == r2 else 0.0) for r2 in CANONICAL_REGIMES}
                                  for r1 in CANONICAL_REGIMES}}
-
-
-@pytest.fixture
-def crypto_state(monkeypatch):
-    """Patch the live crypto regime loader; returns a mutable holder + call log."""
-    import regime.crypto_regime as cr
-    box = {'state': 'LOW_VOL', 'calls': 0}
-
-    def _fake(path=None):
-        box['calls'] += 1
-        return {'state': box['state'], 'regime_data': {'state': box['state']}}
-    monkeypatch.setattr(cr, 'load_crypto_regime_state', _fake)
-    return box
 
 
 # ── contract ────────────────────────────────────────────────────────────────
@@ -132,23 +111,20 @@ def test_non_numeric_btc_close_logs_debug_message(capsys):
 
 # ── exit hook: plain regime dicts (backtest shape) ─────────────────────────
 @pytest.mark.parametrize('entry', CANONICAL_REGIMES)
-def test_same_regime_holds_other_regime_exits(entry, crypto_state):
+def test_same_regime_holds_other_regime_exits(entry):
     s = BetaBtc()
     for state in CANONICAL_REGIMES:
         got = s.should_exit(_pos(entry), pd.DataFrame(), {'state': state})
         assert got == (None if state == entry else 'regime_exit')
-    assert crypto_state['calls'] == 0     # non-live shape never reads the live file
 
 
-def test_backtest_payload_used_as_is_and_never_reads_live_file(crypto_state):
-    crypto_state['state'] = 'LOW_VOL'     # would mask a flip if it were (wrongly) read
+def test_backtest_payload_state_is_used():
     s = BetaBtc()
     assert s.should_exit(_pos('LOW_VOL'), pd.DataFrame(), _backtest_payload('HIGH_VOL')) == 'regime_exit'
     assert s.should_exit(_pos('HIGH_VOL'), pd.DataFrame(), _backtest_payload('HIGH_VOL')) is None
-    assert crypto_state['calls'] == 0
 
 
-def test_missing_or_unknown_state_holds(crypto_state):
+def test_missing_or_unknown_state_holds():
     s = BetaBtc()
     assert s.should_exit(_pos('LOW_VOL'), pd.DataFrame(), {}) is None
     assert s.should_exit(_pos('LOW_VOL'), pd.DataFrame(), {'state': 'UNKNOWN'}) is None
@@ -159,45 +135,8 @@ def test_missing_or_unknown_state_holds(crypto_state):
     assert s.should_exit(p, pd.DataFrame(), {'state': 'CRISIS'}) is None
 
 
-# ── exit hook: live engine shape (equity regime dict) ──────────────────────
-def test_live_equity_regime_is_replaced_by_crypto_regime(crypto_state):
-    s = BetaBtc()
-    # equity says CRISIS, crypto says LOW_VOL: a LOW_VOL lot must HOLD
-    crypto_state['state'] = 'LOW_VOL'
-    assert s.should_exit(_pos('LOW_VOL'), pd.DataFrame(), _equity_live_regime('CRISIS')) is None
-    # crypto flips away from entry while equity matches entry: must EXIT
-    crypto_state['state'] = 'HIGH_VOL'
-    assert s.should_exit(_pos('LOW_VOL'), pd.DataFrame(), _equity_live_regime('LOW_VOL')) == 'regime_exit'
-
-
-def test_live_crypto_state_missing_or_noncanonical_holds(crypto_state):
-    s = BetaBtc()
-    for bad in (None, 'UNKNOWN'):
-        crypto_state['state'] = bad
-        assert s.should_exit(_pos('LOW_VOL'), pd.DataFrame(), _equity_live_regime('CRISIS')) is None
-
-
-def test_live_crypto_regime_cached_per_call_batch(crypto_state):
-    s = BetaBtc()
-    reg = _equity_live_regime('CRISIS')             # one update_pnl call = one dict object
-    for _ in range(5):
-        s.should_exit(_pos('LOW_VOL'), pd.DataFrame(), reg)
-    assert crypto_state['calls'] == 1
-    s.should_exit(_pos('LOW_VOL'), pd.DataFrame(), _equity_live_regime('CRISIS'))   # next batch
-    assert crypto_state['calls'] == 2
-
-
-def test_live_crypto_loader_raising_holds(monkeypatch):
-    import regime.crypto_regime as cr
-
-    def _boom(path=None):
-        raise OSError('disk')
-    monkeypatch.setattr(cr, 'load_crypto_regime_state', _boom)
-    assert BetaBtc().should_exit(_pos('LOW_VOL'), pd.DataFrame(), _equity_live_regime('CRISIS')) is None
-
-
 # ── backtest open book closes on the crypto flip bar ───────────────────────
-def test_open_book_closes_on_the_flip_bar(crypto_state):
+def test_open_book_closes_on_the_flip_bar():
     dates = pd.date_range('2026-01-05', periods=12, freq='D')
     closes = [90000.0 + 100 * i for i in range(12)]
     bars = pd.DataFrame({'open': closes, 'high': [c + 50 for c in closes],
@@ -224,7 +163,6 @@ def test_open_book_closes_on_the_flip_bar(crypto_state):
     assert t['exit_reason'] == 'strategy_exit:regime_exit'
     assert t['exit_date'] == dates[6].date()
     assert counters['hook_exits'] == 1
-    assert crypto_state['calls'] == 0
 
 
 def test_requirements_declares_prices_only():
