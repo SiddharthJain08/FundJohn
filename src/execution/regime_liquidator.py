@@ -958,7 +958,7 @@ def _write_liquidation_audit(row: dict) -> str | None:
     # schema migration — alpaca_liquidations has no ticker/direction/market_value_usd
     # columns; those are close_subset-internal labels stored here for traceability.
     close_result_payload = json.dumps({
-        'source': 'close_subset',
+        'source': row.get('source') or 'close_subset',
         'ticker': row.get('ticker'),
         'direction': row.get('direction'),
         'market_value_usd': row.get('market_value_usd'),
@@ -966,24 +966,33 @@ def _write_liquidation_audit(row: dict) -> str | None:
         'avg_fill_price': row.get('avg_fill_price'),
     })
     side_closed = ('long_close' if row.get('direction') == 'long' else 'short_close')
-    try:
-        with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
-            cur.execute(
-                """
+    params = (
+        row['run_date'], row['regime_from'], row['regime_to'],
+        row.get('ticker'), row.get('qty'),
+        side_closed,
+        close_result_payload,
+        row['result_status'],
+    )
+    insert_sql = """
                 INSERT INTO alpaca_liquidations
                     (run_date, regime_from, regime_to, symbol, qty,
                      side_closed, close_result, result_status)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
-                """,
-                (
-                    row['run_date'], row['regime_from'], row['regime_to'],
-                    row.get('ticker'), row.get('qty'),
-                    side_closed,
-                    close_result_payload,
-                    row['result_status'],
-                ),
-            )
+                """
+    if row.get('asset_class'):
+        # migration 169 column; only written when the caller supplies it.
+        insert_sql = """
+                INSERT INTO alpaca_liquidations
+                    (run_date, regime_from, regime_to, symbol, qty,
+                     side_closed, close_result, result_status, asset_class)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """
+        params = params + (row['asset_class'],)
+    try:
+        with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(insert_sql, params)
             new_id = cur.fetchone()[0]
             conn.commit()
         return str(new_id) if new_id else None
