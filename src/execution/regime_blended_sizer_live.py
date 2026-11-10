@@ -537,8 +537,19 @@ def main():
         signals = handoff.get('signals', []) if isinstance(handoff, dict) else []
         print(f'[regime_blended_sizer_live] loaded {len(signals)} signals from handoff for {run_date_str}')
         if not signals:
-            print('[regime_blended_sizer_live] no signals in handoff; nothing to do')
-            return 0
+            # Crypto engine Phase 3 (fix round 1): an empty EQUITY handoff is an
+            # equity risk-off day — the crypto book must still be sized (shadow
+            # line / crypto orders). Only when a crypto regime is known; the
+            # sizer then runs the crypto block alone (equity sizes nothing).
+            try:
+                from execution.pooled_sizing import load_crypto_regime_and_params
+                _cr_state = load_crypto_regime_and_params()[0]
+            except Exception:  # noqa: BLE001
+                _cr_state = None
+            if not _cr_state:
+                print('[regime_blended_sizer_live] no signals in handoff; nothing to do')
+                return 0
+            print('[regime_blended_sizer_live] no equity signals in handoff; sizing the crypto book only')
 
     # Field aliasing — handoff uses entry/stop/t1; consolidator+sizer uses
     # entry_price/stop_loss/take_profit_1.  Also convert direction to numeric.

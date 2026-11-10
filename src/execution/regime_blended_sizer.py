@@ -183,6 +183,9 @@ def _size_positions_impl(
             logger.info('regime_blended_sizer: force_all=True — cadence bypassed (regime transition)')
 
         if not passed:
+            if crypto_regime_state is not None:
+                return _crypto_alone_orders(account_state, regime_params, confirmer,
+                                            crypto_regime_state, crypto_params)
             return []
 
     # TradeJohn LLM confirmer retired 2026-07-20 — per-ticker news-veto is now
@@ -1608,6 +1611,14 @@ def _write_crypto_sizing_last_line(line: str) -> None:
         logger.warning('crypto_sizing: last-line write skipped (%s)', e)
 
 
+def _crypto_held_usd() -> dict:
+    """Held crypto market value by internal symbol (funding pass `current`).
+    Broker read failure ⇒ {} (every target counts as new buying: conservative)."""
+    book, cls = _load_broker_positions_usd_with_class()
+    return {k: v for k, v in (book or {}).items()
+            if ((cls.get(k) == _CRYPTO_CLASS) if cls.get(k) else _is_crypto_key(k))}
+
+
 def _broker_key_is_crypto(tkr) -> bool:
     ac = _broker_asset_classes.get(tkr)
     return (ac == _CRYPTO_CLASS) if ac else _is_crypto_key(tkr)
@@ -1635,8 +1646,8 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
       hurdle (floor_zero; applied only with a qualified BTC sleeve ticker) →
       beta budget (per class; OFF in production) → pooled normaliser → dust →
       per-ticker cap → cluster cap → BTC corr removal → BTC D-4′ clamp
-      (benchmark_max_nav_frac_crypto) → crypto_gross_cap → funding_pass →
-      hold-flat. Then the shadow/apply line (log + #botjohn-log + pipeline_config).
+      (benchmark_max_nav_frac_crypto) → long-only clamp → crypto_gross_cap →
+      funding_pass (net new buying vs nmbp) → hold-flat. Then the shadow/apply line (log + #botjohn-log + pipeline_config).
 
     Returns {'targets', 'ticker_meta', 'gate_net_sharpe', 'rows', 'crypto_ids',
     'active', 'bench_tkrs', 'gross_w', 'line', 'empty_reason'}."""
@@ -1712,6 +1723,7 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
     shortfall = None
     hold = False
     n_held = 0
+    n_short = 0
     bench_cr: set = set()
     gate_net: dict = {}
     if meta:
@@ -1780,8 +1792,11 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
                 usd = targets.get(t)
                 if usd is not None and abs(usd) > max_btc:
                     targets[t] = math.copysign(max_btc, usd)
+            targets, n_short = _ps.clamp_long_only(targets)
             targets, shaved = _ps.crypto_gross_cap(targets, nav, _bsz.crypto_gross_max_nav_frac())
-            targets, shortfall = _ps.funding_pass(targets, (account_state or {}).get('non_marginable_buying_power'))
+            _nmbp = (account_state or {}).get('non_marginable_buying_power')
+            targets, shortfall = _ps.funding_pass(
+                targets, _nmbp, current=_crypto_held_usd() if _nmbp is not None else None)
             if shortfall is None:
                 logger.info('crypto_sizing.funding_bind=unknown (non_marginable_buying_power absent)')
             elif shortfall > 0:
@@ -1805,7 +1820,7 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
     res['line'] = _ps.shadow_line(
         crypto_regime_state, s_m, before_usd, targets, dropped, bench_cr, lam_global * nav,
         gross_cap_shaved=shaved, funding_shortfall=shortfall, hold_flat=hold, mode=mode,
-        nav=nav, stable_excluded=n_stable, hold_zeroed=n_held)
+        nav=nav, stable_excluded=n_stable, hold_zeroed=n_held, short_clamped=n_short)
     logger.info(res['line'])
     if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
         _post_corr_cumsharpe_log(res['line'])
@@ -1855,6 +1870,23 @@ def _crypto_only_orders(cb, flatten_orders, *, crypto_regime_state,
             sh, w, w, account_state, [], instrument_class='crypto')
         out += fl or []
     return out
+
+
+def _crypto_alone_orders(account_state, params, confirmer, crypto_regime_state, crypto_params):
+    """Equity produced nothing this cycle (no weights / no approved or handoff
+    equity signals): the crypto book still runs — crypto fills unused NAV on
+    equity risk-off days (fix round 1). Shadow ⇒ the line only, return [] (the
+    equity early-return value, unchanged); apply ⇒ crypto orders against the
+    crypto-only broker book (equities HELD)."""
+    nav = float(account_state.get('equity') or 100_000.0)
+    liq = float(params.get('liquidity_param', 1.0)) if params else 1.0
+    cb = _crypto_book(crypto_regime_state, crypto_params, nav=nav, lam_global=_load_lambda(),
+                      eq_gross=0.0, liq_eq=liq, account_state=account_state)
+    if not (pooled_sizing_enabled() and cb is not None):
+        return []
+    return _crypto_only_orders(cb, [], crypto_regime_state=crypto_regime_state, nav=nav,
+                               confirmer=confirmer, ortho_groups=None,
+                               account_state=account_state)
 
 
 def _emit_pooled(cb, target_usd, ticker_meta, nav, confirmer, ortho_groups,
@@ -1939,9 +1971,16 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     _pooled = _crypto_on and pooled_sizing_enabled()
 
     nav = float(account_state.get('equity') or 100_000.0)
+
+    def _crypto_alone():
+        return _crypto_alone_orders(account_state, params, confirmer,
+                                    crypto_regime_state, crypto_params)
+
     rows = _sw.load_current(regime_state)
     if not rows:
         logger.info('regime_blended_sizer.sharpe_cadence: no current weights for %s', regime_state)
+        if _crypto_on:
+            return _crypto_alone()
         return []
     weight_by_strat   = {r['strategy_id']: float(r['daily_weight']) for r in rows}
     sharpe_by_strat   = {r['strategy_id']: float(r['effective_sharpe']) for r in rows}
@@ -2033,6 +2072,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             # appropriate.
             logger.info('regime_blended_sizer.sharpe_cadence: EOD mode — no APPROVED carried signals; '
                         'zero orders (flatten handled by run_reconcile if needed)')
+            if _crypto_on:
+                return _crypto_alone()
             return []
         # Legacy fallback: use today's `signals` parameter (e.g. force_all day-1
         # of regime, before signals are persisted)

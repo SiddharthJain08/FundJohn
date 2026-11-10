@@ -63,7 +63,8 @@ class H:
 
 def run(monkeypatch, *, crypto=True, pooled=False, bench_flag=False, s_m_eq=2.0, s_m_cr=0.8,
         broker=None, nmbp=None, hold=None, eq_frac=10.0, btc_frac=0.25, gross_frac=0.50,
-        eq_carried=None, cr_params=None, eq_params=None, lane='eod', h=None):
+        eq_carried=None, cr_params=None, eq_params=None, lane='eod', eq_rows=None, cr_carried=None,
+        sigs=None, h=None):
     h = h if h is not None else H()
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
     if lane == 'eod':
@@ -95,7 +96,7 @@ def run(monkeypatch, *, crypto=True, pooled=False, bench_flag=False, s_m_eq=2.0,
                                'tradable_classes': tradable_classes, 'sids': set(weight_by_strat)})
         if strategy_ids is None:          # equity call: us_equity universe only
             return [dict(s) for s in (eq_carried if eq_carried is not None else EQ_CARRIED)]
-        return [dict(s) for s in CR_CARRIED if s['strategy_id'] in strategy_ids]
+        return [dict(s) for s in (cr_carried or CR_CARRIED) if s['strategy_id'] in strategy_ids]
     monkeypatch.setattr(_sizer, '_load_approved_carried_signals', _carried_loader)
 
     def _window_loader(regime_state, weight_by_strat, cadence_by_strat, *,
@@ -110,13 +111,16 @@ def run(monkeypatch, *, crypto=True, pooled=False, bench_flag=False, s_m_eq=2.0,
 
     def _load_current(regime_state):
         h.load_current.append(regime_state)
-        return [dict(r) for r in (EQ_ROWS if regime_state == EQ_REGIME else CR_ROWS)]
+        return [dict(r) for r in ((EQ_ROWS if eq_rows is None else eq_rows)
+                                  if regime_state == EQ_REGIME else CR_ROWS)]
 
     def _s_m(regime_state, run_date, *, benchmark='SPY', horizon=None, **_k):
         return s_m_cr if benchmark == 'BTC-USD' else s_m_eq
 
     monkeypatch.setattr(_sizer, '_load_lambda', lambda default=2.0, *, intraday=False: LAM)
     monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: dict(broker or {}))
+    monkeypatch.setattr(_sizer, '_load_broker_positions_usd_with_class',
+                        lambda: (dict(broker or {}), {}))     # never the real CLI
     monkeypatch.setattr(_sizer, '_apply_asset_corr_cap', lambda t, *a, **k: t)
     monkeypatch.setattr(_sizer, '_apply_benchmark_corr_removal', lambda t, b, nav: t)
     monkeypatch.setattr(_sizer, '_post_corr_cumsharpe_log', lambda line: h.lines.append(line))
@@ -141,7 +145,8 @@ def run(monkeypatch, *, crypto=True, pooled=False, bench_flag=False, s_m_eq=2.0,
          _mock.patch('execution.benchmark_sleeve.load_benchmark_sleeve_ids',
                      return_value={'S_beta_spy', 'S_beta_btc'}), \
          _mock.patch('execution.benchmark_sizing.regime_benchmark_sharpe_for_sizing', side_effect=_s_m):
-        sigs = [] if lane == 'eod' else [dict(x) for x in EQ_CARRIED]
+        if sigs is None:
+            sigs = [] if lane == 'eod' else [dict(x) for x in EQ_CARRIED]
         orders = _sizer.size_positions(signals=sigs, account_state=_account(nmbp), regime={'state': EQ_REGIME},
                                        run_date=date(2026, 11, 10), strategy_state={},
                                        regime_params=eq_params or _params(), confirmer=lambda p: {}, **kw)
@@ -402,3 +407,87 @@ def test_sameday_lane_shadow_identical_and_apply_emits(monkeypatch):
     applied, h2 = run(monkeypatch, crypto=True, pooled=True, gross_frac=10.0, broker=broker, lane='sameday')
     assert set(cr_t(applied)) == {'BTC-USD', 'ETH-USD'}
     assert len(shadow_lines(h2, 'apply')) == 1
+
+
+# ── fix round 1 ─────────────────────────────────────────────────────────────
+
+def test_funding_pass_constrains_net_new_buying_only(monkeypatch):
+    # held BTC 10k; pooled BTC target clamped to 25k by the D-4' cap (raw 24.1k ⇒ use btc_frac 0.12)
+    broker = {'BTC-USD': 10_000.0}
+    ref, _ = run(monkeypatch, pooled=True, gross_frac=10.0, btc_frac=0.12, broker=broker)
+    c0 = cr_t(ref)                                     # BTC 12k (clamped), ETH ~28.9k new
+    bound, h = run(monkeypatch, pooled=True, gross_frac=10.0, btc_frac=0.12, broker=broker, nmbp=1_000.0)
+    c1 = cr_t(bound)
+    demand = (c0['BTC-USD'] - 10_000.0) + c0['ETH-USD']
+    k = 1_000.0 / demand
+    assert abs(c1['BTC-USD'] - (10_000.0 + (c0['BTC-USD'] - 10_000.0) * k)) < 1e-6
+    assert abs(c1['ETH-USD'] - c0['ETH-USD'] * k) < 1e-6
+    assert c1['BTC-USD'] > 10_000.0                    # never sells a position the book grows
+    assert eq_t(bound) == eq_t(ref)
+    assert 'funding_bind=%.0f' % (demand - 1_000.0) in shadow_lines(h, 'apply')[0]
+
+
+def test_crypto_targets_long_only(monkeypatch):
+    cr = [_carried('S_beta_btc', 'BTC-USD'), _carried('S_cr_a', 'ETH-USD'),
+          _carried('S_cr_b', 'SOL-USD', direction='SHORT')]
+    orders, h = run(monkeypatch, pooled=True, s_m_cr=None, gross_frac=10.0, cr_carried=cr)
+    c = cr_t(orders)
+    assert c.get('SOL-USD', 0.0) == 0.0 and all(v >= 0 for v in c.values())
+    assert 'short_clamped=1' in shadow_lines(h, 'apply')[0]
+    # equity shorts untouched: an equity SHORT keeps its sign
+    eqc = [_carried('S_beta_spy', 'SPY'), _carried('S_hi', 'ZZTA', direction='SHORT')]
+    orders2, _ = run(monkeypatch, pooled=True, s_m_cr=None, gross_frac=10.0, cr_carried=cr, eq_carried=eqc)
+    assert eq_t(orders2)['ZZTA'] < 0
+
+
+@pytest.mark.parametrize('case', ['no_weights', 'no_approved', 'sameday_empty_handoff'])
+def test_equity_early_returns_still_run_the_crypto_block(monkeypatch, case):
+    kw = {'no_weights': dict(eq_rows=[]),
+          'no_approved': dict(eq_carried=[]),
+          'sameday_empty_handoff': dict(lane='sameday', sigs=[])}[case]
+    base, h0 = run(monkeypatch, crypto=False, **kw)
+    assert base == [] and shadow_lines(h0) == []            # crypto None ⇒ identical early return
+    shadow, h1 = run(monkeypatch, crypto=True, **kw)
+    assert shadow == [] and len(shadow_lines(h1)) == 1 and 'n=2' in shadow_lines(h1)[0]
+    applied, h2 = run(monkeypatch, crypto=True, pooled=True, gross_frac=10.0,
+                      broker={'ZZTA': 1_000.0}, **kw)
+    assert set(cr_t(applied)) == {'BTC-USD', 'ETH-USD'}
+    assert not any(o['ticker'] == 'ZZTA' for o in applied)  # equities HELD on a data-absent day
+    assert len(shadow_lines(h2, 'apply')) == 1
+
+
+def test_live_empty_handoff_sizes_crypto_only_when_crypto_regime_known(monkeypatch):
+    import execution.regime_blended_sizer_live as drv
+    import execution.pooled_sizing as _ps
+    import execution.alpaca_trader as _at
+
+    class _Cur:
+        def __init__(self): self.q = ''
+        def execute(self, sql, args=None): self.q = sql
+        def fetchone(self): return {'state': 'LOW_VOL'} if 'market_regime' in self.q else None
+        def fetchall(self): return []
+        def close(self): pass
+
+    class _Conn:
+        def cursor(self, *a, **k): return _Cur()
+        def close(self): pass
+        def rollback(self): pass
+
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://test/test')
+    monkeypatch.delenv('OPENCLAW_EOD_SIGNAL_REGISTER', raising=False)
+    monkeypatch.delenv('OPENCLAW_SAMEDAY_SIGNAL_TARGET', raising=False)
+    monkeypatch.setattr(drv.psycopg2, 'connect', lambda *a, **k: _Conn())
+    monkeypatch.setattr(_at, '_alpaca_session', lambda: object(), raising=False)
+    monkeypatch.setattr(_at, '_fetch_account_state',
+                        lambda sess: {'equity': NAV, 'regt_buying_power': 2 * NAV,
+                                      'long_market_value': 0.0, 'cash': NAV}, raising=False)
+    monkeypatch.setattr(drv, 'read_handoff', lambda *a, **k: {'regime': {'state': 'LOW_VOL'}, 'signals': []})
+    monkeypatch.setattr(sys, 'argv', ['regime_blended_sizer_live', '--date', '2026-11-10'])
+    calls = []
+    monkeypatch.setattr(drv, 'size_positions', lambda **k: calls.append(k) or [])
+    monkeypatch.setattr(_ps, 'load_crypto_regime_and_params', lambda conn=None: (None, None))
+    assert drv.main() == 0 and calls == []                  # no crypto regime ⇒ today's return
+    monkeypatch.setattr(_ps, 'load_crypto_regime_and_params',
+                        lambda conn=None: (CR_REGIME, {'liquidity_param': 1.0}))
+    assert drv.main() == 0 and len(calls) == 1
+    assert calls[0]['signals'] == [] and calls[0]['crypto_regime_state'] == CR_REGIME

@@ -8,8 +8,8 @@ Pure helpers for regime_blended_sizer._sharpe_cadence_path's crypto block
 Order of operations inside the sizer's crypto block (Task 7):
   stablecoins dropped → acting gate → S_m_crypto hurdle (floor_zero) →
   pooled normaliser → dust → per-ticker cap → cluster cap → BTC corr removal →
-  BTC D-4′ clamp (benchmark_max_nav_frac_crypto) → crypto_gross_cap →
-  funding_pass → hold-flat.
+  BTC D-4′ clamp (benchmark_max_nav_frac_crypto) → long-only clamp →
+  crypto_gross_cap → funding_pass (net new buying vs nmbp) → hold-flat.
 """
 from __future__ import annotations
 
@@ -148,9 +148,16 @@ def crypto_gross_cap(crypto_targets: dict, nav: float, frac: float) -> tuple[dic
     return {t: v * k for t, v in out.items()}, gross - cap
 
 
-def funding_pass(crypto_targets: dict, non_marginable_bp: float | None) -> tuple[dict, float | None]:
-    """Alpaca crypto is non-marginable: pro-rata scale when Σ|crypto| > nmbp.
-    Returns (targets, shortfall_usd); nmbp None (unknown) ⇒ no-op, shortfall None."""
+def funding_pass(crypto_targets: dict, non_marginable_bp: float | None,
+                 current: dict | None = None) -> tuple[dict, float | None]:
+    """Alpaca crypto is non-marginable, and nmbp is cash still FREE (held
+    crypto is already paid for), so the constraint is on NET NEW BUYING
+    (fix round 1 ruling): demand = Σ max(target − current, 0); when demand >
+    nmbp only the increases scale, k = nmbp/demand:
+    target = current + (target − current)·k. Shrinking/closing targets are
+    untouched. Returns (targets, shortfall = unmet new demand); nmbp None
+    (unknown) ⇒ no-op, shortfall None. `current` = held crypto USD by
+    internal symbol (absent ⇒ 0)."""
     out = dict(crypto_targets or {})
     if non_marginable_bp is None:
         return out, None
@@ -161,11 +168,27 @@ def funding_pass(crypto_targets: dict, non_marginable_bp: float | None) -> tuple
     if not math.isfinite(bp):
         return out, None
     bp = max(0.0, bp)
-    gross = sum(abs(v) for v in out.values())
-    if gross <= bp or gross <= 0:
+    cur = current or {}
+    inc = {t: v - float(cur.get(t, 0.0) or 0.0) for t, v in out.items()}
+    demand = sum(d for d in inc.values() if d > 0)
+    if demand <= bp or demand <= 0:
         return out, 0.0
-    k = bp / gross
-    return {t: v * k for t, v in out.items()}, gross - bp
+    k = bp / demand
+    for t, d in inc.items():
+        if d > 0:
+            out[t] = float(cur.get(t, 0.0) or 0.0) + d * k
+    return out, demand - bp
+
+
+def clamp_long_only(crypto_targets: dict) -> tuple[dict, int]:
+    """Alpaca crypto cannot be shorted: every crypto target ≥ 0. (targets, n_clamped)."""
+    out, n = {}, 0
+    for t, v in (crypto_targets or {}).items():
+        if v < 0:
+            out[t], n = 0.0, n + 1
+        else:
+            out[t] = v
+    return out, n
 
 
 def apply_hold_flat(crypto_targets: dict, state: dict | None) -> tuple[dict, int]:
@@ -192,7 +215,7 @@ def shadow_line(crypto_regime, s_m_crypto, before: dict, after: dict, dropped: l
                 bench_tkrs: set, lam_nav: float, *, gross_cap_shaved: float,
                 funding_shortfall: float | None, hold_flat: bool, mode: str,
                 nav: float | None = None, stable_excluded: int = 0,
-                hold_zeroed: int = 0) -> str:
+                hold_zeroed: int = 0, short_clamped: int = 0) -> str:
     """One line per cycle. `before` = unconstrained crypto USD targets (post
     normaliser, pre caps); `after` = feasible targets (post caps, funding,
     hold-flat) — the shadow review sees both (spec §5.3b)."""
@@ -203,8 +226,9 @@ def shadow_line(crypto_regime, s_m_crypto, before: dict, after: dict, dropped: l
     fb = 'unknown' if funding_shortfall is None else '%.0f' % funding_shortfall
     top = sorted(((t, round(v)) for t, v in (after or {}).items() if v), key=lambda x: -abs(x[1]))[:8]
     return ('crypto_sizing.%s[%s]: S_m=%s n=%d gross=%.0f%s unconstrained=%.0f lam_nav=%.0f '
-            'cap_shaved=%.0f funding_bind=%s hold=%d hold_zeroed=%d stable_excluded=%d '
-            'dropped=%d bench=%s top=%s' % (
+            'cap_shaved=%.0f funding_bind=%s hold=%d hold_zeroed=%d short_clamped=%d '
+            'stable_excluded=%d dropped=%d bench=%s top=%s' % (
                 mode, crypto_regime, _fmt_s_m(s_m_crypto), n, g1, pct, g0, lam_nav,
-                gross_cap_shaved, fb, 1 if hold_flat else 0, hold_zeroed, stable_excluded,
+                gross_cap_shaved, fb, 1 if hold_flat else 0, hold_zeroed, short_clamped,
+                stable_excluded,
                 len(dropped or []), sorted(bench_tkrs or ()), top))

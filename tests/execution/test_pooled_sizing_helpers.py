@@ -144,3 +144,40 @@ def test_load_crypto_regime_and_params_fail_open(monkeypatch):
     def boom(path=None): raise RuntimeError('x')
     monkeypatch.setattr(cr, 'load_crypto_regime_state', boom)
     assert ps.load_crypto_regime_and_params(_Conn(None)) == (None, None)
+
+
+# ── fix round 1: funding is on NET NEW buying ───────────────────────────────
+
+def test_funding_pass_scales_only_the_increase():
+    t, short = ps.funding_pass({'BTC-USD': 12_000.0}, 1_000.0, current={'BTC-USD': 10_000.0})
+    assert abs(t['BTC-USD'] - 11_000.0) < 1e-6 and abs(short - 1_000.0) < 1e-6
+
+
+def test_funding_pass_reductions_untouched_even_with_zero_bp():
+    t, short = ps.funding_pass({'BTC-USD': 8_000.0}, 0.0, current={'BTC-USD': 10_000.0})
+    assert t == {'BTC-USD': 8_000.0} and short == 0.0
+
+
+def test_funding_pass_mixed_book_scales_growers_pro_rata():
+    t, short = ps.funding_pass({'BTC-USD': 12_000.0, 'ETH-USD': 4_000.0, 'SOL-USD': 2_000.0}, 3_000.0,
+                               current={'BTC-USD': 10_000.0, 'SOL-USD': 5_000.0})
+    # demand = 2k (BTC) + 4k (ETH new) = 6k; k = 0.5; SOL shrinks untouched
+    assert abs(t['BTC-USD'] - 11_000.0) < 1e-6 and abs(t['ETH-USD'] - 2_000.0) < 1e-6
+    assert t['SOL-USD'] == 2_000.0 and abs(short - 3_000.0) < 1e-6
+
+
+def test_funding_pass_unknown_bp_is_noop_even_with_current():
+    src = {'BTC-USD': 12_000.0}
+    t, short = ps.funding_pass(src, None, current={'BTC-USD': 10_000.0})
+    assert t == src and short is None
+
+
+def test_clamp_long_only():
+    t, n = ps.clamp_long_only({'BTC-USD': 5.0, 'SOL-USD': -3.0, 'ETH-USD': 0.0})
+    assert t == {'BTC-USD': 5.0, 'SOL-USD': 0.0, 'ETH-USD': 0.0} and n == 1
+
+
+def test_shadow_line_reports_short_clamped():
+    line = ps.shadow_line('LOW_VOL', 0.1, {}, {}, [], set(), 0.0, gross_cap_shaved=0.0,
+                          funding_shortfall=0.0, hold_flat=False, mode='shadow', short_clamped=3)
+    assert 'short_clamped=3' in line and 'funding_bind=0' in line
