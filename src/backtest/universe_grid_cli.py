@@ -183,7 +183,8 @@ def _simulate_grid(
     instance.active_in_regimes = list(CANONICAL_REGIMES)
 
     close_wide, bars_by_ticker = load_prices_panels()
-    regimes = load_regimes()
+    # crypto partitions on the crypto tier table (Phase 3 D-2); equity unchanged.
+    regimes = load_regimes(_resolve_instrument_class(strategy_id, filepath=filepath))
 
     # §7-corrected cost model: mirror run_backtest's slippage resolution EXACTLY
     # so grid metrics are comparable to production (true-MTM is already on; this

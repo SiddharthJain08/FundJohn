@@ -145,3 +145,28 @@ def test_master_registered_with_ledger_and_freshness():
     assert ledger.PARQUET_MAP['crypto_historical_regimes'] == 'crypto_historical_regimes'
     assert ledger.PROVIDERS['crypto_historical_regimes'] == 'computed'
     assert mf._CADENCES['crypto_historical_regimes.parquet'] == ('date', 5)
+
+
+def test_no_rebuild_when_source_has_not_advanced(monkeypatch):
+    closes = _two_segment_closes()
+    monkeypatch.setattr(mod, 'load_btc_closes', lambda start=None, end=None: closes)
+    mod.rebuild_cache()
+    last = closes.index.max().date()
+    calls = []
+    monkeypatch.setattr(mod, 'rebuild_cache', lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(mod, '_source_max_date', lambda: last)
+    monkeypatch.setattr(mod, '_cache', None)
+    mod.load_table()
+    assert calls == []
+    monkeypatch.setattr(mod, '_source_max_date', lambda: last + pd.Timedelta(days=1))
+    monkeypatch.setattr(mod, '_cache', None)
+    mod.load_table()
+    assert calls == [1]
+
+
+def test_calibrate_tiers_tie_aware():
+    # heavy ties: 10 copies of 1.0 straddle the 40 % cut
+    rv = pd.Series([0.5] * 37 + [1.0] * 10 + [2.0] * 53)
+    t1, _, _ = mod.calibrate_tiers(rv, {'LOW_VOL': 0.40, 'TRANSITIONING': 0.10,
+                                        'HIGH_VOL': 0.10, 'CRISIS': 0.40})
+    assert t1 == 0.5     # sorted[39] == 1.0 would admit 47 %; 0.5 admits 37 % (closer to 40 %)

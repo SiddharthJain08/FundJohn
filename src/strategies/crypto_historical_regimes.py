@@ -45,7 +45,7 @@ Public API
     classify_history(start_date=None, end_date=None, *, closes=None, tiers=None)
     calibrate_tiers(rv_smoothed, target_freq) -> (t1, t2, t3)
     rebuild_cache(start_date=None, end_date=None) -> Path
-    load_table() -> pd.DataFrame          # cached table (self-heals when stale)
+    load_table() -> pd.DataFrame          # cached table (self-heals when missing or behind the prices master)
     regime_series(dates) -> pd.Series
     regime_for_date(d) -> str
 """
@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import math
 import sys
-from datetime import date as _date, timedelta
+from datetime import date as _date
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -70,11 +70,6 @@ BENCH       = 'BTC-USD'
 RV_WINDOW   = 30
 SMOOTH_DAYS = 5
 ANNUALISE   = 365
-
-# Cache older than this many days (vs today, UTC-naive date) is rebuilt on
-# first read — BTC prints every day, so a 2-day lag means the collector hook
-# did not run.
-_STALE_DAYS = 2
 
 # >>> CRYPTO_RV_TIERS (rewritten by scripts/calibrate_crypto_regime_tiers.py --write)
 # calibrated 2026-11-10 against crypto_regime_states 2026-05-26..2026-11-10 (daily mode)
@@ -160,7 +155,7 @@ def calibrate_tiers(rv_smoothed: pd.Series,
     to the calibration window), the share of values ≤ t1 / ≤ t2 / ≤ t3 is the
     nearest achievable to the cumulative target LOW_VOL / +TRANSITIONING /
     +HIGH_VOL. Exact order statistics (no interpolation), so the inclusive-
-    upper tier rule reproduces the counts."""
+    upper tier rule reproduces the counts; tie-aware (see below)."""
     if set(target_freq) != set(CANONICAL_REGIMES):
         raise ValueError(f'target_freq keys must be {CANONICAL_REGIMES}, got {sorted(target_freq)}')
     total = float(sum(target_freq.values()))
@@ -172,10 +167,19 @@ def calibrate_tiers(rv_smoothed: pd.Series,
         raise ValueError(f'need ≥ 10 non-NaN rv values to calibrate, got {n}')
     cum = np.cumsum([target_freq['LOW_VOL'], target_freq['TRANSITIONING'],
                      target_freq['HIGH_VOL']]) / total
+    # The 5-day rolling median repeats values, so a cut at sorted[k-1] can
+    # admit more than k rows. Choose between that value and the next-lower
+    # distinct value, whichever count (#values ≤ cut) is closer to n·cum.
     out = []
     for c in cum:
-        k = int(min(max(round(n * float(c)), 1), n))
-        out.append(float(vals[k - 1]))
+        want = n * float(c)
+        k = int(min(max(round(want), 1), n))
+        v = float(vals[k - 1])
+        cands = [v]
+        lower = vals[vals < v]
+        if len(lower):
+            cands.append(float(lower[-1]))
+        out.append(min(cands, key=lambda t: (abs(int(np.searchsorted(vals, t, 'right')) - want), -t)))
     return tuple(out)  # type: ignore[return-value]
 
 
@@ -199,12 +203,28 @@ def rebuild_cache(start_date: str | None = None,
 _cache: pd.DataFrame | None = None
 
 
+def _source_max_date() -> _date | None:
+    """Newest `date` in the prices master from footer stats (no data read)."""
+    if str(ROOT) not in sys.path:
+        sys.path.append(str(ROOT))
+    from src.data import parquet_store as _ps
+    mx = _ps._max_date_from_footers([_ps.PRICES_PATH])
+    return None if mx is None else pd.to_datetime(mx).date()
+
+
 def _cache_is_stale() -> bool:
+    """True only when the prices master has advanced past the cache — the
+    equity module's source-relative rule. A calendar-age rule would rebuild
+    in every consumer after a weekend whose BTC bars never landed (the cache
+    cannot advance past the source), each doing a prices read + master merge."""
     try:
-        mx = pd.to_datetime(pd.read_parquet(CACHE, columns=['date'])['date']).max()
+        cached = pd.to_datetime(pd.read_parquet(CACHE, columns=['date'])['date']).max()
+        src = _source_max_date()
     except Exception:  # noqa: BLE001 — an unreadable probe must not break consumers
         return False
-    return pd.isna(mx) or mx.date() < _date.today() - timedelta(days=_STALE_DAYS)
+    if src is None:
+        return False
+    return pd.isna(cached) or cached.date() < src
 
 
 def load_table() -> pd.DataFrame:
