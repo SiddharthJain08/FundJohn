@@ -126,7 +126,8 @@ def test_calibration_script_rewrites_only_the_marked_block():
     spec.loader.exec_module(cs)
     src = Path(mod.__file__).read_text()
     block = cs.render_block((0.1, 0.2, 0.3), '2026-05-26', '2026-11-10', '2026-11-10',
-                            {'LOW_VOL': .4, 'TRANSITIONING': .3, 'HIGH_VOL': .1, 'CRISIS': .2})
+                            {'LOW_VOL': .4, 'TRANSITIONING': .3, 'HIGH_VOL': .1, 'CRISIS': .2},
+                            n_days=143, provenance='passed via --frequencies')
     new = cs.rewrite_module(src, block)
     ns = {}
     start = new.index(cs.BEGIN)
@@ -134,7 +135,11 @@ def test_calibration_script_rewrites_only_the_marked_block():
     assert ns['CRYPTO_RV_TIERS'] == ((0.1, 'LOW_VOL'), (0.2, 'TRANSITIONING'), (0.3, 'HIGH_VOL'))
     assert new[:start] == src[:src.index(cs.BEGIN)]
     assert new.split(cs.END, 1)[1] == src.split(cs.END, 1)[1]
-    assert '# calibrated 2026-11-10 against crypto_regime_states 2026-05-26..2026-11-10 (daily mode)' in new
+    assert '# calibrated 2026-11-10 on BTC-USD rv30_smoothed 2026-05-26..2026-11-10 (143 days' in new
+    assert '# targets passed via --frequencies' in new
+    db = cs.render_block((0.1, 0.2, 0.3), '2026-05-26', '2026-11-10', '2026-11-10',
+                         {'LOW_VOL': .4, 'TRANSITIONING': .3, 'HIGH_VOL': .1, 'CRISIS': .2})
+    assert 'via --db (daily mode of hourly states)' in db
     with pytest.raises(SystemExit):
         cs.rewrite_module(src + '\n' + cs.BEGIN + '\n', block)
 
@@ -147,18 +152,36 @@ def test_master_registered_with_ledger_and_freshness():
     assert mf._CADENCES['crypto_historical_regimes.parquet'] == ('date', 5)
 
 
-def test_no_rebuild_when_source_has_not_advanced(monkeypatch):
+def test_no_consumer_rebuild_when_prices_master_is_ahead_of_btc(monkeypatch):
+    """I1: BTC-USD lags the equity bars (weekday BTC gap / crypto fill failed).
+    The prices master's footer max is AHEAD of the cache, yet a consumer must
+    not rebuild — stubbed at the parquet_store level, where the bug lived."""
+    from src.data import parquet_store as ps
     closes = _two_segment_closes()
     monkeypatch.setattr(mod, 'load_btc_closes', lambda start=None, end=None: closes)
     mod.rebuild_cache()
-    last = closes.index.max().date()
-    calls = []
-    monkeypatch.setattr(mod, 'rebuild_cache', lambda *a, **k: calls.append(1))
-    monkeypatch.setattr(mod, '_source_max_date', lambda: last)
+    ahead = (closes.index.max() + pd.Timedelta(days=3)).date().isoformat()
+    monkeypatch.setattr(ps, '_max_date_from_footers', lambda files: ahead)
+    attempts = []
+
+    def _boom(*a, **k):   # recorded: a swallowed rebuild failure must still fail the test
+        attempts.append(1)
+        raise AssertionError('consumer must not read prices / rebuild')
+    monkeypatch.setattr(mod, 'load_btc_closes', _boom)
+    monkeypatch.setattr(ps, 'prices_read_table', _boom)
+    monkeypatch.setattr(ps, 'append_dedup', _boom)
     monkeypatch.setattr(mod, '_cache', None)
+    df = mod.load_table()
+    assert attempts == []
+    assert len(df) == len(closes)
+
+
+def test_missing_cache_is_built_once(monkeypatch):
+    closes = _two_segment_closes()
+    calls = []
+    monkeypatch.setattr(mod, 'load_btc_closes',
+                        lambda start=None, end=None: calls.append(1) or closes)
     mod.load_table()
-    assert calls == []
-    monkeypatch.setattr(mod, '_source_max_date', lambda: last + pd.Timedelta(days=1))
     monkeypatch.setattr(mod, '_cache', None)
     mod.load_table()
     assert calls == [1]

@@ -183,15 +183,15 @@ def _simulate_grid(
     instance.active_in_regimes = list(CANONICAL_REGIMES)
 
     close_wide, bars_by_ticker = load_prices_panels()
+    _instrument_class = _resolve_instrument_class(strategy_id, filepath=filepath)
     # crypto partitions on the crypto tier table (Phase 3 D-2); equity unchanged.
-    regimes = load_regimes(_resolve_instrument_class(strategy_id, filepath=filepath))
+    regimes = load_regimes(_instrument_class)
 
     # §7-corrected cost model: mirror run_backtest's slippage resolution EXACTLY
     # so grid metrics are comparable to production (true-MTM is already on; this
     # closes the only remaining gap — always-adverse slippage). Same env-var name
     # and same default semantics (unset → ON, via the '1' default) as
     # unified_backtest.run_backtest:857 — must match EXACTLY or the grid diverges.
-    _instrument_class = _resolve_instrument_class(strategy_id, filepath=filepath)
     _cost_bps = resolve_cost_model_bps(_instrument_class)
     _slippage_on = os.environ.get('OPENCLAW_BACKTEST_SLIPPAGE', '1') != '0'
     _slippage_bps = _cost_bps if _slippage_on else 0.0

@@ -45,7 +45,7 @@ Public API
     classify_history(start_date=None, end_date=None, *, closes=None, tiers=None)
     calibrate_tiers(rv_smoothed, target_freq) -> (t1, t2, t3)
     rebuild_cache(start_date=None, end_date=None) -> Path
-    load_table() -> pd.DataFrame          # cached table (self-heals when missing or behind the prices master)
+    load_table() -> pd.DataFrame          # cached table (built only when missing)
     regime_series(dates) -> pd.Series
     regime_for_date(d) -> str
 """
@@ -72,7 +72,8 @@ SMOOTH_DAYS = 5
 ANNUALISE   = 365
 
 # >>> CRYPTO_RV_TIERS (rewritten by scripts/calibrate_crypto_regime_tiers.py --write)
-# calibrated 2026-11-10 against crypto_regime_states 2026-05-26..2026-11-10 (daily mode)
+# calibrated 2026-11-10 on BTC-USD rv30_smoothed 2026-05-26..2026-11-10 (143 days in the prices master)
+# targets measured from crypto_regime_states by the controller 2026-11-10 21:39Z (daily mode of hourly states); passed via --frequencies; --db rerun owed at merge
 # targets: LOW_VOL 0.414, TRANSITIONING 0.308, HIGH_VOL 0.118, CRISIS 0.160
 CRYPTO_RV_TIERS: tuple[tuple[float, str], ...] = (
     (0.3597795949784727, 'LOW_VOL'),
@@ -203,42 +204,20 @@ def rebuild_cache(start_date: str | None = None,
 _cache: pd.DataFrame | None = None
 
 
-def _source_max_date() -> _date | None:
-    """Newest `date` in the prices master from footer stats (no data read)."""
-    if str(ROOT) not in sys.path:
-        sys.path.append(str(ROOT))
-    from src.data import parquet_store as _ps
-    mx = _ps._max_date_from_footers([_ps.PRICES_PATH])
-    return None if mx is None else pd.to_datetime(mx).date()
-
-
-def _cache_is_stale() -> bool:
-    """True only when the prices master has advanced past the cache — the
-    equity module's source-relative rule. A calendar-age rule would rebuild
-    in every consumer after a weekend whose BTC bars never landed (the cache
-    cannot advance past the source), each doing a prices read + master merge."""
-    try:
-        cached = pd.to_datetime(pd.read_parquet(CACHE, columns=['date'])['date']).max()
-        src = _source_max_date()
-    except Exception:  # noqa: BLE001 — an unreadable probe must not break consumers
-        return False
-    if src is None:
-        return False
-    return pd.isna(cached) or cached.date() < src
-
-
 def load_table() -> pd.DataFrame:
-    """The cached table sorted by date, (re)building it when missing or stale.
-    A failed rebuild falls back to the existing (stale) cache."""
+    """The cached table sorted by date, building it ONLY when the file is
+    missing. Freshness is owned by the collector's daily --rebuild hook and
+    the master_freshness probe (5-day cadence) — never by consumers: a
+    source-relative self-heal against the (equity-driven) prices master
+    would rebuild in every backtest child whenever BTC-USD lags the equity
+    bars (weekday BTC gaps exist; or the crypto fill fails while equities
+    succeed), each paying a filtered prices read + a locked master write in
+    the compute window, and would change the partition mid-fleet."""
     global _cache
     if _cache is not None:
         return _cache
-    if not CACHE.exists() or _cache_is_stale():
-        try:
-            rebuild_cache()
-        except Exception:  # noqa: BLE001
-            if not CACHE.exists():
-                raise
+    if not CACHE.exists():
+        rebuild_cache()
     df = pd.read_parquet(CACHE)
     df['date'] = pd.to_datetime(df['date']).dt.date
     _cache = df.sort_values('date').reset_index(drop=True)

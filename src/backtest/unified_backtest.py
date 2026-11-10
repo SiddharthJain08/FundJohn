@@ -381,7 +381,10 @@ def load_regimes(instrument_class: str = 'equity') -> pd.Series:
     table exactly as before."""
     if instrument_class == 'crypto':
         from strategies import crypto_historical_regimes as _chr
-        s = _chr.regime_series(_chr.load_table()['date'])
+        # Dense daily span (BTC gap days carry the previous label) so a bar on
+        # a gap day is never skipped for want of a regime.
+        _d = pd.to_datetime(_chr.load_table()['date'])
+        s = _chr.regime_series(pd.date_range(_d.min(), _d.max(), freq='D'))
         s.index = pd.DatetimeIndex(pd.to_datetime(s.index), name='date')
         return s.sort_index().astype(str)
     r = pd.read_parquet(REGIMES_PARQUET)

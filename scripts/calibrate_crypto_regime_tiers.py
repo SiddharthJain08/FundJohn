@@ -68,12 +68,19 @@ def db_frequencies(start: str, end: str) -> dict[str, float]:
 
 
 def render_block(tiers: tuple[float, float, float], start: str, end: str, today: str,
-                 target: dict[str, float]) -> str:
+                 target: dict[str, float], n_days: int | None = None,
+                 provenance: str | None = None) -> str:
+    """provenance=None means the targets were read by --db; otherwise it is
+    the caller's statement of where --frequencies came from."""
     t1, t2, t3 = tiers
     tgt = ', '.join(f'{k} {target[k]:.3f}' for k in chr_mod.CANONICAL_REGIMES)
+    days = f' ({n_days} days in the prices master)' if n_days is not None else ''
+    src = (f'# targets read from crypto_regime_states {start}..{end} via --db (daily mode of hourly states)\n'
+           if provenance is None else f'# targets {provenance}\n')
     return (
         f'{BEGIN} (rewritten by scripts/calibrate_crypto_regime_tiers.py --write)\n'
-        f'# calibrated {today} against crypto_regime_states {start}..{end} (daily mode)\n'
+        f'# calibrated {today} on BTC-USD rv30_smoothed {start}..{end}{days}\n'
+        + src +
         f'# targets: {tgt}\n'
         'CRYPTO_RV_TIERS: tuple[tuple[float, str], ...] = (\n'
         f"    ({t1!r}, 'LOW_VOL'),\n"
@@ -103,6 +110,7 @@ def main(argv=None) -> int:
     g.add_argument('--frequencies')
     g.add_argument('--db', action='store_true')
     ap.add_argument('--write', action='store_true')
+    ap.add_argument('--provenance', help='with --frequencies: where the targets came from (written into the comment)')
     a = ap.parse_args(argv)
 
     target = json.loads(a.frequencies) if a.frequencies else db_frequencies(a.start, a.end)
@@ -125,7 +133,10 @@ def main(argv=None) -> int:
     print('full-history shares: ' + ', '.join(f'{k} {hf.get(k, 0.0)*100:.1f} %'
                                               for k in chr_mod.CANONICAL_REGIMES + ('UNKNOWN',)))
     if a.write:
-        block = render_block(tiers, a.start, a.end, date.today().isoformat(), target)
+        if a.frequencies and not a.provenance:
+            raise SystemExit('--write with --frequencies requires --provenance (say where the targets came from)')
+        block = render_block(tiers, a.start, a.end, date.today().isoformat(), target,
+                             n_days=len(win), provenance=None if a.db else a.provenance)
         MODULE_PATH.write_text(rewrite_module(MODULE_PATH.read_text(), block))
         print(f'rewrote CRYPTO_RV_TIERS in {MODULE_PATH}')
     return 0
