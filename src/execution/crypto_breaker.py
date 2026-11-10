@@ -289,3 +289,101 @@ def mirror_hold_to_pipeline_config(conn, hold: dict | None) -> None:
         conn.commit()
     except Exception as e:  # noqa: BLE001
         print(f'[crypto_breaker] hold mirror failed: {e}')
+
+
+# --------------------------------------------------------------------------
+# Actions: close / flatten through the crypto executor path, audit, Discord.
+# Every dependency is injectable; defaults import lazily (heavy deps).
+# --------------------------------------------------------------------------
+CLOSE_STRATEGY_ID = '__crypto_breaker__'
+
+
+def close_position(pos, *, equity, run_date, reason, executor=None, poller=None, audit=None) -> dict:
+    """Full-close one crypto position. Never raises; always audits."""
+    out = {'ticker': pos.ticker, 'status': 'error', 'order_id': None, 'filled_qty': None,
+           'avg_fill_price': None, 'error': None, 'market_value': abs(pos.market_value)}
+    status, err = 'submit_error', None
+    try:
+        if executor is None:
+            from execution import alpaca_executor as executor
+        if poller is None:
+            from execution.regime_liquidator import _poll_to_terminal as poller
+        mv = abs(pos.market_value)
+        order = {'ticker': pos.ticker, 'direction': 'short' if pos.qty > 0 else 'long',
+                 'notional_usd': mv, 'current_usd': mv,
+                 'strategy_id': CLOSE_STRATEGY_ID, 'close_only': True}
+        res = executor.execute_single(None, equity, order, run_date)
+        if isinstance(res, dict) and res.get('status') == 'submitted':
+            out['order_id'] = res.get('order_id')
+            final = poller(out['order_id'], timeout_s=90)
+            from execution.regime_liquidator import _classify_outcome
+            status = _classify_outcome(True, final, abs(pos.qty))
+            if isinstance(final, dict):
+                out['filled_qty'] = _f(final.get('filled_qty'))
+                out['avg_fill_price'] = _f(final.get('filled_avg_price'))
+        else:
+            status = 'rejected'
+            err = str((res or {}).get('reason') or res) if isinstance(res, dict) or res is None \
+                else f'not submitted: {res}'
+        out['status'] = status
+    except Exception as e:  # noqa: BLE001 - a risk action must never raise
+        err = f'{type(e).__name__}: {e}'
+        out['status'] = 'error'
+    out['error'] = err
+    row = {'run_date': run_date, 'regime_from': 'CRYPTO', 'regime_to': 'CRYPTO_BREAKER',
+           'ticker': pos.ticker, 'direction': 'long_close' if pos.qty > 0 else 'short_close',
+           'qty': abs(pos.qty), 'result_status': status, 'market_value_usd': pos.market_value,
+           'filled_qty': out['filled_qty'], 'avg_fill_price': out['avg_fill_price'],
+           'asset_class': 'crypto', 'source': 'crypto_breaker',
+           'error_msg': f'{reason}: {err}' if err else None}
+    try:
+        if audit is None:
+            from execution.regime_liquidator import _write_liquidation_audit as audit
+        audit(row)
+    except Exception as e:  # noqa: BLE001
+        print(f'[crypto_breaker] audit write failed for {pos.ticker}: {e}')
+    return out
+
+
+def flatten_crypto(pos, *, equity, run_date, reason, **deps) -> list[dict]:
+    """Close every position, largest exposure first, continuing past failures."""
+    return [close_position(p, equity=equity, run_date=run_date, reason=reason, **deps)
+            for p in sorted(pos, key=lambda p: abs(p.market_value), reverse=True)]
+
+
+def post(msg: str, poster=None) -> None:
+    try:
+        if poster is None:
+            from execution import regime_liquidator
+            poster = lambda m: regime_liquidator._post_to_discord('trade-reports', m)  # noqa: E731
+        poster(msg[:1900])
+    except Exception as e:  # noqa: BLE001
+        print(f'[crypto_breaker] discord post failed: {e}')
+
+
+def _usd(v: float) -> str:
+    v = abs(v)
+    return f'${v / 1e6:.1f}M' if v >= 1e6 else f'${v / 1e3:.1f}K' if v >= 1e3 else f'${v:.0f}'
+
+
+def fmt_fire_msg(mode, triggers, results, hold) -> str:
+    n = lambda *s: sum(r.get('status') in s for r in results)  # noqa: E731
+    since = (hold or {}).get('since') or '-'
+    return (f"[crypto_breaker] FIRED mode={mode} reason={','.join(t['reason'] for t in triggers)} "
+            f"n={n('filled', 'partial')}/{len(results)} "
+            f"notional={_usd(sum(r.get('market_value') or 0 for r in results))} "
+            f"filled={n('filled')} rejected={n('rejected')} hold_flat={since}")
+
+
+def fmt_shadow_msg(ev, triggers) -> str:
+    dd, w = ev.get('sleeve_dd'), ev.get('worst_plpc')
+    return (f"[crypto_breaker] shadow would_fire={','.join(t['reason'] for t in triggers)} "
+            f"dd={'n/a' if dd is None else f'{dd:.2%}'} worst={ev.get('worst_ticker')}@"
+            f"{'n/a' if w is None else f'{w:.2%}'} n={ev.get('n_positions', '?')}")
+
+
+def fmt_blackout_msg(ev) -> str:
+    ages = ev.get('ages_h') or next((t.get('ages_h') for t in ev.get('triggers', [])
+                                     if t.get('id') == 'T5'), None) or {}
+    return (f"[crypto_breaker] BLACKOUT regime_age_h={ages.get('regime')} flow_age_h={ages.get('flow')} "
+            f"holding={ev.get('n_positions', '?')} — alert only, no orders")
