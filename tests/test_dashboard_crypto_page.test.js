@@ -239,3 +239,15 @@ test('breaker: hero chip reads risk.breaker.status + HOLD FLAT; risk panel lists
   api._renderCryptoRisk({ flags: {}, params: {}, sizing: {} }, { available: false });   // old payload, no breaker
   assert.ok(els['cr-risk'].innerHTML.includes('breaker: —'));
 });
+
+test('risk panel lists per-ticker holds (hold_tickers) and stays quiet when none', () => {
+  const { api, els } = crSandbox();
+  const base = { flags: {}, params: {}, sizing: {} };
+  api._renderCryptoRisk(Object.assign({}, base, { breaker: { status: 'armed', hold_flat: null,
+    hold_tickers: { 'SOL-USD': { since: '2026-11-10T10:00:00Z' }, 'ETH-USD': { since: '2026-11-10T09:00:00Z' } } } }), { available: false });
+  let h = els['cr-risk'].innerHTML;
+  assert.ok(h.includes('HOLD ETH-USD, SOL-USD') && !h.includes('HOLD FLAT'));
+  api._renderCryptoRisk(Object.assign({}, base, { breaker: { status: 'armed', hold_flat: null, hold_tickers: {} } }), { available: false });
+  h = els['cr-risk'].innerHTML;
+  assert.ok(h.includes('breaker: armed') && !h.includes('HOLD'));
+});

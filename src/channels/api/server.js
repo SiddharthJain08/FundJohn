@@ -11826,8 +11826,10 @@ function _renderCryptoRisk(risk, positions) {
   const bth = b.thresholds || {};
   const bPct = v => { const n = _crNum(v); return n == null ? '—' : (n * 100).toFixed(1) + ' %'; };
   const bHold = b.hold_flat || null;
+  const bHoldT = (b.hold_tickers && typeof b.hold_tickers === 'object') ? Object.keys(b.hold_tickers).sort() : [];
   const bStatusLine = 'breaker: ' + escapeHtml(b.status || '—')
-    + (bHold ? ' · <span style="color:var(--red)">HOLD FLAT since ' + escapeHtml(_ageStr(bHold.since)) + '</span>' : '');
+    + (bHold ? ' · <span style="color:var(--red)">HOLD FLAT since ' + escapeHtml(_ageStr(bHold.since)) + '</span>' : '')
+    + (bHoldT.length ? ' · <span style="color:var(--red)">HOLD ' + bHoldT.map(t => escapeHtml(t)).join(', ') + '</span>' : '');
   const bThLine = 'sleeve DD ' + bPct(bth.sleeve_dd) + ' · position DD ' + bPct(bth.position_dd)
     + ' · blackout ' + escapeHtml(bth.blackout_h != null ? bth.blackout_h : '—') + ' h';
   const bEvals = Array.isArray(b.last_evals) ? b.last_evals : [];

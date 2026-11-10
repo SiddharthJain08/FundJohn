@@ -68,6 +68,16 @@ def test_hold_state_prefers_redis_then_pipeline_config(monkeypatch):
     assert st == {'sleeve': {'since': 'mirror'}, 'tickers': {}}
     # mirror '' -> empty; nothing available -> empty
     assert ch.hold_state(conn=FakeConn(''), redis=BrokenRedis()) == EMPTY
+    # {sleeve, tickers} mirror shape: both halves read; an empty-state dict is NOT a hold
+    tk = {'since': 'y', 'ticker': 'ETH-USD'}
+    st = ch.hold_state(conn=FakeConn(json.dumps({'sleeve': None, 'tickers': {'ETH-USD': tk}})),
+                       redis=BrokenRedis())
+    assert st == {'sleeve': None, 'tickers': {'ETH-USD': tk}}
+    assert ch.is_held('ETH-USD', st) and not ch.is_held('BTC-USD', st)
+    st = ch.hold_state(conn=FakeConn({'sleeve': None, 'tickers': {}}), redis=BrokenRedis())
+    assert st == EMPTY and not ch.is_held('BTC-USD', st)
+    st = ch.hold_state(conn=FakeConn(json.dumps({'sleeve': sleeve, 'tickers': {}})), redis=BrokenRedis())
+    assert st == {'sleeve': sleeve, 'tickers': {}}
     assert not ch.is_held('BTC-USD', EMPTY)
 
 

@@ -71,12 +71,18 @@ def test_flatten_continues_after_one_failure():
 
 def test_messages_contain_reason_count_notional():
     res = [{'ticker': 'BTC-USD', 'status': 'filled', 'market_value': 12000.0},
-           {'ticker': 'ETH-USD', 'status': 'rejected', 'market_value': 300.0}]
+           {'ticker': 'ETH-USD', 'status': 'rejected', 'market_value': 300.0, 'error': 'insufficient'}]
     trig = [{'id': 'T4a', 'reason': 'sleeve_drawdown'}]
     m = cb.fmt_fire_msg('armed', trig, res, {'since': 'X'})
     assert m.startswith('[crypto_breaker] FIRED mode=armed reason=sleeve_drawdown n=1/2 ')
-    assert 'notional=$12.3K' in m and 'filled=1 rejected=1 hold_flat=X' in m
-    assert cb.fmt_fire_msg('armed', trig, [], None).endswith('hold_flat=-')
+    assert 'notional=$12.3K' in m and 'filled=1 rejected=1 remain_open=1 hold_flat=X' in m
+    assert m.endswith(' — 1 remain open, manual close required (retry after cooldown); reason=insufficient')
+    assert cb.fmt_fire_msg('armed', trig, [], None).endswith('remain_open=0 hold_flat=-')
+    ok = cb.fmt_fire_msg('armed', trig, res[:1], {'since': 'X'})
+    assert ok.endswith('remain_open=0 hold_flat=X') and 'manual close' not in ok
+    pos = [cb.CryptoPos('BTC-USD', 'BTC/USD', 1.0, None, None, 9000.0, 9500.0, -500.0, -0.05),
+           cb.CryptoPos('ETH-USD', 'ETH/USD', 1.0, None, None, 3000.0, None, None, None)]
+    assert cb.fmt_firing_msg(trig[0], pos) == '[crypto_breaker] FIRING reason=sleeve_drawdown n=2 notional=$12.0K'
     ev = {'sleeve_dd': -0.0912, 'worst_ticker': 'BTC-USD', 'worst_plpc': -0.1634, 'n_positions': 2}
     s = cb.fmt_shadow_msg(ev, trig)
     assert s == '[crypto_breaker] shadow would_fire=sleeve_drawdown dd=-9.12% worst=BTC-USD@-16.34% n=2'

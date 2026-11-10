@@ -228,3 +228,43 @@ test('risk breaker: DB error -> 200 with hold_flat null, last_evals []', async (
   assert.equal(body.breaker.hold_flat, null);
   assert.deepEqual(body.breaker.last_evals, []);
 });
+
+test('risk breaker: {sleeve, tickers} mirror -> hold_flat = sleeve, hold_tickers = dict; legacy + empty shapes', async () => {
+  const mirror = (v) => router._setQueryForTests(async (sql) => {
+    if (/pipeline_config/.test(sql)) return { rows: [{ value: v }] };
+    return { rows: [] };
+  });
+  mirror('{"sleeve":{"since":"2026-11-10T10:00:00Z","scope":"sleeve"},"tickers":{"ETH-USD":{"since":"x","ticker":"ETH-USD"}}}');
+  let { body } = await get('/risk');
+  assert.equal(body.breaker.hold_flat.scope, 'sleeve');
+  assert.deepEqual(Object.keys(body.breaker.hold_tickers), ['ETH-USD']);
+  mirror({ sleeve: null, tickers: { 'SOL-USD': { since: 'y' } } });   // jsonb object
+  ({ body } = await get('/risk'));
+  assert.equal(body.breaker.hold_flat, null);
+  assert.deepEqual(Object.keys(body.breaker.hold_tickers), ['SOL-USD']);
+  mirror('{"sleeve":null,"tickers":{}}');   // empty state is NOT a hold
+  ({ body } = await get('/risk'));
+  assert.equal(body.breaker.hold_flat, null);
+  assert.deepEqual(body.breaker.hold_tickers, {});
+  mirror('');
+  ({ body } = await get('/risk'));
+  assert.equal(body.breaker.hold_flat, null);
+  assert.deepEqual(body.breaker.hold_tickers, {});
+});
+
+test('risk breaker: DD thresholds outside (-1, 0) fall back to the defaults (mirrors Python)', async () => {
+  const keys = ['OPENCLAW_CRYPTO_BREAKER_SLEEVE_DD', 'OPENCLAW_CRYPTO_BREAKER_POSITION_DD'];
+  const saved = keys.map((k) => process.env[k]);
+  router._setQueryForTests(async () => ({ rows: [] }));
+  try {
+    for (const [v, want] of [['-8', -0.08], ['0.08', -0.08], ['0', -0.08], ['-1', -0.08], ['-0.05', -0.05], ['abc', -0.08]]) {
+      process.env.OPENCLAW_CRYPTO_BREAKER_SLEEVE_DD = v;
+      process.env.OPENCLAW_CRYPTO_BREAKER_POSITION_DD = v;
+      const { body } = await get('/risk');
+      assert.equal(body.breaker.thresholds.sleeve_dd, want, v);
+      assert.equal(body.breaker.thresholds.position_dd, want === -0.08 ? -0.15 : want, v);
+    }
+  } finally {
+    keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
+  }
+});

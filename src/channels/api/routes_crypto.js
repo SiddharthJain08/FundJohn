@@ -123,14 +123,25 @@ router.get('/providers', async (req, res) => {
 router.get('/risk', async (req, res) => {
   const flag = (k) => (process.env[k] === '1' ? '1' : process.env[k] === '0' ? '0' : 'unset');
   const envNum = (k, d) => { const n = Number(process.env[k]); return process.env[k] !== undefined && process.env[k] !== '' && Number.isFinite(n) ? n : d; };
+  // DD thresholds: same open interval (-1, 0) as crypto_breaker._env_threshold.
+  const envDd = (k, d) => { const n = envNum(k, d); return n < 0 && n > -1 ? n : d; };
   let holdFlat = null;
+  let holdTickers = {};
   let lastEvals = [];
   try {
     const h = await dbQuery(`SELECT value FROM pipeline_config WHERE key='crypto_breaker_hold_flat'`);
     const raw = h.rows && h.rows[0] ? h.rows[0].value : null;
-    if (raw && typeof raw === 'object') holdFlat = raw;
-    else if (typeof raw === 'string' && raw.trim()) holdFlat = JSON.parse(raw);
-  } catch (_) { holdFlat = null; }
+    const v = raw && typeof raw === 'object' ? raw : (typeof raw === 'string' && raw.trim() ? JSON.parse(raw) : null);
+    if (v && typeof v === 'object' && ('sleeve' in v || 'tickers' in v)) {
+      // {sleeve, tickers} mirror (crypto_breaker.parse_mirror)
+      holdFlat = v.sleeve && typeof v.sleeve === 'object' && Object.keys(v.sleeve).length ? v.sleeve : null;
+      if (v.tickers && typeof v.tickers === 'object' && !Array.isArray(v.tickers)) {
+        for (const [t, x] of Object.entries(v.tickers)) if (x && typeof x === 'object') holdTickers[t] = x;
+      }
+    } else if (v && typeof v === 'object' && v.since) {
+      holdFlat = v;  // legacy bare sleeve hold
+    }
+  } catch (_) { holdFlat = null; holdTickers = {}; }
   try {
     const e = await dbQuery(
       `SELECT ts_utc, mode, n_positions, sleeve_dd, worst_ticker, worst_plpc, triggers, action, skipped, hold_flat, note
@@ -144,9 +155,10 @@ router.get('/risk', async (req, res) => {
     armed,
     status: process.env.OPENCLAW_CRYPTO_BREAKER_TICK !== '1' ? 'off' : (process.env.OPENCLAW_CRYPTO_BREAKER === '1' ? 'armed' : 'shadow'),
     hold_flat: holdFlat,
+    hold_tickers: holdTickers,
     thresholds: {
-      sleeve_dd: envNum('OPENCLAW_CRYPTO_BREAKER_SLEEVE_DD', -0.08),
-      position_dd: envNum('OPENCLAW_CRYPTO_BREAKER_POSITION_DD', -0.15),
+      sleeve_dd: envDd('OPENCLAW_CRYPTO_BREAKER_SLEEVE_DD', -0.08),
+      position_dd: envDd('OPENCLAW_CRYPTO_BREAKER_POSITION_DD', -0.15),
       blackout_h: envNum('OPENCLAW_CRYPTO_BREAKER_BLACKOUT_H', 3),
     },
     last_evals: lastEvals,

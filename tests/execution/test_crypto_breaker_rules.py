@@ -122,15 +122,79 @@ import pytest
 
 
 @pytest.mark.parametrize('raw,expected', [('0.08', -0.08), ('nan', -0.08), ('abc', -0.08),
-                                          ('-0.05', -0.05)])
+                                          ('-0.05', -0.05), ('-8', -0.08), ('-1', -0.08),
+                                          ('0', -0.08)])
 def test_env_threshold_rejects_positive_and_nan(monkeypatch, raw, expected):
     monkeypatch.setenv('OPENCLAW_CRYPTO_BREAKER_SLEEVE_DD', raw)
     assert cb._env_threshold('OPENCLAW_CRYPTO_BREAKER_SLEEVE_DD', -0.08) == expected
     monkeypatch.setenv('OPENCLAW_CRYPTO_BREAKER_BLACKOUT_H', raw)
     assert cb._env_threshold('OPENCLAW_CRYPTO_BREAKER_BLACKOUT_H', 3.0,
-                             must_be_negative=False) == (0.08 if raw == '0.08' else 3.0)
+                             must_be_negative=False) == {'0.08': 0.08}.get(raw, 3.0)
 
 
 def test_zero_qty_row_skipped():
     pos, c = cb.parse_positions([_row('BTCUSD', qty='0', unrealized_plpc='-0.5')])
     assert pos == [] and c['zero_qty'] == 1
+
+
+def test_unmapped_crypto_symbol_derives_crypto_ticker(monkeypatch):
+    import ingestion.crypto_flow.universe as u
+    from execution import alpaca_executor as ae
+    monkeypatch.setattr(u, 'normalize_broker_symbol', lambda s: None)
+    pos, c = cb.parse_positions([_row('BTCUSD'), _row('PEPE/USD'), _row('AAPL', 'us_equity')])
+    assert [p.ticker for p in pos] == ['BTC-USD', 'PEPE-USD']
+    assert c['unmapped'] == 2 and c['equity_rows'] == 1
+    assert all(ae._is_crypto_ticker(p.ticker) for p in pos)
+    # not derivable (no USD quote) -> skipped, never routed
+    pos, c = cb.parse_positions([_row('BTCEUR'), _row('ETH/BTC')])
+    assert pos == [] and c['unmapped_skipped'] == 2
+    # the normaliser raising takes the same path
+    def boom(s):
+        raise FileNotFoundError('universe.json')
+    monkeypatch.setattr(u, 'normalize_broker_symbol', boom)
+    (p,), c = cb.parse_positions([_row('BTCUSD')])
+    assert p.ticker == 'BTC-USD' and ae._is_crypto_ticker(p.ticker) and c['normaliser_errors'] == 1
+
+
+def test_cost_basis_fallback_chain_and_no_cost_exclusion():
+    # cost from mv - pl when neither cost_basis nor avg is present
+    r = _row('BTCUSD', market_value='90', unrealized_pl='-10')
+    del r['cost_basis'], r['avg_entry_price'], r['unrealized_plpc']
+    (p,), c = cb.parse_positions([r])
+    assert p.cost_basis == 100.0 and abs(p.unrealized_plpc + 0.1) < 1e-9 and c['no_cost'] == 0
+    # nothing to derive a basis from: kept (closable), excluded from the sleeve
+    r = dict(symbol='ETH/USD', asset_class='crypto', qty='2', market_value='500')
+    pos, c = cb.parse_positions([_row('BTCUSD', market_value='92', unrealized_pl='-8'), r])
+    eth = next(p for p in pos if p.ticker == 'ETH-USD')
+    assert eth.cost_basis is None and eth.unrealized_plpc is None and c['no_cost'] == 1
+    dd, cost, pl = cb.sleeve_drawdown(pos)
+    assert cost == 100.0 and pl == -8.0 and abs(dd + 0.08) < 1e-9
+    ev = cb.evaluate(pos, now=NOW, regime_ts=NOW, flow_ts=NOW)
+    assert ev['worst_ticker'] == 'BTC-USD'
+    assert cb.fmt_counters(c) == 'no_cost=1'
+    assert cb.fmt_counters({'unparsed': 0, 'zero_qty': 2, 'crypto_rows': 5}) == 'zero_qty=2'
+
+
+def test_duplicate_rows_summed_per_ticker():
+    a = _row('BTCUSD', qty='1', market_value='90', cost_basis='100', unrealized_pl='-10')
+    b = _row('BTC/USD', qty='3', market_value='290', cost_basis='300', unrealized_pl='-10')
+    (p,), c = cb.parse_positions([a, b])
+    assert p.ticker == 'BTC-USD' and p.qty == 4 and p.market_value == 380
+    assert p.cost_basis == 400 and p.unrealized_pl == -20 and abs(p.unrealized_plpc + 0.05) < 1e-9
+    assert p.avg_entry == 100 and c['duplicate_rows'] == 1 and c['crypto_rows'] == 1
+    # a duplicate without a basis poisons the merged basis -> excluded
+    nb = dict(symbol='BTC/USD', asset_class='crypto', qty='1', market_value='100')
+    (p,), c = cb.parse_positions([a, nb])
+    assert p.cost_basis is None and p.unrealized_plpc is None and p.qty == 2
+
+
+def test_mirror_shape_roundtrip_and_legacy():
+    sl = {'since': 'a', 'reason': 'sleeve_drawdown', 'scope': 'sleeve'}
+    tk = {'ETH-USD': {'since': 'b', 'ticker': 'ETH-USD'}}
+    assert cb.mirror_value(None, {}) == ''
+    assert cb.parse_mirror(cb.mirror_value(sl, tk)) == {'sleeve': sl, 'tickers': tk}
+    assert cb.parse_mirror(cb.mirror_value(None, tk)) == {'sleeve': None, 'tickers': tk}
+    assert cb.parse_mirror(json.dumps(sl)) == {'sleeve': sl, 'tickers': {}}  # legacy
+    assert cb.parse_mirror({'sleeve': None, 'tickers': {}}) == {'sleeve': None, 'tickers': {}}
+    assert cb.parse_mirror('') == {'sleeve': None, 'tickers': {}}
+    assert cb.parse_mirror('not json') == {'sleeve': None, 'tickers': {}}

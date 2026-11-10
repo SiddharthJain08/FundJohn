@@ -84,8 +84,28 @@ MemoryMax 400M, renices to 10). Drawdown-only (operator decision).
   `unrealized_plpc` ≤ −15 % (close that position, hold ticker); `T5` data blackout > 3 h (Discord alert only, never orders).
   Env overrides `_SLEEVE_DD`, `_POSITION_DD`, `_BLACKOUT_H`. Skips in the 15:55–16:05 ET crypto execution window.
 - Hold-flat: Redis `crypto_breaker:hold_flat` (24 h) and `crypto_breaker:hold_ticker:<T>` (7 d), mirrored to `pipeline_config`
-  `crypto_breaker_hold_flat` each tick (dashboard + Phase 3 sizer read the mirror). Clear with
-  `OPENCLAW_CRYPTO_BREAKER_REARM=<iso of since>` (scoped to that halt) or TTL expiry.
-- Consumers: `/api/crypto/risk` `breaker` block (status, hold_flat, thresholds, last 10 evals) → Crypto page hero chip + risk panel.
+  `crypto_breaker_hold_flat` each tick as JSON `{"sleeve": {…}|null, "tickers": {"<T>": {…}}}` (`''` when nothing is held;
+  readers also accept the legacy bare sleeve hold). Dashboard + `crypto_hold` (sizer/executor) fall back to the mirror.
+- Mirror during a Redis outage: the tick reads hold + ticker holds FROM the mirror and leaves it untouched (never a `''` wipe
+  over a real hold), except to add a hold it sets itself; cooldowns come from `crypto_breaker_evals` (the pre-order
+  `flatten:started` / `close_started:<T>` rows count). Re-arm is ignored while Redis is down.
+- Re-arm: `OPENCLAW_CRYPTO_BREAKER_REARM=<iso of since>` clears the SLEEVE hold only (scoped to that halt);
+  `OPENCLAW_CRYPTO_BREAKER_REARM_TICKER=<T>` (e.g. `BTC-USD`) clears that ticker hold (Redis + mirror, posts) — it is not
+  since-scoped, so unset it after one tick or it also clears a later re-fire's hold. Otherwise TTL expiry.
+- Armed fire order: eval row (`flatten:started` / `close_started:<T>`) → hold + cooldown → mirror → `FIRING` post → orders
+  → `FIRED` post (`remain_open=<n>`; non-zero ⇒ manual close, the breaker retries after the 6 h cooldown) → final eval → mirror.
+- Blindness: `positions_unavailable` posts `DEGRADED: positions unavailable (<err>)` (6 h cooldown; every tick if Redis is
+  down); `no_state_store` (no Redis + no DB, armed) posts/prints and writes nothing — `system_checks`
+  `crypto_breaker_evaluating` WARNs when the tick is on, crypto is held and the newest eval is > 30 min old.
+- Data quality: unmapped crypto symbols are derived to `BASE-USD` (never the equity path) or skipped; duplicate rows are
+  summed per ticker; rows with no derivable cost basis stay closable but are excluded from the sleeve DD. Non-zero counters
+  appear as `counters=k=v,…` in the summary line and the eval `note`. DD thresholds outside (−1, 0) fall back to defaults
+  (Python and `/risk` alike).
+- Test hook: `OPENCLAW_CRYPTO_BREAKER_FAKE_POSITIONS=<json file>` is honoured ONLY with `--dry-run`; otherwise ignored
+  with a warning.
+- No overlap lock (m9): the 5-min job's `timeout 240` keeps scheduled ticks apart; a manual run concurrent with a scheduled
+  tick relies on the Redis/evals cooldown (written before any order) to avoid a double fire.
+- Consumers: `/api/crypto/risk` `breaker` block (status, `hold_flat` = sleeve hold, `hold_tickers` = {T: hold}, thresholds,
+  last 10 evals) → Crypto page hero chip + risk panel.
 - Audit: `crypto_breaker_evals` (append-only, mig 169), `alpaca_liquidations` (`asset_class='crypto'`, `source='crypto_breaker'`).
 - Log: `logs/crypto_breaker_<YYYY-MM-DD>.log`. Health: `scheduled_jobs` `crypto-breaker-tick` `('hours', 1)`.

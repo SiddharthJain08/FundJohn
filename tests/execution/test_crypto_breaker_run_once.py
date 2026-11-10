@@ -13,8 +13,9 @@ class FakeRedis:
     def __init__(s, log=None): s.d = {}; s.ttls = {}; s.log = log if log is not None else []
     def get(s, k): return s.d.get(k)
     def set(s, k, v, ex=None): s.d[k] = v; s.ttls[k] = ex; s.log.append(('set', k))
-    def delete(s, k): s.d.pop(k, None)
+    def delete(s, k): s.d.pop(k, None); s.log.append(('delete', k))
     def ttl(s, k): return s.ttls.get(k)
+    def scan_iter(s, match=None): return iter([k for k in list(s.d) if k.startswith(match.rstrip('*'))])
 
 
 class FakeExec:
@@ -41,14 +42,21 @@ class _Cur:
             c.fail_next -= 1; c.aborted = True
             raise RuntimeError('boom')
         c.sql.append((sql, params))
+        if c.log is not None and sql.startswith('INSERT INTO crypto_breaker_evals'):
+            c.log.append(('eval', params[_ACTION_IDX]))
+        elif c.log is not None and sql.startswith('INSERT INTO pipeline_config'):
+            c.log.append(('mirror', params[1]))
         s.row = c.respond(sql, params)
 
     def fetchone(s): return s.row
 
 
+_ACTION_IDX = cb._EVAL_COLS.index('action')
+
+
 class FakeConn:
-    def __init__(s, respond=None, fail_next=0):
-        s.sql = []; s.commits = 0; s.aborted = False; s.fail_next = fail_next
+    def __init__(s, respond=None, fail_next=0, log=None):
+        s.sql = []; s.commits = 0; s.aborted = False; s.fail_next = fail_next; s.log = log
         s.respond = respond or (lambda sql, params: None)
     def cursor(s): return _Cur(s)
     def commit(s): s.commits += 1
@@ -142,11 +150,15 @@ def test_armed_sleeve_fire_flattens_sets_hold_and_cooldown():
     assert hold['reason'] == 'sleeve_drawdown' and hold['scope'] == 'sleeve'
     assert cb.cooldown_active(d['redis'], 'sleeve_drawdown', NOW)
     assert len(audit) == 2 and all(a['result_status'] == 'filled' for a in audit)
-    ev = d['conn'].evals()[0]
+    started, ev = d['conn'].evals()  # pre-order evidence row, then the final row
+    assert started['action'] == 'flatten:started' and started['skipped'] is None
     assert ev['action'] == 'flatten' and ev['hold_flat'] is True and ev['mode'] == 'armed'
     assert json.loads(ev['triggers'])[0]['id'] == 'T4a'
-    assert any(p.startswith('[crypto_breaker] FIRED mode=armed reason=sleeve_drawdown') for p in posts)
-    assert json.loads(d['conn'].mirrors()[-1][1])['reason'] == 'sleeve_drawdown'
+    assert posts[0] == '[crypto_breaker] FIRING reason=sleeve_drawdown n=2 notional=$9.1K'
+    assert posts[1].startswith('[crypto_breaker] FIRED mode=armed reason=sleeve_drawdown')
+    assert 'remain_open=0' in posts[1] and 'manual close' not in posts[1]
+    m = json.loads(d['conn'].mirrors()[-1][1])
+    assert m['sleeve']['reason'] == 'sleeve_drawdown' and m['tickers'] == {}
 
 
 def test_armed_position_fire_closes_only_that_ticker_and_sets_hold_ticker():
@@ -161,9 +173,14 @@ def test_armed_position_fire_closes_only_that_ticker_and_sets_hold_ticker():
     assert cb.hold_ticker_get(d['redis'], 'ETH-USD')['reason'] == 'position_drawdown:ETH-USD'
     assert cb.hold_flat_get(d['redis']) is None
     assert cb.cooldown_active(d['redis'], 'position_drawdown:ETH-USD', NOW)
-    ev = d['conn'].evals()[0]
+    started, ev = d['conn'].evals()
+    assert started['action'] == 'close_started:ETH-USD'
     assert ev['action'] == 'close:ETH-USD' and ev['hold_flat'] is False
-    assert len(posts) == 1 and 'reason=position_drawdown:ETH-USD' in posts[0]
+    assert len(posts) == 2 and posts[0].startswith('[crypto_breaker] FIRING reason=position_drawdown:ETH-USD n=1')
+    assert 'reason=position_drawdown:ETH-USD' in posts[1]
+    m = json.loads(d['conn'].mirrors()[-1][1])
+    assert m['sleeve'] is None and m['tickers']['ETH-USD']['reason'] == 'position_drawdown:ETH-USD'
+    assert res['hold_tickers'] == {'ETH-USD': m['tickers']['ETH-USD']}
 
 
 def test_fire_rejected_close_sets_hold_and_cooldown():
@@ -172,7 +189,8 @@ def test_fire_rejected_close_sets_hold_and_cooldown():
     assert cb.hold_flat_get(d['redis'])['reason'] == 'sleeve_drawdown'
     assert cb.cooldown_active(d['redis'], 'sleeve_drawdown', NOW)
     assert [a['result_status'] for a in audit] == ['rejected', 'rejected']
-    assert 'rejected=2' in posts[-1]
+    assert 'rejected=2' in posts[-1] and 'remain_open=2' in posts[-1]
+    assert '2 remain open, manual close required (retry after cooldown); reason=insufficient' in posts[-1]
 
 
 def test_cooldown_suppresses_second_fire():
@@ -202,7 +220,7 @@ def test_blackout_alert_does_not_block_t4_but_never_orders_itself():
     _call(d, env=ARMED)
     assert len(d['executor'].calls) == 2
     assert any(p.startswith('[crypto_breaker] BLACKOUT') for p in posts)
-    assert any(p.startswith('[crypto_breaker] FIRED') for p in posts) and len(posts) == 2
+    assert any(p.startswith('[crypto_breaker] FIRED') for p in posts) and len(posts) == 3  # +FIRING
     rows = [_row('BTC/USD', 9000.0, -90.0), _row('ETH/USD', 1000.0, -10.0)]  # dd -0.01
     d, audit, posts = _deps(rows, regime_age_h=4, flow_age_h=4)
     res = _call(d, env=ARMED)
@@ -223,25 +241,48 @@ def test_rearm_clears_hold_and_posts():
     assert d['conn'].evals()[-1]['hold_flat'] is False
 
 
-def test_positions_unavailable_writes_skip_row_and_no_action():
+DEGRADED = '[crypto_breaker] DEGRADED: positions unavailable (cli down) — not evaluating'
+
+
+def test_positions_unavailable_writes_skip_row_posts_degraded_no_action():
     d, audit, posts = _deps(None)
     res = _call(d, env=ARMED)
-    assert res['skipped'] == 'positions_unavailable' and d['executor'].calls == [] and posts == []
+    assert res['skipped'] == 'positions_unavailable' and d['executor'].calls == []
+    assert posts == [DEGRADED]
     ev = d['conn'].evals()
     assert len(ev) == 1 and ev[0]['skipped'] == 'positions_unavailable'
     assert ev[0]['n_positions'] == 0 and ev[0]['action'] == 'skipped'
+    assert 'error=cli down' in ev[0]['note']
+    assert d['redis'].ttls[cb._cd_key('positions_unavailable', NOW)] == 6 * 3600
+    _call(d, env=ARMED, now=NOW + timedelta(minutes=5))
+    assert posts == [DEGRADED]  # once per cooldown
+    # Redis down: post anyway, every tick
+    d, _, posts = _no_redis_deps(None)
+    _call(d, env=ARMED)
+    _call(d, env=ARMED, now=NOW + timedelta(minutes=5))
+    assert posts == [DEGRADED, DEGRADED]
 
 
-def test_fake_positions_file_forces_dry_run(tmp_path, monkeypatch, capsys):
+def test_fake_positions_file_honoured_only_with_dry_run(tmp_path, capsys):
     f = tmp_path / 'pos.json'
     f.write_text(json.dumps(SLEEVE_HIT))
-    monkeypatch.setenv('OPENCLAW_CRYPTO_BREAKER_FAKE_POSITIONS', str(f))
-    d, audit, posts = _deps(None)  # real CLI would fail; the file must be used
     env = dict(ARMED, OPENCLAW_CRYPTO_BREAKER_FAKE_POSITIONS=str(f))
-    res = _call(d, env=env)
+    d, audit, posts = _deps(None)  # real CLI would fail; the file must be used
+    res = _call(d, env=env, dry_run=True)
     assert res['mode'] == 'dry_run' and d['executor'].calls == [] and audit == []
-    assert d['conn'].evals()[0]['action'] == 'shadow'
-    assert 'dry_run forced' in capsys.readouterr().out
+    assert d['conn'].evals()[0]['action'] == 'shadow' and res['n'] == 2
+    assert 'FAKE POSITIONS' in capsys.readouterr().out
+
+
+def test_fake_positions_file_ignored_without_dry_run(tmp_path, capsys):
+    f = tmp_path / 'pos.json'
+    f.write_text(json.dumps(SLEEVE_HIT))
+    env = dict(ARMED, OPENCLAW_CRYPTO_BREAKER_FAKE_POSITIONS=str(f))
+    d, audit, posts = _deps([])  # the real (empty) book is used, not the file
+    res = _call(d, env=env)
+    assert res['mode'] == 'armed' and res['skipped'] == 'no_positions'
+    assert d['executor'].calls == [] and audit == []
+    assert 'ignored without --dry-run' in capsys.readouterr().out
 
 
 def test_main_rc(monkeypatch):
@@ -290,21 +331,23 @@ def test_redis_down_armed_cooldown_from_evals():
         return None
     d, audit, posts = _no_redis_deps(SLEEVE_HIT, respond)
     _call(d, env=ARMED)
-    assert len(d['executor'].calls) == 2 and len(posts) == 1
+    assert len(d['executor'].calls) == 2 and len(posts) == 2  # FIRING + FIRED
     sql, params = seen[0]
     assert "mode = %s" in sql and "NOT LIKE 'skipped%%'" in sql and params[0] == 'armed'
     assert params[1] == NOW - timedelta(hours=6)
     # the new hold IS recorded in the mirror (not a wipe)
     w = [p for s_, p in d['conn'].sql if s_.startswith('INSERT INTO pipeline_config')]
-    assert json.loads(w[-1][1])['reason'] == 'sleeve_drawdown'
+    assert json.loads(w[-1][1])['sleeve']['reason'] == 'sleeve_drawdown'
     _call(d, env=ARMED, now=NOW + timedelta(minutes=5))
-    assert len(d['executor'].calls) == 2 and len(posts) == 1
+    assert len(d['executor'].calls) == 2 and len(posts) == 2
     # T4b fallback scopes the query to that ticker
     rows = [_row('BTC/USD', 9000.0, 0.0), _row('ETH/USD', 1000.0, -200.0)]
     seen.clear()
     d, _, _ = _no_redis_deps(rows, respond)
     _call(d, env=ARMED)
-    assert any(p[-1] == '%close:ETH-USD%' for _, p in seen)
+    q = next((s_, p) for s_, p in seen if p[-1] == '%close_started:ETH-USD%')
+    assert q[1][-2] == '%close:ETH-USD%'
+    assert '(action LIKE %s OR action LIKE %s)' in q[0] and 'mode = %s AND ts_utc > %s' in q[0]
 
 
 def test_no_state_store_armed_does_not_act():
@@ -351,4 +394,147 @@ def test_positions_unavailable_refreshes_mirror():
     d, audit, posts = _deps(None)
     cb.hold_flat_set(d['redis'], 'sleeve_drawdown', NOW)
     _call(d, env=ARMED)
-    assert json.loads(d['conn'].mirrors()[-1][1])['reason'] == 'sleeve_drawdown'
+    assert json.loads(d['conn'].mirrors()[-1][1])['sleeve']['reason'] == 'sleeve_drawdown'
+
+
+# ---- final-review fix wave -------------------------------------------------
+
+def test_armed_fire_evidence_trail_precedes_first_order():
+    log = []
+    d, audit, posts = _deps(SLEEVE_HIT, log=log)
+    d['conn'] = FakeConn(log=log)
+    d['poster'] = lambda m: log.append(('post', m.split(' ', 2)[1]))
+    _call(d, env=ARMED)
+    first_exec = next(i for i, e in enumerate(log) if e[0] == 'exec')
+    i_eval = log.index(('eval', 'flatten:started'))
+    i_hold = log.index(('set', cb.HOLD_KEY))
+    i_mirror = next(i for i, e in enumerate(log) if e[0] == 'mirror')
+    i_firing = log.index(('post', 'FIRING'))
+    assert i_eval < i_hold < i_mirror < i_firing < first_exec
+    assert json.loads(log[i_mirror][1])['sleeve']['reason'] == 'sleeve_drawdown'
+    assert log.index(('post', 'FIRED')) > first_exec
+    assert log[-1][0] == 'mirror' and log[-2] == ('eval', 'flatten')
+
+
+def test_redis_down_fire_mirrors_hold_before_first_order():
+    log = []
+    d, audit, posts = _no_redis_deps(SLEEVE_HIT, log=log)
+    d['conn'] = FakeConn(log=log)
+    _call(d, env=ARMED)
+    first_exec = next(i for i, e in enumerate(log) if e[0] == 'exec')
+    i_mirror = next(i for i, e in enumerate(log) if e[0] == 'mirror')
+    assert log.index(('eval', 'flatten:started')) < i_mirror < first_exec
+    assert json.loads(log[i_mirror][1])['sleeve']['reason'] == 'sleeve_drawdown'
+
+
+def test_started_rows_count_as_cooling_in_evals_fallback():
+    seen = []
+
+    def respond(sql, params):
+        seen.append((sql, params))
+        return None
+    conn = FakeConn(respond)
+    cb._cooling_from_evals(conn, 'armed', 'sleeve_drawdown', NOW)
+    sql, params = seen[-1]
+    # 'flatten:started' / 'close_started:<T>' pass every exclusion
+    for act in ('flatten:started', 'close_started:ETH-USD'):
+        assert act not in ('none', 'shadow') and not act.startswith('skipped')
+    assert "action <> 'none' AND action <> 'shadow' AND action NOT LIKE 'skipped%%'" in sql
+    cb._cooling_from_evals(conn, 'armed', 'position_drawdown:ETH-USD', NOW)
+    sql, params = seen[-1]
+    assert params[2:] == ('%close:ETH-USD%', '%close_started:ETH-USD%')
+    # a started row found => cooling
+    assert cb._cooling_from_evals(FakeConn(lambda s_, p: (1,)), 'armed', 'sleeve_drawdown', NOW)
+
+
+def test_redis_down_reads_new_shape_mirror_with_tickers():
+    tk = {'since': '2026-11-10T16:00:00+00:00', 'reason': 'position_drawdown:ETH-USD',
+          'ticker': 'ETH-USD'}
+
+    def respond(sql, params):
+        if 'FROM pipeline_config' in sql:
+            return (json.dumps({'sleeve': None, 'tickers': {'ETH-USD': tk}}),)
+        if 'FROM crypto_breaker_evals' in sql:
+            return (1,)
+        return None
+    rows = [_row('BTC/USD', 9000.0, 0.0), _row('ETH/USD', 1000.0, -200.0)]
+    d, audit, posts = _no_redis_deps(rows, respond)
+    res = _call(d, env=ARMED)
+    assert res['hold'] is None and res['hold_tickers'] == {'ETH-USD': tk}
+    assert d['executor'].calls == [] and d['conn'].mirrors() == []
+
+
+def test_rearm_ticker_clears_that_ticker_hold_and_mirror():
+    d, audit, posts = _deps([_row('BTC/USD', 9000.0, 0.0)])
+    cb.hold_ticker_set(d['redis'], 'ETH-USD', 'position_drawdown:ETH-USD', NOW - timedelta(hours=1))
+    cb.hold_ticker_set(d['redis'], 'SOL-USD', 'position_drawdown:SOL-USD', NOW - timedelta(hours=1))
+    res = _call(d, env=dict(ARMED, OPENCLAW_CRYPTO_BREAKER_REARM_TICKER='eth-usd'))
+    assert cb.hold_ticker_get(d['redis'], 'ETH-USD') is None
+    assert cb.hold_ticker_get(d['redis'], 'SOL-USD') is not None
+    assert list(res['hold_tickers']) == ['SOL-USD']
+    assert any(p.startswith('[crypto_breaker] re-armed ETH-USD') for p in posts)
+    assert list(json.loads(d['conn'].mirrors()[-1][1])['tickers']) == ['SOL-USD']
+    # REARM (sleeve) never touches ticker holds
+    hold = cb.hold_flat_set(d['redis'], 'sleeve_drawdown', NOW - timedelta(hours=2))
+    res = _call(d, env=dict(ARMED, OPENCLAW_CRYPTO_BREAKER_REARM=hold['since']))
+    assert res['hold'] is None and list(res['hold_tickers']) == ['SOL-USD']
+    # last ticker cleared -> mirror ''
+    _call(d, env=dict(ARMED, OPENCLAW_CRYPTO_BREAKER_REARM_TICKER='SOL-USD'))
+    assert d['conn'].mirrors()[-1][1] == ''
+
+
+def test_rearm_ticker_ignored_when_redis_down():
+    def respond(sql, params):
+        if 'FROM pipeline_config' in sql:
+            return (json.dumps({'sleeve': None, 'tickers': {'ETH-USD': {'since': 'x'}}}),)
+        return None
+    d, audit, posts = _no_redis_deps([_row('BTC/USD', 9000.0, 0.0)], respond)
+    res = _call(d, env=dict(ARMED, OPENCLAW_CRYPTO_BREAKER_REARM_TICKER='ETH-USD'))
+    assert 'ETH-USD' in res['hold_tickers'] and posts == [] and d['conn'].mirrors() == []
+
+
+def test_counters_in_summary_and_eval_note(capsys):
+    rows = SLEEVE_HIT + [dict(_row('BTC/USD', 100.0, 0.0)),
+                         dict(symbol='DOGE/USD', asset_class='crypto', qty='5', market_value='50')]
+    d, audit, posts = _deps(rows)
+    _call(d)
+    ev = d['conn'].evals()[-1]
+    assert 'counters=' in ev['note'] and 'no_cost=1' in ev['note'] and 'duplicate_rows=1' in ev['note']
+    out = capsys.readouterr().out
+    assert 'counters=' in out and 'duplicate_rows=1' in out
+
+
+def test_default_regime_ts_reads_state_file_directly(tmp_path):
+    import sys
+    f = tmp_path / 'crypto_regime_latest.json'
+    f.write_text(json.dumps({'state': 'RISK_ON', 'ts_utc': '2026-11-10T17:00:00Z'}))
+    sys.modules.pop('regime.crypto_regime', None)
+    assert cb._default_regime_ts(str(f)) == datetime(2026, 11, 10, 17, 0, tzinfo=timezone.utc)
+    assert 'regime.crypto_regime' not in sys.modules
+    assert cb.REGIME_LATEST.endswith('.agents/crypto-market-state/crypto_regime_latest.json')
+
+
+def test_redis_client_and_db_connect_carry_timeouts(monkeypatch):
+    import psycopg2
+    import redis
+    seen = {}
+
+    class R:
+        def ping(s): return True
+
+    def from_url(url, **kw):
+        seen.setdefault('redis', []).append(kw)
+        return R()
+    monkeypatch.setattr(redis.Redis, 'from_url', staticmethod(from_url))
+    monkeypatch.setattr(psycopg2, 'connect',
+                        lambda *a, **kw: seen.setdefault('pg', []).append(kw) or
+                        type('C', (), {'autocommit': False})())
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://fake/db')
+    assert cb._redis() is not None and cb._default_conn() is not None
+    from execution import crypto_hold as ch
+    ch._default_redis(); ch._default_conn()
+    assert len(seen['redis']) == 2 and len(seen['pg']) == 2
+    for kw in seen['redis']:
+        assert kw['socket_connect_timeout'] == 2 and kw['socket_timeout'] == 2
+    for kw in seen['pg']:
+        assert kw['connect_timeout'] == 3

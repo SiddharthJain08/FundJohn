@@ -89,7 +89,8 @@ src/system_checks/
     ├── agents.py
     ├── storage.py
     ├── backtest_trades_primary.py  # hot-table parity vs strategy_backtest_trades (mig 166)
-    └── scheduled_jobs.py           # scheduled_jobs_overdue: scheduled_job_runs vs cron/systemd policies (mig 167)
+    ├── scheduled_jobs.py           # scheduled_jobs_overdue: scheduled_job_runs vs cron/systemd policies (mig 167)
+    └── crypto_breaker.py           # crypto_breaker_evaluating: tick on + crypto held => an eval row in 30 min
 ```
 
 The framework is exercised by `tests/test_system_checks_framework.py`. Individual checks are exercised by running them against live state (`python3 -m system_checks`).

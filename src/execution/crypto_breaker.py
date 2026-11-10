@@ -19,13 +19,15 @@ logger = logging.getLogger(__name__)
 
 def _env_threshold(name: str, default: float, *, must_be_negative: bool = True) -> float:
     """Finite env float with the required sign, else the default (never a
-    positive DD threshold: that would flatten every tick)."""
+    positive DD threshold: that would flatten every tick). A DD threshold
+    (must_be_negative) must lie in the open interval (-1, 0): a `-8` meant as
+    -8 % would never fire, so it is rejected like a positive one."""
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
         return default
     try:
         v = float(raw)
-        if math.isfinite(v) and (v < 0 if must_be_negative else v > 0):
+        if math.isfinite(v) and (-1 < v < 0 if must_be_negative else v > 0):
             return v
     except ValueError:
         pass
@@ -42,7 +44,10 @@ HOLD_TICKER_TTL_S = 7 * 86400
 ARM_ENV = 'OPENCLAW_CRYPTO_BREAKER'
 TICK_ENV = 'OPENCLAW_CRYPTO_BREAKER_TICK'
 REARM_ENV = 'OPENCLAW_CRYPTO_BREAKER_REARM'
+REARM_TICKER_ENV = 'OPENCLAW_CRYPTO_BREAKER_REARM_TICKER'
 HOLD_KEY = 'crypto_breaker:hold_flat'
+HOLD_TICKER_PREFIX = 'crypto_breaker:hold_ticker:'
+MIRROR_KEY = 'crypto_breaker_hold_flat'
 _ET = ZoneInfo('America/New_York')
 
 
@@ -54,8 +59,8 @@ class CryptoPos:
     avg_entry: float | None
     price: float | None
     market_value: float
-    cost_basis: float
-    unrealized_pl: float
+    cost_basis: float | None      # None: underivable -> excluded from the sleeve sums
+    unrealized_pl: float | None
     unrealized_plpc: float | None
 
 
@@ -67,11 +72,36 @@ def _f(v):
         return None
 
 
+COUNTER_KEYS = ('unparsed', 'unmapped', 'unmapped_skipped', 'normaliser_errors', 'no_cost',
+                'zero_qty', 'duplicate_rows')
+
+
+def _derive_crypto_ticker(sym: str) -> str | None:
+    """Fallback for a crypto row the universe normaliser cannot map: the same
+    compact rule (strip '/' and '-', upper, must end USD) without the universe
+    membership test, so the row stays on the crypto path ('BASE-USD')."""
+    key = sym.replace('/', '').replace('-', '').strip().upper()
+    if key.endswith('USD') and len(key) > 3:
+        return key[:-3] + '-USD'
+    return None
+
+
+def _merge(a: CryptoPos, b: CryptoPos) -> CryptoPos:
+    add = lambda x, y: None if x is None or y is None else x + y  # noqa: E731
+    qty, mv = a.qty + b.qty, a.market_value + b.market_value
+    cost, pl = add(a.cost_basis, b.cost_basis), add(a.unrealized_pl, b.unrealized_pl)
+    if cost is None:
+        pl = None
+    plpc = pl / cost if cost is not None and pl is not None and cost > 0 else None
+    avg = cost / qty if cost is not None and qty > 0 else a.avg_entry
+    return CryptoPos(a.ticker, a.symbol, qty, avg, a.price, mv, cost, pl, plpc)
+
+
 def parse_positions(payload: list[dict]) -> tuple[list[CryptoPos], dict]:
     from ingestion.crypto_flow.universe import normalize_broker_symbol
-    out: list[CryptoPos] = []
-    c = {'equity_rows': 0, 'crypto_rows': 0, 'unparsed': 0, 'unmapped': 0,
-         'zero_qty': 0, 'normaliser_errors': 0}
+    by: dict[str, CryptoPos] = {}
+    c = {'equity_rows': 0, 'crypto_rows': 0}
+    c.update({k: 0 for k in COUNTER_KEYS})
     for p in payload or []:
         if not isinstance(p, dict):
             continue
@@ -87,7 +117,11 @@ def parse_positions(payload: list[dict]) -> tuple[list[CryptoPos], dict]:
             c['equity_rows'] += 1
             continue
         if tkr is None:
-            tkr = sym.replace('/', '-')
+            # never let a crypto row fall to a ticker the executor routes as equity
+            tkr = _derive_crypto_ticker(sym)
+            if tkr is None:
+                c['unmapped_skipped'] += 1
+                continue
             c['unmapped'] += 1
         qty, mv = _f(p.get('qty')), _f(p.get('market_value'))
         if qty is None or mv is None:
@@ -97,18 +131,34 @@ def parse_positions(payload: list[dict]) -> tuple[list[CryptoPos], dict]:
             c['zero_qty'] += 1
             continue
         avg = _f(p.get('avg_entry_price'))
-        cost = _f(p.get('cost_basis'))
-        if cost is None:
-            cost = qty * avg if avg is not None else 0.0
         pl = _f(p.get('unrealized_pl'))
-        pl = mv - cost if pl is None else pl
-        plpc = _f(p.get('unrealized_plpc'))
-        if plpc is None:
-            plpc = pl / cost if cost > 0 else None
-        out.append(CryptoPos(tkr, sym, qty, avg, _f(p.get('current_price')),
-                             mv, cost, pl, plpc))
-        c['crypto_rows'] += 1
-    return out, c
+        cost = _f(p.get('cost_basis'))
+        if cost is None and avg is not None:
+            cost = qty * avg
+        if cost is None and pl is not None:
+            cost = mv - pl
+        if cost is None:
+            # no basis at all: keep the row (T4b/flatten), out of the sleeve sums
+            c['no_cost'] += 1
+            pl, plpc = None, None
+        else:
+            pl = mv - cost if pl is None else pl
+            plpc = _f(p.get('unrealized_plpc'))
+            if plpc is None:
+                plpc = pl / cost if cost > 0 else None
+        pos = CryptoPos(tkr, sym, qty, avg, _f(p.get('current_price')), mv, cost, pl, plpc)
+        if tkr in by:
+            c['duplicate_rows'] += 1
+            by[tkr] = _merge(by[tkr], pos)
+        else:
+            by[tkr] = pos
+            c['crypto_rows'] += 1
+    return list(by.values()), c
+
+
+def fmt_counters(c: dict | None) -> str:
+    """'k=v,...' of the non-zero data-quality counters ('' when clean)."""
+    return ','.join(f'{k}={c[k]}' for k in COUNTER_KEYS if (c or {}).get(k))
 
 
 def load_crypto_positions(run_cli=None) -> tuple[list[CryptoPos] | None, dict]:
@@ -118,10 +168,12 @@ def load_crypto_positions(run_cli=None) -> tuple[list[CryptoPos] | None, dict]:
         ok, payload, err = run_cli(['position', 'list'], timeout=15)
     except Exception as e:  # noqa: BLE001 - risk control must not crash
         logger.warning('[crypto_breaker] position list raised: %s', e)
-        return None, {}
+        return None, {'error': f'{type(e).__name__}: {e}'}
     if not ok or not isinstance(payload, list):
-        logger.warning('[crypto_breaker] position list failed: %s', (err or {}).get('error'))
-        return None, {}
+        msg = (err or {}).get('error') if isinstance(err, dict) else err
+        msg = msg or ('non-list payload' if ok else 'position list failed')
+        logger.warning('[crypto_breaker] position list failed: %s', msg)
+        return None, {'error': str(msg)}
     try:
         return parse_positions(payload)
     except Exception as e:  # noqa: BLE001
@@ -130,8 +182,9 @@ def load_crypto_positions(run_cli=None) -> tuple[list[CryptoPos] | None, dict]:
 
 
 def sleeve_drawdown(pos: list[CryptoPos]) -> tuple[float | None, float, float]:
-    cost = sum(p.cost_basis for p in pos)
-    pl = sum(p.unrealized_pl for p in pos)
+    based = [p for p in pos if p.cost_basis is not None and p.unrealized_pl is not None]
+    cost = sum(p.cost_basis for p in based)
+    pl = sum(p.unrealized_pl for p in based)
     return (pl / cost if cost > 0 else None), cost, pl
 
 
@@ -185,8 +238,9 @@ def in_exec_window(now_utc) -> bool:
 def _redis():
     try:
         import redis
-        r = redis.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379'),
-                           socket_connect_timeout=3, decode_responses=True)
+        r = redis.Redis.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379'),
+                                 decode_responses=True, socket_connect_timeout=2,
+                                 socket_timeout=2)
         r.ping()
         return r
     except Exception as e:  # noqa: BLE001
@@ -241,13 +295,34 @@ def hold_ticker_set(r, ticker, reason, now):
     hold = {'since': now.astimezone(timezone.utc).isoformat(), 'reason': reason,
             'ticker': ticker}
     if r is not None:
-        _safe(lambda: r.set(f'crypto_breaker:hold_ticker:{ticker}', json.dumps(hold),
+        _safe(lambda: r.set(f'{HOLD_TICKER_PREFIX}{ticker}', json.dumps(hold),
                             ex=HOLD_TICKER_TTL_S))
     return hold
 
 
 def hold_ticker_get(r, ticker) -> dict | None:
-    return _get_json(r, f'crypto_breaker:hold_ticker:{ticker}')
+    return _get_json(r, f'{HOLD_TICKER_PREFIX}{ticker}')
+
+
+def hold_tickers_read(r) -> dict:
+    """{ticker: hold} for every live per-ticker hold; {} on any error."""
+    if r is None:
+        return {}
+    out = {}
+    try:
+        for k in r.scan_iter(match=HOLD_TICKER_PREFIX + '*'):
+            k = k.decode() if isinstance(k, bytes) else k
+            v = _get_json(r, k)
+            if k[len(HOLD_TICKER_PREFIX):] and isinstance(v, dict):
+                out[k[len(HOLD_TICKER_PREFIX):]] = v
+    except Exception as e:  # noqa: BLE001 - fail open
+        logger.warning('[crypto_breaker] hold-ticker scan failed: %s', e)
+    return out
+
+
+def clear_hold_ticker(r, ticker) -> None:
+    if r is not None:
+        _safe(lambda: r.delete(f'{HOLD_TICKER_PREFIX}{ticker}'))
 
 
 def _iso_variants(dt) -> set:
@@ -279,15 +354,42 @@ def clear_hold(r) -> None:
         _safe(lambda: r.delete(HOLD_KEY))
 
 
-def mirror_hold_to_pipeline_config(conn, hold: dict | None) -> None:
+def mirror_value(sleeve: dict | None, tickers: dict | None) -> str:
+    """pipeline_config mirror payload: JSON {sleeve, tickers}; '' when nothing
+    is held (an empty-state dict would read as truthy "held" downstream)."""
+    if not sleeve and not tickers:
+        return ''
+    return json.dumps({'sleeve': sleeve or None, 'tickers': dict(tickers or {})})
+
+
+def parse_mirror(raw) -> dict:
+    """Mirror value -> {'sleeve': dict|None, 'tickers': {T: dict}}. Reads the
+    {sleeve, tickers} shape and the legacy bare sleeve hold ({since, ...})."""
+    if isinstance(raw, (str, bytes)):
+        try:
+            raw = json.loads(raw) if raw else None
+        except (TypeError, ValueError):
+            raw = None
+    if not isinstance(raw, dict) or not raw:
+        return {'sleeve': None, 'tickers': {}}
+    if 'sleeve' in raw or 'tickers' in raw:
+        sl = raw.get('sleeve')
+        tk = raw.get('tickers')
+        return {'sleeve': sl if isinstance(sl, dict) and sl else None,
+                'tickers': {k: v for k, v in tk.items() if isinstance(v, dict)}
+                if isinstance(tk, dict) else {}}
+    return {'sleeve': raw if raw.get('since') else None, 'tickers': {}}
+
+
+def mirror_hold_to_pipeline_config(conn, hold: dict | None, tickers: dict | None = None) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO pipeline_config (key, value, description, updated_at) "
                 "VALUES (%s,%s,%s,NOW()) ON CONFLICT (key) DO UPDATE "
                 "SET value=EXCLUDED.value, updated_at=NOW()",
-                ('crypto_breaker_hold_flat', json.dumps(hold) if hold else '',
-                 'crypto breaker hold-flat mirror (Redis is the source)'))
+                (MIRROR_KEY, mirror_value(hold, tickers),
+                 'crypto breaker hold mirror {sleeve, tickers} (Redis is the source)'))
         conn.commit()
     except Exception as e:  # noqa: BLE001
         print(f'[crypto_breaker] hold mirror failed: {e}')
@@ -320,23 +422,25 @@ def hold_flat_read(r) -> tuple[dict | None, bool]:
         return None, True
 
 
-def hold_flat_from_mirror(conn) -> dict | None:
-    """Hold as last mirrored to pipeline_config (Redis-outage fallback)."""
+def hold_state_from_mirror(conn) -> dict:
+    """{'sleeve', 'tickers'} as last mirrored to pipeline_config (Redis-outage
+    fallback); the empty state when unreadable."""
     if conn is None:
-        return None
+        return parse_mirror(None)
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT value FROM pipeline_config WHERE key = %s",
-                        ('crypto_breaker_hold_flat',))
+            cur.execute("SELECT value FROM pipeline_config WHERE key = %s", (MIRROR_KEY,))
             row = cur.fetchone()
-        raw = row[0] if row else None
-        if isinstance(raw, dict):
-            return raw or None
-        return json.loads(raw) if raw else None
+        return parse_mirror(row[0] if row else None)
     except Exception as e:  # noqa: BLE001
         print(f'[crypto_breaker] hold mirror read failed: {e}')
         _rollback(conn)
-        return None
+        return parse_mirror(None)
+
+
+def hold_flat_from_mirror(conn) -> dict | None:
+    """Sleeve hold as last mirrored to pipeline_config (Redis-outage fallback)."""
+    return hold_state_from_mirror(conn)['sleeve']
 
 
 # --------------------------------------------------------------------------
@@ -451,10 +555,22 @@ def _usd(v: float) -> str:
 def fmt_fire_msg(mode, triggers, results, hold) -> str:
     n = lambda *s: sum(r.get('status') in s for r in results)  # noqa: E731
     since = (hold or {}).get('since') or '-'
-    return (f"[crypto_breaker] FIRED mode={mode} reason={','.join(t['reason'] for t in triggers)} "
-            f"n={n('filled', 'partial')}/{len(results)} "
-            f"notional={_usd(sum(r.get('market_value') or 0 for r in results))} "
-            f"filled={n('filled')} rejected={n('rejected')} hold_flat={since}")
+    remain = len(results) - n('filled')
+    msg = (f"[crypto_breaker] FIRED mode={mode} reason={','.join(t['reason'] for t in triggers)} "
+           f"n={n('filled', 'partial')}/{len(results)} "
+           f"notional={_usd(sum(r.get('market_value') or 0 for r in results))} "
+           f"filled={n('filled')} rejected={n('rejected')} remain_open={remain} hold_flat={since}")
+    if remain > 0:
+        first = next((r for r in results if r.get('status') != 'filled'), {})
+        why = str(first.get('error') or first.get('status') or '?')[:160]
+        msg += (f" — {remain} remain open, manual close required (retry after cooldown); "
+                f"reason={why}")
+    return msg
+
+
+def fmt_firing_msg(trigger, pos) -> str:
+    return (f"[crypto_breaker] FIRING reason={trigger['reason']} n={len(pos)} "
+            f"notional={_usd(sum(abs(p.market_value) for p in pos))}")
 
 
 def fmt_shadow_msg(ev, triggers) -> str:
@@ -499,7 +615,7 @@ def write_eval(conn, row: dict) -> None:
 def _default_conn():
     try:
         import psycopg2
-        conn = psycopg2.connect(os.environ['POSTGRES_URI'])
+        conn = psycopg2.connect(os.environ['POSTGRES_URI'], connect_timeout=3)
         conn.autocommit = True  # one failed statement must not abort the rest of the tick
         return conn
     except Exception as e:  # noqa: BLE001
@@ -517,9 +633,15 @@ def _parse_ts(v):
     return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
 
 
-def _default_regime_ts():
-    from regime.crypto_regime import load_crypto_regime_state
-    return _parse_ts(load_crypto_regime_state()['regime_data'].get('ts_utc'))
+REGIME_LATEST = (os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..',
+                             '.agents', 'crypto-market-state', 'crypto_regime_latest.json'))
+
+
+def _default_regime_ts(path=None):
+    """ts_utc of the crypto regime state file, read directly (importing
+    regime.crypto_regime would drag the HMM stack into a 400M-capped tick)."""
+    with open(path or REGIME_LATEST) as fh:
+        return _parse_ts(json.load(fh).get('ts_utc'))
 
 
 def _flow_ts_from(conn):
@@ -537,8 +659,9 @@ def _flow_ts_from(conn):
 
 def _cooling_from_evals(conn, m, reason, now) -> bool:
     """Redis-outage cooldown fallback from the append-only evals table.
-    armed T4a: any armed close/flatten in the TTL; armed T4b: a close of that
-    ticker; blackout: a row noting `blackout_alert`; shadow/dry_run: a row of
+    armed T4a: any armed close/flatten in the TTL (incl. the pre-order
+    'flatten:started' / 'close_started:<T>' rows, so a tick killed mid-flatten
+    still cools); armed T4b: a close (or close_started) of that ticker; blackout: a row noting `blackout_alert`; shadow/dry_run: a row of
     that mode with action 'shadow'. A query failure counts as cooling (no
     usable state => do not act)."""
     since = now - timedelta(seconds=COOLDOWN_TTL_S)
@@ -551,7 +674,10 @@ def _cooling_from_evals(conn, m, reason, now) -> bool:
         q += ("AND action <> 'none' AND action <> 'shadow' AND action NOT LIKE 'skipped%%'")
         extra = ()
         if reason.startswith('position_drawdown:'):
-            q, extra = q + " AND action LIKE %s", (f"%close:{reason.split(':', 1)[1]}%",)
+            tk = reason.split(':', 1)[1]
+            # 'close:<T>' (final row) or 'close_started:<T>' (pre-order evidence row)
+            q, extra = (q + " AND (action LIKE %s OR action LIKE %s)",
+                        (f"%close:{tk}%", f"%close_started:{tk}%"))
     try:
         with conn.cursor() as cur:
             cur.execute(q + " LIMIT 1", (m, since) + extra)
@@ -589,15 +715,25 @@ def run_once(*, now=None, env=None, dry_run=False, force=False, deps: dict | Non
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     fake_path = (env.get(FAKE_POS_ENV) or '').strip()
-    if fake_path:
-        print(f'[crypto_breaker] FAKE POSITIONS from {fake_path} — dry_run forced')
-        dry_run = True
+    if fake_path and not dry_run:
+        print(f'[crypto_breaker] WARNING: {FAKE_POS_ENV} ignored without --dry-run '
+              '(using the real broker book)')
+        fake_path = ''
+    elif fake_path:
+        print(f'[crypto_breaker] FAKE POSITIONS from {fake_path} (dry_run)')
     m = mode(env, dry_run)
     r = deps['redis'] if 'redis' in deps else _redis()
     conn = deps['conn'] if 'conn' in deps else _default_conn()
     poster = deps.get('poster')
     act_deps = {k: deps[k] for k in ('executor', 'poller', 'audit') if k in deps}
-    res = {'mode': m, 'n': 0, 'skipped': None, 'action': 'none', 'hold': None, 'ev': None}
+    res = {'mode': m, 'n': 0, 'skipped': None, 'action': 'none', 'hold': None,
+           'hold_tickers': {}, 'ev': None, 'counters': {}}
+    changed = {'v': False}  # a hold set/cleared by THIS tick
+
+    def _note(*parts):
+        cs = fmt_counters(res['counters'])
+        out = [p for p in parts if p] + ([f'counters={cs}'] if cs else [])
+        return ','.join(out) or None
 
     def _eval_row(**kw):
         row = {'ts_utc': now, 'mode': m, 'n_positions': 0, 'triggers': '[]',
@@ -609,20 +745,23 @@ def run_once(*, now=None, env=None, dry_run=False, force=False, deps: dict | Non
         ev = res['ev'] or {}
         dd, w = ev.get('sleeve_dd'), ev.get('worst_plpc')
         trig = ','.join(t['id'] for t in ev.get('triggers', [])) or '-'
+        cs = fmt_counters(res['counters'])
         print(f"[crypto_breaker] mode={m} n={res['n']} "
               f"dd={'n/a' if dd is None else f'{dd:.2%}'} "
               f"worst={ev.get('worst_ticker') or '-'}@{'n/a' if w is None else f'{w:.2%}'} "
               f"triggers={trig} action={res['skipped'] and 'skipped:' + res['skipped'] or res['action']} "
-              f"hold={(res['hold'] or {}).get('since') or '-'}")
+              f"hold={(res['hold'] or {}).get('since') or '-'}"
+              + (f" hold_tickers={','.join(sorted(res['hold_tickers']))}" if res['hold_tickers'] else '')
+              + (f' counters={cs}' if cs else ''))
         return res
 
-    def _mirror(h):
+    def _mirror():
         # Redis is the source; when it could not be asked, the mirror is left
         # alone (a '' would erase a real hold) -- except to record a hold set
         # by THIS tick, which would otherwise exist nowhere.
-        if conn is None or (not redis_ok and (not h or h == mirrored)):
+        if conn is None or (not redis_ok and not changed['v']):
             return
-        mirror_hold_to_pipeline_config(conn, h)
+        mirror_hold_to_pipeline_config(conn, res['hold'], res['hold_tickers'])
 
     def _cooling(reason) -> bool:
         if redis_ok:
@@ -637,34 +776,55 @@ def run_once(*, now=None, env=None, dry_run=False, force=False, deps: dict | Non
 
     # (2) hold + re-arm
     hold, redis_ok = hold_flat_read(r)
-    if not redis_ok:
+    if redis_ok:
+        tickers = hold_tickers_read(r)
+    else:
         print('[crypto_breaker] redis unavailable: hold read from pipeline_config mirror, '
               'cooldowns from crypto_breaker_evals')
-        hold = hold_flat_from_mirror(conn)
-    mirrored = hold if not redis_ok else None
+        st = hold_state_from_mirror(conn)
+        hold, tickers = st['sleeve'], st['tickers']
     if rearm_requested(env, hold):
         if redis_ok:
             clear_hold(r)
             post(f"[crypto_breaker] re-armed (cleared hold_flat since={hold.get('since')} "
                  f"reason={hold.get('reason')})", poster)
             hold = None
-            _mirror(None)
+            changed['v'] = True
         else:
             print('[crypto_breaker] re-arm ignored: redis unavailable (hold source of truth)')
-    res['hold'] = hold
+    rt = (env.get(REARM_TICKER_ENV) or '').strip().upper()
+    if rt:
+        if not redis_ok:
+            print(f'[crypto_breaker] ticker re-arm {rt} ignored: redis unavailable')
+        elif rt in tickers:
+            th = tickers.pop(rt)
+            clear_hold_ticker(r, rt)
+            post(f"[crypto_breaker] re-armed {rt} (cleared hold_ticker since={th.get('since')} "
+                 f"reason={th.get('reason')})", poster)
+            changed['v'] = True
+        else:
+            print(f'[crypto_breaker] ticker re-arm {rt}: no hold on that ticker')
+    res['hold'], res['hold_tickers'] = hold, tickers
 
     # (3) positions
     if fake_path:
-        pos, _counters = _load_fake_positions(fake_path)
+        pos, counters = _load_fake_positions(fake_path)
     else:
-        pos, _counters = load_crypto_positions(deps.get('run_cli'))
+        pos, counters = load_crypto_positions(deps.get('run_cli'))
+    res['counters'] = counters or {}
     if pos is None:
         res['skipped'] = 'positions_unavailable'
-        _eval_row(action='skipped', skipped='positions_unavailable')
-        _mirror(hold)
+        err = (counters or {}).get('error') or 'unknown'
+        _eval_row(action='skipped', skipped='positions_unavailable', note=_note(f'error={err}'[:300]))
+        # blind is loud: once per cooldown, or every tick when Redis cannot say
+        if not (redis_ok and cooldown_active(r, cd('positions_unavailable'), now)):
+            post(f'[crypto_breaker] DEGRADED: positions unavailable ({str(err)[:300]}) '
+                 '— not evaluating', poster)
+            set_cooldown(r, cd('positions_unavailable'), now)
+        _mirror()
         return _summary()
     if not pos:
-        _mirror(hold)
+        _mirror()
         print('[crypto_breaker] no crypto positions')
         res['skipped'] = 'no_positions'
         return _summary()
@@ -679,8 +839,8 @@ def run_once(*, now=None, env=None, dry_run=False, force=False, deps: dict | Non
     # (4) daily lane's crypto execution window
     if in_exec_window(now) and not force:
         res['skipped'] = 'exec_window'
-        _eval_row(n_positions=len(pos), action='skipped', skipped='exec_window')
-        _mirror(hold)
+        _eval_row(n_positions=len(pos), action='skipped', skipped='exec_window', note=_note())
+        _mirror()
         return _summary()
 
     # (5) evaluate
@@ -690,6 +850,12 @@ def run_once(*, now=None, env=None, dry_run=False, force=False, deps: dict | Non
     ev['n_positions'] = len(pos)
     res['ev'] = ev
     notes, actions = [], []
+
+    def _ev_cols():
+        return dict(n_positions=len(pos), sleeve_cost_basis=ev['sleeve_cost'],
+                    sleeve_unrealized_pl=ev['sleeve_pl'], sleeve_dd=ev['sleeve_dd'],
+                    worst_ticker=ev['worst_ticker'], worst_plpc=ev['worst_plpc'],
+                    triggers=json.dumps(ev['triggers'], default=str))
 
     # (6) T5 blackout: alert only, never orders
     if ev['blackout']:
@@ -718,32 +884,37 @@ def run_once(*, now=None, env=None, dry_run=False, force=False, deps: dict | Non
         equity = _try(deps['account_equity'], 'account equity', 0.0) \
             if 'account_equity' in deps else 0.0
         for t in live:
+            targets = pos if t['id'] == 'T4a' else [p for p in pos if p.ticker == t['ticker']][:1]
+            started = 'flatten:started' if t['id'] == 'T4a' else f"close_started:{t['ticker']}"
+            # evidence trail BEFORE any order: eval row (also the Redis-outage
+            # cooldown source) -> hold/cooldown -> mirror -> FIRING post.
+            _eval_row(**_ev_cols(), action=started, note=_note(*notes))
             if t['id'] == 'T4a':
                 # hold BEFORE orders: a SIGTERM mid-flatten still leaves the lane held
                 hold = hold_flat_set(r, t['reason'], now, since=(hold or {}).get('since'))
                 res['hold'] = hold
-                set_cooldown(r, t['reason'], now)
+                fire_hold = hold
+            else:
+                fire_hold = hold_ticker_set(r, t['ticker'], t['reason'], now)
+                res['hold_tickers'][t['ticker']] = fire_hold
+            set_cooldown(r, t['reason'], now)
+            changed['v'] = True
+            _mirror()
+            post(fmt_firing_msg(t, targets), poster)
+            if t['id'] == 'T4a':
                 results = flatten_crypto(pos, equity=equity, run_date=run_date,
                                          reason=t['reason'], **act_deps)
-                post(fmt_fire_msg(m, [t], results, hold), poster)
                 actions.append('flatten')
             else:
-                p = next(p for p in pos if p.ticker == t['ticker'])
-                th = hold_ticker_set(r, p.ticker, t['reason'], now)
-                set_cooldown(r, t['reason'], now)
-                result = close_position(p, equity=equity, run_date=run_date,
-                                        reason=t['reason'], **act_deps)
-                post(fmt_fire_msg(m, [t], [result], th), poster)
-                actions.append(f'close:{p.ticker}')
+                results = [close_position(targets[0], equity=equity, run_date=run_date,
+                                          reason=t['reason'], **act_deps)]
+                actions.append(f"close:{t['ticker']}")
+            post(fmt_fire_msg(m, [t], results, fire_hold), poster)
     res['action'] = ','.join(actions) or 'none'
 
     # (8) eval row, (9) mirror, (10) summary
-    _eval_row(n_positions=len(pos), sleeve_cost_basis=ev['sleeve_cost'],
-              sleeve_unrealized_pl=ev['sleeve_pl'], sleeve_dd=ev['sleeve_dd'],
-              worst_ticker=ev['worst_ticker'], worst_plpc=ev['worst_plpc'],
-              triggers=json.dumps(ev['triggers'], default=str), action=res['action'],
-              note=','.join(notes) or None)
-    _mirror(hold)
+    _eval_row(**_ev_cols(), action=res['action'], note=_note(*notes))
+    _mirror()
     return _summary()
 
 
