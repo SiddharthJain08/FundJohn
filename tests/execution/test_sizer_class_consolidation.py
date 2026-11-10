@@ -355,7 +355,8 @@ def test_occ_filter_excludes_option_legs(monkeypatch, caplog):
     _patch_alpaca(monkeypatch, _FAKE_POSITIONS)
     with caplog.at_level(logging.INFO):
         out = _sizer._load_broker_positions_usd()
-    assert set(out.keys()) == {'AAPL', 'SPY', 'BTC/USD'}, \
+    # Phase 3 (D-1): crypto keys are internal form ('BTC/USD' -> 'BTC-USD').
+    assert set(out.keys()) == {'AAPL', 'SPY', 'BTC-USD'}, \
         f'OCC legs must be excluded; got {out.keys()}'
     assert 'SPY260626C00755000' not in out
     assert 'QQQ260618P00400000' not in out
@@ -380,6 +381,7 @@ def test_is_occ_symbol():
 def test_classify_never_orphans_occ_leg(monkeypatch):
     """A broker map built via the real (filtered) loader contains NO OCC keys, so
     _classify_position_deltas can never emit an orphan_close for one."""
+    monkeypatch.delenv('OPENCLAW_CRYPTO_POOLED_SIZING', raising=False)
     _patch_alpaca(monkeypatch, _FAKE_POSITIONS)
     broker = _sizer._load_broker_positions_usd()
     ticker_meta = {}
@@ -388,7 +390,9 @@ def test_classify_never_orphans_occ_leg(monkeypatch):
     orphaned = [tkr for (tkr, _usd, kind) in emissions if kind == 'orphan_close']
     assert 'SPY260626C00755000' not in orphaned
     assert 'QQQ260618P00400000' not in orphaned
-    assert set(orphaned) == {'AAPL', 'SPY', 'BTC/USD'}
+    # Phase 3 Review Focus 2: flag unset ⇒ the crypto position is the legacy
+    # crypto lane's and is NOT orphan-closed from the equity/pooled path.
+    assert set(orphaned) == {'AAPL', 'SPY'}
 
 
 # ===========================================================================

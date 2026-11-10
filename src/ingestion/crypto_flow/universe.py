@@ -76,6 +76,44 @@ def normalize_broker_symbol(sym: str, assets: list[Asset] | None = None) -> str 
     return None
 
 
+def internal_symbol(sym, *, crypto: bool = False) -> str:
+    """Any broker / engine spelling -> the engine key. The ONE wrapper every
+    execution module uses (Phase 3 D-1) around :func:`normalize_broker_symbol`.
+
+    * a known pair in any form ('BTCUSD' | 'BTC/USD' | 'BTC-USD') -> 'BTC-USD';
+    * an unknown slash pair ('XYZ/USD') -> 'XYZ-USD' (the legacy '/'->'-' rule);
+    * an unknown compact pair ('XYZUSD') -> 'XYZ-USD' ONLY when the caller knows
+      the row is crypto (``crypto=True``, e.g. broker ``asset_class == 'crypto'``);
+    * anything else (equities) -> stripped + upper-cased, otherwise unchanged.
+
+    Never raises: a missing/corrupt universe file degrades to the shape rules
+    (the reconcile / breaker paths are safety paths)."""
+    s = str(sym or '').strip().upper()
+    try:
+        n = normalize_broker_symbol(s)
+    except Exception:  # noqa: BLE001 - universe file missing/corrupt
+        n = None
+    if n:
+        return n
+    if '/' in s:
+        return s.replace('/', '-')
+    if crypto and len(s) > 3 and s.endswith('USD') and '-' not in s:
+        return s[:-3] + '-USD'
+    return s
+
+
+def is_crypto_symbol(sym) -> bool:
+    """Shape + universe test: True for any crypto spelling ('/' form, '-USD'
+    internal form, or a compact 'BTCUSD' the universe knows). Never raises."""
+    s = str(sym or '').strip().upper()
+    if '/' in s or s.endswith('-USD'):
+        return True
+    try:
+        return normalize_broker_symbol(s) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def refresh_from_alpaca(
     existing: list[Asset], alpaca_symbols: list[str]
 ) -> tuple[list[Asset], list[str], list[str]]:

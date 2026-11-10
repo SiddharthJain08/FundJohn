@@ -151,12 +151,16 @@ def test_orphan_close_short():
 
 
 def test_orphan_close_crypto():
-    """orphan_close: crypto position orphaned."""
+    """orphan_close: crypto position orphaned — POOLED only (crypto engine
+    Phase 3: with OPENCLAW_CRYPTO_POOLED_SIZING unset the legacy crypto lane
+    owns crypto positions and the orphan pass skips them; see
+    test_broker_symbol_normalisation.py)."""
     from execution.regime_blended_sizer import _classify_position_deltas
     target = {}
     broker = {'BTC-USD': 20000.0, 'ETH-USD': -5000.0}
     ticker_meta = {}
-    emissions = _classify_position_deltas(target, broker, ticker_meta)
+    assert _classify_position_deltas(target, broker, {}, pooled=False) == []
+    emissions = _classify_position_deltas(target, broker, ticker_meta, pooled=True)
     emitted = {(t, k) for t, _, k in emissions}
     assert ('BTC-USD', 'orphan_close') in emitted
     assert ('ETH-USD', 'orphan_close') in emitted

@@ -339,12 +339,14 @@ def _hold_target_set(broker: dict, vetoed: set) -> dict[str, float]:
 def _normalize_broker_symbol(t: str) -> str:
     """Map a broker symbol to the engine BASE-USD (dash) convention.
 
-    Replicates execution.crypto_redeploy_sizer._normalize_broker_symbol: Alpaca
-    returns crypto as 'BTC/USD' (slash) while signals/engine use 'BTC-USD' (dash).
-    '/' never appears in an equity ticker, so this can never mis-map an equity
-    position. Replicated (not imported) to keep this safety path import-light;
-    behaviour is identical and pinned by a parity assertion in the test suite."""
-    return (t or '').strip().upper().replace('/', '-')
+    Delegates to the ONE normaliser (crypto engine Phase 3, D-1):
+    ``ingestion.crypto_flow.universe.internal_symbol`` — 'BTCUSD' / 'BTC/USD' /
+    'BTC-USD' -> 'BTC-USD'; equities are stripped + upper-cased only. Never
+    raises (a missing universe file degrades to the '/'->'-' shape rule), so
+    this safety path stays fail-safe. Same function the crypto redeploy sizer
+    and the equity sizer's broker loader use."""
+    from ingestion.crypto_flow import universe as _u
+    return _u.internal_symbol(t)
 
 
 def _row_is_option(row) -> bool:

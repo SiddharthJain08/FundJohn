@@ -21,12 +21,15 @@ def _is_crypto_ticker(t: str) -> bool:
 
 def _normalize_broker_symbol(t: str) -> str:
     """Map a broker crypto symbol to the engine BASE-USD (dash) convention.
-    Alpaca position list returns crypto as 'BTC/USD' (slash; confirmed Task 0 +
-    Phase B smoke); signals/engine use 'BTC-USD' (dash). '/' never appears in an
-    equity ticker, so this can never mis-map an equity position into crypto — the
-    equity-untouched invariant is preserved. (A no-separator 'BTCUSD' form, if
-    Alpaca ever returns one, stays excluded = fail-closed; confirm at Phase D.)"""
-    return (t or '').strip().upper().replace('/', '-')
+
+    Thin alias over the ONE normaliser (crypto engine Phase 3, D-1):
+    ``ingestion.crypto_flow.universe.internal_symbol``. 'BTCUSD' (broker
+    position form), 'BTC/USD' (asset/order form) and 'BTC-USD' all map to
+    'BTC-USD'; an equity ticker is only stripped + upper-cased, so an equity
+    position can never be mis-mapped into crypto (the equity-untouched
+    invariant)."""
+    from ingestion.crypto_flow import universe as _u
+    return _u.internal_symbol(t)
 
 
 def _dir_to_int(d) -> int:

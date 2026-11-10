@@ -984,12 +984,46 @@ def _occ_dte(occ: str, today: date | None = None) -> int:
         return 0
 
 
-def _load_broker_positions_usd():
-    """Read current broker positions as {ticker: signed_market_value_usd}.
+# Phase 3 (D-1): asset class per key of the LAST broker read, parallel to the
+# {ticker: usd} dict. Informational only — _classify_position_deltas never
+# depends on it (it classifies by explicit `asset_classes` or key shape).
+_broker_asset_classes: dict[str, str] = {}
 
-    Positive = long, negative = short. Returns empty dict on any failure
+_CRYPTO_CLASS = 'crypto'
+_EQUITY_CLASS = 'us_equity'
+
+
+def _broker_row_class(sym, raw_class) -> str:
+    """'crypto' | 'us_equity' for one broker position row: the broker's own
+    `asset_class` is authoritative; absent ⇒ the universe/shape test."""
+    ac = str(raw_class or '').strip().lower()
+    if ac:
+        return _CRYPTO_CLASS if ac == _CRYPTO_CLASS else _EQUITY_CLASS
+    from ingestion.crypto_flow import universe as _u
+    return _CRYPTO_CLASS if _u.is_crypto_symbol(sym) else _EQUITY_CLASS
+
+
+def _is_crypto_key(tkr) -> bool:
+    """Shape test on an engine/broker key (sizer convention, cf. the '-USD' /
+    '/' checks in the eligibility + margin paths)."""
+    t = str(tkr or '')
+    return '/' in t or t.upper().endswith('-USD')
+
+
+def _load_broker_positions_usd_with_class() -> tuple[dict, dict]:
+    """Read current broker positions as ({ticker: signed_market_value_usd},
+    {ticker: 'crypto'|'us_equity'}).
+
+    Positive = long, negative = short. Returns ({}, {}) on any failure
     (fail-safe: the sizer then behaves as if book is flat — emits target
     orders, executor's idempotency catches duplicates).
+
+    Crypto keys are INTERNAL form ('BTC-USD') whatever the broker spelling
+    ('BTCUSD' position form, 'BTC/USD' asset form) via the one normaliser
+    (`ingestion.crypto_flow.universe.internal_symbol`); a row the broker tags
+    `asset_class == 'crypto'` always gets a '-USD' key, even for a pair the
+    universe file does not know, so the orphan pass can see its class.
+    Equity keys are the broker symbol, unchanged.
 
     SP-5.1a: OCC option legs (e.g. SPY260626C00755000) are EXCLUDED — this loader
     feeds the equity-book delta/orphan logic in both the daily sizer and the 9:28
@@ -997,6 +1031,7 @@ def _load_broker_positions_usd():
     as if it were equity. The option position lifecycle is owned by the executor +
     EOD carried set, not the equity book.
     """
+    global _broker_asset_classes
     import subprocess
     import json as _json
     try:
@@ -1006,9 +1041,12 @@ def _load_broker_positions_usd():
                               capture_output=True, env=env, timeout=15)
         if proc.returncode != 0:
             logger.warning('sharpe_cadence: broker position fetch failed (%s)', proc.stderr.decode()[:200])
-            return {}
+            _broker_asset_classes = {}
+            return {}, {}
         positions = _json.loads(proc.stdout)
+        from ingestion.crypto_flow import universe as _u
         out = {}
+        classes = {}
         excluded_legs = []
         for p in positions:
             try:
@@ -1020,17 +1058,28 @@ def _load_broker_positions_usd():
                 if _is_occ_symbol(sym):
                     excluded_legs.append(sym)
                     continue
+                cls = _broker_row_class(sym, p.get('asset_class'))
+                key = _u.internal_symbol(sym, crypto=True) if cls == _CRYPTO_CLASS else sym
                 # market_value is signed (negative for shorts); use that.
-                out[sym] = mkt
+                out[key] = mkt
+                classes[key] = cls
             except (TypeError, ValueError):
                 continue
         if excluded_legs:
             logger.info('sharpe_cadence: excluded %d held option leg(s) from equity book: %s',
                         len(excluded_legs), ', '.join(sorted(excluded_legs)))
-        return out
+        _broker_asset_classes = classes
+        return out, classes
     except Exception as e:
         logger.warning('sharpe_cadence: broker fetch error (%s)', e)
-        return {}
+        _broker_asset_classes = {}
+        return {}, {}
+
+
+def _load_broker_positions_usd():
+    """{ticker: signed_market_value_usd} — see _load_broker_positions_usd_with_class
+    (this wraps it; crypto keys are internal 'BTC-USD' form). Empty on failure."""
+    return _load_broker_positions_usd_with_class()[0]
 
 
 def _held_option_underlyings() -> dict[str, list[str]] | None:
@@ -1079,6 +1128,8 @@ def _classify_position_deltas(
     target_usd: dict[str, float],
     broker: dict[str, float],
     ticker_meta: dict,
+    pooled: bool | None = None,
+    asset_classes: dict[str, str] | None = None,
 ) -> list[tuple[str, float, str]]:
     """Classify position deltas into emission kinds: delta, flip_close, flip_open, orphan_close.
 
@@ -1104,6 +1155,14 @@ def _classify_position_deltas(
                      (positive=long, negative=short)
         ticker_meta: dict — mutable; will be populated with __close_orphan__ metadata
                      for orphan tickers not already present
+        pooled:      crypto engine Phase 3 — None ⇒ `pooled_sizing_enabled()`
+                     (OPENCLAW_CRYPTO_POOLED_SIZING=1). When NOT pooled, crypto
+                     broker positions are SKIPPED by the orphan pass (the legacy
+                     crypto lane owns them; Review Focus 2) and counted in an
+                     `orphan_pass: crypto_skipped=N` line. Deltas/flips on
+                     TARGETED keys are unaffected.
+        asset_classes: optional {ticker: 'crypto'|'us_equity'}; a key absent
+                     from it (or None) is classed by shape ('/' or '-USD' ⇒ crypto).
 
     Returns:
         list[tuple[str, float, str]] — each (ticker, signed_usd, kind) emission
@@ -1131,13 +1190,26 @@ def _classify_position_deltas(
                 emissions.append((tkr, delta, 'delta'))
 
     # Third pass: emit orphan_closes for positions in broker but not in targets.
+    # Class-aware (Phase 3): unless pooled, crypto positions are the legacy
+    # crypto lane's — never orphan-closed from here.
+    if pooled is None:
+        pooled = pooled_sizing_enabled()
+    crypto_skipped = 0
     for tkr, current in broker.items():
         if tkr in target_usd or current == 0.0:
             continue
+        if not pooled:
+            ac = (asset_classes or {}).get(tkr)
+            if (ac == _CRYPTO_CLASS) if ac else _is_crypto_key(tkr):
+                crypto_skipped += 1
+                continue
         emissions.append((tkr, -current, 'orphan_close'))
         if tkr not in ticker_meta:
             ticker_meta[tkr] = {'strategies': ['__close_orphan__'], 'directions': [0],
                                 'brackets': []}
+    if crypto_skipped:
+        logger.info('orphan_pass: crypto_skipped=%d (pooled=0; legacy crypto lane owns them)',
+                    crypto_skipped)
 
     return emissions
 

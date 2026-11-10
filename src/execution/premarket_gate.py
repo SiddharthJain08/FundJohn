@@ -120,6 +120,7 @@ def _load_held_subjects(broker_loader=None) -> list[dict]:
         from execution.regime_blended_sizer import _load_broker_positions_usd
         broker_loader = _load_broker_positions_usd
     from execution.regime_blended_sizer import _is_occ_symbol
+    from ingestion.crypto_flow import universe as _u
     try:
         book = broker_loader() or {}
     except Exception as exc:  # noqa: BLE001
@@ -132,7 +133,9 @@ def _load_held_subjects(broker_loader=None) -> list[dict]:
             f = float(usd)
         except (TypeError, ValueError):
             continue
-        if f == 0.0 or _is_occ_symbol(tkr) or '/' in tkr:
+        # crypto in any spelling ('/' broker form or the '-USD' internal key the
+        # sizer loader emits since Phase 3 D-1) is not an equity gate subject
+        if f == 0.0 or _is_occ_symbol(tkr) or _u.is_crypto_symbol(tkr):
             continue
         subjects.append({
             'id': None,

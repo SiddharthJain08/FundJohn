@@ -233,9 +233,12 @@ _EQUITY_CLASS = 'us_equity'
 def _symbol_class(sym) -> str:
     """Shape-based class guess, used ONLY for a symbol the broker gave no
     position payload for (a fill/lot of a position that is already closed — the
-    fills table carries no asset_class)."""
+    fills table carries no asset_class). Crypto is detected by the ONE broker
+    normaliser (Phase 3 D-1), so the compact position form 'BTCUSD' classes as
+    crypto exactly like the fill form 'BTC/USD'."""
     s = str(sym or '').strip().upper()
-    if '/' in s:
+    from ingestion.crypto_flow import universe as _u
+    if _u.is_crypto_symbol(s):
         return 'crypto'
     if _OCC_RE.match(s):
         return 'us_option'

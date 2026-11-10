@@ -210,7 +210,15 @@ def _load_open_openclaw_submissions(conn) -> list[dict]:
 
 
 def _load_broker_positions() -> dict:
-    """Map symbol → {qty, side, market_value}. Empty on CLI failure."""
+    """Map symbol → {qty, side, market_value, ticker, asset_class, …}. Empty on
+    CLI failure.
+
+    Keys stay the BROKER symbol (the `position close` CLI needs it). Phase 3
+    (D-1): each entry also carries `ticker`, the engine key from the ONE
+    normaliser ('BTCUSD' / 'BTC/USD' → 'BTC-USD'; equities unchanged), and an
+    `asset_class` that falls back to the normaliser's crypto test when the
+    broker row omits it."""
+    from ingestion.crypto_flow import universe as _u
     ok, payload, err = _run_cli(['position', 'list'], timeout=15)
     if not ok or not isinstance(payload, list):
         logger.warning('[liquidate] position list failed: %s',
@@ -227,10 +235,14 @@ def _load_broker_positions() -> dict:
             qty = float(p.get('qty') or 0)
         except (TypeError, ValueError):
             qty = 0.0
+        _ac = p.get('asset_class')
+        if not _ac:
+            _ac = 'crypto' if _u.is_crypto_symbol(sym) else None
         out[sym] = {'qty': qty, 'side': p.get('side'),
                     'market_value': p.get('market_value'),
+                    'ticker': _u.internal_symbol(sym, crypto=(_ac == 'crypto')),
                     # additive (account breaker alpha P&L, C1 amendment 2)
-                    'asset_class': p.get('asset_class'),   # P3: breaker scope = us_equity only
+                    'asset_class': _ac,   # P3: breaker scope = us_equity only
                     'avg_entry_price': p.get('avg_entry_price'),
                     'current_price': p.get('current_price'),
                     'unrealized_pl': p.get('unrealized_pl')}
