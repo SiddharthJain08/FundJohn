@@ -249,6 +249,39 @@ def _load_broker_positions() -> dict:
     return out
 
 
+def _resolve_position(positions: dict, sym: str):
+    """(broker_key, position) for a submission ticker, or (None, None).
+
+    Equity: a direct key hit only — byte-identical to the pre-Phase-3
+    `positions.get(sym)`. Crypto (Phase 3 D-1): a submission ticker in any
+    spelling ('BTC/USD' / 'BTC-USD' / 'BTCUSD') matches the broker position
+    whose internal form is the same ('BTCUSD' position → 'BTC-USD'), so an
+    operator forced liquidation closes crypto too. The returned broker_key is
+    what `position close` is called with."""
+    pos = positions.get(sym)
+    if pos is not None:
+        return sym, pos
+    from ingestion.crypto_flow import universe as _u
+    if not _u.is_crypto_symbol(sym):
+        return None, None
+    want = _u.internal_symbol(sym, crypto=True)
+    for key, p in positions.items():
+        tkr = (p or {}).get('ticker') if isinstance(p, dict) else None
+        if (tkr or _u.internal_symbol(key, crypto=True)) == want:
+            return key, p
+    return None, None
+
+
+def _same_symbol(a, b) -> bool:
+    """Order-symbol vs submission-ticker match: exact for equities; internal
+    form for crypto (order 'BTC/USD' vs ticker 'BTC-USD')."""
+    if a == b:
+        return True
+    from ingestion.crypto_flow import universe as _u
+    return (_u.is_crypto_symbol(a) and _u.is_crypto_symbol(b)
+            and _u.internal_symbol(a, crypto=True) == _u.internal_symbol(b, crypto=True))
+
+
 def _load_open_orders() -> list[dict]:
     """All open orders on the account, fetched with --nested so legs[] is
     populated. We later filter by COID prefix."""
@@ -665,11 +698,15 @@ def liquidate_on_regime_change(run_date: str | None = None,
         open_orders = _load_open_orders()
         cancels = _collect_openclaw_orders_to_cancel(open_orders)
         plan['cancel'] = cancels
-        plan['close'] = [
-            {'symbol': s, 'qty': positions.get(s, {}).get('qty', 0),
-             'tif': 'day'}
-            for s in oc_symbols if positions.get(s, {}).get('qty')
-        ]
+        plan['close'] = []
+        _planned: set = set()
+        for s in oc_symbols:
+            _bk, _pos = _resolve_position(positions, s)
+            if not _pos or not _pos.get('qty') or _bk in _planned:
+                continue
+            _planned.add(_bk)
+            plan['close'].append({'symbol': _bk, 'qty': _pos.get('qty', 0),
+                                  'tif': 'day'})
         conn.close()
         logger.info('[liquidate] DRY-RUN plan: %s', json.dumps(plan)[:1000])
         _post_to_discord(
@@ -701,10 +738,20 @@ def liquidate_on_regime_change(run_date: str | None = None,
 
     positions = _load_broker_positions()
     close_results = []
-    for sym in oc_symbols:
-        pos = positions.get(sym)
+    # Phase 3 D-1: group submission tickers by the broker position they
+    # resolve to (crypto spellings differ: 'BTC/USD' submission vs 'BTCUSD'
+    # position), so every held openclaw position is closed exactly once.
+    # Equity: broker_key == sym, one ticker per group — byte-identical.
+    _groups: dict[str, list[str]] = {}
+    for _s in oc_symbols:
+        _bk, _pos = _resolve_position(positions, _s)
+        if _bk is not None:
+            _groups.setdefault(_bk, []).append(_s)
+    for broker_key, _syms in _groups.items():
+        pos = positions.get(broker_key)
         if not pos or not pos.get('qty'):
             continue
+        sym = broker_key
         qty = pos['qty']
         ok, payload = _close_symbol(sym, qty)
         # The submit response carries the broker-assigned order id; we
@@ -731,9 +778,9 @@ def liquidate_on_regime_change(run_date: str | None = None,
             _record_audit(
                 conn, date_str, prior, state, sym, qty,
                 'long_close' if qty > 0 else 'short_close',
-                coids_by_symbol.get(sym, []),
+                [c for _s in _syms for c in coids_by_symbol.get(_s, [])],
                 {oid: r for oid, r in cancel_results.items()
-                 if r.get('symbol') == sym},
+                 if _same_symbol(r.get('symbol'), sym)},
                 audit_payload,
                 outcome,
                 None if outcome == 'filled' else json.dumps(payload)[:500],

@@ -823,3 +823,96 @@ class TestSentinelStillGuardedByMay9Logic(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestCryptoSymbolMatching(unittest.TestCase):
+    """Phase 3 D-1 fix round 1: the forced liquidation must close crypto whatever
+    the spelling (submission 'BTC/USD' vs position 'BTCUSD'); equity matching is
+    unchanged; a book-only position (no openclaw submission) is NOT closed by this
+    path — crypto and equity alike (the path only closes oc_symbols)."""
+
+    BOOK = [
+        {'symbol': 'BTCUSD', 'qty': '0.5', 'side': 'long', 'market_value': '30000',
+         'asset_class': 'crypto'},
+        {'symbol': 'ETHUSD', 'qty': '2', 'side': 'long', 'market_value': '6000',
+         'asset_class': 'crypto'},                          # book-only crypto
+        {'symbol': 'AAPL', 'qty': '50', 'side': 'long', 'market_value': '7500',
+         'asset_class': 'us_equity'},
+        {'symbol': 'MSFT', 'qty': '5', 'side': 'long', 'market_value': '2000',
+         'asset_class': 'us_equity'},                       # book-only equity
+    ]
+    SUBS = [('AX20260506_AAPL_S1', 'p1', 'AAPL', 'long', 50),
+            ('AX20260506_BTC_S1', 'p2', 'BTC/USD', 'long', 0.5),
+            ('AX20260507_BTC_S1', 'p3', 'BTC-USD', 'long', 0.1)]  # same position, 2nd spelling
+
+    def setUp(self):
+        self._prev_uri = os.environ.get('POSTGRES_URI')
+        os.environ['POSTGRES_URI'] = 'postgres://stub/stub'
+        os.environ['OPENCLAW_ALPACA_LIVE_LIQUIDATE'] = '1'
+
+    def tearDown(self):
+        os.environ.pop('OPENCLAW_ALPACA_LIVE_LIQUIDATE', None)
+        if self._prev_uri is None:
+            os.environ.pop('POSTGRES_URI', None)
+        else:
+            os.environ['POSTGRES_URI'] = self._prev_uri
+
+    def _run(self, live=True):
+        if not live:
+            os.environ.pop('OPENCLAW_ALPACA_LIVE_LIQUIDATE', None)
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = list(self.SUBS)
+        mock_conn.cursor.return_value = mock_cur
+        closes, audits = [], []
+
+        def _close(sym, qty, market_open=None):
+            closes.append((sym, qty))
+            return True, {'id': f'close-{sym}'}
+
+        def _audit(conn, date_str, prior, state, sym, qty, kind, coids, *a):
+            audits.append((sym, sorted(coids)))
+
+        with patch.object(rl, '_load_regime', return_value=REGIME_CHANGED), \
+             patch.object(rl, '_redis', return_value=_StubRedis()), \
+             patch.object(rl, '_post_to_discord', return_value=True), \
+             patch.object(rl, '_market_is_open', return_value=True), \
+             patch.object(rl, '_load_open_orders', return_value=[]), \
+             patch.object(rl, '_run_cli', return_value=(True, list(self.BOOK), None)), \
+             patch.object(rl, '_close_symbol', side_effect=_close), \
+             patch.object(rl, '_poll_to_terminal',
+                          return_value={'status': 'filled', 'filled_qty': '1'}), \
+             patch.object(rl, '_record_audit', side_effect=_audit), \
+             patch('execution.regime_liquidator.time.sleep'), \
+             patch('psycopg2.connect', return_value=mock_conn):
+            result = rl.liquidate_on_regime_change()
+        return result, closes, audits
+
+    def test_crypto_submission_matches_compact_position_and_closes_once(self):
+        result, closes, audits = self._run()
+        self.assertEqual(result['action'], 'liquidated')
+        # AAPL (equity, exact) + BTCUSD (crypto via the normaliser), each once,
+        # closed under the BROKER symbol; oc_symbols sorted order preserved.
+        self.assertEqual(closes, [('AAPL', 50.0), ('BTCUSD', 0.5)])
+        self.assertEqual(dict(audits)['BTCUSD'],
+                         ['AX20260506_BTC_S1', 'AX20260507_BTC_S1'])
+        self.assertEqual(dict(audits)['AAPL'], ['AX20260506_AAPL_S1'])
+
+    def test_book_only_positions_not_closed_equity_and_crypto_alike(self):
+        _result, closes, _audits = self._run()
+        closed = {s for s, _ in closes}
+        self.assertNotIn('MSFT', closed)    # existing equity behaviour
+        self.assertNotIn('ETHUSD', closed)  # crypto behaves exactly the same
+
+    def test_dry_run_plan_resolves_crypto(self):
+        result, closes, _ = self._run(live=False)
+        self.assertEqual(result['action'], 'dry_run')
+        self.assertEqual(closes, [])
+        self.assertEqual([c['symbol'] for c in result['plan']['close']],
+                         ['AAPL', 'BTCUSD'])
+
+    def test_resolve_position_equity_is_exact_only(self):
+        positions = {'AAPL': {'qty': 1.0, 'ticker': 'AAPL'}}
+        self.assertEqual(rl._resolve_position(positions, 'AAPL')[0], 'AAPL')
+        self.assertEqual(rl._resolve_position(positions, 'aapl'), (None, None))
+        self.assertEqual(rl._resolve_position(positions, 'MSFT'), (None, None))
