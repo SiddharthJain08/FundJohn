@@ -29,28 +29,41 @@ class FakeExec:
 
 
 class _Cur:
-    def __init__(s, c): s.c = c
+    def __init__(s, c): s.c = c; s.row = None
     def __enter__(s): return s
     def __exit__(s, *a): return False
-    def execute(s, sql, params=None): s.c.sql.append((sql, params))
+
+    def execute(s, sql, params=None):
+        c = s.c
+        if c.aborted:  # psycopg2 InFailedSqlTransaction semantics
+            raise RuntimeError('current transaction is aborted')
+        if c.fail_next:
+            c.fail_next -= 1; c.aborted = True
+            raise RuntimeError('boom')
+        c.sql.append((sql, params))
+        s.row = c.respond(sql, params)
+
+    def fetchone(s): return s.row
 
 
 class FakeConn:
-    def __init__(s): s.sql = []; s.commits = 0
+    def __init__(s, respond=None, fail_next=0):
+        s.sql = []; s.commits = 0; s.aborted = False; s.fail_next = fail_next
+        s.respond = respond or (lambda sql, params: None)
     def cursor(s): return _Cur(s)
     def commit(s): s.commits += 1
-    def rollback(s): pass
+    def rollback(s): s.aborted = False
 
     def evals(s):
         out = []
         for sql, p in s.sql:
-            if 'crypto_breaker_evals' in sql:
+            if sql.startswith('INSERT INTO crypto_breaker_evals'):
                 cols = sql.split('(', 1)[1].split(')', 1)[0].replace(' ', '').split(',')
                 out.append(dict(zip(cols, p)))
         return out
 
     def mirrors(s):
-        return [p for sql, p in s.sql if 'pipeline_config' in sql]
+        return [p for sql, p in s.sql if sql.startswith('INSERT INTO pipeline_config')]
 
 
 def _row(sym, cost, pl):
@@ -74,6 +87,13 @@ def _deps(rows, *, log=None, rejected=(), regime_age_h=0.5, flow_age_h=0.5, redi
     audit, posts = d['audit'], d['posts']
     d['audit'] = audit.append
     d['poster'] = posts.append
+    return d, audit, posts
+
+
+def _no_redis_deps(rows, respond=None, **kw):
+    d, audit, posts = _deps(rows, **kw)
+    d['redis'] = None
+    d['conn'] = FakeConn(respond)
     return d, audit, posts
 
 
@@ -235,3 +255,100 @@ def test_main_rc(monkeypatch):
     assert cb.main(['--force']) == 1 and seen['force'] is True and seen['dry_run'] is False
     monkeypatch.setattr(cb, 'run_once', lambda **kw: {'mode': 'shadow', 'skipped': 'positions_unavailable'})
     assert cb.main(['--dry-run']) == 0
+
+
+MIRROR_HOLD = {'since': '2026-11-10T16:00:00+00:00', 'reason': 'sleeve_drawdown', 'scope': 'sleeve'}
+
+
+def test_redis_down_keeps_mirror_and_reads_hold_from_it():
+    def respond(sql, params):
+        if 'FROM pipeline_config' in sql:
+            return (json.dumps(MIRROR_HOLD),)
+        if 'FROM crypto_breaker_evals' in sql:
+            return (1,)  # the flatten that set the hold, 2 h ago
+        return None
+    d, audit, posts = _no_redis_deps(SLEEVE_HIT, respond)
+    res = _call(d, env=ARMED)
+    assert res['hold'] == MIRROR_HOLD and d['executor'].calls == [] and posts == []
+    writes = [p for sql, p in d['conn'].sql if sql.startswith('INSERT INTO pipeline_config')]
+    assert writes == []  # never '' over a real hold
+    ev = d['conn'].evals()[0]
+    assert ev['hold_flat'] is True and 'cooldown:sleeve_drawdown' in ev['note']
+    # empty book while Redis is down: still no '' wipe
+    d, _, _ = _no_redis_deps([], respond)
+    _call(d, env=ARMED)
+    assert not any(sql.startswith('INSERT INTO pipeline_config') for sql, _ in d['conn'].sql)
+
+
+def test_redis_down_armed_cooldown_from_evals():
+    seen = []
+
+    def respond(sql, params):
+        if 'FROM crypto_breaker_evals' in sql:
+            seen.append((sql, params))
+            return (1,) if len(seen) > 1 else None  # first tick: nothing recent
+        return None
+    d, audit, posts = _no_redis_deps(SLEEVE_HIT, respond)
+    _call(d, env=ARMED)
+    assert len(d['executor'].calls) == 2 and len(posts) == 1
+    sql, params = seen[0]
+    assert "mode = %s" in sql and "NOT LIKE 'skipped%%'" in sql and params[0] == 'armed'
+    assert params[1] == NOW - timedelta(hours=6)
+    # the new hold IS recorded in the mirror (not a wipe)
+    w = [p for s_, p in d['conn'].sql if s_.startswith('INSERT INTO pipeline_config')]
+    assert json.loads(w[-1][1])['reason'] == 'sleeve_drawdown'
+    _call(d, env=ARMED, now=NOW + timedelta(minutes=5))
+    assert len(d['executor'].calls) == 2 and len(posts) == 1
+    # T4b fallback scopes the query to that ticker
+    rows = [_row('BTC/USD', 9000.0, 0.0), _row('ETH/USD', 1000.0, -200.0)]
+    seen.clear()
+    d, _, _ = _no_redis_deps(rows, respond)
+    _call(d, env=ARMED)
+    assert any(p[-1] == '%close:ETH-USD%' for _, p in seen)
+
+
+def test_no_state_store_armed_does_not_act():
+    d, audit, posts = _deps(SLEEVE_HIT)
+    d['redis'] = None; d['conn'] = None
+    res = _call(d, env=ARMED)
+    assert res['skipped'] == 'no_state_store' and d['executor'].calls == [] and audit == []
+    assert posts == ['[crypto_breaker] DEGRADED: no state store — not acting']
+
+
+def test_failed_statement_does_not_lose_eval_row():
+    d, audit, posts = _deps(SLEEVE_HIT)
+    d['conn'] = FakeConn(fail_next=1)
+    del d['flow_ts']  # the flow-ts query is the first statement and raises
+    _call(d)
+    ev = d['conn'].evals()
+    assert len(ev) == 1 and ev[0]['action'] == 'shadow'
+
+
+def test_refire_keeps_existing_since():
+    d, audit, posts = _deps(SLEEVE_HIT)
+    old = cb.hold_flat_set(d['redis'], 'sleeve_drawdown', NOW - timedelta(hours=7))
+    _call(d, env=ARMED)  # cooldown (6 h) expired, hold (24 h) still live
+    assert len(d['executor'].calls) == 2
+    assert cb.hold_flat_get(d['redis'])['since'] == old['since']
+
+
+def test_close_does_not_fetch_equity(monkeypatch):
+    import sys
+    import types
+    fetched = []
+    fake = types.ModuleType('execution.alpaca_trader')
+    fake._alpaca_session = lambda: fetched.append('session')
+    fake._fetch_account_state = lambda sess: fetched.append('account') or {'equity': 1.0}
+    monkeypatch.setitem(sys.modules, 'execution.alpaca_trader', fake)
+    d, audit, posts = _deps(SLEEVE_HIT)
+    del d['account_equity']
+    _call(d, env=ARMED)
+    assert len(d['executor'].calls) == 2 and audit and fetched == []
+    assert all(c is not None for c in d['executor'].calls)
+
+
+def test_positions_unavailable_refreshes_mirror():
+    d, audit, posts = _deps(None)
+    cb.hold_flat_set(d['redis'], 'sleeve_drawdown', NOW)
+    _call(d, env=ARMED)
+    assert json.loads(d['conn'].mirrors()[-1][1])['reason'] == 'sleeve_drawdown'

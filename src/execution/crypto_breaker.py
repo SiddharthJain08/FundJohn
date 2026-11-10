@@ -11,7 +11,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -227,8 +227,10 @@ def hold_flat_get(r) -> dict | None:
     return _get_json(r, HOLD_KEY)
 
 
-def hold_flat_set(r, reason, now) -> dict:
-    hold = {'since': now.astimezone(timezone.utc).isoformat(), 'reason': reason,
+def hold_flat_set(r, reason, now, since=None) -> dict:
+    """`since` keeps an existing hold's timestamp on a re-fire, so a REARM
+    token pasted from the first FIRED message stays valid."""
+    hold = {'since': since or now.astimezone(timezone.utc).isoformat(), 'reason': reason,
             'scope': 'sleeve'}
     if r is not None:
         _safe(lambda: r.set(HOLD_KEY, json.dumps(hold), ex=HOLD_FLAT_TTL_S))
@@ -289,6 +291,52 @@ def mirror_hold_to_pipeline_config(conn, hold: dict | None) -> None:
         conn.commit()
     except Exception as e:  # noqa: BLE001
         print(f'[crypto_breaker] hold mirror failed: {e}')
+        _rollback(conn)
+
+
+def _rollback(conn) -> None:
+    """Clear an aborted transaction so later statements on a non-autocommit
+    conn still run (psycopg2 InFailedSqlTransaction otherwise)."""
+    try:
+        if conn is not None:
+            conn.rollback()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def hold_flat_read(r) -> tuple[dict | None, bool]:
+    """(hold, redis_ok): unlike hold_flat_get, distinguishes "no hold" from
+    "Redis could not be asked"."""
+    if r is None:
+        return None, False
+    try:
+        raw = r.get(HOLD_KEY)
+    except Exception as e:  # noqa: BLE001
+        print(f'[crypto_breaker] redis read failed: {e}')
+        return None, False
+    try:
+        return (json.loads(raw) if raw else None), True
+    except (TypeError, ValueError):
+        return None, True
+
+
+def hold_flat_from_mirror(conn) -> dict | None:
+    """Hold as last mirrored to pipeline_config (Redis-outage fallback)."""
+    if conn is None:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM pipeline_config WHERE key = %s",
+                        ('crypto_breaker_hold_flat',))
+            row = cur.fetchone()
+        raw = row[0] if row else None
+        if isinstance(raw, dict):
+            return raw or None
+        return json.loads(raw) if raw else None
+    except Exception as e:  # noqa: BLE001
+        print(f'[crypto_breaker] hold mirror read failed: {e}')
+        _rollback(conn)
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -445,24 +493,18 @@ def write_eval(conn, row: dict) -> None:
         conn.commit()
     except Exception as e:  # noqa: BLE001
         print(f'[crypto_breaker] eval row write failed: {e}')
-        try:
-            conn.rollback()
-        except Exception:  # noqa: BLE001
-            pass
+        _rollback(conn)
 
 
 def _default_conn():
     try:
         import psycopg2
-        return psycopg2.connect(os.environ['POSTGRES_URI'])
+        conn = psycopg2.connect(os.environ['POSTGRES_URI'])
+        conn.autocommit = True  # one failed statement must not abort the rest of the tick
+        return conn
     except Exception as e:  # noqa: BLE001
         print(f'[crypto_breaker] DB unavailable: {e}')
         return None
-
-
-def _default_equity() -> float:
-    from execution.alpaca_trader import _alpaca_session, _fetch_account_state
-    return float(_fetch_account_state(_alpaca_session())['equity'])
 
 
 def _parse_ts(v):
@@ -483,10 +525,41 @@ def _default_regime_ts():
 def _flow_ts_from(conn):
     if conn is None:
         return None
-    with conn.cursor() as cur:
-        cur.execute('SELECT MAX(ts_utc) FROM crypto_flow_snapshot')
-        row = cur.fetchone()
-    return _parse_ts(row[0]) if row else None
+    try:
+        with conn.cursor() as cur:
+            cur.execute('SELECT MAX(ts_utc) FROM crypto_flow_snapshot')
+            row = cur.fetchone()
+        return _parse_ts(row[0]) if row else None
+    except Exception:
+        _rollback(conn)
+        raise
+
+
+def _cooling_from_evals(conn, m, reason, now) -> bool:
+    """Redis-outage cooldown fallback from the append-only evals table.
+    armed T4a: any armed close/flatten in the TTL; armed T4b: a close of that
+    ticker; blackout: a row noting `blackout_alert`; shadow/dry_run: a row of
+    that mode with action 'shadow'. A query failure counts as cooling (no
+    usable state => do not act)."""
+    since = now - timedelta(seconds=COOLDOWN_TTL_S)
+    q = "SELECT 1 FROM crypto_breaker_evals WHERE mode = %s AND ts_utc > %s "
+    if reason == 'data_blackout':
+        q, extra = q + "AND note LIKE %s", ('%blackout_alert%',)
+    elif m != 'armed':
+        q, extra = q + "AND action = 'shadow'", ()
+    else:
+        q += ("AND action <> 'none' AND action <> 'shadow' AND action NOT LIKE 'skipped%%'")
+        extra = ()
+        if reason.startswith('position_drawdown:'):
+            q, extra = q + " AND action LIKE %s", (f"%close:{reason.split(':', 1)[1]}%",)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(q + " LIMIT 1", (m, since) + extra)
+            return cur.fetchone() is not None
+    except Exception as e:  # noqa: BLE001
+        print(f'[crypto_breaker] evals cooldown query failed (treating as cooling): {e}')
+        _rollback(conn)
+        return True
 
 
 def _try(fn, what, default=None):
@@ -543,15 +616,41 @@ def run_once(*, now=None, env=None, dry_run=False, force=False, deps: dict | Non
               f"hold={(res['hold'] or {}).get('since') or '-'}")
         return res
 
-    # (2) hold + re-arm
-    hold = hold_flat_get(r)
-    if rearm_requested(env, hold):
-        clear_hold(r)
-        post(f"[crypto_breaker] re-armed (cleared hold_flat since={hold.get('since')} "
-             f"reason={hold.get('reason')})", poster)
-        hold = None
+    def _mirror(h):
+        # Redis is the source; when it could not be asked, the mirror is left
+        # alone (a '' would erase a real hold) -- except to record a hold set
+        # by THIS tick, which would otherwise exist nowhere.
+        if conn is None or (not redis_ok and (not h or h == mirrored)):
+            return
+        mirror_hold_to_pipeline_config(conn, h)
+
+    def _cooling(reason) -> bool:
+        if redis_ok:
+            return cooldown_active(r, cd(reason), now)
         if conn is not None:
-            mirror_hold_to_pipeline_config(conn, None)
+            return _cooling_from_evals(conn, m, reason, now)
+        return False
+
+    # non-armed modes keep their own cooldown keys so a shadow/dry-run post can
+    # never consume (and so suppress) the first real armed fire.
+    cd = (lambda reason: reason) if m == 'armed' else (lambda reason: f'{m}:{reason}')
+
+    # (2) hold + re-arm
+    hold, redis_ok = hold_flat_read(r)
+    if not redis_ok:
+        print('[crypto_breaker] redis unavailable: hold read from pipeline_config mirror, '
+              'cooldowns from crypto_breaker_evals')
+        hold = hold_flat_from_mirror(conn)
+    mirrored = hold if not redis_ok else None
+    if rearm_requested(env, hold):
+        if redis_ok:
+            clear_hold(r)
+            post(f"[crypto_breaker] re-armed (cleared hold_flat since={hold.get('since')} "
+                 f"reason={hold.get('reason')})", poster)
+            hold = None
+            _mirror(None)
+        else:
+            print('[crypto_breaker] re-arm ignored: redis unavailable (hold source of truth)')
     res['hold'] = hold
 
     # (3) positions
@@ -562,21 +661,26 @@ def run_once(*, now=None, env=None, dry_run=False, force=False, deps: dict | Non
     if pos is None:
         res['skipped'] = 'positions_unavailable'
         _eval_row(action='skipped', skipped='positions_unavailable')
+        _mirror(hold)
         return _summary()
-    if conn is not None and not pos:
-        mirror_hold_to_pipeline_config(conn, hold)
     if not pos:
+        _mirror(hold)
         print('[crypto_breaker] no crypto positions')
         res['skipped'] = 'no_positions'
         return _summary()
     res['n'] = len(pos)
 
+    # no Redis AND no DB: no cooldown/hold state at all => an armed tick must not act
+    if m == 'armed' and not redis_ok and conn is None:
+        post('[crypto_breaker] DEGRADED: no state store — not acting', poster)
+        res['skipped'] = 'no_state_store'
+        return _summary()
+
     # (4) daily lane's crypto execution window
     if in_exec_window(now) and not force:
         res['skipped'] = 'exec_window'
         _eval_row(n_positions=len(pos), action='skipped', skipped='exec_window')
-        if conn is not None:
-            mirror_hold_to_pipeline_config(conn, hold)
+        _mirror(hold)
         return _summary()
 
     # (5) evaluate
@@ -586,13 +690,10 @@ def run_once(*, now=None, env=None, dry_run=False, force=False, deps: dict | Non
     ev['n_positions'] = len(pos)
     res['ev'] = ev
     notes, actions = [], []
-    # non-armed modes keep their own cooldown keys so a shadow/dry-run post can
-    # never consume (and so suppress) the first real armed fire.
-    cd = (lambda reason: reason) if m == 'armed' else (lambda reason: f'{m}:{reason}')
 
     # (6) T5 blackout: alert only, never orders
     if ev['blackout']:
-        if cooldown_active(r, cd('data_blackout'), now):
+        if _cooling('data_blackout'):
             notes.append('cooldown:data_blackout')
         else:
             post(fmt_blackout_msg(ev), poster)
@@ -602,7 +703,7 @@ def run_once(*, now=None, env=None, dry_run=False, force=False, deps: dict | Non
     # (7) T4 drawdown triggers
     live = []
     for t in (t for t in ev['triggers'] if t['id'] in ('T4a', 'T4b')):
-        if cooldown_active(r, cd(t['reason']), now):
+        if _cooling(t['reason']):
             notes.append(f"cooldown:{t['reason']}")
         else:
             live.append(t)
@@ -613,11 +714,13 @@ def run_once(*, now=None, env=None, dry_run=False, force=False, deps: dict | Non
         actions.append('shadow')
     elif live:
         run_date = now.astimezone(_ET).date().isoformat()
-        equity = _try(deps.get('account_equity') or _default_equity, 'account equity', 0.0)
+        # the crypto close path never reads equity: no account fetch ahead of a close
+        equity = _try(deps['account_equity'], 'account equity', 0.0) \
+            if 'account_equity' in deps else 0.0
         for t in live:
             if t['id'] == 'T4a':
                 # hold BEFORE orders: a SIGTERM mid-flatten still leaves the lane held
-                hold = hold_flat_set(r, t['reason'], now)
+                hold = hold_flat_set(r, t['reason'], now, since=(hold or {}).get('since'))
                 res['hold'] = hold
                 set_cooldown(r, t['reason'], now)
                 results = flatten_crypto(pos, equity=equity, run_date=run_date,
@@ -640,8 +743,7 @@ def run_once(*, now=None, env=None, dry_run=False, force=False, deps: dict | Non
               worst_ticker=ev['worst_ticker'], worst_plpc=ev['worst_plpc'],
               triggers=json.dumps(ev['triggers'], default=str), action=res['action'],
               note=','.join(notes) or None)
-    if conn is not None:
-        mirror_hold_to_pipeline_config(conn, hold)
+    _mirror(hold)
     return _summary()
 
 
@@ -656,7 +758,8 @@ def main(argv=None) -> int:
     except Exception:  # noqa: BLE001
         pass
     res = run_once(dry_run=a.dry_run, force=a.force)
-    return 1 if res.get('skipped') == 'positions_unavailable' and res.get('mode') == 'armed' else 0
+    failed = res.get('skipped') in ('positions_unavailable', 'no_state_store')
+    return 1 if failed and res.get('mode') == 'armed' else 0
 
 
 if __name__ == '__main__':
