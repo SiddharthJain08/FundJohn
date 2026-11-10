@@ -56,3 +56,11 @@ def test_write_liquidation_audit_missing_key_returns_none(monkeypatch):
     row = _row()
     del row['run_date']
     assert rl._write_liquidation_audit(row) is None
+
+
+def test_write_liquidation_audit_error_msg_column_and_payload(monkeypatch):
+    sql, params = _run(monkeypatch, _row(asset_class='crypto', error_msg='insufficient'))
+    assert 'error_msg' in sql and sql.count('%s') == len(params) == 10
+    assert params[-1] == 'insufficient' and json.loads(params[6])['error'] == 'insufficient'
+    sql2, params2 = _run(monkeypatch, _row(error_msg='x'))
+    assert sql2.count('%s') == len(params2) == 9

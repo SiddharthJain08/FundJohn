@@ -964,6 +964,7 @@ def _write_liquidation_audit(row: dict) -> str | None:
         'market_value_usd': row.get('market_value_usd'),
         'filled_qty': row.get('filled_qty'),
         'avg_fill_price': row.get('avg_fill_price'),
+        'error': row.get('error_msg'),
     })
     side_closed = ('long_close' if row.get('direction') == 'long' else 'short_close')
     try:
@@ -991,6 +992,12 @@ def _write_liquidation_audit(row: dict) -> str | None:
                 RETURNING id
                 """
             params = params + (row['asset_class'],)
+        if row.get('error_msg'):
+            # alpaca_liquidations.error_msg (mig 066); only written when supplied.
+            cols_end = insert_sql.index(')\n                VALUES')
+            insert_sql = insert_sql[:cols_end] + ', error_msg' + insert_sql[cols_end:]
+            insert_sql = insert_sql.replace(')\n                RETURNING', ', %s)\n                RETURNING', 1)
+            params = params + (str(row['error_msg'])[:1000],)
         with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
             cur.execute(insert_sql, params)
             new_id = cur.fetchone()[0]

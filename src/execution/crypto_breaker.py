@@ -298,7 +298,8 @@ def mirror_hold_to_pipeline_config(conn, hold: dict | None) -> None:
 CLOSE_STRATEGY_ID = '__crypto_breaker__'
 
 
-def close_position(pos, *, equity, run_date, reason, executor=None, poller=None, audit=None) -> dict:
+def close_position(pos, *, equity, run_date, reason, executor=None, poller=None, audit=None,
+                   poll_timeout_s: float = 90) -> dict:
     """Full-close one crypto position. Never raises; always audits."""
     out = {'ticker': pos.ticker, 'status': 'error', 'order_id': None, 'filled_qty': None,
            'avg_fill_price': None, 'error': None, 'market_value': abs(pos.market_value)}
@@ -315,12 +316,16 @@ def close_position(pos, *, equity, run_date, reason, executor=None, poller=None,
         res = executor.execute_single(None, equity, order, run_date)
         if isinstance(res, dict) and res.get('status') == 'submitted':
             out['order_id'] = res.get('order_id')
-            final = poller(out['order_id'], timeout_s=90)
-            from execution.regime_liquidator import _classify_outcome
-            status = _classify_outcome(True, final, abs(pos.qty))
-            if isinstance(final, dict):
-                out['filled_qty'] = _f(final.get('filled_qty'))
-                out['avg_fill_price'] = _f(final.get('filled_avg_price'))
+            status = 'pending'  # order is live; a poll/classify failure stays pending
+            try:
+                final = poller(out['order_id'], timeout_s=poll_timeout_s)
+                from execution.regime_liquidator import _classify_outcome
+                status = _classify_outcome(True, final, abs(pos.qty))
+                if isinstance(final, dict):
+                    out['filled_qty'] = _f(final.get('filled_qty'))
+                    out['avg_fill_price'] = _f(final.get('filled_avg_price'))
+            except Exception as e:  # noqa: BLE001
+                err = f'post-submit {type(e).__name__}: {e}'
         else:
             status = 'rejected'
             err = str((res or {}).get('reason') or res) if isinstance(res, dict) or res is None \
@@ -331,7 +336,7 @@ def close_position(pos, *, equity, run_date, reason, executor=None, poller=None,
         out['status'] = 'error'
     out['error'] = err
     row = {'run_date': run_date, 'regime_from': 'CRYPTO', 'regime_to': 'CRYPTO_BREAKER',
-           'ticker': pos.ticker, 'direction': 'long_close' if pos.qty > 0 else 'short_close',
+           'ticker': pos.ticker, 'direction': 'long' if pos.qty > 0 else 'short',  # writer maps to <dir>_close
            'qty': abs(pos.qty), 'result_status': status, 'market_value_usd': pos.market_value,
            'filled_qty': out['filled_qty'], 'avg_fill_price': out['avg_fill_price'],
            'asset_class': 'crypto', 'source': 'crypto_breaker',
@@ -345,10 +350,39 @@ def close_position(pos, *, equity, run_date, reason, executor=None, poller=None,
     return out
 
 
-def flatten_crypto(pos, *, equity, run_date, reason, **deps) -> list[dict]:
-    """Close every position, largest exposure first, continuing past failures."""
-    return [close_position(p, equity=equity, run_date=run_date, reason=reason, **deps)
-            for p in sorted(pos, key=lambda p: abs(p.market_value), reverse=True)]
+def flatten_crypto(pos, *, equity, run_date, reason, deadline_s=None, clock=None, **deps) -> list[dict]:
+    """Close every position, largest exposure first, continuing past failures.
+    A shared deadline bounds the whole flatten; positions past it are skipped
+    (audited) so the 240 s process timeout never cuts a close mid-flight."""
+    import time
+    clock = clock or time.monotonic
+    if deadline_s is None:
+        deadline_s = _env_threshold('OPENCLAW_CRYPTO_BREAKER_FLATTEN_DEADLINE_S', 150.0,
+                                    must_be_negative=False)
+    start, out = clock(), []
+    for p in sorted(pos, key=lambda p: abs(p.market_value), reverse=True):
+        remaining = deadline_s - (clock() - start)
+        if remaining <= 0:
+            out.append(_skipped(p, run_date, deps.get('audit')))
+            continue
+        out.append(close_position(p, equity=equity, run_date=run_date, reason=reason,
+                                  poll_timeout_s=min(90, max(10, remaining)), **deps))
+    return out
+
+
+def _skipped(p, run_date, audit):
+    row = {'run_date': run_date, 'regime_from': 'CRYPTO', 'regime_to': 'CRYPTO_BREAKER',
+           'ticker': p.ticker, 'direction': 'long' if p.qty > 0 else 'short', 'qty': abs(p.qty),
+           'result_status': 'skipped', 'market_value_usd': p.market_value,
+           'asset_class': 'crypto', 'source': 'crypto_breaker', 'error_msg': 'flatten deadline'}
+    try:
+        if audit is None:
+            from execution.regime_liquidator import _write_liquidation_audit as audit
+        audit(row)
+    except Exception as e:  # noqa: BLE001
+        print(f'[crypto_breaker] audit write failed for {p.ticker}: {e}')
+    return {'ticker': p.ticker, 'status': 'skipped', 'order_id': None, 'filled_qty': None,
+            'avg_fill_price': None, 'error': 'deadline', 'market_value': abs(p.market_value)}
 
 
 def post(msg: str, poster=None) -> None:

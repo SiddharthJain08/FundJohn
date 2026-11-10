@@ -21,10 +21,12 @@ def _filled(oid, timeout_s=90):
 
 
 def _run(pos, ex=None, poller=_filled, audit=None):
-    audit = [] if audit is None else audit
+    rows = []
+    sink = audit if callable(audit) else rows.append
+    audit = rows if not callable(audit) else audit
     ex = ex or FakeExec()
     r = cb.close_position(pos, equity=100000, run_date='2026-11-10', reason='sleeve_drawdown',
-                          executor=ex, poller=poller, audit=audit.append)
+                          executor=ex, poller=poller, audit=sink)
     return r, ex, audit
 
 
@@ -36,7 +38,7 @@ def test_close_position_full_close_order_shape():
                  'current_usd': 5000.0, 'strategy_id': '__crypto_breaker__', 'close_only': True}
     assert r['status'] == 'filled' and r['order_id'] == 'oid-BTC-USD'
     a = audit[0]
-    assert a['result_status'] == 'filled' and a['direction'] == 'long_close'
+    assert a['result_status'] == 'filled' and a['direction'] == 'long'
     assert a['regime_to'] == 'CRYPTO_BREAKER' and a['source'] == 'crypto_breaker'
     assert a['asset_class'] == 'crypto' and a['avg_fill_price'] == 76000.0
 
@@ -82,3 +84,56 @@ def test_messages_contain_reason_count_notional():
                                           'ages_h': {'regime': 4.0, 'flow': 5.5}}]}
     assert cb.fmt_blackout_msg(ev) == ('[crypto_breaker] BLACKOUT regime_age_h=4.0 flow_age_h=5.5 '
                                        'holding=2 \u2014 alert only, no orders')
+
+
+def test_post_submit_poller_failure_is_pending_with_order_id():
+    def boom(*a, **k):
+        raise RuntimeError('net down')
+    r, _, audit = _run(_p('BTC-USD', 5000.0), poller=boom)
+    assert r['status'] == 'pending' and r['order_id'] == 'oid-BTC-USD' and 'net down' in r['error']
+    assert audit[0]['result_status'] == 'pending' and 'net down' in audit[0]['error_msg']
+
+
+def test_flatten_deadline_skips_remaining_positions():
+    t = [0.0]
+    seen = []
+
+    def slow(oid, timeout_s=90):
+        seen.append(timeout_s); t[0] += 100
+        return _filled(oid)
+    audit = []
+    res = cb.flatten_crypto([_p('A-USD', 3.0), _p('B-USD', 2.0), _p('C-USD', 1.0)], equity=1, run_date='d',
+                            reason='r', deadline_s=150, clock=lambda: t[0], executor=FakeExec(),
+                            poller=slow, audit=audit.append)
+    assert [r['status'] for r in res] == ['filled', 'filled', 'skipped']
+    assert res[2]['error'] == 'deadline' and seen == [90, 50]
+    assert audit[2]['result_status'] == 'skipped' and audit[2]['error_msg'] == 'flatten deadline'
+
+
+class _Cur:
+    def __init__(s): s.sql = []
+    def execute(s, q, p=None): s.sql.append((q, p))
+    def fetchone(s): return ('uuid-1',)
+    def __enter__(s): return s
+    def __exit__(s, *a): pass
+
+
+class _Conn:
+    def __init__(s): s.cur = _Cur()
+    def cursor(s): return s.cur
+    def commit(s): pass
+    def __enter__(s): return s
+    def __exit__(s, *a): pass
+
+
+def test_through_real_writer_direction_and_error_msg(monkeypatch):
+    import psycopg2
+    c = _Conn()
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://x')
+    monkeypatch.setattr(psycopg2, 'connect', lambda dsn: c)
+    from execution import regime_liquidator as rl
+    r, _, _ = _run(_p('BTC-USD', 5000.0), ex=FakeExec(rejected={'BTC-USD'}), audit=rl._write_liquidation_audit)
+    assert r['status'] == 'rejected'
+    sql, params = c.cur.sql[0]
+    assert 'long_close' in params and 'rejected' in params
+    assert 'error_msg' in sql and any(isinstance(x, str) and 'insufficient' in x for x in params)
