@@ -1,0 +1,7 @@
+{
+  "strategy_id": "S_beta_btc",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}

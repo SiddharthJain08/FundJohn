@@ -225,3 +225,13 @@ def test_open_book_closes_on_the_flip_bar(crypto_state):
     assert t['exit_date'] == dates[6].date()
     assert counters['hook_exits'] == 1
     assert crypto_state['calls'] == 0
+
+
+def test_requirements_declares_prices_only():
+    # without it the engine's aux planner fails toward "load every lazy aux kind"
+    import json
+    p = ROOT / 'src' / 'strategies' / 'implementations' / 'S_beta_btc.requirements.json'
+    req = json.loads(p.read_text())
+    assert req == {'strategy_id': 'S_beta_btc', 'required': ['prices'], 'optional': []}
+    import execution.engine as eng
+    assert eng._strategy_aux_needs(BetaBtc()) == set()
