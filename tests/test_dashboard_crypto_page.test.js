@@ -220,11 +220,11 @@ test('risk panel reads caps and flags from the payload', () => {
     params: { whale_min_usd: 1e6, large_print_usd: 250000, thresholds: { score_alert: 70 } },
     breaker: { status: 'shadow', hold_flat: { since: '2026-11-10T10:00:00Z' }, thresholds: { sleeve_dd: -0.08, position_dd: -0.15, blackout_h: 3 },
       last_evals: [{ ts_utc: '2026-11-10T10:05:00Z', mode: 'shadow', sleeve_dd: -0.091, worst_ticker: 'SOL-USD', worst_plpc: -0.16, action: 'shadow' }] },
-    sizing: { status: 'pending_phase_3', benchmark: 'BTC-USD', bench_cap_nav: 0.25, gross_cap_nav: 0.5 },
+    sizing: { status: 'shadow', benchmark: 'BTC-USD', bench_cap_nav: 0.25, gross_cap_nav: 0.5 },
   }, { available: true, rows: [{ ticker: 'BTC-USD', qty: 0.5, market_value: 37000, unrealized_plpc: -0.021 }] });
   const h = els['cr-risk'].innerHTML;
   assert.ok(h.includes('CRYPTO_FLOWS: on') && h.includes('CRYPTO_BREAKER: off') && h.includes('CRYPTO_POOLED_SIZING: unset'));
-  assert.ok(h.includes('sizing: pending_phase_3 — benchmark BTC-USD, BTC cap 25 %, crypto gross cap 50 %'));
+  assert.ok(h.includes('sizing: shadow — benchmark BTC-USD, BTC cap 25 %, crypto gross cap 50 %'));
   assert.ok(h.includes('breaker: shadow') && h.includes('HOLD FLAT since'));
   assert.ok(h.includes('sleeve DD -8.0 %') && h.includes('SOL-USD@-16.0%') && h.includes('-9.1%'));
   assert.ok(h.includes('-2.10 %'));
@@ -250,4 +250,23 @@ test('risk panel lists per-ticker holds (hold_tickers) and stays quiet when none
   api._renderCryptoRisk(Object.assign({}, base, { breaker: { status: 'armed', hold_flat: null, hold_tickers: {} } }), { available: false });
   h = els['cr-risk'].innerHTML;
   assert.ok(h.includes('breaker: armed') && !h.includes('HOLD'));
+});
+
+test('S_m tile shows four numbers (2 dp / n/a) + horizon; risk panel shows mode and escaped last line', () => {
+  const { api, els } = crSandbox();
+  const sizing = { status: 'apply', benchmark: 'BTC-USD', bench_cap_nav: 0.25, gross_cap_nav: 0.5, horizon: 1, s_m_as_of: '2026-11-09',
+    s_m_by_regime: { LOW_VOL: 0.914, TRANSITIONING: null, HIGH_VOL: -0.1, CRISIS: '1.5' },
+    last_shadow_line: 'crypto_sizing: <img src=x onerror=alert(1)> & more' };
+  api._renderCryptoTiles({}, null, { sizing });
+  let h = els['cr-tiles'].innerHTML;
+  assert.ok(h.includes('>0.91<') && h.includes('>n/a<') && h.includes('>-0.10<') && h.includes('>1.50<'));
+  assert.ok(h.includes('h=1d') && !h.includes('>pending<'));
+  api._renderCryptoTiles({}, null);   // no risk payload: all n/a, no throw
+  assert.ok(!els['cr-tiles'].innerHTML.includes('pending'));
+  api._renderCryptoRisk({ flags: {}, params: {}, breaker: {}, sizing }, { available: false });
+  h = els['cr-risk'].innerHTML;
+  assert.ok(h.includes('sizing: apply'));
+  assert.ok(h.includes('&lt;img src=x onerror=alert(1)&gt; &amp; more') && !h.includes('<img'));
+  api._renderCryptoRisk({ flags: {}, params: {}, breaker: {}, sizing: { status: 'shadow' } }, { available: false });
+  assert.ok(!els['cr-risk'].innerHTML.includes('last sizing line'));
 });

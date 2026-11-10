@@ -11436,7 +11436,7 @@ async function _refreshCrypto() {
   }
   guard('cr-hero',  () => _renderCryptoHero(snap, regime, providers, risk));
   guard('cr-board', () => _renderCryptoBoard(snap));
-  guard('cr-tiles', () => _renderCryptoTiles(snap, regime));
+  guard('cr-tiles', () => _renderCryptoTiles(snap, regime, risk));
   guard('cr-feed',  () => _renderCryptoFeed(events && events.available !== false && Array.isArray(events.rows) ? events.rows : []));
   guard('cr-risk',  () => _renderCryptoRisk(risk, positions));
 }
@@ -11712,7 +11712,7 @@ function _crTile(label, valueHtml, subHtml) {
     + (subHtml ? '<div class="ov-chg">' + subHtml + '</div>' : '') + '</div>';
 }
 
-function _renderCryptoTiles(snap, regime) {
+function _renderCryptoTiles(snap, regime, risk) {
   const el = document.getElementById('cr-tiles');
   if (!el) return;
   const m = (snap && snap.market) || {};
@@ -11747,12 +11747,17 @@ function _renderCryptoTiles(snap, regime) {
     + ' · ETH ' + _crCompact(m.san_eth_exchange_balance_30d_lag, '', false), cap('30 d lag')));
 
   const cur = regime && regime.latest && regime.latest.state;
+  const smSz = (risk && risk.sizing) || {};
+  const smBy = smSz.s_m_by_regime || {};
   const cells = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'].map(st => {
     const short = st === 'TRANSITIONING' ? 'TRANS' : st;
     const cls = st === cur ? ' ' + (_STATE_CLASS[st] || '') : '';
-    return '<div class="cr-sm-cell' + cls + '"><div style="font-size:10px">' + short + '</div><div style="font-size:11px">pending</div></div>';
+    const v = _crNum(smBy[st]);
+    return '<div class="cr-sm-cell' + cls + '"><div style="font-size:10px">' + short + '</div><div style="font-size:11px">' + (v == null ? 'n/a' : v.toFixed(2)) + '</div></div>';
   }).join('');
-  tiles.push('<div class="ov-card" style="cursor:default"><div class="ov-name">S_m crypto by regime</div><div class="cr-sm-grid">' + cells + '</div></div>');
+  const smH = _crNum(smSz.horizon);
+  const smCap = 'BTC-USD buy-and-hold' + (smH == null ? '' : ', h=' + smH.toFixed(0) + 'd') + (smSz.s_m_as_of ? ' · ' + escapeHtml(smSz.s_m_as_of) : '');
+  tiles.push('<div class="ov-card" style="cursor:default"><div class="ov-name">S_m crypto by regime</div><div class="cr-sm-grid">' + cells + '</div><div style="font-size:10px;color:var(--muted);margin-top:4px">' + smCap + '</div></div>');
 
   el.innerHTML = '<div class="ov-label">Market flow</div><div class="ov-cards">' + tiles.join('') + '</div>';
 }
@@ -11849,13 +11854,15 @@ function _renderCryptoRisk(risk, positions) {
   const benchSym = sz.benchmark ? String(sz.benchmark).split('-')[0] : 'bench';
   const sizingLine = 'sizing: ' + escapeHtml(sz.status || '—') + ' — benchmark ' + escapeHtml(sz.benchmark || '—')
     + ', ' + escapeHtml(benchSym) + ' cap ' + pctOf(sz.bench_cap_nav) + ', crypto gross cap ' + pctOf(sz.gross_cap_nav);
+  const sizingLast = sz.last_shadow_line
+    ? '<div style="font-size:11px;color:var(--muted);word-break:break-word">last sizing line: ' + escapeHtml(String(sz.last_shadow_line)) + '</div>' : '';
 
   const left = '<div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">' + chips + '</div>'
     + '<table class="cr-table" style="margin-bottom:10px"><tbody>' + paramRows + '</tbody></table>'
     + '<div style="font-size:12px">' + bStatusLine + '</div>'
     + '<div style="font-size:12px;color:var(--muted)">' + bThLine + '</div>'
     + bEvalsHtml
-    + '<div style="font-size:12px">' + sizingLine + '</div></div>';
+    + '<div style="font-size:12px">' + sizingLine + '</div>' + sizingLast + '</div>';
 
   const pos = (positions && positions.available !== false && Array.isArray(positions.rows)) ? positions.rows : [];
   const right = pos.length

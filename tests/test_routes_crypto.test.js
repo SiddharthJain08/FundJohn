@@ -268,3 +268,89 @@ test('risk breaker: DD thresholds outside (-1, 0) fall back to the defaults (mir
     keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
   }
 });
+
+// ── risk.sizing (Phase 3 Task 9) ────────────────────────────────────────────
+function cfgQuery(cfg) {
+  return async (sql) => {
+    if (/pipeline_config/.test(sql) && /ANY/.test(sql)) {
+      return { rows: Object.entries(cfg).map(([key, value]) => ({ key, value })) };
+    }
+    return { rows: [] };
+  };
+}
+async function riskSizing(cfg, flagVal) {
+  const saved = process.env.OPENCLAW_CRYPTO_POOLED_SIZING;
+  try {
+    if (flagVal === undefined) delete process.env.OPENCLAW_CRYPTO_POOLED_SIZING; else process.env.OPENCLAW_CRYPTO_POOLED_SIZING = flagVal;
+    router._setQueryForTests(cfgQuery(cfg));
+    const { status, body } = await get('/risk');
+    assert.equal(status, 200);
+    return body.sizing;
+  } finally {
+    if (saved === undefined) delete process.env.OPENCLAW_CRYPTO_POOLED_SIZING; else process.env.OPENCLAW_CRYPTO_POOLED_SIZING = saved;
+  }
+}
+const SCHEMA3 = {
+  schema: 3, rf_source: 'macro',
+  benchmarks: {
+    SPY: { as_of: '2026-11-09', by_regime: { LOW_VOL: { 1: 0.8 } } },
+    'BTC-USD': { as_of: '2026-11-09', start: '2018-01-01', horizons: [1, 2],
+      by_regime: { LOW_VOL: { 1: 0.91, 2: 0.5 }, TRANSITIONING: { 1: 0.42 }, HIGH_VOL: { 1: -0.1 }, CRISIS: { 1: 1.5, 2: 1.0 } } },
+  },
+};
+
+test('risk sizing: schema-3 cache -> four BTC numbers, horizon, caps, last line, shadow by default', async () => {
+  const sz = await riskSizing({
+    benchmark_regime_sharpe: JSON.stringify(SCHEMA3), benchmark_horizon_days: '1',
+    benchmark_max_nav_frac_crypto: '0.3', crypto_gross_max_nav_frac: '0.6', crypto_sizing_last_line: 'crypto_sizing: shadow x',
+  });
+  assert.equal(sz.status, 'shadow');
+  assert.equal(sz.flag, 'unset');
+  assert.deepEqual(sz.s_m_by_regime, { LOW_VOL: 0.91, TRANSITIONING: 0.42, HIGH_VOL: -0.1, CRISIS: 1.5 });
+  assert.equal(sz.horizon, 1);
+  assert.equal(sz.s_m_as_of, '2026-11-09');
+  assert.equal(sz.bench_cap_nav, 0.3);
+  assert.equal(sz.gross_cap_nav, 0.6);
+  assert.equal(sz.last_shadow_line, 'crypto_sizing: shadow x');
+});
+
+test('risk sizing: horizon 2 picks the inner key; object-valued JSONB works', async () => {
+  const sz = await riskSizing({ benchmark_regime_sharpe: SCHEMA3, benchmark_horizon_days: 2 });
+  assert.equal(sz.horizon, 2);
+  assert.equal(sz.s_m_by_regime.LOW_VOL, 0.5);
+  assert.equal(sz.s_m_by_regime.TRANSITIONING, null);
+  assert.equal(sz.s_m_by_regime.CRISIS, 1.0);
+});
+
+test('risk sizing: legacy schema-2 SPY-only payload -> nulls for BTC', async () => {
+  const sz = await riskSizing({ benchmark_regime_sharpe: { schema: 2, benchmark: 'SPY', as_of: '2026-11-09', by_regime: { LOW_VOL: { 1: 0.8 } } } });
+  assert.deepEqual(sz.s_m_by_regime, { LOW_VOL: null, TRANSITIONING: null, HIGH_VOL: null, CRISIS: null });
+  assert.equal(sz.s_m_as_of, null);
+  // legacy payload that IS BTC maps to benchmarks['BTC-USD']
+  const sz2 = await riskSizing({ benchmark_regime_sharpe: { schema: 2, benchmark: 'BTC-USD', as_of: 'd', by_regime: { LOW_VOL: { 1: 0.3 } } } });
+  assert.equal(sz2.s_m_by_regime.LOW_VOL, 0.3);
+});
+
+test('risk sizing: flag =1 -> apply; unset/0 -> shadow', async () => {
+  assert.equal((await riskSizing({}, '1')).status, 'apply');
+  assert.equal((await riskSizing({}, '0')).status, 'shadow');
+  assert.equal((await riskSizing({})).status, 'shadow');
+});
+
+test('risk sizing: missing keys / garbage / DB error -> defaults and nulls, no throw', async () => {
+  let sz = await riskSizing({});
+  assert.equal(sz.horizon, 1);
+  assert.equal(sz.bench_cap_nav, 0.25);
+  assert.equal(sz.gross_cap_nav, 0.5);
+  assert.equal(sz.last_shadow_line, null);
+  assert.deepEqual(Object.values(sz.s_m_by_regime), [null, null, null, null]);
+  sz = await riskSizing({ benchmark_regime_sharpe: '{not json', benchmark_horizon_days: 'zz', benchmark_max_nav_frac_crypto: 'x' });
+  assert.equal(sz.horizon, 1);
+  assert.equal(sz.bench_cap_nav, 0.25);
+  assert.deepEqual(Object.values(sz.s_m_by_regime), [null, null, null, null]);
+  router._setQueryForTests(async () => { throw new Error('db down'); });
+  const { status, body } = await get('/risk');
+  assert.equal(status, 200);
+  assert.equal(body.sizing.status, 'shadow');
+  assert.equal(body.sizing.last_shadow_line, null);
+});

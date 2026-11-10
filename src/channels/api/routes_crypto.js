@@ -120,6 +120,56 @@ router.get('/providers', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// Crypto pooled-sizing block for /risk. Every read fails open (nulls, never a 500).
+const SIZING_REGIMES = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
+function parseCfg(raw) {
+  if (raw && typeof raw === 'object') return raw;
+  if (typeof raw === 'string' && raw.trim()) { try { return JSON.parse(raw); } catch (_) { return null; } }
+  return null;
+}
+async function sizingBlock(flagVal) {
+  const cfg = {};
+  try {
+    const r = await dbQuery(
+      `SELECT key, value FROM pipeline_config WHERE key = ANY($1)`,
+      [['benchmark_regime_sharpe', 'benchmark_horizon_days', 'benchmark_max_nav_frac_crypto',
+        'crypto_gross_max_nav_frac', 'crypto_sizing_last_line']]);
+    for (const row of (r && r.rows) || []) cfg[row.key] = row.value;
+  } catch (_) { /* fail open */ }
+  const numOr = (v, d) => { const n = Number(typeof v === 'string' ? v.replace(/"/g, '') : v); return v != null && v !== '' && Number.isFinite(n) ? n : d; };
+  let h = Math.trunc(numOr(cfg.benchmark_horizon_days, 1));
+  if (!(h >= 1)) h = 1;
+  let entry = null;
+  try {
+    const payload = parseCfg(cfg.benchmark_regime_sharpe);
+    if (payload && typeof payload === 'object') {
+      const benches = payload.benchmarks && typeof payload.benchmarks === 'object' ? payload.benchmarks
+        : (payload.benchmark ? { [payload.benchmark]: payload } : {});   // legacy schema-2
+      entry = benches['BTC-USD'] || null;
+    }
+  } catch (_) { entry = null; }
+  const byReg = (entry && entry.by_regime && typeof entry.by_regime === 'object') ? entry.by_regime : {};
+  const sm = {};
+  for (const reg of SIZING_REGIMES) {
+    const cell = byReg[reg];
+    const v = cell && typeof cell === 'object' ? cell[String(h)] : null;
+    sm[reg] = v != null && v !== '' && Number.isFinite(Number(v)) ? Number(v) : null;
+  }
+  let line = cfg.crypto_sizing_last_line;
+  if (line != null && typeof line !== 'string') line = String(line);
+  return {
+    status: flagVal === '1' ? 'apply' : 'shadow',
+    flag: flagVal,
+    benchmark: 'BTC-USD',
+    bench_cap_nav: numOr(cfg.benchmark_max_nav_frac_crypto, 0.25),
+    gross_cap_nav: numOr(cfg.crypto_gross_max_nav_frac, 0.50),
+    s_m_by_regime: sm,
+    horizon: h,
+    s_m_as_of: (entry && entry.as_of) || null,
+    last_shadow_line: line || null,
+  };
+}
+
 router.get('/risk', async (req, res) => {
   const flag = (k) => (process.env[k] === '1' ? '1' : process.env[k] === '0' ? '0' : 'unset');
   const envNum = (k, d) => { const n = Number(process.env[k]); return process.env[k] !== undefined && process.env[k] !== '' && Number.isFinite(n) ? n : d; };
@@ -175,7 +225,7 @@ router.get('/risk', async (req, res) => {
       thresholds: { delev_oi_chg_1h_pct: -5, delev_ret_1h_pct: -3, netflow_z_shock: 3, coverage_floor: 0.25, score_alert: 70 },
     },
     breaker,
-    sizing: { status: 'pending_phase_3', benchmark: 'BTC-USD', bench_cap_nav: 0.25, gross_cap_nav: 0.50 },
+    sizing: await sizingBlock(flag('OPENCLAW_CRYPTO_POOLED_SIZING')),
   });
 });
 
