@@ -24,9 +24,10 @@ MAX_AGE_MIN = 30
 
 def _newest_eval_ts():
     """Newest crypto_breaker_evals.ts_utc (aware UTC) or None; raises on DB error."""
+    import contextlib
     import psycopg2
-    with psycopg2.connect(os.environ['POSTGRES_URI'], connect_timeout=5) as conn:
-        with conn.cursor() as cur:
+    with contextlib.closing(psycopg2.connect(os.environ['POSTGRES_URI'], connect_timeout=5)) as conn:
+        with conn, conn.cursor() as cur:
             cur.execute('SELECT MAX(ts_utc) FROM crypto_breaker_evals')
             row = cur.fetchone()
     return row[0] if row else None

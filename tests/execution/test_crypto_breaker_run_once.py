@@ -538,3 +538,25 @@ def test_redis_client_and_db_connect_carry_timeouts(monkeypatch):
         assert kw['socket_connect_timeout'] == 2 and kw['socket_timeout'] == 2
     for kw in seen['pg']:
         assert kw['connect_timeout'] == 3
+
+
+def test_ticker_scan_failure_keeps_mirror_ticker_holds():
+    """Redis pings but scan_iter raises: the ticker holds must come from the
+    mirror, never an empty dict that the tick then mirrors back."""
+    tk = {'since': '2026-11-10T16:00:00+00:00', 'reason': 'position_drawdown:ETH-USD',
+          'ticker': 'ETH-USD'}
+
+    class ScanBroken(FakeRedis):
+        def scan_iter(s, match=None): raise RuntimeError('scan boom')
+
+    def respond(sql, params):
+        if 'FROM pipeline_config' in sql:
+            return (json.dumps({'sleeve': None, 'tickers': {'ETH-USD': tk}}),)
+        return None
+    rows = [_row('BTC/USD', 9000.0, 0.0), _row('ETH/USD', 1000.0, -50.0)]  # nothing triggers
+    d, audit, posts = _deps(rows, redis=ScanBroken())
+    d['conn'] = FakeConn(respond)
+    res = _call(d, env=ARMED)
+    assert res['hold_tickers'] == {'ETH-USD': tk}
+    assert d['executor'].calls == []
+    assert d['conn'].mirrors() and all('ETH-USD' in p[1] for p in d['conn'].mirrors())

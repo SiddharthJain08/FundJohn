@@ -304,8 +304,10 @@ def hold_ticker_get(r, ticker) -> dict | None:
     return _get_json(r, f'{HOLD_TICKER_PREFIX}{ticker}')
 
 
-def hold_tickers_read(r) -> dict:
-    """{ticker: hold} for every live per-ticker hold; {} on any error."""
+def hold_tickers_read(r) -> dict | None:
+    """{ticker: hold} for every live per-ticker hold; None when the scan failed
+    (the caller falls back to the pipeline_config mirror so a transient scan
+    error can never rewrite the mirror with the ticker holds dropped)."""
     if r is None:
         return {}
     out = {}
@@ -317,6 +319,7 @@ def hold_tickers_read(r) -> dict:
                 out[k[len(HOLD_TICKER_PREFIX):]] = v
     except Exception as e:  # noqa: BLE001 - fail open
         logger.warning('[crypto_breaker] hold-ticker scan failed: %s', e)
+        return None
     return out
 
 
@@ -778,6 +781,9 @@ def run_once(*, now=None, env=None, dry_run=False, force=False, deps: dict | Non
     hold, redis_ok = hold_flat_read(r)
     if redis_ok:
         tickers = hold_tickers_read(r)
+        if tickers is None:  # scan failed after a good ping: keep the mirror's ticker holds
+            tickers = hold_state_from_mirror(conn)['tickers']
+            print('[crypto_breaker] hold-ticker scan failed: ticker holds read from pipeline_config mirror')
     else:
         print('[crypto_breaker] redis unavailable: hold read from pipeline_config mirror, '
               'cooldowns from crypto_breaker_evals')
