@@ -1769,13 +1769,31 @@ def _stamp_cadence_reset_on_flip(cur, regime) -> None:
         return
     if os.environ.get('OPENCLAW_CADENCE_RESET_ON_FLIP', '1') != '1':
         return
+    # Crypto engine Phase 3 (Task 8): the probe is CLASS-SCOPED — the equity
+    # regime is compared against the newest EQUITY-strategy row only, so a
+    # crypto-only mint can never mask (or fake) an equity flip. No crypto
+    # strategy in the manifest (or the lookup fails) ⇒ the historical
+    # unscoped query, verbatim. The crypto class has its own probe
+    # (_stamp_crypto_cadence_reset_on_flip).
+    try:
+        _crypto_ids = sorted(_crypto_strategy_ids())
+    except Exception as e:  # noqa: BLE001 — manifest unreadable ⇒ legacy probe
+        logger.warning('[engine] crypto-class lookup failed (%s) — unscoped flip probe', e)
+        _crypto_ids = []
     try:
         # created_at tiebreak matters on a double-flip day: same signal_date can
         # carry rows from two regimes; the NEWEST mint must win or the probe
         # would re-force emission against an already-current book.
-        cur.execute("""SELECT regime_state FROM execution_signals
-                       WHERE regime_state IS NOT NULL
-                       ORDER BY signal_date DESC, created_at DESC NULLS LAST LIMIT 1""")
+        if _crypto_ids:
+            cur.execute("""SELECT regime_state FROM execution_signals
+                           WHERE regime_state IS NOT NULL
+                             AND NOT (strategy_id = ANY(%s))
+                           ORDER BY signal_date DESC, created_at DESC NULLS LAST LIMIT 1""",
+                        (_crypto_ids,))
+        else:
+            cur.execute("""SELECT regime_state FROM execution_signals
+                           WHERE regime_state IS NOT NULL
+                           ORDER BY signal_date DESC, created_at DESC NULLS LAST LIMIT 1""")
         row = cur.fetchone()
     except Exception as e:
         logger.warning('[engine] regime-flip probe failed (%s) — cadence gates unchanged', e)
@@ -1788,6 +1806,101 @@ def _stamp_cadence_reset_on_flip(cur, regime) -> None:
                    'all eligible rebalance-cadence strategies emit today; cadence '
                    'windows restart from today (operator directive 2026-08-13)',
                    prev or '(no prior signals)', regime['state'])
+
+
+_CRYPTO_IDS_MEMO: "frozenset | None" = None
+
+
+def _crypto_strategy_ids() -> frozenset:
+    """Manifest strategy ids whose instrument_class is 'crypto' (memoised per
+    process — instrument_class_for re-parses the manifest on every call; this
+    is the same record field it reads, parsed once)."""
+    global _CRYPTO_IDS_MEMO
+    if _CRYPTO_IDS_MEMO is None:
+        from strategies.instrument_class import _DEFAULT_MANIFEST, LifecycleStateMachine
+        sm = LifecycleStateMachine.from_manifest(_DEFAULT_MANIFEST)
+        _CRYPTO_IDS_MEMO = frozenset(
+            sid for sid, rec in sm._records.items()
+            if getattr(rec, 'instrument_class', 'equity') == 'crypto')
+    return _CRYPTO_IDS_MEMO
+
+
+def _stamp_crypto_cadence_reset_on_flip(cur, crypto_regime) -> None:
+    """Crypto-class regime-flip detection (crypto engine Phase 3, Task 8).
+
+    Mirrors _stamp_cadence_reset_on_flip for crypto strategies, which are
+    gated/run on the CRYPTO regime (crypto_regime_latest.json). The
+    execution_signals.regime_state stamp carries the EQUITY label for every
+    row (write_signals stamps one regime per run — deliberately unchanged,
+    see the Task 8 report: the live co-firing similarity leg and the sizer's
+    weights-gap audit read that label), so the prior crypto regime is
+    resolved from crypto_regime_states AT the newest crypto-strategy row's
+    created_at. Mismatch with today's crypto state ⇒
+    crypto_regime['cadence_reset']=True, which only the crypto strategies
+    receive (run_strategies hands them this dict, never the equity one).
+
+    No crypto row ever minted ⇒ flip (mirrors the equity "no prior signals").
+    A crypto row whose prior state cannot be resolved (NULL created_at, no
+    crypto_regime_states tick at/before it) ⇒ NO stamp: an unknown prior must
+    degrade to calendar-gated behaviour, never force a mass emission. Same for
+    any DB error — and the probe runs inside a SAVEPOINT so a failure can
+    never abort the engine's transaction. Kill switch / manual force: the same
+    OPENCLAW_CADENCE_RESET_ON_FLIP=0 / OPENCLAW_FORCE_CADENCE_RESET=1 as the
+    equity probe."""
+    if not isinstance(crypto_regime, dict) or not crypto_regime.get('state'):
+        return
+    if os.environ.get('OPENCLAW_FORCE_CADENCE_RESET') == '1':
+        crypto_regime['cadence_reset'] = True
+        logger.warning('[engine] crypto cadence reset FORCED via OPENCLAW_FORCE_CADENCE_RESET=1')
+        return
+    if os.environ.get('OPENCLAW_CADENCE_RESET_ON_FLIP', '1') != '1':
+        return
+    try:
+        _crypto_ids = sorted(_crypto_strategy_ids())
+    except Exception as e:  # noqa: BLE001
+        logger.warning('[engine] crypto flip probe: class lookup failed (%s) — no stamp', e)
+        return
+    if not _crypto_ids:
+        return
+    try:
+        cur.execute("SAVEPOINT sp_crypto_flip_probe")
+    except Exception as e:  # noqa: BLE001
+        logger.warning('[engine] crypto flip probe: savepoint failed (%s) — no stamp', e)
+        return
+    try:
+        cur.execute("""SELECT es.created_at,
+                              (SELECT crs.state FROM crypto_regime_states crs
+                                WHERE es.created_at IS NOT NULL
+                                  AND crs.ts_utc <= es.created_at
+                                ORDER BY crs.ts_utc DESC LIMIT 1) AS crypto_state
+                         FROM execution_signals es
+                        WHERE es.strategy_id = ANY(%s)
+                        ORDER BY es.signal_date DESC, es.created_at DESC NULLS LAST
+                        LIMIT 1""", (_crypto_ids,))
+        row = cur.fetchone()
+        cur.execute("RELEASE SAVEPOINT sp_crypto_flip_probe")
+    except Exception as e:  # noqa: BLE001
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_crypto_flip_probe")
+            cur.execute("RELEASE SAVEPOINT sp_crypto_flip_probe")
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning('[engine] crypto regime-flip probe failed (%s) — crypto cadence gates unchanged', e)
+        return
+    if row is not None:
+        prev = row[1]
+        if prev is None:
+            logger.info('[engine] crypto flip probe: prior crypto regime unresolved '
+                        '(created_at=%s) — no stamp', row[0])
+            return
+        if prev == crypto_regime['state']:
+            return
+    else:
+        prev = None
+    crypto_regime['cadence_reset'] = True
+    logger.warning('[engine] 🔁 CRYPTO REGIME FLIP: %s → %s — cadence-gate bypass armed for '
+                   'crypto strategies only', prev or '(no prior crypto signals)',
+                   crypto_regime['state'])
 
 
 # ──────────────────────────────────────────────────────────
@@ -2233,7 +2346,7 @@ def _resolve_aux_load_plan_safe(strategies, regime_state):
 
 def run_strategies(strategies, prices, regime, universe, aux_data,
                    strategy_universes=None, aux_loaded_kinds=None,
-                   as_of=None) -> dict:
+                   as_of=None, cadence_cur=None) -> dict:
     """
     Returns: {strategy_id: [Signal, ...]}
 
@@ -2276,6 +2389,11 @@ def run_strategies(strategies, prices, regime, universe, aux_data,
             if ic == 'crypto':
                 if _crypto_regime is None:
                     _crypto_regime = load_crypto_regime_state()
+                    # Task 8: per-class cadence reset — stamps THIS dict (crypto
+                    # strategies only). cadence_cur None (tests / ad-hoc callers)
+                    # ⇒ no probe, exactly the pre-Task-8 behaviour.
+                    if cadence_cur is not None:
+                        _stamp_crypto_cadence_reset_on_flip(cadence_cur, _crypto_regime)
                 strat_regime = _crypto_regime
                 strat_regime_str = _crypto_regime.get('state')
                 if not strat_regime_str:
@@ -3246,7 +3364,8 @@ def main():
                 logger.warning(f'last_price inject failed: {_e}')
         strategy_results = run_strategies(strategies, prices, regime, universe,
                                           aux_data, strategy_universes=strategy_universes,
-                                          aux_loaded_kinds=_aux_needed_kinds, as_of=run_date)
+                                          aux_loaded_kinds=_aux_needed_kinds, as_of=run_date,
+                                          cadence_cur=cur)
 
         # M3: plan-vs-run drift check (shadow/on only — _aux_running_ids is
         # None in 'off' mode, meaning no plan was computed). is_eligible

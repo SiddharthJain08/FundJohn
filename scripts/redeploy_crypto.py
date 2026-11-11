@@ -60,7 +60,23 @@ def main(argv=None) -> int:
     account_state = _load_account_state()
     crypto_regime = load_crypto_regime_state()
     signals_loader = _make_crypto_signals_loader()
+    from execution.pooled_sizing import pooled_sizing_enabled
+    _pooled = pooled_sizing_enabled()
+    # Crypto engine Phase 3 (Task 8): flag ON ⇒ size_crypto_positions re-runs
+    # the POOLED sizer and keeps only its crypto orders (signals self-loaded;
+    # signals_loader is the legacy budget model's input only).
+    print(f'[crypto-redeploy] sizing mode: {"pooled" if _pooled else "legacy_budget"}')
     orders = size_crypto_positions(account_state, crypto_regime, signals_loader=signals_loader)
+    if _pooled:
+        # Pooled orders carry the real contributing strategy ids (not the legacy
+        # 'crypto_redeploy' sid), so tag a per-run wave: the coid
+        # (AX<date>_<ticker>_<sid>_w<HHMMSS>) can then never collide with the
+        # 15:55 trade step's submission (or an earlier redeploy) for the same
+        # (date, ticker, strategy).
+        from datetime import datetime as _dt, timezone as _tz
+        _wave = _dt.now(_tz.utc).strftime('%H%M%S')
+        for o in orders:
+            o.setdefault('_wave', _wave)
     if not orders:
         print('[crypto-redeploy] no crypto orders (empty signals or flat) — no-op'); return 0
 

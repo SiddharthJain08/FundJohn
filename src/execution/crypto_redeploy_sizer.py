@@ -37,12 +37,137 @@ def _dir_to_int(d) -> int:
     return 1 if s in ('long', 'buy', '1') else (-1 if s in ('short', 'sell', '-1') else 0)
 
 
+_EQUITY_REGIME_FILE = ('.agents', 'market-state', 'regime_latest.json')
+
+
+def _load_equity_regime_and_params() -> tuple[str | None, dict | None]:
+    """Equity regime-of-record (regime_latest.json, file-primary like the
+    engine + handoff builder, same ENGINE_REGIME_FAIL_HOURS staleness bound)
+    and its regime_sizer_params row. Fail-closed: (None, None) ⇒ the pooled
+    redeploy emits nothing (crypto HELD) rather than sizing against an
+    unknown equity book."""
+    import json, os, time
+    from pathlib import Path
+    p = Path(__file__).resolve().parents[2].joinpath(*_EQUITY_REGIME_FILE)
+    try:
+        age_h = (time.time() - p.stat().st_mtime) / 3600.0
+        if age_h > float(os.environ.get('ENGINE_REGIME_FAIL_HOURS', '80')) \
+                and os.environ.get('OPENCLAW_ALLOW_STALE_REGIME') != '1':
+            logger.warning('[crypto_redeploy] equity regime file stale (%.1fh)', age_h)
+            return None, None
+        state = (json.loads(p.read_text()) or {}).get('state')
+    except (OSError, ValueError) as e:
+        logger.warning('[crypto_redeploy] equity regime unreadable (%s)', e)
+        return None, None
+    if not state:
+        return None, None
+    params = {'liquidity_param': 1.0, 'position_circuit_breaker_pct': 0.02}
+    try:
+        import psycopg2, psycopg2.extras
+        conn = psycopg2.connect(os.environ['POSTGRES_URI'])
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT * FROM regime_sizer_params WHERE regime_state = %s", (state,))
+                row = cur.fetchone()
+                if row:
+                    params = dict(row)
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 — same default as regime_blended_sizer_live
+        logger.warning('[crypto_redeploy] equity params load failed (%s); defaults', e)
+    return state, params
+
+
+def _default_pooled_runner(account_state, equity_regime, equity_params,
+                           crypto_regime, crypto_params) -> list[dict]:
+    """One pass of the pooled sizer body (regime_blended_sizer._sharpe_cadence_path).
+
+    Deliberately ONE level below _size_positions_impl: in the same-day lane
+    _size_positions_impl runs _check_force_fire_flag(), which DELETES the
+    equity pipeline's one-shot regime:transition:fresh key — a 24/7 crypto
+    redeploy must never consume it. signals=[] because the body self-loads
+    every signal from execution_signals (the parameter is only the legacy
+    fallback when the equity active window is empty; there is no handoff
+    here)."""
+    from execution import regime_blended_sizer as _rbs
+    return _rbs._sharpe_cadence_path([], account_state, equity_regime, equity_params, None,
+                                     crypto_regime_state=crypto_regime,
+                                     crypto_params=crypto_params)
+
+
+def _to_executor_orders(raw: list[dict], nav: float) -> list[dict]:
+    """Raw sizer orders → the executor contract (close_only on bracket-less
+    orders, pct_nav, …) through the SAME adapter the 15:00 trade step uses."""
+    from execution.regime_blended_sizer_live import _build_sized_payload
+    return _build_sized_payload(raw, {'regime': {}}, equity=nav)['orders']
+
+
+def _size_crypto_pooled(account_state: dict, crypto_regime_state: dict, *,
+                        pooled_runner=None, regime_loader=None, crypto_loader=None,
+                        hold_state: dict | None = None) -> list[dict]:
+    """OPENCLAW_CRYPTO_POOLED_SIZING=1: the redeploy is a thin re-run of the
+    pooled sizer. The full pooled book is computed (so crypto keeps exactly
+    the share of λ·NAV the 15:00 pooled normaliser gives it next to today's
+    equity book), then ONLY crypto orders are kept; equity orders are
+    discarded and counted. Hold-flat is applied inside the pooled block
+    (crypto_hold.hold_state) and re-checked here (belt and braces)."""
+    from execution import pooled_sizing as _ps
+    from execution.regime_blended_sizer import _is_crypto_key
+    nav = float(account_state.get('equity') or 0.0)
+    if nav <= 0:
+        return []
+    cr_state, cr_params = (crypto_loader or _ps.load_crypto_regime_and_params)()
+    if not cr_state:
+        logger.info('[crypto_redeploy] pooled: no crypto regime — no orders')
+        return []
+    if crypto_regime_state.get('state') and crypto_regime_state.get('state') != cr_state:
+        logger.info('[crypto_redeploy] pooled: crypto regime moved %s -> %s between reads; using %s',
+                    crypto_regime_state.get('state'), cr_state, cr_state)
+    eq_state, eq_params = (regime_loader or _load_equity_regime_and_params)()
+    if not eq_state:
+        logger.warning('[crypto_redeploy] pooled: no equity regime — crypto HELD (no orders)')
+        return []
+    raw = (pooled_runner or _default_pooled_runner)(
+        account_state, eq_state, eq_params, cr_state, cr_params) or []
+    crypto_raw = [o for o in raw if _is_crypto_key(o.get('ticker'))]
+    n_eq = len(raw) - len(crypto_raw)
+    logger.info('crypto_redeploy: equity_orders_discarded=%d crypto_orders=%d', n_eq, len(crypto_raw))
+    print(f'crypto_redeploy: equity_orders_discarded={n_eq} crypto_orders={len(crypto_raw)}')
+    orders = _to_executor_orders(crypto_raw, nav)
+
+    if hold_state is None:
+        from execution import crypto_hold as _ch
+        hold_state = _ch.hold_state()
+    sleeve_hold = bool((hold_state or {}).get('sleeve'))
+    held = {_normalize_broker_symbol(t) for t in ((hold_state or {}).get('tickers') or {})}
+    if sleeve_hold or held:
+        kept = [o for o in orders
+                if o.get('close_only')
+                or str(o.get('direction') or '').lower() != 'long'
+                or not (sleeve_hold or _normalize_broker_symbol(o.get('ticker') or '') in held)]
+        if len(kept) != len(orders):
+            logger.info('[crypto_redeploy] hold_flat active: %d crypto buy(s) dropped',
+                        len(orders) - len(kept))
+        orders = kept
+    return orders
+
+
 def size_crypto_positions(account_state: dict, crypto_regime_state: dict, *,
                           broker_loader=None, weights_loader=None, signals_loader=None,
                           crypto_strategy_ids=None, all_live_weight_sum=None,
-                          hold_state: dict | None = None) -> list[dict]:
+                          hold_state: dict | None = None,
+                          pooled_runner=None, regime_loader=None,
+                          crypto_loader=None) -> list[dict]:
     """Return crypto order dicts (ticker, direction, notional_usd, strategy_id, close_only).
-    All loaders are injectable for testing; defaults wire to the live sources."""
+    All loaders are injectable for testing; defaults wire to the live sources.
+
+    OPENCLAW_CRYPTO_POOLED_SIZING=1 ⇒ _size_crypto_pooled (the pooled sizer,
+    crypto orders only); unset ⇒ the legacy budget model below, unchanged."""
+    from execution.pooled_sizing import pooled_sizing_enabled
+    if pooled_sizing_enabled():
+        return _size_crypto_pooled(account_state, crypto_regime_state,
+                                   pooled_runner=pooled_runner, regime_loader=regime_loader,
+                                   crypto_loader=crypto_loader, hold_state=hold_state)
     regime = crypto_regime_state.get('state')
     if not regime:
         logger.info('[crypto_sizer] no crypto regime — no orders')
