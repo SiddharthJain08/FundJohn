@@ -128,6 +128,7 @@ def _load_pooled_account_state() -> dict:
         acct = _fetch_account_state(_alpaca_session())
         if isinstance(acct, dict) and acct.get('fetched') is not False:
             return acct
+        print('[crypto-redeploy] full account fetch returned fetched=False — equity-only snapshot')
     except Exception as e:  # noqa: BLE001
         print(f'[crypto-redeploy] full account fetch failed ({e}) — equity-only snapshot')
     return _load_account_state()
