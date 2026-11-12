@@ -505,6 +505,48 @@ controller ruling in the SDD ledger, surfaced to the operator at finish):
 - **Known limits**: mirror-sourced holds carry no TTL during a long Redis outage; the system check fails open when it cannot reach
   the DB; duplicate broker rows where only one carries a cost basis merge to `plpc=None` (counted, T4a still covers them).
 
+## 7c. As built — Phase 3 pooled sizing (2026-11-12, branch `crypto-pooled-p3`, 23 commits, 9 tasks + final review)
+
+- **Flag** `OPENCLAW_CRYPTO_POOLED_SIZING` unset at merge ⇒ **SHADOW**: equity targets and orders byte-identical (pinned by
+  `test_pooled_shadow_leaves_equity_targets_identical`, full order-list equality); the crypto book is computed and printed as
+  `crypto_sizing.shadow[{crypto_regime}]: S_m=… n=… gross=… cap_shaved=… btc_clamped_usd=… short_clamped=… funding_bind=…
+  hold=… stable_excluded=… eq_scale_ratio=…` (posted to Discord by its own ungated helper and written to
+  `pipeline_config.crypto_sizing_last_line`; the dashboard Crypto page shows it with the S_m-by-crypto-regime tile).
+  The legacy `crypto_redeploy_sizer` budget lane keeps acting until the flip.
+- **Regime tier table** `data/master/crypto_historical_regimes.parquet` (NEVER-DELETE; `src/strategies/crypto_historical_regimes.py`,
+  BTC-USD 30-day realised vol √365, 5-day median, tiers t1=0.35978 / t2=0.43100 / t3=0.48577 calibrated 2026-11-10 to the live
+  HMM's daily-mode frequencies 41.4/30.8/11.8/16.0 % over 2026-05-26..11-10 and FROZEN; rebuilt daily by the collector after the
+  BTC bar lands; self-heals only when missing). `unified_backtest.load_regimes(instrument_class='crypto')` partitions crypto backtests
+  on it (dense daily series). Known: the frozen tiers label ≈ 60 % of 2016–2026 as CRISIS.
+- **S_m_crypto** = buy-and-hold BTC-USD daily excess returns (rf per `OPENCLAW_RF_SOURCE`) on the crypto partition, 365-day
+  annualisation, horizons (1,2,3,5,10,21), min_obs 40; cache `pipeline_config.benchmark_regime_sharpe` schema 3 keyed by benchmark
+  (schema-2 payload upgraded in place, never evicted). Crypto only: hurdle `max(S_m,0)`, sleeve weight `max(S_m,0)`; S_m None ⇒
+  no hurdle (fail-open like SPY).
+- **`S_beta_btc`** (crypto class, `benchmark_sleeve`, `benchmark_ticker='BTC-USD'`, hold 21 d, −40 %/+400 % bracket, `regime_exit`
+  on a CRYPTO regime flip — the engine's exit hook now hands crypto-class strategies the crypto regime); `scripts/register_s_beta_btc.py`
+  (idempotent, status `pending_approval`); multi-sleeve `always_on`; the equity sleeve stays the bench vector.
+- **Universe + symbols**: `alpaca_tradable_universe` carries the 36 crypto pairs under the internal symbol with `asset_class='crypto'`
+  (class-scoped deactivation; every reader class-filtered; refresh-log notes carry crypto counts/errors); one broker-symbol normaliser
+  across sizer/redeploy/reconcile/breakers/liquidator/premarket gate (D-1 closed); the orphan pass skips crypto unless pooled.
+- **Account + executor**: `non_marginable_buying_power` in the account state; the executor refuses a crypto BUY above it
+  (`refused:crypto_buying_power`, fail-open when unknown; closes exempt; `crypto_bp_guard:` summary line); class from ANY contributor.
+- **Pooled path** (`_sharpe_cadence_path` + pure helpers in `src/execution/pooled_sizing.py`): per-class regime-of-record (crypto
+  weights/eligibility/min_acting/liquidity_param from the crypto regime + its `regime_sizer_params` row), stablecoins excluded
+  (universe `role='stable'`), per-class hurdle, ONE λ·NAV normaliser over Σ|w_eq|+Σ|w_cr| ("shave, never redistribute"), same
+  per-ticker cap, cluster cap per class, BTC-USD clamped BY TICKER at `benchmark_max_nav_frac_crypto` (0.25) NAV, long-only clamp,
+  crypto gross cap `crypto_gross_max_nav_frac` (0.50) pro-rata, funding pass on NET NEW buying vs non-marginable BP (increases
+  scaled pro-rata), Phase 2 hold-flat zeroes crypto (sleeve + ticker). Runs on equity-empty days too (crypto fills unused NAV);
+  block unavailable ⇒ crypto HELD, never liquidated; the equity account-breaker / macro-event / entry-hygiene gates skip crypto.
+- **Redeploy** (`OPENCLAW_CRYPTO_REDEPLOY=1`, on crypto-regime transitions): pooled mode re-runs the full pooled pass with the
+  trade-step account snapshot, keeps crypto orders (`equity_orders_discarded=N`), silences equity posts (`_REDEPLOY_QUIET`), tags
+  `_wave` client order ids. Cadence reset per class: crypto rows carry `signal_params.crypto_regime`; the crypto probe reads it.
+- **Flip gate** (`=1`): `S_beta_btc` registered + backtested on the crypto partition + approved/active/weighted; BTC S_m computed;
+  the 7 crypto strategies re-gated on the crypto partition; two clean shadow cycles; then weights → floors → activation.
+- **Known limits**: 26 BTC-USD days missing from the prices master (weekend bars dropped by the daily collect since June — backfill
+  owed); nmbp snapshot predates same-cycle closes (conservative); crypto orphan close is per-transition in the legacy lane; the
+  forced liquidator closes submission-tracked positions only; crypto weight rows blend partitions (live Sharpe by equity regime);
+  equity-class strategies that trade BTC-USD are never sized (pre-existing); a refreshed older row can add one cadence emission.
+
 ## 8. Left to the builder
 - Exact provider fallback ordering per field; which of Binance's spot `aggTrades` vs Coinbase trades is primary for
   large prints (coverage decides).
