@@ -124,6 +124,7 @@ def run(monkeypatch, *, crypto=True, pooled=False, bench_flag=False, s_m_eq=2.0,
     monkeypatch.setattr(_sizer, '_apply_asset_corr_cap', lambda t, *a, **k: t)
     monkeypatch.setattr(_sizer, '_apply_benchmark_corr_removal', lambda t, b, nav: t)
     monkeypatch.setattr(_sizer, '_post_corr_cumsharpe_log', lambda line: h.lines.append(line))
+    monkeypatch.setattr(_sizer, '_post_crypto_sizing_line', lambda line: h.lines.append(line))
     monkeypatch.setattr(_sizer, '_write_crypto_sizing_last_line', lambda line: h.written.append(line))
     monkeypatch.setattr(_sizer, '_load_crypto_hold_state', lambda: hold or {'sleeve': None, 'tickers': {}})
     monkeypatch.setattr(_sizer, '_strategy_classes', lambda: dict(CLASSES))
@@ -614,3 +615,71 @@ def test_pooled_attribution_uses_size_scalar_adjusted_weights(monkeypatch):
     eth = [o for o in orders if o['ticker'] == 'ETH-USD'][0]
     contrib = {c['strategy_id']: c['contribution'] for c in eth['contributions']}
     assert abs(contrib['S_cr_a'] - 1.0) < 1e-9                            # 2.0 × 0.5, what sized it
+
+
+# ── final-review fix wave ───────────────────────────────────────────────────
+
+def test_account_breaker_halt_passes_crypto_targets_through(monkeypatch):
+    out = _sizer._apply_account_breaker_gate({'BTC-USD': 1_000.0, 'ZZTA': 500.0}, {}, halted=True)
+    assert out['BTC-USD'] == 1_000.0                  # crypto: own Phase 2 breaker
+    assert 'ZZTA' not in out                          # equity open still refused
+
+
+def test_macro_event_gate_skips_crypto(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_EVENT_GATE', '1')
+    out = _sizer._apply_macro_event_gate({'BTC-USD': 1_000.0, 'ZZTA': 500.0}, {},
+                                         session=date(2026, 11, 12), events='FOMC_DECISION')
+    assert out.get('BTC-USD') == 1_000.0 and 'ZZTA' not in out
+
+
+def test_entry_hygiene_skips_crypto(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_ENTRY_HYGIENE', '1')
+    out = _sizer._apply_entry_hygiene_gate(
+        {'BTC-USD': 1_000.0, 'ZZTA': 500.0}, {}, stopouts={}, liq={}, params={},
+        premarket_vetoes={'BTC-USD', 'ZZTA'}, risk_exits={},
+        ownership_blocked=set(), ownership_cycle_date=None, ownership_enforcing=False)
+    assert out.get('BTC-USD') == 1_000.0 and not out.get('ZZTA')
+
+
+def test_btc_clamped_by_ticker_without_the_sleeve(monkeypatch):
+    cr = [_carried('S_cr_a', 'BTC-USD')]            # alpha-only BTC, no S_beta_btc contributor
+    orders, h = run(monkeypatch, pooled=True, s_m_cr=None, gross_frac=10.0, cr_carried=cr)
+    raw = LAM * NAV * 2.0 / (6.1 + 2.0)                # 49.4k ≈ 0.49·NAV
+    assert abs(cr_t(orders)['BTC-USD'] - 0.25 * NAV) < 1e-6
+    assert 'btc_clamped_usd=%.0f' % (raw - 0.25 * NAV) in shadow_lines(h, 'apply')[0]
+
+
+class _PCur:
+    def __init__(self): self.q = ''
+    def execute(self, sql, args=None): self.q = sql
+    def fetchone(self):
+        if 'corr_cumsharpe_log_until' in self.q:
+            return ('2026-09-12',)                     # gate EXPIRED
+        if 'botjohn-log' in self.q:
+            return ('https://discord.example/webhook',)
+        return None
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+class _PConn:
+    def cursor(self, *a, **k): return _PCur()
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+def test_crypto_line_posts_with_the_corr_cumsharpe_gate_expired(monkeypatch):
+    import psycopg2
+    import urllib.request as _ur
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://fake/fake')
+    monkeypatch.setattr(psycopg2, 'connect', lambda *a, **k: _PConn())
+    sent = []
+
+    class _Resp:
+        def read(self): return b''
+    monkeypatch.setattr(_ur, 'urlopen', lambda req, timeout=None: sent.append(req) or _Resp())
+    _sizer._post_corr_cumsharpe_log('corr_cumsharpe.live[X]: ...')
+    assert sent == []                                  # the equity diag line is gated off
+    _sizer._post_crypto_sizing_line('crypto_sizing.shadow[CRISIS]: S_m=0.10 n=1')
+    assert len(sent) == 1 and b'crypto_sizing.shadow[CRISIS]' in sent[0].data
+    assert sent[0].get_header('User-agent') == 'fundjohn-sizer/1.0'

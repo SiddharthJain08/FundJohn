@@ -151,6 +151,9 @@ def test_flag_unset_runs_the_legacy_budget_model(monkeypatch):
 
 # ── scripts/redeploy_crypto.py wiring ────────────────────────────────────────
 
+_seen_accounts: list = []
+
+
 def _run_script(monkeypatch, orders):
     sys.path.insert(0, str(ROOT / 'scripts'))
     import redeploy_crypto as rc
@@ -159,9 +162,13 @@ def _run_script(monkeypatch, orders):
     monkeypatch.setenv('OPENCLAW_CRYPTO_REDEPLOY', '1')
     monkeypatch.setattr(rc, '_redis', lambda: None)
     monkeypatch.setattr(rc, '_load_account_state', lambda: {'equity': NAV})
+    monkeypatch.setattr(rc, '_load_pooled_account_state',
+                        lambda: {'equity': NAV, 'non_marginable_buying_power': 7_000.0, 'fetched': True})
     import regime.crypto_regime as _cr
     monkeypatch.setattr(_cr, 'load_crypto_regime_state', lambda: {'state': 'HIGH_VOL'})
-    monkeypatch.setattr(_crs, 'size_crypto_positions', lambda *a, **k: [dict(o) for o in orders])
+    _seen_accounts.clear()
+    monkeypatch.setattr(_crs, 'size_crypto_positions',
+                        lambda acct, *a, **k: _seen_accounts.append(acct) or [dict(o) for o in orders])
     sent = []
     monkeypatch.setattr(ae, 'execute_single',
                         lambda sess, equity, order, run_date: sent.append(order) or {'status': 'submitted'})
@@ -318,3 +325,34 @@ def test_equity_regime_absent_fails_closed():
     st, p = crs._load_equity_regime_and_params('2026-11-12', conn=_FConn(_FCur(None, None)),
                                                handoff_reader=_bad)
     assert (st, p) == (None, None)
+
+
+# ── final-review fix wave: pooled redeploy gets the full account snapshot ────
+
+def test_script_pooled_passes_full_account_snapshot(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_CRYPTO_POOLED_SIZING', '1')
+    _run_script(monkeypatch, [])
+    assert _seen_accounts and _seen_accounts[-1]['non_marginable_buying_power'] == 7_000.0
+
+
+def test_script_legacy_passes_equity_only_account(monkeypatch):
+    monkeypatch.delenv('OPENCLAW_CRYPTO_POOLED_SIZING', raising=False)
+    _run_script(monkeypatch, [])
+    assert _seen_accounts[-1] == {'equity': NAV}
+
+
+def test_load_pooled_account_state_reads_the_trade_step_snapshot(monkeypatch):
+    sys.path.insert(0, str(ROOT / 'scripts'))
+    import redeploy_crypto as rc
+    import execution.alpaca_trader as _at
+    monkeypatch.setattr(_at, '_alpaca_session', lambda: object(), raising=False)
+    monkeypatch.setattr(_at, '_fetch_account_state',
+                        lambda sess: {'equity': NAV, 'non_marginable_buying_power': 3_000.0,
+                                      'buying_power': 2 * NAV, 'multiplier': 2.0, 'fetched': True},
+                        raising=False)
+    acct = rc._load_pooled_account_state()
+    assert acct['non_marginable_buying_power'] == 3_000.0 and acct['multiplier'] == 2.0
+    monkeypatch.setattr(_at, '_fetch_account_state', lambda sess: {'equity': 0.0, 'fetched': False},
+                        raising=False)
+    monkeypatch.setattr(rc, '_load_account_state', lambda: {'equity': NAV})
+    assert rc._load_pooled_account_state() == {'equity': NAV}       # fetch failed ⇒ legacy dict

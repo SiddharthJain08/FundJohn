@@ -8,7 +8,7 @@ Pure helpers for regime_blended_sizer._sharpe_cadence_path's crypto block
 Order of operations inside the sizer's crypto block (Task 7):
   stablecoins dropped → acting gate → S_m_crypto hurdle (floor_zero) →
   pooled normaliser → dust → per-ticker cap → cluster cap → BTC corr removal →
-  BTC D-4′ clamp (benchmark_max_nav_frac_crypto) → long-only clamp →
+  BTC 25 % clamp by ticker (benchmark_max_nav_frac_crypto) → long-only clamp →
   crypto_gross_cap → funding_pass (net new buying vs nmbp) → hold-flat.
 """
 from __future__ import annotations
@@ -195,7 +195,7 @@ def shadow_line(crypto_regime, s_m_crypto, before: dict, after: dict, dropped: l
                 funding_shortfall: float | None, hold_flat: bool, mode: str,
                 nav: float | None = None, stable_excluded: int = 0,
                 hold_zeroed: int = 0, short_clamped: int = 0,
-                eq_scale_ratio: float | None = None) -> str:
+                eq_scale_ratio: float | None = None, btc_clamped_usd: float = 0.0) -> str:
     """One line per cycle. `before` = unconstrained crypto USD targets (post
     normaliser, pre caps); `after` = feasible targets (post caps, funding,
     hold-flat) — the shadow review sees both (spec §5.3b). `eq_scale_ratio` =
@@ -210,8 +210,9 @@ def shadow_line(crypto_regime, s_m_crypto, before: dict, after: dict, dropped: l
     top = sorted(((t, round(v)) for t, v in (after or {}).items() if v), key=lambda x: -abs(x[1]))[:8]
     return ('crypto_sizing.%s[%s]: S_m=%s n=%d gross=%.0f%s unconstrained=%.0f lam_nav=%.0f '
             'cap_shaved=%.0f funding_bind=%s hold=%d hold_zeroed=%d short_clamped=%d '
-            'stable_excluded=%d eq_scale_ratio=%s dropped=%d bench=%s top=%s' % (
+            'stable_excluded=%d eq_scale_ratio=%s btc_clamped_usd=%.0f dropped=%d bench=%s top=%s' % (
                 mode, crypto_regime, _fmt_s_m(s_m_crypto), n, g1, pct, g0, lam_nav,
                 gross_cap_shaved, fb, 1 if hold_flat else 0, hold_zeroed, short_clamped,
                 stable_excluded, 'na' if eq_scale_ratio is None else '%.4f' % eq_scale_ratio,
+                btc_clamped_usd,
                 len(dropped or []), sorted(bench_tkrs or ()), top))

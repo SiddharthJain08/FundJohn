@@ -1591,6 +1591,32 @@ def _maybe_flatten_zero_conviction(active, regime_state, ticker_meta, nav, confi
 # tests can stub it without reaching Postgres / Redis.
 
 CRYPTO_SIZING_LAST_LINE_KEY = 'crypto_sizing_last_line'
+BTC_TICKER = 'BTC-USD'
+
+
+def _post_crypto_sizing_line(line: str) -> None:
+    """Post the crypto_sizing.* line to #botjohn-log, UNGATED (final-review
+    M-2: _post_corr_cumsharpe_log self-expires on pipeline_config
+    corr_cumsharpe_log_until, so the shadow-review line would never arrive).
+    Same webhook lookup + urllib/User-Agent mechanism; posts in a crypto
+    redeploy too (not _REDEPLOY_QUIET-gated). Fail-open: never raises."""
+    try:
+        import psycopg2
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            cur.execute("SELECT webhook_urls->>'botjohn-log' FROM agent_registry "
+                        "WHERE webhook_urls->>'botjohn-log' IS NOT NULL LIMIT 1")
+            wrow = cur.fetchone()
+        url = wrow[0] if wrow else None
+        if not url:
+            return
+        import json as _json
+        import urllib.request as _ur
+        req = _ur.Request(url, data=_json.dumps({'content': line[:1900]}).encode(), method='POST',
+                          headers={'Content-Type': 'application/json',
+                                   'User-Agent': 'fundjohn-sizer/1.0'})
+        _ur.urlopen(req, timeout=8).read()
+    except Exception as e:  # noqa: BLE001
+        logger.warning('crypto_sizing: discord post skipped (%s)', e)
 
 
 def _strategy_classes() -> dict[str, str]:
@@ -1746,6 +1772,7 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
     hold = False
     n_held = 0
     n_short = 0
+    btc_clamped = 0.0
     bench_cr: set = set()
     gate_net: dict = {}
     if meta:
@@ -1809,10 +1836,14 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
                         targets[t] = math.copysign(cap, usd)
             targets = _apply_asset_corr_cap(targets, gate_net, nav, lam=lam_global, exclude=exempt)
             targets = _apply_benchmark_corr_removal(targets, exempt, nav)
+            # BTC 25 % NAV cap BY TICKER (final-review ruling): BTC-USD is
+            # clamped whenever it carries a crypto target, sleeve-qualified or
+            # not; the S_m hurdle alone stays sleeve-dependent.
             max_btc = _bsz.benchmark_max_nav_frac(instrument_class='crypto') * nav
-            for t in bench_cr:
+            for t in set(bench_cr) | ({BTC_TICKER} & set(targets)):
                 usd = targets.get(t)
                 if usd is not None and abs(usd) > max_btc:
+                    btc_clamped += abs(usd) - max_btc
                     targets[t] = math.copysign(max_btc, usd)
             targets, n_short = _ps.clamp_long_only(targets)
             targets, shaved = _ps.crypto_gross_cap(targets, nav, _bsz.crypto_gross_max_nav_frac())
@@ -1844,10 +1875,11 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
         crypto_regime_state, s_m, before_usd, targets, dropped, bench_cr, lam_global * nav,
         gross_cap_shaved=shaved, funding_shortfall=shortfall, hold_flat=hold, mode=mode,
         nav=nav, stable_excluded=n_stable, hold_zeroed=n_held, short_clamped=n_short,
-        eq_scale_ratio=(eq_gross / (eq_gross + res['gross_w'])) if eq_gross > 0 else None)
+        eq_scale_ratio=(eq_gross / (eq_gross + res['gross_w'])) if eq_gross > 0 else None,
+        btc_clamped_usd=btc_clamped)
     logger.info(res['line'])
     if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
-        _post_corr_cumsharpe_log(res['line'])
+        _post_crypto_sizing_line(res['line'])
     _write_crypto_sizing_last_line(res['line'])
     return res
 
@@ -3261,7 +3293,9 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
         elif abs(target) > abs(current):
             out[tkr] = (1.0 if current > 0 else -1.0) * abs(current)
 
-    for tkr in [t for t in target_usd if not _is_occ_symbol(t) and '/' not in t]:
+    # Crypto (internal 'BTC-USD' or broker '/') is out of scope: the hygiene
+    # gate is equity-designed (final-review ruling 2026-11-12).
+    for tkr in [t for t in target_usd if not _is_occ_symbol(t) and not _is_crypto_key(t)]:
         if tkr not in out:
             continue
         target = out[tkr]
@@ -3395,7 +3429,8 @@ def _apply_account_breaker_gate(target_usd, broker, *, halted=None,
     out = dict(target_usd)
     blocked, unflipped, capped = [], [], []
     for tkr in [t for t in target_usd
-                if t not in bench_tkrs and not _is_occ_symbol(t) and '/' not in t]:
+                if t not in bench_tkrs and not _is_occ_symbol(t) and not _is_crypto_key(t)]:
+        # crypto skipped: it has its own Phase 2 breaker (final-review ruling)
         action = _clamp_to_held(out, tkr, broker)
         if action == 'blocked':
             blocked.append(tkr)
@@ -3528,7 +3563,8 @@ def _apply_macro_event_gate(target_usd, broker, *, session=None, events=None,
     blocked, capped = [], []
     if events:
         for tkr in [t for t in (target_usd or {})
-                    if t not in exempt and not _is_occ_symbol(t) and '/' not in t]:
+                    if t not in exempt and not _is_occ_symbol(t) and not _is_crypto_key(t)]:
+            # crypto skipped: equity-designed macro calendar (final-review ruling)
             action = _clamp_to_held(work, tkr, broker)
             if action in ('blocked', 'unflipped'):
                 # both are "this entry is refused"; the shadow line reports

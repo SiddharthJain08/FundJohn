@@ -57,11 +57,13 @@ def main(argv=None) -> int:
 
     from execution.crypto_redeploy_sizer import size_crypto_positions
     from regime.crypto_regime import load_crypto_regime_state
-    account_state = _load_account_state()
-    crypto_regime = load_crypto_regime_state()
-    signals_loader = _make_crypto_signals_loader()
     from execution.pooled_sizing import pooled_sizing_enabled
     _pooled = pooled_sizing_enabled()
+    # Pooled: the FULL account snapshot the 15:00 trade step uses (incl.
+    # non_marginable_buying_power, so the funding pass runs); legacy unchanged.
+    account_state = _load_pooled_account_state() if _pooled else _load_account_state()
+    crypto_regime = load_crypto_regime_state()
+    signals_loader = _make_crypto_signals_loader()
     # Crypto engine Phase 3 (Task 8): flag ON ⇒ size_crypto_positions re-runs
     # the POOLED sizer and keeps only its crypto orders (signals self-loaded;
     # signals_loader is the legacy budget model's input only).
@@ -115,6 +117,20 @@ def _load_account_state() -> dict:
     except Exception:
         pass
     return {'equity': 0.0}
+
+
+def _load_pooled_account_state() -> dict:
+    """Full Alpaca account snapshot (alpaca_trader._fetch_account_state), as the
+    15:00 trade step reads it. Fetch failure ⇒ the legacy {'equity': …} dict
+    (logged): the funding pass then sees nmbp unknown and is a no-op."""
+    try:
+        from execution.alpaca_trader import _alpaca_session, _fetch_account_state
+        acct = _fetch_account_state(_alpaca_session())
+        if isinstance(acct, dict) and acct.get('fetched') is not False:
+            return acct
+    except Exception as e:  # noqa: BLE001
+        print(f'[crypto-redeploy] full account fetch failed ({e}) — equity-only snapshot')
+    return _load_account_state()
 
 
 def _make_crypto_signals_loader():
