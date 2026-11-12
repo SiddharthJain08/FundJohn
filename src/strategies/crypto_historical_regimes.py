@@ -72,13 +72,13 @@ SMOOTH_DAYS = 5
 ANNUALISE   = 365
 
 # >>> CRYPTO_RV_TIERS (rewritten by scripts/calibrate_crypto_regime_tiers.py --write)
-# calibrated 2026-11-10 on BTC-USD rv30_smoothed 2026-05-26..2026-11-10 (143 days in the prices master)
-# targets measured from crypto_regime_states by the controller 2026-11-10 21:39Z (daily mode of hourly states); passed via --frequencies; --db rerun owed at merge
-# targets: LOW_VOL 0.414, TRANSITIONING 0.308, HIGH_VOL 0.118, CRISIS 0.160
+# calibrated 2026-11-12 on BTC-USD rv30_smoothed 2026-05-26..2026-11-12 (171 days in the prices master)
+# targets read from crypto_regime_states 2026-05-26..2026-11-12 via --db (daily mode of hourly states)
+# targets: LOW_VOL 0.409, TRANSITIONING 0.316, HIGH_VOL 0.117, CRISIS 0.158
 CRYPTO_RV_TIERS: tuple[tuple[float, str], ...] = (
-    (0.3597795949784727, 'LOW_VOL'),
-    (0.4309998535210531, 'TRANSITIONING'),
-    (0.48576732147008633, 'HIGH_VOL'),
+    (0.33914348477392137, 'LOW_VOL'),
+    (0.42642386765001644, 'TRANSITIONING'),
+    (0.43330851816852767, 'HIGH_VOL'),
     # > t3 → CRISIS (the catch-all)
 )
 # <<< CRYPTO_RV_TIERS
