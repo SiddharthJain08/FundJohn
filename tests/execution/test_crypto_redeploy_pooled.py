@@ -182,3 +182,139 @@ def test_script_legacy_mode_unchanged(monkeypatch, capsys):
                                       'pct_nav': 0.1, 'strategy_id': 'crypto_redeploy'}])
     assert len(sent) == 1 and '_wave' not in sent[0]
     assert 'sizing mode: legacy_budget' in capsys.readouterr().out
+
+
+# ── fix round 1: the pooled redeploy pass is QUIET on the equity side ────────
+
+def _harness():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        '_pooled_shadow_harness', ROOT / 'tests' / 'execution' / 'test_sizer_pooled_shadow.py')
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _record_posts(monkeypatch, h):
+    import execution.regime_blended_sizer as _rbs
+    import execution.qp_shadow_sizer as _qps
+    h.ops, h.qp = [], []
+    monkeypatch.setattr(_rbs, '_post_ops_alert', lambda line: h.ops.append(line))
+    monkeypatch.setenv('OPENCLAW_QP_SHADOW', '1')
+    monkeypatch.setattr(_qps, 'qp_shadow_enabled', lambda: True)
+    monkeypatch.setattr(_qps, 'build_caps', lambda *a, **k: {})
+    monkeypatch.setattr(_qps, 'run_qp_shadow', lambda *a, **k: h.qp.append(1))
+
+
+def _drive(monkeypatch, *, via_redeploy):
+    hm = _harness()
+    import execution.regime_blended_sizer as _rbs
+    h = hm.H()
+    _record_posts(monkeypatch, h)
+    if via_redeploy:
+        def _as_redeploy(*, signals, account_state, regime, run_date, strategy_state,
+                         regime_params, confirmer=None, crypto_regime_state=None, crypto_params=None):
+            return crs._default_pooled_runner(account_state, regime['state'], regime_params,
+                                              crypto_regime_state, crypto_params)
+        monkeypatch.setattr(_rbs, 'size_positions', _as_redeploy)
+    # run() deletes OPENCLAW_QP_SHADOW; qp_shadow_enabled is patched True above.
+    orders, h = hm.run(monkeypatch, pooled=True, lane='sameday', bench_flag=True, h=h)
+    return orders, h, hm
+
+
+def test_redeploy_pass_posts_no_equity_lines_but_the_crypto_line(monkeypatch):
+    import execution.regime_blended_sizer as _rbs
+    orders, h, hm = _drive(monkeypatch, via_redeploy=True)
+    assert _rbs._REDEPLOY_QUIET is False                     # restored by try/finally
+    assert hm.cr_t(orders), 'crypto targets must still be sized'
+    assert h.lines and all(l.startswith('crypto_sizing.apply[') for l in h.lines), h.lines
+    assert h.written and h.written[-1].startswith('crypto_sizing.apply[')
+    assert h.ops == [] and h.qp == []
+
+
+def test_daily_pass_still_posts_equity_lines(monkeypatch):
+    # control: the same book through the daily entry point posts the equity
+    # lines + runs the QP shadow (so the quiet assertion above is not vacuous).
+    _, h, _ = _drive(monkeypatch, via_redeploy=False)
+    assert any(not l.startswith('crypto_sizing.') for l in h.lines)
+    assert h.qp
+
+
+def test_quiet_flag_restored_when_the_pass_raises(monkeypatch):
+    import execution.regime_blended_sizer as _rbs
+
+    def _boom(*a, **k):
+        assert _rbs._REDEPLOY_QUIET is True
+        raise RuntimeError('x')
+    monkeypatch.setattr(_rbs, '_sharpe_cadence_path', _boom)
+    with pytest.raises(RuntimeError):
+        crs._default_pooled_runner({'equity': NAV}, 'LOW_VOL', {}, 'HIGH_VOL', {})
+    assert _rbs._REDEPLOY_QUIET is False
+
+
+def test_quiet_silences_equity_flatten_alert_only(monkeypatch):
+    import execution.regime_blended_sizer as _rbs
+    monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
+    monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')
+    monkeypatch.setenv('OPENCLAW_FLATTEN_ON_ZERO_CONVICTION', '1')
+    monkeypatch.delenv('OPENCLAW_INTRADAY_REDEPLOY', raising=False)
+    monkeypatch.setattr(_rbs, '_load_broker_positions_usd', lambda: {'AAPL': 1e3, 'BTC-USD': 5e2})
+    alerts = []
+    monkeypatch.setattr(_rbs, '_post_flatten_alert', lambda *a, **k: alerts.append(a))
+    monkeypatch.setattr(_rbs, '_emit_orders_from_targets', lambda *a, **k: ['x'])
+    active = [{'strategy_id': 's', 'ticker': 'T%d' % i} for i in range(_rbs.SIGNAL_SET_MIN_FLOOR)]
+    args = (active, 'LOW_VOL', {}, NAV, None, None, {}, {}, {}, {'equity': NAV}, [])
+    monkeypatch.setattr(_rbs, '_REDEPLOY_QUIET', True)
+    _rbs._maybe_flatten_zero_conviction(*args, instrument_class='equity')
+    assert alerts == []
+    _rbs._maybe_flatten_zero_conviction(*args, instrument_class='crypto')
+    assert len(alerts) == 1                                  # crypto flatten alert still posts
+    monkeypatch.setattr(_rbs, '_REDEPLOY_QUIET', False)
+    _rbs._maybe_flatten_zero_conviction(*args, instrument_class='equity')
+    assert len(alerts) == 2                                  # daily lane unchanged
+
+
+# ── fix round 1: equity regime resolved like the live trade step ─────────────
+
+class _FCur:
+    def __init__(self, regime_row, params_row):
+        self.regime_row, self.params_row, self.sql = regime_row, params_row, []
+        self._n = None
+
+    def execute(self, sql, params=None):
+        self.sql.append(sql)
+        self._n = self.regime_row if 'market_regime' in sql else self.params_row
+
+    def fetchone(self):
+        return self._n
+
+
+class _FConn:
+    def __init__(self, cur):
+        self.c = cur
+
+    def cursor(self, **k):
+        return self.c
+
+
+def test_equity_regime_from_handoff_first():
+    cur = _FCur({'state': 'CRISIS'}, {'liquidity_param': 0.5})
+    st, p = crs._load_equity_regime_and_params(
+        '2026-11-12', conn=_FConn(cur), handoff_reader=lambda d: {'regime': {'state': 'HIGH_VOL'}})
+    assert st == 'HIGH_VOL' and p == {'liquidity_param': 0.5}
+    assert not any('market_regime' in s for s in cur.sql)
+
+
+def test_equity_regime_falls_back_to_market_regime():
+    cur = _FCur({'state': 'CRISIS'}, None)
+    st, p = crs._load_equity_regime_and_params('2026-11-12', conn=_FConn(cur),
+                                               handoff_reader=lambda d: None)
+    assert st == 'CRISIS' and p == {'liquidity_param': 1.0, 'position_circuit_breaker_pct': 0.02}
+
+
+def test_equity_regime_absent_fails_closed():
+    def _bad(d):
+        raise OSError('no handoff')
+    st, p = crs._load_equity_regime_and_params('2026-11-12', conn=_FConn(_FCur(None, None)),
+                                               handoff_reader=_bad)
+    assert (st, p) == (None, None)

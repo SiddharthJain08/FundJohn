@@ -208,6 +208,16 @@ def _size_positions_impl(
                                 crypto_params=crypto_params)
 
 
+# Crypto engine Phase 3, Task 8 fix round 1: set (try/finally) by
+# crypto_redeploy_sizer._default_pooled_runner for the 24/7 pooled crypto
+# redeploy pass, whose EQUITY orders are discarded. Honoured ONLY at the
+# equity-side post sites (zero-conviction equity flatten alert, weights-gap +
+# shed-benchmark ops alerts, corr_cumsharpe.live + bench lines) and the QP
+# shadow; the crypto flatten alert and the crypto_sizing line + its
+# pipeline_config write still post. Never set by the daily/intraday lanes.
+_REDEPLOY_QUIET = False
+
+
 @functools.wraps(_size_positions_impl)
 def size_positions(*args, **kwargs):
     """B6: brackets the sizer so EVERY exit path (empty signals, acting gate,
@@ -823,7 +833,8 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float],
                      'from the conviction gate: %s — rerun the weights rebuild to admit them'
                      % (len(gap_sids), ', '.join(gap_sids)))
         logger.warning(_gap_line)
-        _post_ops_alert('⚠️ ' + _gap_line)
+        if not (_REDEPLOY_QUIET and tuple(_classes) != ('crypto',)):
+            _post_ops_alert('⚠️ ' + _gap_line)
 
     dropped_untradable = 0
     dropped_stale = 0
@@ -1564,7 +1575,8 @@ def _maybe_flatten_zero_conviction(active, regime_state, ticker_meta, nav, confi
                    'healthy carried set (%d signal(s)) fully rejected by the acting-'
                    'strategy gate in %s; flattening %d broker position(s)',
                    len(active), regime_state, len(broker))
-    _post_flatten_alert(regime_state, len(active), broker)
+    if not (_REDEPLOY_QUIET and instrument_class != 'crypto'):
+        _post_flatten_alert(regime_state, len(active), broker)
     _warn_options_dropped_no_equity_scale(opt_active, 'zero-conviction flatten')
     return _emit_orders_from_targets(
         {}, ticker_meta, nav, confirmer, _ortho_groups, sharpe_by_strat,
@@ -2286,7 +2298,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.info(_line)
         # Post once per daily cycle only (skip the every-5-min intraday redeploy lane
         # to avoid #botjohn-log spam); the post self-expires via pipeline_config.
-        if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
+        if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1' and not _REDEPLOY_QUIET:
             _post_corr_cumsharpe_log(_line)
     except Exception as e:
         logger.warning('corr_cumsharpe.live diag failed (%s)', e)
@@ -2384,7 +2396,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                                   budget_mode='apply' if _apply_budget else 'shadow',
                                   beta_usd_cap=_bsz.benchmark_max_nav_frac() * nav)
         logger.info(_bline)
-        if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
+        if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1' and not _REDEPLOY_QUIET:
             _post_corr_cumsharpe_log(_bline)
         if _bench_on and not _bench_tkrs:
             logger.warning('bench_sizing: flag ON but no net-direction-qualified benchmark ticker '
@@ -2495,7 +2507,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # B6: QP-shadow tracking target h = post-scale PRE-cap snapshot (before dust,
     # per-ticker cap, cluster cap, bench-corr removal, SPY NAV clamp).
     try:
-        _qp_h = dict(target_usd) if _qps.qp_shadow_enabled() else None
+        _qp_h = dict(target_usd) if (_qps.qp_shadow_enabled() and not _REDEPLOY_QUIET) else None
     except Exception:  # noqa: BLE001 — shadow must never raise into sizing
         _qp_h = None
 
@@ -2668,7 +2680,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # Option delta-hedge names injected after the snapshot are NOT in h, so they
     # are outside the shadow tokens (the QP and its comparison cover equity names only).
     _qp_broker = None
-    if _qps.qp_shadow_enabled():
+    if _qps.qp_shadow_enabled() and not _REDEPLOY_QUIET:
         try:
             _qp_broker = _load_broker_positions_usd()
             _net_on, _net_frac = _load_net_cap_cfg()
@@ -2732,7 +2744,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                           % (sorted(_bench_tkrs),))
             logger.warning(_shed_line)
             try:
-                _post_ops_alert('⚠️ ' + _shed_line)
+                if not _REDEPLOY_QUIET:
+                    _post_ops_alert('⚠️ ' + _shed_line)
             except Exception as _e:      # belt-and-braces: an alert must never abort sizing
                 logger.warning('bench_sizing: shed-benchmark alert post skipped (%s)', _e)
     return _orders

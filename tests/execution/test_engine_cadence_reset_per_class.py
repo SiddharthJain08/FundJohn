@@ -7,7 +7,7 @@ resolved from crypto_regime_states at the newest crypto row's created_at.
 No DB / Redis: a fake cursor answers by SQL shape.
 """
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -106,7 +106,8 @@ def test_crypto_probe_scoped_to_crypto_rows_in_a_savepoint():
     sqls = [s for s, _ in cur.executed]
     assert sqls[0] == 'SAVEPOINT sp_crypto_flip_probe'
     assert 'es.strategy_id = ANY(%s)' in sqls[1] and cur.executed[1][1] == (sorted(CRYPTO_IDS),)
-    assert 'crs.ts_utc <= es.created_at' in sqls[1]
+    assert 'crs.created_at <= es.created_at' in sqls[1] and 'ts_utc' not in sqls[1]
+    assert "es.signal_params->>'crypto_regime'" in sqls[1]
     assert sqls[2] == 'RELEASE SAVEPOINT sp_crypto_flip_probe'
 
 
@@ -210,3 +211,91 @@ def test_run_strategies_without_cursor_never_probes(monkeypatch):
     cr_s = _Rec('S_cr')
     engine.run_strategies([cr_s], None, {'state': 'LOW_VOL'}, [], {})
     assert called == [] and 'cadence_reset' not in cr_s.seen
+
+
+# ── fix round 1: the prior is the state the run actually used ───────────────
+
+class _SemanticCur:
+    """Evaluates the crypto probe against in-memory rows the way Postgres
+    would, honouring whichever tick column the SQL orders/filters on."""
+    def __init__(self, signal_row, ticks):
+        self.signal_row = signal_row          # {'created_at', 'signal_params'}
+        self.ticks = ticks                    # [(ts_utc, created_at, state)]
+        self.executed = []
+        self._next = None
+
+    def execute(self, sql, params=None):
+        self.executed.append(sql)
+        if 'crypto_regime_states' not in sql:
+            return
+        r = self.signal_row
+        if r is None:
+            self._next = None
+            return
+        stamped = None
+        if "signal_params->>'crypto_regime'" in sql:
+            stamped = (r.get('signal_params') or {}).get('crypto_regime')
+        col = 1 if 'crs.created_at <= es.created_at' in sql else 0
+        cand = [t for t in self.ticks if r['created_at'] and t[col] <= r['created_at']]
+        tick_state = max(cand, key=lambda t: t[col])[2] if cand else None
+        self._next = (r['created_at'], stamped or tick_state)
+
+    def fetchone(self):
+        return self._next
+
+
+H15 = datetime(2026, 11, 11, 20, 0, tzinfo=timezone.utc)      # 15:00 ET
+TICKS = [(H15 - timedelta(hours=1), H15 - timedelta(minutes=57), 'HIGH_VOL'),
+         (H15, H15 + timedelta(minutes=3), 'LOW_VOL')]           # HH:00 tick lands at HH:03
+ROW_LEGACY = {'created_at': H15 + timedelta(seconds=30), 'signal_params': {}}
+
+
+def test_hour_boundary_no_invented_flip():
+    # The 15:00:30 run read the 14:03 JSON (HIGH_VOL); the 15:00 tick (LOW_VOL)
+    # was inserted at 15:03. Still HIGH_VOL now ⇒ NO flip (ts_utc would invent one).
+    cr = {'state': 'HIGH_VOL'}
+    engine._stamp_crypto_cadence_reset_on_flip(_SemanticCur(ROW_LEGACY, TICKS), cr)
+    assert 'cadence_reset' not in cr
+
+
+def test_hour_boundary_no_hidden_flip():
+    # Same rows; the next run reads LOW_VOL ⇒ a REAL flip (ts_utc would hide it).
+    cr = {'state': 'LOW_VOL'}
+    engine._stamp_crypto_cadence_reset_on_flip(_SemanticCur(ROW_LEGACY, TICKS), cr)
+    assert cr.get('cadence_reset') is True
+
+
+def test_stamped_key_wins_over_tick_table():
+    row = {'created_at': H15 + timedelta(seconds=30), 'signal_params': {'crypto_regime': 'CRISIS'}}
+    steady, flipped = {'state': 'CRISIS'}, {'state': 'LOW_VOL'}
+    engine._stamp_crypto_cadence_reset_on_flip(_SemanticCur(row, TICKS), steady)
+    engine._stamp_crypto_cadence_reset_on_flip(_SemanticCur(row, TICKS), flipped)
+    assert 'cadence_reset' not in steady and flipped.get('cadence_reset') is True
+
+
+def test_fallback_without_any_prior_tick_never_stamps():
+    row = {'created_at': H15 - timedelta(hours=5), 'signal_params': {}}
+    cr = {'state': 'LOW_VOL'}
+    engine._stamp_crypto_cadence_reset_on_flip(_SemanticCur(row, TICKS), cr)
+    assert 'cadence_reset' not in cr
+
+
+class _Sig:
+    def __init__(self):
+        self.signal_params = {'k': 1}
+
+
+class _Emit:
+    def __init__(self, sid):
+        self.id = sid
+
+    def generate_signals(self, prices, regime, universe, aux_data):
+        return [_Sig()]
+
+
+def test_run_strategies_stamps_crypto_regime_on_crypto_rows_only(monkeypatch):
+    _wire(monkeypatch)
+    res = engine.run_strategies([_Emit('S_eq'), _Emit('S_cr')], None, {'state': 'TRANSITIONING'},
+                                [], {})
+    assert res['S_cr'][0].signal_params == {'k': 1, 'crypto_regime': 'LOW_VOL'}
+    assert res['S_eq'][0].signal_params == {'k': 1}

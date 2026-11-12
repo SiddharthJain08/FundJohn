@@ -1833,9 +1833,11 @@ def _stamp_crypto_cadence_reset_on_flip(cur, crypto_regime) -> None:
     execution_signals.regime_state stamp carries the EQUITY label for every
     row (write_signals stamps one regime per run — deliberately unchanged,
     see the Task 8 report: the live co-firing similarity leg and the sizer's
-    weights-gap audit read that label), so the prior crypto regime is
-    resolved from crypto_regime_states AT the newest crypto-strategy row's
-    created_at. Mismatch with today's crypto state ⇒
+    weights-gap audit read that label), so the prior crypto regime is the
+    newest crypto-strategy row's signal_params.crypto_regime (the state that
+    run actually used, stamped in run_strategies), falling back — for rows
+    minted before that stamp — to the newest crypto_regime_states row INSERTED
+    at or before the signal row's created_at. Mismatch with today's crypto state ⇒
     crypto_regime['cadence_reset']=True, which only the crypto strategies
     receive (run_strategies hands them this dict, never the equity one).
 
@@ -1868,11 +1870,18 @@ def _stamp_crypto_cadence_reset_on_flip(cur, crypto_regime) -> None:
         logger.warning('[engine] crypto flip probe: savepoint failed (%s) — no stamp', e)
         return
     try:
+        # Prior = the crypto regime the newest crypto row's run ACTUALLY used
+        # (signal_params.crypto_regime, stamped by run_strategies). Rows minted
+        # before that stamp existed fall back to the newest crypto_regime_states
+        # row INSERTED (created_at — never the hour-truncated ts_utc, whose row
+        # lands minutes after HH:00 and before the JSON the engine reads) at or
+        # before the signal row's created_at.
         cur.execute("""SELECT es.created_at,
-                              (SELECT crs.state FROM crypto_regime_states crs
-                                WHERE es.created_at IS NOT NULL
-                                  AND crs.ts_utc <= es.created_at
-                                ORDER BY crs.ts_utc DESC LIMIT 1) AS crypto_state
+                              COALESCE(es.signal_params->>'crypto_regime',
+                                (SELECT crs.state FROM crypto_regime_states crs
+                                  WHERE es.created_at IS NOT NULL
+                                    AND crs.created_at <= es.created_at
+                                  ORDER BY crs.created_at DESC LIMIT 1)) AS crypto_state
                          FROM execution_signals es
                         WHERE es.strategy_id = ANY(%s)
                         ORDER BY es.signal_date DESC, es.created_at DESC NULLS LAST
@@ -2490,6 +2499,14 @@ def run_strategies(strategies, prices, regime, universe, aux_data,
                 for _s in signals:
                     _s.signal_params = {**(getattr(_s, 'signal_params', None) or {}),
                                         'calendar_edge': True}
+            if signals and ic == 'crypto' and strat_regime_str:
+                # Task 8 fix round 1: record the crypto regime THIS run used
+                # (crypto rows only; equity rows untouched) so the next run's
+                # crypto flip probe compares against what was actually read,
+                # not an hour-truncated crypto_regime_states tick.
+                for _s in signals:
+                    _s.signal_params = {**(getattr(_s, 'signal_params', None) or {}),
+                                        'crypto_regime': strat_regime_str}
             results[strat.id] = signals or []
             # Per-strategy input diagnostics (§2 Phase A, 2026-08-06 spec): 36
             # approved strategies ran clean and returned [] on every live day

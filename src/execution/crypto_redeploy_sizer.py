@@ -37,44 +37,59 @@ def _dir_to_int(d) -> int:
     return 1 if s in ('long', 'buy', '1') else (-1 if s in ('short', 'sell', '-1') else 0)
 
 
-_EQUITY_REGIME_FILE = ('.agents', 'market-state', 'regime_latest.json')
+def _read_structured_handoff(run_date_str: str):
+    from execution.handoff import read_handoff
+    return read_handoff(run_date_str, 'structured')
 
 
-def _load_equity_regime_and_params() -> tuple[str | None, dict | None]:
-    """Equity regime-of-record (regime_latest.json, file-primary like the
-    engine + handoff builder, same ENGINE_REGIME_FAIL_HOURS staleness bound)
-    and its regime_sizer_params row. Fail-closed: (None, None) ⇒ the pooled
-    redeploy emits nothing (crypto HELD) rather than sizing against an
-    unknown equity book."""
-    import json, os, time
-    from pathlib import Path
-    p = Path(__file__).resolve().parents[2].joinpath(*_EQUITY_REGIME_FILE)
+def _load_equity_regime_and_params(run_date_str: str | None = None, *, conn=None,
+                                   handoff_reader=None) -> tuple[str | None, dict | None]:
+    """Equity regime + its regime_sizer_params row, resolved EXACTLY as the live
+    trade step does (regime_blended_sizer_live.main): the day's structured
+    handoff regime, falling back to the newest market_regime row. Fail-closed:
+    (None, None) ⇒ the pooled redeploy emits nothing (crypto HELD) rather than
+    sizing against an unknown equity regime."""
+    import os
+    from datetime import date as _date
+    run_date_str = run_date_str or _date.today().isoformat()
+    state = None
     try:
-        age_h = (time.time() - p.stat().st_mtime) / 3600.0
-        if age_h > float(os.environ.get('ENGINE_REGIME_FAIL_HOURS', '80')) \
-                and os.environ.get('OPENCLAW_ALLOW_STALE_REGIME') != '1':
-            logger.warning('[crypto_redeploy] equity regime file stale (%.1fh)', age_h)
-            return None, None
-        state = (json.loads(p.read_text()) or {}).get('state')
-    except (OSError, ValueError) as e:
-        logger.warning('[crypto_redeploy] equity regime unreadable (%s)', e)
-        return None, None
-    if not state:
-        return None, None
-    params = {'liquidity_param': 1.0, 'position_circuit_breaker_pct': 0.02}
+        h = (handoff_reader or _read_structured_handoff)(run_date_str)
+        hr = (h or {}).get('regime') if isinstance(h, dict) else None
+        if isinstance(hr, dict):
+            state = hr.get('state')
+    except Exception as e:  # noqa: BLE001 — no handoff ⇒ DB fallback
+        logger.info('[crypto_redeploy] structured handoff unreadable (%s); market_regime fallback', e)
+    own = conn is None
     try:
-        import psycopg2, psycopg2.extras
-        conn = psycopg2.connect(os.environ['POSTGRES_URI'])
+        if own:
+            import psycopg2
+            conn = psycopg2.connect(os.environ['POSTGRES_URI'])
         try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT * FROM regime_sizer_params WHERE regime_state = %s", (state,))
-                row = cur.fetchone()
-                if row:
-                    params = dict(row)
-        finally:
-            conn.close()
-    except Exception as e:  # noqa: BLE001 — same default as regime_blended_sizer_live
-        logger.warning('[crypto_redeploy] equity params load failed (%s); defaults', e)
+            import psycopg2.extras as _ex
+            cur = conn.cursor(cursor_factory=_ex.RealDictCursor)
+        except Exception:  # noqa: BLE001 — fakes
+            cur = conn.cursor()
+        if not state:
+            cur.execute("SELECT state FROM market_regime ORDER BY updated_at DESC LIMIT 1")
+            row = cur.fetchone()
+            state = (row or {}).get('state') if row else None
+        if not state:
+            logger.warning('[crypto_redeploy] no equity regime (handoff + market_regime empty)')
+            return None, None
+        cur.execute("SELECT * FROM regime_sizer_params WHERE regime_state = %s", (state,))
+        prow = cur.fetchone()
+    except Exception as e:  # noqa: BLE001
+        logger.warning('[crypto_redeploy] equity regime/params load failed (%s)', e)
+        return None, None
+    finally:
+        if own and conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+    params = dict(prow) if prow else {'liquidity_param': 1.0,
+                                      'position_circuit_breaker_pct': 0.02}
     return state, params
 
 
@@ -88,11 +103,18 @@ def _default_pooled_runner(account_state, equity_regime, equity_params,
     redeploy must never consume it. signals=[] because the body self-loads
     every signal from execution_signals (the parameter is only the legacy
     fallback when the equity active window is empty; there is no handoff
-    here)."""
+    here). Runs QUIET (regime_blended_sizer._REDEPLOY_QUIET)."""
     from execution import regime_blended_sizer as _rbs
-    return _rbs._sharpe_cadence_path([], account_state, equity_regime, equity_params, None,
-                                     crypto_regime_state=crypto_regime,
-                                     crypto_params=crypto_params)
+    # Quiet pass (fix round 1): the equity orders are discarded, so no equity
+    # alert/line may post and the QP shadow is skipped; crypto posts still fire.
+    _prev = _rbs._REDEPLOY_QUIET
+    _rbs._REDEPLOY_QUIET = True
+    try:
+        return _rbs._sharpe_cadence_path([], account_state, equity_regime, equity_params, None,
+                                         crypto_regime_state=crypto_regime,
+                                         crypto_params=crypto_params)
+    finally:
+        _rbs._REDEPLOY_QUIET = _prev
 
 
 def _to_executor_orders(raw: list[dict], nav: float) -> list[dict]:
