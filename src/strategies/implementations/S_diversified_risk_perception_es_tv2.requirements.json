@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_diversified_risk_perception_es_tv2",
+  "required": ["prices"],
+  "optional": []
+}

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_garch_copula_cvar_scenario",
+  "required": ["prices"],
+  "optional": []
+}

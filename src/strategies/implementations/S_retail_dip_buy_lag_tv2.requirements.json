@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_retail_dip_buy_lag_tv2",
+  "required": ["prices"],
+  "optional": []
+}

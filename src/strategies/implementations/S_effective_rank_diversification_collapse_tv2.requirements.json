@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_effective_rank_diversification_collapse_tv2",
+  "required": ["prices"],
+  "optional": []
+}

@@ -90,7 +90,10 @@ _IMPL_MAP = {
     'low_volatility_us':                      ('strategies.implementations.low_volatility_us',                      'LowVolatilityUS'),
     'S_low_volatility_us_gk63':               ('strategies.implementations.S_low_volatility_us_gk63',               'LowVolatilityUSGK63'),
     'S_cross_sectional_price_momentum':       ('strategies.implementations.S_cross_sectional_price_momentum',       'CrossSectionalPriceMomentum'),
+    'S_diversified_risk_perception_es':       ('strategies.implementations.S_diversified_risk_perception_es',       'DiversifiedRiskPerceptionEs'),
+    'S_diversified_risk_perception_es_tv2':   ('strategies.implementations.S_diversified_risk_perception_es_tv2',   'DiversifiedRiskPerceptionEsTv2'),
     'S_pairs_trading_jump_diffusion_intraday': ('strategies.implementations.S_pairs_trading_jump_diffusion_intraday', 'PairsTradingJumpDiffusionIntraday'),
+    'S_retail_dip_buy_lag_tv2':                ('strategies.implementations.S_retail_dip_buy_lag_tv2',                'RetailDipBuyLagTv2'),
     # Task D3: sector cointegration pairs — offline EG/FDR-gated pair ledger, live z-score edge-trigger entries
     'S_coint_pairs_sector_v2': ('strategies.implementations.S_coint_pairs_sector_v2', 'CointPairsSectorV2'),
     'S_ivol_mispricing_asymmetry': ('strategies.implementations.s_ivol_mispricing_asymmetry', 'IvolMispricingAsymmetry'),
@@ -102,6 +105,7 @@ _IMPL_MAP = {
     'S_fama_french_five_factor':     ('strategies.implementations.S_fama_french_five_factor',     'FamaFrenchFiveFactor'),
     'S_fade_quarterly_theory_q2':     ('strategies.implementations.S_fade_quarterly_theory_q2',     'FadeQuarterlyTheoryQ2'),
     'S_index_trend_filtered_orb':     ('strategies.implementations.S_index_trend_filtered_orb',     'IndexTrendFilteredORB'),
+    'S_five_min_orb_sp500':     ('strategies.implementations.S_five_min_orb_sp500',     'FiveMinORBSP500'),
     'S_renko_kagi_pairs_spread':     ('strategies.implementations.S_renko_kagi_pairs_spread',     'RenkoKagiPairsSpread'),
     'S_expected_idiosyncratic_skewness': ('strategies.implementations.S_expected_idiosyncratic_skewness', 'ExpectedIdiosyncraticSkewness'),
     'S_partial_cointegration_pairs': ('strategies.implementations.S_partial_cointegration_pairs', 'PartialCointegrationPairs'),
@@ -189,6 +193,9 @@ _IMPL_MAP = {
     'S_schur_damped_minvar_shrinkage':   ('strategies.implementations.S_schur_damped_minvar_shrinkage',   'SchurDampedMinVarShrinkage'),
     # Value + Momentum Everywhere — Asness, Moskowitz & Pedersen (2013)
     'S_value_momentum_everywhere':       ('strategies.implementations.S_value_momentum_everywhere',       'ValueMomentumEverywhere'),
+    # Wang, Rachev & Fabozzi (2026) — smooth momentum x low-vol rank interaction
+    'S_momentum_lowvol_interaction':     ('strategies.implementations.S_momentum_lowvol_interaction',     'MomentumLowVolInteraction'),
+    'S_momentum_lowvol_interaction_tv2': ('strategies.implementations.S_momentum_lowvol_interaction_tv2', 'MomentumLowVolInteractionTv2'),
     # Ang et al. 2006 — idiosyncratic volatility puzzle
     'S_idiosyncratic_vol_puzzle':        ('strategies.implementations.s_idiosyncratic_vol_puzzle',        'IdiosyncraticVolPuzzle'),
     # DellaVigna & Pollet 2009: Friday earnings inattention drift (PEAD premium)
@@ -379,6 +386,8 @@ _IMPL_MAP = {
     'S_return_stacking_gold_managed_futures_tv2': ('strategies.implementations.S_return_stacking_gold_managed_futures_tv2', 'ReturnStackingGoldManagedFuturesTv2'),
     'S_rachev_ratio_etf_scenario_opt': ('strategies.implementations.S_rachev_ratio_etf_scenario_opt', 'RachevRatioEtfScenarioOpt'),
     'S_rachev_ratio_etf_scenario_opt_tv2': ('strategies.implementations.S_rachev_ratio_etf_scenario_opt_tv2', 'RachevRatioEtfScenarioOptTv2'),
+    'S_garch_copula_cvar_scenario': ('strategies.implementations.S_garch_copula_cvar_scenario', 'GarchCopulaCvarScenario'),
+    'S_garch_copula_cvar_scenario_tv2': ('strategies.implementations.S_garch_copula_cvar_scenario_tv2', 'GarchCopulaCvarScenarioTv2'),
     'S_pre_earnings_vol_runup': ('strategies.implementations.S_pre_earnings_vol_runup', 'PreEarningsVolRunup'),
     'S_amortized_neural_filter_stat_arb': ('strategies.implementations.S_amortized_neural_filter_stat_arb', 'AmortizedNeuralFilterStatArb'),
     'S_amortized_neural_filter_stat_arb_tv2': ('strategies.implementations.S_amortized_neural_filter_stat_arb_tv2', 'AmortizedNeuralFilterStatArbTv2'),
@@ -552,6 +561,21 @@ _IMPL_MAP = {
     # Ratio, z-score composite, median-split screen, continuously-held SMA state test
     # (force-flattens on screen dropout), monthly rebalance of the full rule
     'S_br_quality_value_sma_crossover_tv2': ('strategies.implementations.S_br_quality_value_sma_crossover_tv2', 'BrQualityValueSmaCrossoverTv2'),
+    # Chan & Chu 2026 (arXiv 2611.10333), variant 1 of 2: 5-estimator hedge-ratio ensemble
+    # (min-var, robust/LAD-proxy, downside-semivariance, 20% tail, 5% ES-tail beta) used as
+    # a cross-estimator-agreement confidence gate, then low/high ensemble-beta anomaly LONG/SHORT
+    'S_adaptive_hedge_ratio_ensemble': ('strategies.implementations.S_adaptive_hedge_ratio_ensemble', 'AdaptiveHedgeRatioEnsemble'),
+    # Chan & Chu 2026 (arXiv 2611.10333), variant 2 of 2: tail-conditional (20% / 5% ES) betas
+    # minus unconditional minimum-variance beta = crash-beta divergence factor, weekly rebalance
+    'S_adaptive_hedge_ratio_ensemble_tv2': ('strategies.implementations.S_adaptive_hedge_ratio_ensemble_tv2', 'AdaptiveHedgeRatioEnsembleTv2'),
+    # Askar 2026 (aligrithm.com), variant 1 of 2: fixed cross-sector equity panel, 60d rolling
+    # correlation eigen-decomposition, effective_rank/n ratio + literal all-assets sign-uniform
+    # PC1 gate -> cut (FLAT) or hold (LONG SPY) overall equity gross exposure
+    'S_effective_rank_diversification_collapse': ('strategies.implementations.S_effective_rank_diversification_collapse', 'EffectiveRankDiversificationCollapse'),
+    # Askar 2026 (aligrithm.com), variant 2 of 2: live-universe panel, 252d rolling
+    # correlation eigen-decomposition, absolute effective-rank floor + 90% majority-sign
+    # PC1 gate -> active SHORT (collapse) / LONG (no collapse) SPY hedge overlay
+    'S_effective_rank_diversification_collapse_tv2': ('strategies.implementations.S_effective_rank_diversification_collapse_tv2', 'EffectiveRankDiversificationCollapseTv2'),
 }
 
 

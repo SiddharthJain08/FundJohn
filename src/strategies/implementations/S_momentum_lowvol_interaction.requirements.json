@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_momentum_lowvol_interaction",
+  "required": ["prices"],
+  "optional": []
+}

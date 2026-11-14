@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_five_min_orb_sp500",
+  "required": ["prices", "prices_30m"],
+  "optional": []
+}

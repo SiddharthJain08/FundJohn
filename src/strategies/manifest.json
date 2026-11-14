@@ -1,7 +1,29 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-11-07T20:45:19.441Z",
+  "updated_at": "2026-11-14T21:31:14.922Z",
   "strategies": {
+    "S_diversified_risk_perception_es_tv2": {
+      "state": "candidate",
+      "state_since": "2026-11-14T19:10:00Z",
+      "metadata": {
+        "canonical_file": "S_diversified_risk_perception_es_tv2.py",
+        "class": "DiversifiedRiskPerceptionEsTv2",
+        "description": "Long the lowest log-sum-exp aggregated multi-model ES (DRP-ES) quintile, variant 2 (Liu, Liu & Shen 2026)"
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_retail_dip_buy_lag_tv2": {
+      "state": "candidate",
+      "state_since": "2026-11-14T19:35:00Z",
+      "metadata": {
+        "canonical_file": "S_retail_dip_buy_lag_tv2.py",
+        "class": "RetailDipBuyLagTv2",
+        "description": "Dip at t-1 + today turnover z>=+1.0 vs own 60d -> LONG, cross-sectional pressure rank sizing, 2-session hold; variant 2 of S_retail_dip_buy_lag (Askar 2026)"
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
     "S_leadlag_cluster_minirocket_v2": {
       "state": "live",
       "state_since": "2026-09-05T20:37:51.919Z",
@@ -35,8 +57,8 @@
       "instrument_class": "equity"
     },
     "S_beta_btc": {
-      "state": "candidate",
-      "state_since": "2026-11-10T21:00:00.000Z",
+      "state": "live",
+      "state_since": "2026-11-14T21:05:30.708Z",
       "metadata": {
         "canonical_file": "S_beta_btc.py",
         "class": "BetaBtc",
@@ -44,9 +66,7 @@
         "benchmark_sleeve": true,
         "eligible_regimes": [
           "LOW_VOL",
-          "TRANSITIONING",
-          "HIGH_VOL",
-          "CRISIS"
+          "TRANSITIONING"
         ],
         "backtest_tickers": [
           "BTC-USD"
@@ -60,6 +80,26 @@
           "actor": "botjohn",
           "reason": "crypto engine Phase 3 Task 3: crypto beta sleeve minted as candidate",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-11-14T21:05:30.708Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING",
+              "HIGH_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
         }
       ],
       "instrument_class": "crypto"
@@ -7219,30 +7259,6 @@
       ],
       "instrument_class": "equity"
     },
-    "oxf_bollinger_momentum_dsl": {
-      "state": "candidate",
-      "state_since": "2026-10-20T03:02:49.984Z",
-      "metadata": {
-        "canonical_file": "oxf_bollinger_momentum_dsl.py",
-        "class": "OxfBollingerMomentumDsl",
-        "description": "Bollinger-band momentum breakout on liquid ETFs as a SIGNAL formula; DSL twin of oxf_bollinger_momentum",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
-    "S_9sig_tqqq_nav_rebalance_tv2": {
-      "state": "candidate",
-      "state_since": "2026-10-24T19:17:35.298Z",
-      "metadata": {
-        "canonical_file": "S_9sig_tqqq_nav_rebalance_tv2.py",
-        "class": "Sig9TqqqNavRebalanceTv2",
-        "description": "Kelly '9Sig' TQQQ/AGG quarter-end true-up against a self-healing 9%/quarter NAV line (resets off actual NAV); symmetric 5%-band on both buy and sell legs, 60/40 inception split, no shorting (variant 2 of 2).",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
     "S_rachev_ratio_etf_scenario_opt": {
       "state": "live",
       "state_since": "2026-10-24T22:33:22.458Z",
@@ -7291,34 +7307,6 @@
       "history": [],
       "instrument_class": "etp"
     },
-    "S_return_stacking_gold_managed_futures": {
-      "state": "candidate",
-      "state_since": "2026-10-24T18:46:55.931756+00:00",
-      "metadata": {
-        "canonical_file": "S_return_stacking_gold_managed_futures.py",
-        "class": "ReturnStackingGoldManagedFutures",
-        "description": "LONG-only diversifier overlay: UGL (2x gold) + DBMF (managed futures), 12% each, rebalanced monthly on top of existing equity exposure; no margin/futures account needed since the leverage is embedded in the ETPs.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
-    "S_return_stacking_gold_managed_futures_tv2": {
-      "state": "candidate",
-      "state_since": "2026-10-24T18:30:46.322Z",
-      "metadata": {
-        "canonical_file": "S_return_stacking_gold_managed_futures_tv2.py",
-        "class": "ReturnStackingGoldManagedFuturesTv2",
-        "description": "LONG-only diversifier overlay: DGP (2x gold, 10%) + KMLM (managed futures, 15%), rebalanced quarterly on top of existing equity exposure; LOW_VOL/TRANSITIONING only, no margin/futures account needed."
-      },
-      "history": [],
-      "instrument_class": "etp",
-      "backtest_quarantine": {
-        "reason": "candidate written by the 2026-10-24 research auto-commit (047e3462) with only a requirements.json and no implementation file; unified_backtest fails 'no implementation file' every fleet night. Quarantined 2026-11-05 so the fleet stops re-testing it; lift when StrategyCoder lands the .py",
-        "since": "2026-11-05",
-        "by": "botjohn-session-20261105"
-      }
-    },
     "S_graham_number_value_screen_tv2": {
       "state": "live",
       "state_since": "2026-11-07T20:00:10.687Z",
@@ -7351,17 +7339,6 @@
           }
         }
       ],
-      "instrument_class": "equity"
-    },
-    "S_amortized_neural_filter_stat_arb_tv2": {
-      "state": "candidate",
-      "state_since": "2026-10-24T00:00:00.000000+00:00",
-      "metadata": {
-        "canonical_file": "S_amortized_neural_filter_stat_arb_tv2.py",
-        "class": "AmortizedNeuralFilterStatArbTv2",
-        "description": "One-shot conjugate NIG-Bayes posterior (mu_t, sigma2_t) of regression-free, cross-sectional-median-relative idiosyncratic spreads (Chang, Minkey 2026, arXiv:2610.25802v2, variant 2 of 2): LONG/SHORT by sign of mu_t, sized by mu_t/sigma2_t, gated on the posterior t-stat so conviction shrinks toward FLAT as estimation uncertainty rises."
-      },
-      "history": [],
       "instrument_class": "equity"
     },
     "S_leveraged_portfolio_trend_brake_tv2": {
@@ -8075,19 +8052,38 @@
       "instrument_class": "etp"
     },
     "S_mpc_score_rebalanced_equity_tv2": {
-      "state": "candidate",
-      "state_since": "2026-11-07T19:45:00.000000+00:00",
+      "state": "live",
+      "state_since": "2026-11-14T21:07:20.350Z",
       "metadata": {
         "canonical_file": "S_mpc_score_rebalanced_equity_tv2.py",
         "class": "MpcScoreRebalancedEquityTv2",
         "description": "12-1 momentum + soft-capped beta + quarterly market-direction score selects and equal-weights a long-only equity book; rebalanced on a quarterly horizon, GBM forecast-band breach on the market index, or basket drawdown stop, whichever fires first.",
         "eligible_regimes": [
           "LOW_VOL",
-          "TRANSITIONING",
           "HIGH_VOL"
         ]
       },
-      "history": [],
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-11-14T21:07:20.350Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING",
+              "HIGH_VOL"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "HIGH_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        }
+      ],
       "instrument_class": "equity"
     },
     "S_br_quality_value_sma_crossover_tv2": {
@@ -8104,6 +8100,167 @@
       },
       "history": [],
       "instrument_class": "equity"
+    },
+    "S_garch_copula_cvar_scenario": {
+      "state": "live",
+      "state_since": "2026-11-14T21:06:24.632Z",
+      "metadata": {
+        "canonical_file": "S_garch_copula_cvar_scenario.py",
+        "class": "GarchCopulaCvarScenario",
+        "description": "LONG-only minimum-EVaR allocation across 30 cross-asset ETFs from ARMA-GARCH + Student-t copula return scenarios, turnover-capped monthly rebalance (Mensah et al. 2026).",
+        "eligible_regimes": [
+          "TRANSITIONING"
+        ]
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-11-14T21:06:24.632Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "S_garch_copula_cvar_scenario_tv2": {
+      "state": "candidate",
+      "state_since": "2026-11-14T00:00:00Z",
+      "metadata": {
+        "canonical_file": "S_garch_copula_cvar_scenario_tv2.py",
+        "class": "GarchCopulaCvarScenarioTv2",
+        "description": "LONG-only tangency mean-variance allocation across 30 equity-sector/factor ETFs from AR(1)-GARCH + Student-t copula return scenarios, turnover-budget capped monthly rebalance (Mensah et al. 2026, variant 2/2)."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_adaptive_hedge_ratio_ensemble": {
+      "state": "live",
+      "state_since": "2026-11-14T21:05:10.311Z",
+      "metadata": {
+        "canonical_file": "S_adaptive_hedge_ratio_ensemble.py",
+        "class": "AdaptiveHedgeRatioEnsemble",
+        "description": "5-estimator hedge-ratio ensemble (min-var, robust/LAD-proxy, downside-semivariance, 20% tail, 5% ES-tail beta); trade only names where the estimators agree, LONG the low-beta half SHORT the high-beta half (Chan & Chu 2026, variant 1/2).",
+        "eligible_regimes": [
+          "TRANSITIONING"
+        ]
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-11-14T21:05:10.311Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        }
+      ],
+      "instrument_class": "equity"
+    },
+    "S_adaptive_hedge_ratio_ensemble_tv2": {
+      "state": "candidate",
+      "state_since": "2026-11-14T00:00:00Z",
+      "metadata": {
+        "canonical_file": "S_adaptive_hedge_ratio_ensemble_tv2.py",
+        "class": "AdaptiveHedgeRatioEnsembleTv2",
+        "description": "Tail-beta divergence factor: average of 20%-tail and 5%-ES-tail conditional betas minus the unconditional minimum-variance beta vs SPY; LONG the most crash-resistant (negative-divergence) names, SHORT the most crash-amplifying (positive-divergence) names, weekly rebalance (Chan & Chu 2026, variant 2/2)."
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_effective_rank_diversification_collapse": {
+      "state": "candidate",
+      "state_since": "2026-11-14T20:52:22.731301+00:00",
+      "metadata": {
+        "canonical_file": "S_effective_rank_diversification_collapse.py",
+        "class": "EffectiveRankDiversificationCollapse",
+        "description": "Dimensionality-collapse early warning: cuts equity gross exposure when a fixed cross-sector panel's trailing 60d correlation matrix collapses onto a low-rank, sign-uniform common factor; else holds gross via a LONG SPY signal (Askar 2026, variant 1/2).",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "HIGH_VOL"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_effective_rank_diversification_collapse_tv2": {
+      "state": "candidate",
+      "state_since": "2026-11-14T20:50:00Z",
+      "metadata": {
+        "canonical_file": "S_effective_rank_diversification_collapse_tv2.py",
+        "class": "EffectiveRankDiversificationCollapseTv2",
+        "description": "Dimensionality-collapse early warning (variant 2): actively hedges via SHORT SPY when the live-universe panel's trailing 252d correlation matrix collapses below an absolute effective-rank floor with majority-sign-uniform PC1 loadings; else confirms gross via LONG SPY (Askar 2026, variant 2/2)."
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_momentum_lowvol_interaction_tv2": {
+      "state": "candidate",
+      "state_since": "2026-11-14T21:00:00Z",
+      "metadata": {
+        "canonical_file": "S_momentum_lowvol_interaction_tv2.py",
+        "class": "MomentumLowVolInteractionTv2",
+        "description": "Smooth (product-of-ranks) momentum x low-vol rank interaction, LONG top decile, equal-weighted, rolling 21-trading-day rebalance (variant 2 of 2) — Wang, Rachev & Fabozzi (2026)."
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_five_min_orb_sp500": {
+      "state": "staging",
+      "state_since": "2026-11-14T21:05:10.119Z",
+      "metadata": {
+        "canonical_file": "S_five_min_orb_sp500.py",
+        "class": "FiveMinORBSP500",
+        "description": "Classic 5-minute opening-range breakout (long on break above the first-5-min high, short on break below the first-5-min low) claimed 72.17% win rate elsewhere, but this control-group audit measured only 65.9% on 1,250 S&P 500 trades — below both the 66.7% cost-adjusted breakeven "
+      },
+      "instrument_class": "equity",
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-11-14T21:05:10.119Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices_30m: reachable but not backfilled (providers alpaca)"
+              ],
+              "missing_columns": [
+                "prices_30m"
+              ],
+              "provider_route": [
+                {
+                  "provider": "alpaca",
+                  "column": "prices_30m",
+                  "gap_from": "2026-03-07",
+                  "gap_to": "2026-11-14"
+                }
+              ]
+            },
+            "candidate_id": "6983c3da-67fb-49a3-87fd-7f37d58f070c"
+          }
+        }
+      ]
     }
   },
   "decommissioned": {

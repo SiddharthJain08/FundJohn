@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_adaptive_hedge_ratio_ensemble_tv2",
+  "required": ["prices"],
+  "optional": []
+}
