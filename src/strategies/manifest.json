@@ -3008,6 +3008,9 @@
         "description": "Donchian(20) channel breakout on BTC-USD close with a 10bps realistic-cost breakout margin filter; LONG above the upper band, FLAT below the lower band.",
         "eligible_regimes": [
           "LOW_VOL"
+        ],
+        "backtest_tickers": [
+          "BTC-USD"
         ]
       },
       "history": [],
@@ -3022,6 +3025,9 @@
         "description": "90-day momentum on spot BTC-USD; abs-momentum cash gate + 20% vol-target; reference crypto strategy.",
         "eligible_regimes": [
           "HIGH_VOL"
+        ],
+        "backtest_tickers": [
+          "BTC-USD"
         ]
       },
       "history": [
@@ -6384,6 +6390,9 @@
         "eligible_regimes": [
           "LOW_VOL",
           "HIGH_VOL"
+        ],
+        "backtest_tickers": [
+          "BTC-USD"
         ]
       },
       "history": [
@@ -6459,6 +6468,10 @@
         "backtest_universe_cap": "tier_liquid",
         "eligible_regimes": [
           "HIGH_VOL"
+        ],
+        "backtest_tickers": [
+          "BTC-USD",
+          "ETH-USD"
         ]
       },
       "history": [
@@ -6662,6 +6675,9 @@
         },
         "eligible_regimes": [
           "LOW_VOL"
+        ],
+        "backtest_tickers": [
+          "BTC-USD"
         ]
       },
       "history": [
@@ -6764,6 +6780,10 @@
         "eligible_regimes": [
           "LOW_VOL",
           "TRANSITIONING"
+        ],
+        "backtest_tickers": [
+          "BTC-USD",
+          "ETH-USD"
         ]
       },
       "history": [
@@ -7716,7 +7736,10 @@
       "metadata": {
         "canonical_file": "S_btc_donchian_breakout_realistic_costs_tv2.py",
         "class": "BtcDonchianBreakoutRealisticCostsTv2",
-        "description": "Donchian(55) breakout on BTC-USD close requiring 3-bar confirmation before LONG entry, single-bar exit below the lower band; realistic-cost ATR sizing haircut."
+        "description": "Donchian(55) breakout on BTC-USD close requiring 3-bar confirmation before LONG entry, single-bar exit below the lower band; realistic-cost ATR sizing haircut.",
+        "backtest_tickers": [
+          "BTC-USD"
+        ]
       },
       "history": [],
       "instrument_class": "crypto"
