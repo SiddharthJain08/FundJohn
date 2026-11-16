@@ -27,10 +27,24 @@ import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+# 2026-11-16: numexpr 2.10.2 + pandas 3 heap corruption ("double free or
+# corruption (out)" / general protection fault in libc) killed the signals step
+# three times today, mid-strategy-loop, rc=137, at different strategies each
+# time (see reference numexpr_segfault_pandas3). The backtest fleet pins
+# NUMEXPR_MAX_THREADS=1 and S_ecf runs under compute.use_numexpr=False; the
+# engine spawn carried neither. Pin both here — numexpr is an accelerator
+# only, so the signals are numerically unchanged. setdefault keeps an explicit
+# operator override. Kill: OPENCLAW_ENGINE_NUMEXPR=1 restores pandas' default.
+os.environ.setdefault('NUMEXPR_MAX_THREADS', '1')
+os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
+
 import psycopg2
 import psycopg2.extras
 import pandas as pd
 import numpy as np
+
+if os.environ.get('OPENCLAW_ENGINE_NUMEXPR', '0') != '1':
+    pd.set_option('compute.use_numexpr', False)
 
 # Add project root to path
 ROOT = Path(__file__).resolve().parent.parent.parent
