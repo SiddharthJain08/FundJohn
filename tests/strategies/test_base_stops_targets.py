@@ -11,7 +11,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from strategies.base import BaseStrategy, REGIME_ATR_SCALE, TARGET_MODE_ENV
+import sys
+import types
+
+from strategies.base import (BaseStrategy, REGIME_ATR_SCALE, REGIME_ATR_SCALE_BY_CLASS,
+                             TARGET_MODE_ENV, instrument_class_of, regime_atr_scale)
 
 
 class _S(BaseStrategy):
@@ -126,3 +130,49 @@ def test_unknown_mode_raises(monkeypatch):
     monkeypatch.setenv(TARGET_MODE_ENV, 'bogus')
     with pytest.raises(ValueError):
         _S().compute_stops_and_targets(_series(), 'LONG', 100.0)
+
+
+# --- crypto partition: class-aware ATR scale (2026-11-16) -------------------
+
+def _crypto_module_cls():
+    mod = types.ModuleType('tests.strategies._fake_crypto_mod')
+    mod.INSTRUMENT_CLASS = 'crypto'
+    sys.modules[mod.__name__] = mod
+    return type('_SCryptoMod', (_S,), {'__module__': mod.__name__})
+
+
+class _SCryptoAttr(_S):
+    instrument_class = 'crypto'      # S_btc_momentum convention
+
+
+def test_instrument_class_resolution_attr_then_module_then_equity():
+    assert instrument_class_of(_S()) == 'equity'
+    assert instrument_class_of(_SCryptoAttr()) == 'crypto'
+    assert instrument_class_of(_crypto_module_cls()()) == 'crypto'
+
+
+def test_regime_atr_scale_equity_unchanged_crypto_identity():
+    for r, v in REGIME_ATR_SCALE.items():
+        assert regime_atr_scale(r, 'equity') == v
+        assert regime_atr_scale(r, 'etp') == v
+        assert regime_atr_scale(r, None) == v
+        assert regime_atr_scale(r, 'crypto') == 1.0
+    assert set(REGIME_ATR_SCALE_BY_CLASS['crypto']) == set(REGIME_ATR_SCALE)
+    assert regime_atr_scale('UNKNOWN', 'crypto') == 1.0
+
+
+@pytest.mark.parametrize('mode', ['flat', 'atr_r'])
+def test_crypto_stop_ignores_equity_regime_tightening(monkeypatch, mode):
+    monkeypatch.setenv(TARGET_MODE_ENV, mode)
+    s = _series(step=1.0)                        # ATR == 1.0
+    px = _px(s)
+    for cls in (_SCryptoAttr, _crypto_module_cls()):
+        for regime in REGIME_ATR_SCALE:
+            out = cls().compute_stops_and_targets(s, 'LONG', px, atr_multiplier=2.0,
+                                                  regime_state=regime)
+            assert out['stop'] == round(px - 2.0, 4), (cls, regime)
+            if mode == 'atr_r':
+                assert out['t1'] == round(px + 4.0, 4)
+    # equity in CRISIS still tightens — byte-identical to before
+    eq = _S().compute_stops_and_targets(s, 'LONG', px, atr_multiplier=2.0, regime_state='CRISIS')
+    assert eq['stop'] == round(px - 2.0 * REGIME_ATR_SCALE['CRISIS'], 4)

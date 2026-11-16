@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from typing import List, Optional
 from dataclasses import dataclass, field
 import os
+import sys
 
 try:  # tolerant: S23/S24 load this file as top-level module `base`
     from strategies import indicators as _indicators
@@ -135,6 +136,41 @@ REGIME_ATR_SCALE = {
     'HIGH_VOL':      0.55,
     'CRISIS':        0.35,
 }
+
+# Crypto partition (2026-11-16). REGIME_ATR_SCALE was calibrated for the equity
+# VIX tiers. Crypto-class strategies take the CRYPTO regime-of-record (the
+# crypto tier table in backtests, the crypto HMM live), which labels most of
+# BTC's history CRISIS (69.6 % of 2016-2026 on the frozen tiers): the equity
+# scale then cuts a 2×ATR stop to 0.7×ATR — under one day's range — and the
+# 2026-11-14 re-gate stopped out 64 % of trades at a 1-day median hold
+# (same-date stop ratio vs the equity-labelled runs ≈ 0.35 exactly where the
+# label moved LOW_VOL→CRISIS, ≈ 1.0 where it did not). ATR14 already tracks
+# crypto vol, so crypto uses the identity ladder until the operator sets a
+# crypto-specific one (crypto-sizing ledger, operator decision 12). Every
+# other class keeps REGIME_ATR_SCALE byte-identical.
+REGIME_ATR_SCALE_BY_CLASS = {
+    'crypto': {'LOW_VOL': 1.00, 'TRANSITIONING': 1.00, 'HIGH_VOL': 1.00, 'CRISIS': 1.00},
+}
+
+
+def instrument_class_of(strategy) -> str:
+    """Instrument class of a strategy INSTANCE, resolved the way the loaders
+    do without a manifest read: a class attribute ``instrument_class``
+    (S_btc_momentum, S_ast_fed_model convention) wins, then the defining
+    module's top-level ``INSTRUMENT_CLASS`` (lifecycle._detect_module_
+    instrument_class), else 'equity'."""
+    v = getattr(type(strategy), 'instrument_class', None)
+    if isinstance(v, str) and v:
+        return v
+    mod = sys.modules.get(getattr(type(strategy), '__module__', '') or '')
+    v = getattr(mod, 'INSTRUMENT_CLASS', None)
+    return v if isinstance(v, str) and v else 'equity'
+
+
+def regime_atr_scale(regime_state: str, instrument_class: str = 'equity') -> float:
+    """Stop-distance scale for (regime, instrument class). Unknown regimes → 1.0."""
+    table = REGIME_ATR_SCALE_BY_CLASS.get(instrument_class or 'equity', REGIME_ATR_SCALE)
+    return table.get(regime_state, 1.0)
 
 # Target geometry (2026-09-10). 'flat' = legacy ±5/10/20 % of price regardless
 # of vol (143/156 strategies inherited it: SPY got 6:1 reward:risk, a 3 %-ATR
@@ -523,7 +559,8 @@ class BaseStrategy(ABC):
         atr  = float(_atr_raw) if (pd.notna(_atr_raw) and float(_atr_raw) > 0) else current_price * 0.02
 
         # Scale ATR multiplier by regime (see REGIME_ATR_SCALE).
-        effective_atr_mult = atr_multiplier * REGIME_ATR_SCALE.get(regime_state, 1.0)
+        # Class-aware (2026-11-16): crypto takes REGIME_ATR_SCALE_BY_CLASS['crypto'].
+        effective_atr_mult = atr_multiplier * regime_atr_scale(regime_state, instrument_class_of(self))
         d = atr * effective_atr_mult            # stop distance from entry
         mode = target_mode()
 

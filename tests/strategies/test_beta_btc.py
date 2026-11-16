@@ -70,12 +70,18 @@ def test_registry_and_manifest_wiring():
     import json
     m = json.loads((ROOT / 'src' / 'strategies' / 'manifest.json').read_text())
     e = m['strategies']['S_beta_btc']
-    assert e['state'] == 'candidate'
+    # lifecycle-owned: registered 'candidate' 11-12, auto-promoted 'live' by the
+    # 11-14 weekend finisher — pin the set, not the moment
+    assert e['state'] in ('candidate', 'live')
     assert e['instrument_class'] == 'crypto'
     md = e['metadata']
     assert md['benchmark_sleeve'] is True
     assert md['backtest_tickers'] == ['BTC-USD']
-    assert set(md['eligible_regimes']) == set(CANONICAL_REGIMES)
+    # Registered with all four; the 11-14 weekend finisher narrowed the manifest
+    # metadata to the regimes that cleared its gate. Live eligibility for the
+    # sleeve is strategy_regime_params + benchmark_sleeve_always_on, not this
+    # list — pin that it stays a non-empty canonical subset.
+    assert md['eligible_regimes'] and set(md['eligible_regimes']) <= set(CANONICAL_REGIMES)
     assert md['canonical_file'] == 'S_beta_btc.py' and md['class'] == 'BetaBtc'
 
 
