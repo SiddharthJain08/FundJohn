@@ -1863,13 +1863,52 @@ def _record_placed_bracket_on() -> bool:
     return os.environ.get('OPENCLAW_RECORD_PLACED_BRACKET') == '1'
 
 
-def _dtbp_summary_line(skipped: list) -> str:
-    """One-line buying-power-skip summary, or '' if none were skipped for BP."""
+def _dtbp_summary_line(skipped: list, note: str = '') -> str:
+    """One-line buying-power-skip summary, or '' if none were skipped for BP.
+    `note` (2026-11-16) carries the account-fetch fallback explanation so the
+    #trade-reports post says WHY the budget was what it was."""
     bp = [s for s in skipped if s.get('reason') == 'dtbp_budget_exhausted']
-    if not bp:
+    if not bp and not note:
         return ''
-    tickers = ', '.join(s['ticker'] for s in bp[:10])
-    return f'⛔ {len(bp)} opens skipped for buying-power (lowest-conviction): {tickers}'
+    out = ''
+    if bp:
+        tickers = ', '.join(s['ticker'] for s in bp[:10])
+        out = f'⛔ {len(bp)} opens skipped for buying-power (lowest-conviction): {tickers}'
+    if note:
+        out = (out + '\n' if out else '') + f'⚠️ dtbp-guard: {note}'
+    return out
+
+
+# Set by the guard call site in main() when the pre-open re-fetch fell back;
+# consumed by _post_executor_summary. Module-level so the summary poster's
+# signature stays as the tests pin it.
+_dtbp_guard_note: str = ''
+
+
+def _dtbp_account_for_guard(refetched: dict, pre_close: dict) -> tuple[dict, str]:
+    """Pick the account snapshot the DTBP guard sizes from (2026-11-16).
+
+    The re-fetch after the close burst is authoritative when it succeeded.
+    When it failed even after _fetch_account_state's retry ladder (429 on
+    10-13, 10-19, 11-13, 11-16 → $0 budget → every open skipped), fall back
+    to the PRE-CLOSE snapshot taken at the top of the run: closes and cancels
+    since then only FREE buying power, and no opening order has been
+    submitted yet (the guard runs at the first opening-tier order), so its
+    budget is a conservative floor, never an over-statement. If that one
+    failed too, keep the fail-safe $0. Returns (account, note) — note is ''
+    when nothing unusual happened, else a one-line explanation for the log
+    and the #trade-reports summary. Never mutates either input."""
+    if refetched.get('fetched') is not False:
+        return refetched, ''
+    err = str(refetched.get('fetch_error') or 'fetch failed')[:120]
+    if pre_close.get('fetched') is False:
+        return refetched, (f'account re-fetch failed ({err}) and the pre-close fetch failed too — '
+                           f'budget $0, every open skipped (fail-safe)')
+    acct = dict(pre_close)
+    acct['_dtbp_source'] = 'pre_close_snapshot'
+    budget = _dtbp_opening_budget(acct)
+    return acct, (f'account re-fetch failed ({err}) — pre-close floor ${budget:,.0f} used '
+                  f'(closes since only free buying power)')
 
 
 def _bp_snapshot(account: dict, run_date, path: str | None = None) -> None:
@@ -3008,7 +3047,11 @@ def main():
 
     for order in orders:
         if guard_on and not dtbp_ready and _exec_priority_for_test(order)[0] >= 2:
-            acct2 = _fetch_account_state(sess)
+            acct2, _note = _dtbp_account_for_guard(_fetch_account_state(sess), account)
+            if _note:
+                global _dtbp_guard_note
+                _dtbp_guard_note = _note
+                log(f'[dtbp-guard] {_note}')
             open_orders = [o for o in orders if _exec_priority_for_test(o)[0] >= 2]
             dtbp_skip_keys = _compute_dtbp_skips(open_orders, acct2, equity)
             dtbp_ready = True
@@ -3152,7 +3195,7 @@ def _post_executor_summary(run_date, submitted, skipped, notional):
         )
         suffix = ' …' if len(skipped) > 8 else ''
         lines.append(f'• rejected:  {reasons}{suffix}')
-    _bp_line = _dtbp_summary_line(skipped)
+    _bp_line = _dtbp_summary_line(skipped, note=_dtbp_guard_note)
     if _bp_line:
         lines.append(_bp_line)
     _cbp_line = _crypto_bp_guard_summary_line()

@@ -156,3 +156,47 @@ class TestBpSnapshot(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestDtbpGuardAccountFallback(unittest.TestCase):
+    """2026-11-16: when the pre-open re-fetch fails even after retries, the
+    guard must size the budget from the PRE-CLOSE snapshot (closes since
+    then only free buying power, so it is a conservative floor) instead of
+    the $0 that skipped 339 / 392 opens on 11-13 / 11-16. Both failed →
+    still $0 (fail-safe)."""
+    _pre  = {'fetched': True, 'buying_power': 336000.0, 'regt_buying_power': 161000.0,
+             'equity': 91300.0}
+    _fail = {'fetched': False, 'buying_power': 100000.0, 'regt_buying_power': 100000.0,
+             'fetch_error': '429 Client Error: Too Many Requests'}
+    _ok   = {'fetched': True, 'buying_power': 350000.0, 'regt_buying_power': 170000.0}
+
+    def test_refetch_ok_is_used_as_is(self):
+        acct, note = ae._dtbp_account_for_guard(self._ok, self._pre)
+        self.assertIs(acct, self._ok)
+        self.assertEqual(note, '')
+
+    def test_refetch_failed_falls_back_to_pre_close_snapshot(self):
+        acct, note = ae._dtbp_account_for_guard(self._fail, self._pre)
+        self.assertEqual(ae._dtbp_opening_budget(acct), 161000.0)
+        self.assertEqual(acct.get('_dtbp_source'), 'pre_close_snapshot')
+        self.assertIn('429', note)
+        self.assertIn('pre-close', note)
+
+    def test_both_failed_stays_zero(self):
+        acct, note = ae._dtbp_account_for_guard(self._fail, dict(self._fail))
+        self.assertEqual(ae._dtbp_opening_budget(acct), 0.0)
+        self.assertIn('$0', note)
+
+    def test_fallback_does_not_mutate_the_snapshot(self):
+        pre = dict(self._pre)
+        acct, _ = ae._dtbp_account_for_guard(self._fail, pre)
+        self.assertIsNot(acct, pre)
+        self.assertNotIn('_dtbp_source', pre)
+
+    def test_summary_line_carries_the_fallback_note(self):
+        skipped = [{'ticker': 'AAA', 'reason': 'dtbp_budget_exhausted'}]
+        line = ae._dtbp_summary_line(skipped, note='account re-fetch failed (429) — pre-close floor $161,000')
+        self.assertIn('AAA', line)
+        self.assertIn('pre-close floor', line)
+        # no note → unchanged shape
+        self.assertNotIn('\n', ae._dtbp_summary_line(skipped))

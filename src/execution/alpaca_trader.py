@@ -9,6 +9,17 @@ logger = logging.getLogger(__name__)
 # Starting paper portfolio value — used as fallback if account equity fetch fails.
 # Update this if the paper account is reset or funded differently.
 PAPER_PORTFOLIO   = 100_000.0
+
+# Account-fetch retry (2026-11-16). The executor re-fetches /v2/account right
+# after its close/cancel/flip burst to size the DTBP opening budget; Alpaca
+# answered 429 on 10-13, 10-19, 11-13 and 11-16, the fetch fell back to the
+# PAPER_PORTFOLIO defaults with fetched=False and the guard skipped EVERY
+# open (339 / 392 orders). Retry 429 / 5xx / connection errors with a short
+# ladder, honouring Retry-After (capped). The whole ladder stays well under a
+# minute: the opening tier runs ~2 min before the close.
+ACCOUNT_FETCH_RETRIES         = 3
+ACCOUNT_FETCH_BACKOFF         = (1.0, 2.0, 4.0, 8.0)
+ACCOUNT_FETCH_RETRY_AFTER_CAP = 10.0
 MIN_KELLY_FLOOR   = 0.005   # minimum fraction used when kelly_pos==0 (yellow test signals)
 
 
@@ -40,7 +51,7 @@ def _fetch_equity(sess):
     return PAPER_PORTFOLIO
 
 
-def _fetch_account_state(sess):
+def _fetch_account_state(sess, *, retries: int = ACCOUNT_FETCH_RETRIES, _sleep=None):
     """Return full account snapshot used by sizing/cash gates.
 
     Always returns a dict with every key populated (zeros on failure) so
@@ -69,10 +80,29 @@ def _fetch_account_state(sess):
         'daytrade_count':        0,
         'fetched':               False,
     }
+    import time as _time
+    _sleep = _sleep or _time.sleep
+    j = None
+    exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            r = sess.get(f"{sess._base}/v2/account", timeout=10)
+            r.raise_for_status()
+            j = r.json()
+            break
+        except Exception as e:                     # noqa: BLE001 — classified below
+            exc = e
+            if attempt >= retries or not _account_fetch_retryable(e):
+                break
+            delay = _account_fetch_delay(e, attempt)
+            logger.warning(f"[Alpaca] account fetch attempt {attempt + 1}/{retries + 1} failed "
+                           f"({e}) — retrying in {delay:.0f}s")
+            _sleep(delay)
+    if j is None:
+        state['fetch_error'] = str(exc)
+        logger.warning(f"[Alpaca] account fetch failed ({exc}) — using PAPER_PORTFOLIO defaults")
+        return state
     try:
-        r = sess.get(f"{sess._base}/v2/account", timeout=10)
-        r.raise_for_status()
-        j = r.json()
         for key in ('equity', 'cash', 'long_market_value', 'short_market_value',
                     'buying_power', 'regt_buying_power', 'daytrading_buying_power',
                     'non_marginable_buying_power', 'initial_margin', 'maintenance_margin', 'multiplier',
@@ -96,9 +126,34 @@ def _fetch_account_state(sess):
             f"[Alpaca] equity=${state['equity']:,.2f} cash=${state['cash']:,.2f} "
             f"long_mv=${state['long_market_value']:,.2f} regt_bp=${state['regt_buying_power']:,.2f}"
         )
-    except Exception as exc:
-        logger.warning(f"[Alpaca] account fetch failed ({exc}) — using PAPER_PORTFOLIO defaults")
+    except Exception as exc2:
+        state['fetch_error'] = str(exc2)
+        logger.warning(f"[Alpaca] account fetch failed ({exc2}) — using PAPER_PORTFOLIO defaults")
     return state
+
+
+def _account_fetch_retryable(e: Exception) -> bool:
+    """429 / 5xx HTTP errors and connection/timeout errors are transient."""
+    import requests as _rq
+    if isinstance(e, _rq.HTTPError):
+        code = getattr(getattr(e, 'response', None), 'status_code', None)
+        return code == 429 or (isinstance(code, int) and code >= 500)
+    return isinstance(e, (_rq.ConnectionError, _rq.Timeout))
+
+
+def _account_fetch_delay(e: Exception, attempt: int) -> float:
+    """Retry-After (seconds, capped) when the server sent one, else the ladder."""
+    hdr = None
+    try:
+        hdr = getattr(e, 'response', None).headers.get('Retry-After')
+    except Exception:
+        hdr = None
+    if hdr is not None:
+        try:
+            return float(min(float(hdr), ACCOUNT_FETCH_RETRY_AFTER_CAP))
+        except (TypeError, ValueError):
+            pass
+    return float(ACCOUNT_FETCH_BACKOFF[min(attempt, len(ACCOUNT_FETCH_BACKOFF) - 1)])
 
 
 def _price_str(price):
