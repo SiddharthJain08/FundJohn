@@ -803,3 +803,76 @@ def test_equity_empty_floor_is_capped_not_nan(monkeypatch):
                cr_carried=[_carried('S_beta_btc', 'BTC-USD')])
     btc = _top_usd(h.written[-1], 'BTC-USD')
     assert 0 < btc <= 0.25 * NAV + 1.0
+
+
+# ── fix wave C1: the floored BTC order carries the sleeve's attribution and bracket ──
+
+def _sleeve_btc():
+    """The sleeve's own buy-and-hold bracket (-40 % / +400 %), distinct from any alpha's."""
+    return dict(_carried('S_beta_btc', 'BTC-USD'), stop_loss=60.0, target_1=500.0, target_2=500.0)
+
+
+def _alpha_btc():
+    return dict(_carried('S_cr_a', 'BTC-USD'), stop_loss=97.0, target_1=104.0, target_2=108.0)
+
+
+def _btc_orders(orders):
+    return [o for o in orders if o['ticker'] == 'BTC-USD'
+            and o['action'] not in ('close_long', 'close_short')]
+
+
+def _assert_sleeve_attributed(o):
+    assert 'S_beta_btc' in o['strategy_id'].split('|')
+    assert 'S_beta_btc' in o['contributing_strategies']
+    assert o['stop'] == 60.0 and o['t1'] == 500.0          # the sleeve's bracket, never None
+
+
+@pytest.mark.parametrize('lane', ['eod', 'window'])
+def test_floor_no_weight_row_apply_emits_attributed_order(monkeypatch, lane):
+    orders, _ = run(monkeypatch, pooled=True, lane=lane, s_m_cr=-0.4, gross_frac=10.0,
+                    cr_rows=[_row('S_cr_a', 2.0)], cr_carried=[_sleeve_btc()])
+    btc = _btc_orders(orders)
+    assert len(btc) == 1
+    _assert_sleeve_attributed(btc[0])
+    assert btc[0]['strategy_id'] == 'S_beta_btc'
+    assert abs(btc[0]['target_usd'] - 0.10 * NAV) < 1.0
+
+
+def test_floor_no_weight_row_equity_empty_apply_cannot_raise(monkeypatch):
+    orders, _ = run(monkeypatch, pooled=True, eq_carried=[], s_m_cr=-0.4, gross_frac=10.0,
+                    cr_rows=[_row('S_cr_a', 2.0)], cr_carried=[_sleeve_btc()])
+    btc = _btc_orders(orders)
+    assert len(btc) == 1
+    _assert_sleeve_attributed(btc[0])
+    assert 0 < btc[0]['target_usd'] <= 0.25 * NAV + 1.0
+
+
+def test_floor_no_weight_row_takes_sleeve_bracket_over_alpha(monkeypatch):
+    # alpha BTC conviction present, sleeve weightless: the floored BTC rides the
+    # sleeve's -40 % stop, not the alpha's ATR stop
+    orders, _ = run(monkeypatch, pooled=True, s_m_cr=-0.4, gross_frac=10.0,
+                    cr_rows=[_row('S_cr_a', 2.0)], cr_carried=[_sleeve_btc(), _alpha_btc()])
+    btc = _btc_orders(orders)
+    assert len(btc) == 1
+    _assert_sleeve_attributed(btc[0])
+    assert 'S_cr_a' in btc[0]['contributing_strategies']
+
+
+def test_crypto_only_orders_tolerates_ticker_missing_from_meta(monkeypatch):
+    monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: {})
+    cb = {'rows': [], 'eff_by': {}, 'targets': {'BTC-USD': 5_000.0}, 'ticker_meta': {},
+          'gate_net_sharpe': {}, 'bench_ids': set(), 'bench_tkrs': set(), 'empty_reason': None,
+          'active': []}
+    out = _sizer._crypto_only_orders(cb, [], crypto_regime_state=CR_REGIME, nav=NAV,
+                                     confirmer=None, ortho_groups=None, account_state=_account())
+    assert [o['ticker'] for o in out] == ['BTC-USD']
+
+
+def test_floor_usd_not_inflated_by_net_short_alpha_btc(monkeypatch):
+    # M1: a net-short alpha BTC weight is not own conviction; floor_usd is the
+    # whole pre-cap BTC target, never more
+    short = dict(_alpha_btc(), direction='SHORT')
+    _, h, res = _block_res(monkeypatch, s_m_cr=-0.4, btc_frac=10.0, gross_frac=10.0,
+                           cr_rows=[_row('S_cr_a', 2.0)], cr_carried=[_sleeve_btc(), short])
+    btc = _top_usd(h.written[-1], 'BTC-USD')
+    assert btc > 0 and abs(res['floor_usd'] - btc) < 1.0

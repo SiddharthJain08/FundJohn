@@ -1757,6 +1757,13 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
     sleeve_acting = any(s.get('strategy_id') in sleeve_ids and s.get('ticker') == BTC_TICKER
                         and _dir_to_int(s.get('direction')) > 0 for s in active)
     res['sleeve_acting'] = sleeve_acting
+    # Keep the sleeve's own BTC row aside: with no weight row it is dropped by
+    # the `in w_by` filter below (so it never reaches naive_w / S_adj / acting
+    # counts), but a floored BTC order must still carry its attribution and
+    # its own buy-and-hold bracket (attached after hold-flat, below).
+    sleeve_sig = next((s for s in active
+                       if s.get('strategy_id') in sleeve_ids and s.get('ticker') == BTC_TICKER
+                       and _dir_to_int(s.get('direction')) > 0), None)
     active = [s for s in active if s.get('strategy_id') in w_by]
     stables = _ps.stable_tickers()
     res['active'] = [s for s in active if s.get('ticker') not in stables]
@@ -1839,6 +1846,9 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
                 for t in [t for t in w if acting.get(t, 0) < min_acting and t not in bench_cr]:
                     w.pop(t, None)
         s_m = _load_s_m()
+        # A sleeve with no weight row (S_m <= 0, or S_m None on a cache miss)
+        # leaves bench_cr empty, so alts skip rule C here. A no-op: the hurdle
+        # is max(S_m, 0) = 0 for S_m <= 0, and S_m None means no hurdle anyway.
         hurdle_applied = bool(bench_cr) and s_m is not None
         if hurdle_applied:
             hurdled, dropped = _bsz.apply_benchmark_hurdle(w, s_m, bench_cr, floor_zero=True)
@@ -1855,7 +1865,7 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
                                           lam_global=lam_global, liq_cr=liq_cr)
             if w_new > w_btc:
                 w[BTC_TICKER] = w_new
-                own_w = w_btc
+                own_w = max(w_btc, 0.0)   # net-short alpha BTC is not own conviction
                 logger.info('crypto_sizing.floor: how=%s frac=%.3f w_btc %.4f -> %.4f',
                             how, frac, w_btc, w_new)
                 if how == 'floor' and lam_global * min(1.0, max(0.0, liq_cr)) <= frac:
@@ -1918,10 +1928,30 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
         hs = {}
     hold = bool((hs or {}).get('sleeve'))
     targets, n_held = _ps.apply_hold_flat(targets, hs)
+    # The acting sleeve attributes its BTC target and supplies its own bracket
+    # (the -40 % / +400 % buy-and-hold stop, never an alpha's 2xATR), even
+    # when it has no weight row (meta built from w_by only). Attached here,
+    # after S_adj / acting counts / hurdle / caps / the line, so none of those
+    # see it; weight 0.0 keeps it out of any max-weight bracket pick.
+    sleeve_btc = set()
+    if sleeve_sig is not None and float(targets.get(BTC_TICKER) or 0.0) > 0:
+        _sid = sleeve_sig['strategy_id']
+        m = meta.setdefault(BTC_TICKER, {'strategies': [], 'directions': [], 'brackets': []})
+        if _sid not in m['strategies']:
+            _e, _st = sleeve_sig.get('entry_price'), sleeve_sig.get('stop_loss')
+            _t1, _t2 = sleeve_sig.get('target_1'), sleeve_sig.get('target_2')
+            if _stop_norm:
+                _st, _t1, _t2 = _bs.daily_normalized_levels(_e, _st, _t1, _t2, cad_by.get(_sid, 1.0))
+            m['strategies'].append(_sid)
+            m['directions'].append(1)
+            m['brackets'].append({'sid': _sid, 'direction': 1, 'weight': 0.0,
+                                  'entry': _e, 'stop': _st, 't1': _t1, 't2': _t2})
+        sleeve_btc = {BTC_TICKER}
     res['targets'] = targets
     res['ticker_meta'] = {t: m for t, m in meta.items() if t in targets}
     res['gate_net_sharpe'] = {t: v for t, v in gate_net.items() if t in targets}
-    res['bench_tkrs'] = set(bench_cr)
+    # emission-only: bench_cr itself (hurdle, corr-removal exemption, line) is unchanged
+    res['bench_tkrs'] = set(bench_cr) | sleeve_btc
     res['bench_ids'] = set(bench_ids or ())
     res['eff_by'] = dict(eff_by)
     res['line'] = _ps.shadow_line(
@@ -1975,8 +2005,13 @@ def _crypto_only_orders(cb, flatten_orders, *, crypto_regime_state,
     eff = dict(cb['eff_by']) or w
     if cb['targets']:
         broker = _filter_broker_by_class(_load_broker_positions_usd(), 'crypto')
+        # defaultdict: a target without a meta entry must never KeyError the
+        # trade step (it emits unattributed rather than failing the cycle)
+        from collections import defaultdict
+        meta = defaultdict(lambda: {'strategies': [], 'directions': [], 'brackets': []})
+        meta.update(cb['ticker_meta'])
         out += _emit_orders_from_targets(
-            dict(cb['targets']), dict(cb['ticker_meta']), nav, confirmer, ortho_groups,
+            dict(cb['targets']), meta, nav, confirmer, ortho_groups,
             sh, eff, [], w, 0.0, account_state, broker=broker,
             gate_net_sharpe=cb['gate_net_sharpe'], bench_ids=cb['bench_ids'], bench_tkrs=cb['bench_tkrs'])
     elif cb['empty_reason'] == 'gated':
