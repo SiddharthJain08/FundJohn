@@ -154,6 +154,38 @@ def test_benchmark_max_nav_frac_per_class_defaults():
     assert bz.crypto_gross_max_nav_frac(conn=_Conn({bz.CRYPTO_GROSS_MAX_NAV_FRAC_KEY: '-1'})) == 0.50
 
 
+def _conn(value):
+    """Stub conn: the crypto min-floor key holds `value` (None = no row)."""
+    return _Conn({} if value is None else {bz.MIN_NAV_FRAC_KEY_CRYPTO: value})
+
+
+def _conn_multi(d):
+    return _Conn(dict(d))
+
+
+def test_crypto_beta_budget_flag_default_on(monkeypatch):
+    monkeypatch.delenv(bz.CRYPTO_BETA_BUDGET_ENV, raising=False)
+    assert bz.crypto_beta_budget_enabled() is True
+    monkeypatch.setenv(bz.CRYPTO_BETA_BUDGET_ENV, '0'); assert bz.crypto_beta_budget_enabled() is False
+    monkeypatch.setenv(bz.CRYPTO_BETA_BUDGET_ENV, '1'); assert bz.crypto_beta_budget_enabled() is True
+    monkeypatch.setenv(bz.BETA_BUDGET_ENV, '0'); assert bz.crypto_beta_budget_enabled() is True  # SPY flag irrelevant
+
+
+def test_benchmark_min_nav_frac_default_and_zero():
+    assert bz.benchmark_min_nav_frac(conn=_conn(None)) == 0.10          # missing row -> default
+    assert bz.benchmark_min_nav_frac(conn=_conn('0')) == 0.0            # 0 disables
+    assert bz.benchmark_min_nav_frac(conn=_conn('0.15')) == 0.15
+    assert bz.benchmark_min_nav_frac(conn=_conn('0.15'), instrument_class='equity') == 0.0
+
+
+def test_benchmark_min_nav_frac_clamps_to_max_and_handles_garbage(caplog):
+    # max key absent -> 0.25 default cap; 0.40 requested -> 0.25 + WARN
+    assert bz.benchmark_min_nav_frac(conn=_conn_multi({'benchmark_min_nav_frac_crypto': '0.40'})) == 0.25
+    assert 'clamp' in caplog.text.lower()
+    assert bz.benchmark_min_nav_frac(conn=_conn('abc')) == 0.10
+    assert bz.benchmark_min_nav_frac(conn=_conn('-1')) == 0.0
+
+
 # --- strategy_weights: crypto sleeve floored at zero -------------------------
 
 class _WCur:

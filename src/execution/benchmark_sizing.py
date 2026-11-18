@@ -41,6 +41,10 @@ MAX_NAV_FRAC_KEY_CRYPTO = 'benchmark_max_nav_frac_crypto'   # BTC-USD sleeve |ta
 MAX_NAV_FRAC_CRYPTO_DEFAULT = 0.25
 CRYPTO_GROSS_MAX_NAV_FRAC_KEY = 'crypto_gross_max_nav_frac'  # Σ|crypto targets| <= frac * NAV
 CRYPTO_GROSS_MAX_NAV_FRAC_DEFAULT = 0.50
+# BTC sleeve size floor (2026-11-18): minimum |target| / NAV for the crypto sleeve, clamped to the cap; 0 disables.
+MIN_NAV_FRAC_KEY_CRYPTO = 'benchmark_min_nav_frac_crypto'
+MIN_NAV_FRAC_CRYPTO_DEFAULT = 0.10
+CRYPTO_BETA_BUDGET_ENV = 'OPENCLAW_CRYPTO_BETA_BUDGET'   # unset/'1' = ON, '0' = OFF (independent of the SPY flag)
 CORR_REMOVAL_ENV = 'OPENCLAW_BENCH_CORR_REMOVAL'  # '0' kills the benchmark-correlation removal (operator directive 2026-09-04)
 CORR_REMOVAL_THR_KEY = 'benchmark_corr_removal_thr'  # pipeline_config: |corr(t, SPY)| >= thr => remove t outright; <=0 or >=1 disables
 CONFIG_KEY = 'benchmark_regime_sharpe'
@@ -70,9 +74,15 @@ def beta_budget_enabled() -> bool:
     return os.environ.get(BETA_BUDGET_ENV) == '1'
 
 
-def _positive_config_float(key: str, default: float, conn=None) -> float:
-    """pipeline_config[key] as a positive finite float; missing -> default,
-    garbage/non-positive -> default (logged). Own connection when conn is None."""
+def crypto_beta_budget_enabled() -> bool:
+    return os.environ.get(CRYPTO_BETA_BUDGET_ENV) != '0'
+
+
+def _config_float(key: str, default: float, conn=None, *, allow_zero: bool) -> float:
+    """pipeline_config[key] as a finite float; missing -> default. Non-numeric/
+    non-finite -> default (logged). allow_zero=False: non-positive -> default
+    (logged). allow_zero=True: negative -> 0.0 (logged), 0 -> 0.0.
+    Own connection when conn is None."""
     own = conn is None
     try:
         if own:
@@ -84,7 +94,15 @@ def _positive_config_float(key: str, default: float, conn=None) -> float:
         if not row or row[0] is None:
             return float(default)
         v = float(str(row[0]).strip())
-        if not math.isfinite(v) or v <= 0:
+        if not math.isfinite(v):
+            logger.warning('[bench_sizing] %s=%r not finite; using %s', key, row[0], default)
+            return float(default)
+        if allow_zero:
+            if v < 0:
+                logger.warning('[bench_sizing] %s=%r negative; using 0.0', key, row[0])
+                return 0.0
+            return v
+        if v <= 0:
             logger.warning('[bench_sizing] %s=%r not positive; using %s', key, row[0], default)
             return float(default)
         return v
@@ -99,10 +117,32 @@ def _positive_config_float(key: str, default: float, conn=None) -> float:
                 pass
 
 
+def _positive_config_float(key: str, default: float, conn=None) -> float:
+    """pipeline_config[key] as a positive finite float; missing -> default,
+    garbage/non-positive -> default (logged). Own connection when conn is None."""
+    return _config_float(key, default, conn, allow_zero=False)
+
+
 def crypto_gross_max_nav_frac(default: float = CRYPTO_GROSS_MAX_NAV_FRAC_DEFAULT, conn=None) -> float:
     """pipeline_config.crypto_gross_max_nav_frac (Σ|crypto target| / NAV cap,
     default 0.50); missing/garbage/non-positive -> default."""
     return _positive_config_float(CRYPTO_GROSS_MAX_NAV_FRAC_KEY, default, conn)
+
+
+def benchmark_min_nav_frac(conn=None, *, instrument_class: str = 'crypto') -> float:
+    """Minimum |BTC sleeve target| / NAV (pipeline_config.benchmark_min_nav_frac_crypto,
+    default 0.10). 0 disables; negative -> 0.0; missing/garbage -> default; the
+    result is clamped to benchmark_max_nav_frac(crypto) (WARN). Crypto only —
+    any other instrument_class has no floor (0.0, no DB access)."""
+    if instrument_class != 'crypto':
+        return 0.0
+    v = _config_float(MIN_NAV_FRAC_KEY_CRYPTO, MIN_NAV_FRAC_CRYPTO_DEFAULT, conn, allow_zero=True)
+    cap = benchmark_max_nav_frac(conn=conn, instrument_class='crypto')
+    if v > cap:
+        logger.warning('[bench_sizing] %s=%.3f exceeds the crypto cap %.3f; clamp to the cap',
+                       MIN_NAV_FRAC_KEY_CRYPTO, v, cap)
+        return cap
+    return v
 
 
 def benchmark_max_nav_frac(default: float = 1.0, conn=None, *, instrument_class: str = 'equity') -> float:
