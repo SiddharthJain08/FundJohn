@@ -556,7 +556,9 @@ Design: `docs/superpowers/specs/2026-11-18-btc-sleeve-floor-and-class-bench-desi
   `0` disables; a value above `benchmark_max_nav_frac_crypto` is clamped to it with a WARN. Non-crypto classes read no key (0.0).
 - **Floor is a WEIGHT, not a dollar target**: injected before the one λ·NAV normaliser by `pooled_sizing.floor_weight`
   (`w_f = frac·G/(k−frac)`, G = Σ other weights, k = λ·clip(liq)); the pooled book still sums to λ·NAV (shave, never redistribute).
-  A BTC weight already above the floor is left alone (label `own`; the degenerate `k <= frac` branch also labels own conviction as own).
+  A BTC weight already above the floor is left alone (label `own`). Degenerate `k <= frac` (no positive solution): BTC takes the
+  half-book weight `max(w_btc, G)` — still a weight, so Σ = λ·NAV is conserved — with a WARN, bounded by the 25 % clamp / gross cap /
+  funding / hold-flat (no post-normaliser dollar floor; own conviction above G keeps the label `own`).
 - **Trigger**: whenever `S_beta_btc` has a loaded LONG BTC-USD signal (`sleeve_acting`, detected from the signal rows after the
   option_spec drop), **independent of BTC S_m sign** and of whether the sleeve has a weight row. The sizer's loaders build their SQL
   from the keys of the weight map, so `_crypto_pooled_block` hands them a load-only map `w_load = weights + {sleeve_id: 0.0}` (both the
@@ -581,10 +583,14 @@ Design: `docs/superpowers/specs/2026-11-18-btc-sleeve-floor-and-class-bench-desi
   (0.5/regime + WARN naming that key as fallback; the equity key is never read for crypto); `benchCardPayload` carries `bench_by_class`.
 - **Expected first effects** (next 15:00 ET daily cycle): crypto cells re-judged against `S_beta_btc` run `12632bad`
   (LOW 0.86 / TRANS 0.23 / HIGH −0.49 / CRISIS 0.60) instead of the SPY vector; halving CRISIS (0.64) switches ON, LOW/TRANS unchanged.
-  The next `crypto_sizing.shadow[…]` line shows `floor_usd ≈ 0.10·NAV` and a non-zero `pool=…`.
+  The next `crypto_sizing.shadow[…]` line shows `floor_usd ≈ 0.10·NAV`; `pool=0.00` while no crypto alt carries a signal
+  (the budget harvests alts only), non-zero once alts appear.
 - **Rollout**: the assigner change is live at the next daily cycle after merge (activation is not operator-gated); the sizer change
   is SHADOW until `OPENCLAW_CRYPTO_POOLED_SIZING=1` (equity byte-identical); `promotion_service.js` runs inside johnbot ⇒ restart in a
   window (21:30–22:00Z or after 23:30Z).
+- **Floored BTC order attribution** (fix wave): when the sleeve is acting and BTC carries a long target, the sleeve's own signal row
+  is attached to BTC's `ticker_meta` after hold-flat (weight 0.0; never in S_adj / acting counts / the hurdle) and BTC joins the
+  emission `bench_tkrs`, so the order is attributed to `S_beta_btc` and takes its −40 % / +400 % bracket even with no weight row.
 - **Known**: if alphas net BTC short while the sleeve is LONG the floor lifts BTC to the positive floor (crypto is long-only anyway);
   `test_transition_route_refactor.js` has a pre-existing failure unrelated to this change.
 

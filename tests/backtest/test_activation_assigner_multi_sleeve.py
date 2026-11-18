@@ -38,17 +38,37 @@ _BENCH_META = {'sleeve_id': 'S_beta_spy', 'sleeve_source': 'registry', 'run_id':
                'regime_source': {r: 'sleeve' for r in aa.CANONICAL_REGIMES}}
 
 
+def _registry_ids(registry, sql, params):
+    """What the class-filtered registry sleeve query returns (fix wave M4:
+    main() resolves the crypto sleeve via resolve_bench_sleeve_id, so the
+    stubs answer that SQL from the helper's bench_ids/params)."""
+    if '<> %s' in sql:
+        return sorted(s for s, c in registry.items() if c != 'crypto')
+    return sorted(s for s, c in registry.items() if c == params[-1])
+
+
+def _registry(bench_ids, params):
+    return {s: ('crypto' if str((params.get(s) or {}).get('instrument_class', '')).lower() == 'crypto'
+                else 'equity') for s in bench_ids}
+
+
 class _Cur:
-    def __init__(self, sids):
+    def __init__(self, sids, registry=None):
         self._sids = sids
+        self._registry = registry or {}
+        self._all = None
 
     def execute(self, sql, params=()):
-        pass
+        self._all = None
+        if 'strategy_registry' in sql:
+            self._all = [(s,) for s in _registry_ids(self._registry, sql, params)]
 
     def fetchone(self):
         return None
 
     def fetchall(self):
+        if self._all is not None:
+            return list(self._all)
         return [(s,) for s in self._sids]
 
     def close(self):
@@ -56,8 +76,8 @@ class _Cur:
 
 
 class _Conn:
-    def __init__(self, sids):
-        self.cur = _Cur(sids)
+    def __init__(self, sids, registry=None):
+        self.cur = _Cur(sids, registry)
 
     def cursor(self, cursor_factory=None):
         return self.cur
@@ -93,7 +113,7 @@ def _run_main(bench_ids, params, sids=('S_beta_btc', 'S_beta_spy', 'S_alpha')):
          mock.patch.object(sys, 'argv', ['activation_assigner.py', '--all', '--dry-run']), \
          mock.patch.dict(os.environ, {'POSTGRES_URI': 'postgres://fake/fake'}), \
          contextlib.redirect_stdout(buf):
-        pg.connect.return_value = _Conn(list(sids))
+        pg.connect.return_value = _Conn(list(sids), _registry(bench_ids, params))
         rc = aa.main()
     return rc, seen, lbs, buf.getvalue()
 
@@ -180,8 +200,8 @@ _RUNS = {
 
 class _SqlCur:
     """Dispatches on the SQL text: pipeline_config reads/writes, sleeve
-    primary runs + regime rows, the registry sleeve lookup (always empty ->
-    the resolver's literal fallback), and the --all sid list."""
+    primary runs + regime rows, the class-filtered registry sleeve lookup
+    (answered from the helper's bench_ids/params), and the --all sid list."""
     def __init__(self, conn):
         self.c = conn
         self._one = None
@@ -206,7 +226,7 @@ class _SqlCur:
             self._all = [(s,) for s in self.c.sids]
         elif 'strategy_registry' in sql:
             self.c.registry_queries.append(params)
-            self._all = []
+            self._all = [(s,) for s in _registry_ids(self.c.registry, sql, params)]
 
     def fetchone(self):
         return self._one
@@ -219,8 +239,9 @@ class _SqlCur:
 
 
 class _SqlConn:
-    def __init__(self, sids, config, runs):
+    def __init__(self, sids, config, runs, registry=None):
         self.sids, self.config, self.runs = list(sids), dict(config), dict(runs)
+        self.registry = dict(registry or {})
         self.stamps: dict = {}
         self.stamp_desc: dict = {}
         self.registry_queries: list = []
@@ -251,7 +272,8 @@ def _run_main_capture(bench_ids, params, classes, sids, config=None, runs=None,
                 'new': {r: True for r in aa.CANONICAL_REGIMES},
                 'diag': {}, 'actions': {r: 'initialized' for r in aa.CANONICAL_REGIMES}}
 
-    conn = _SqlConn(sids, config or {}, _RUNS if runs is None else runs)
+    conn = _SqlConn(sids, config or {}, _RUNS if runs is None else runs,
+                    registry=_registry(bench_ids, params))
     argv = ['activation_assigner.py', '--all'] + ([] if all_apply else ['--dry-run'])
     buf = io.StringIO()
     with mock.patch.object(aa, 'psycopg2') as pg, \
@@ -307,6 +329,22 @@ class TestPerClassBenchVector(unittest.TestCase):
         self.assertEqual(la['bench_run_id'], 'rs')
         self.assertEqual(json.loads(stamps['strategy_activation_bench_sharpe_crypto'])['CRISIS'], 0.6)
         self.assertEqual(json.loads(stamps['strategy_activation_bench_sharpe'])['CRISIS'], 1.575)
+
+    def test_crypto_sleeve_run_missing_one_regime_takes_crypto_key(self):
+        # I1: the crypto sleeve run has three regimes only; both tier-2 keys
+        # are set to different values -> the missing regime (CRISIS) takes the
+        # CRYPTO key's value, never the equity key's (nor the SPY sleeve's).
+        runs = dict(_RUNS, S_beta_btc=('rb', {'LOW_VOL': 0.86, 'TRANSITIONING': 0.23,
+                                              'HIGH_VOL': -0.49}))
+        calls, _ = _run_main_capture(bench_ids={'S_beta_spy', 'S_beta_btc'}, params=PARAMS,
+                                     classes={'S_alpha': 'equity', 'S_btc_x': 'crypto'},
+                                     sids=('S_alpha', 'S_btc_x'), runs=runs,
+                                     config={'strategy_activation_bench_sharpe': '{"CRISIS": 9.0}',
+                                             'strategy_activation_bench_sharpe_crypto': '{"CRISIS": 0.7}'})
+        cb = calls['S_btc_x']['bench']
+        self.assertEqual(cb['CRISIS'], 0.7)
+        self.assertEqual((cb['LOW_VOL'], cb['TRANSITIONING'], cb['HIGH_VOL']), (0.86, 0.23, -0.49))
+        self.assertEqual(calls['S_alpha']['bench']['CRISIS'], 1.575)       # equity: its own sleeve run
 
     def test_equity_only_fleet_has_no_crypto_lines_or_stamps(self):
         _, out, stamps = _run_main_capture(bench_ids={'S_beta_spy'}, params=PARAMS,

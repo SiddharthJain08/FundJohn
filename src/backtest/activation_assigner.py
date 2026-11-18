@@ -1397,16 +1397,18 @@ def main() -> int:
     # the registry but crypto strategies present -> load_bench_sharpe's
     # crypto tier 2/3 (crypto pipeline_config key, then DEFAULT) -- still
     # never the equity vector. Equity-only fleet -> no crypto vector at all.
+    # The crypto sleeve id comes from the SHARED resolver (same class filter
+    # and tie-break as activation_apply._bench_sleeve_run_id), never a literal
+    # preference; 'literal_fallback' means "no crypto sleeve registered" (the
+    # literal is the EQUITY sleeve) -> tier 2/3 inside load_bench_sharpe.
     _crypto_bench_ids = set(bench_ids) - _equity_bench_ids
     crypto_vector = crypto_meta = None
     crypto_vector_line = ''
-    if _crypto_bench_ids:
-        crypto_sleeve_id = ('S_beta_btc' if 'S_beta_btc' in _crypto_bench_ids
-                            else sorted(_crypto_bench_ids)[0])
-        crypto_vector, crypto_meta = load_bench_sharpe(conn, sleeve_id=crypto_sleeve_id,
-                                                       instrument_class='crypto')
-    elif any(c == 'crypto' for c in classes.values()):
-        crypto_vector, crypto_meta = load_bench_sharpe(conn, None, instrument_class='crypto')
+    if _crypto_bench_ids or any(c == 'crypto' for c in classes.values()):
+        crypto_sleeve_id, _cr_src = resolve_bench_sleeve_id(conn, None, instrument_class='crypto')
+        crypto_vector, crypto_meta = load_bench_sharpe(
+            conn, sleeve_id=crypto_sleeve_id if _cr_src == 'registry' else None,
+            instrument_class='crypto')
     if crypto_vector is not None:
         try:
             conn.rollback()
