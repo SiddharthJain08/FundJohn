@@ -219,6 +219,9 @@ def test_pooled_apply_emits_crypto_targets(monkeypatch):
     assert abs(c['BTC-USD'] - gross * 1.0 / G) < 1e-6
     assert abs(c['ETH-USD'] - gross * 1.2 / G) < 1e-6
     assert len(shadow_lines(h, 'apply')) == 1 and shadow_lines(h) == []
+    # real emit path: the retired placeholder fields are no longer stamped
+    assert orders
+    assert all('ev' not in o and 'p_t1' not in o for o in orders)
 
 
 def test_crypto_weights_read_crypto_regime_row(monkeypatch):
