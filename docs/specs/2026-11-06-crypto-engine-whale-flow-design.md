@@ -547,6 +547,47 @@ controller ruling in the SDD ledger, surfaced to the operator at finish):
   forced liquidator closes submission-tracked positions only; crypto weight rows blend partitions (live Sharpe by equity regime);
   equity-class strategies that trade BTC-USD are never sized (pre-existing); a refreshed older row can add one cadence emission.
 
+## 7d. As built — BTC sleeve floor + per-class activation bench (2026-11-18, branch `crypto-sleeve-floor`, 8 commits)
+
+Design: `docs/superpowers/specs/2026-11-18-btc-sleeve-floor-and-class-bench-design.md` (decisions 14b / 15). Commits: `e9b01f77`,
+`510fee36`, `73373e0c`, `267fdc40`, `931b4bc1`, `7656a6b5`, `2ac2269a`, `d252062f`.
+
+- **Floor key** `pipeline_config.benchmark_min_nav_frac_crypto`, default **0.10** NAV (`benchmark_sizing.benchmark_min_nav_frac`);
+  `0` disables; a value above `benchmark_max_nav_frac_crypto` is clamped to it with a WARN. Non-crypto classes read no key (0.0).
+- **Floor is a WEIGHT, not a dollar target**: injected before the one λ·NAV normaliser by `pooled_sizing.floor_weight`
+  (`w_f = frac·G/(k−frac)`, G = Σ other weights, k = λ·clip(liq)); the pooled book still sums to λ·NAV (shave, never redistribute).
+  A BTC weight already above the floor is left alone (label `own`; the degenerate `k <= frac` branch also labels own conviction as own).
+- **Trigger**: whenever `S_beta_btc` has a loaded LONG BTC-USD signal (`sleeve_acting`, detected from the signal rows after the
+  option_spec drop), **independent of BTC S_m sign** and of whether the sleeve has a weight row. The sizer's loaders build their SQL
+  from the keys of the weight map, so `_crypto_pooled_block` hands them a load-only map `w_load = weights + {sleeve_id: 0.0}` (both the
+  EOD and window lanes); a weightless sleeve is still loaded and its cadence falls back to 1.0 (only today's signal counts).
+- **Order of operations** (crypto block): hurdle → crypto beta budget → floor → pooled normaliser → dust → per-ticker cap (BTC exempt
+  when the floor injected) → cluster cap → corr removal (original exemptions; BTC not added) → 25 % BTC clamp → long-only → 50 % gross
+  cap, shaving alts before BTC (`protect={BTC}` when the sleeve acts) → funding pass → hold-flat.
+- **Crypto beta budget** `OPENCLAW_CRYPTO_BETA_BUDGET`: unset or `1` = ON, `0` = OFF; independent of the SPY flag
+  `OPENCLAW_BENCH_BETA_BUDGET` (which used to switch it off). Effect: the shadow numbers (e.g. `eq_scale_ratio`) now carry the pool on BTC.
+- **Line fields**: ` floor_usd=… pool=…` appended after `top=` in `crypto_sizing.shadow[…]` (also `res['floor_usd']`, `res['pool']`).
+  `floor_usd` = BTC target minus its own-conviction share, measured after the normaliser and BEFORE dust / clamps / gross cap /
+  funding / hold-flat — it is NOT executed dollars. `pool` = Σ min(|S_adj|, S_m) over non-bench crypto tickers.
+- **Per-class activation bench** (`activation_assigner`): `load_bench_sharpe(..., instrument_class=)`; crypto-class strategies are judged
+  against the crypto sleeve run's regime vector (`S_beta_btc`): tier 1 the sleeve run, tier 2 `pipeline_config.strategy_activation_bench_sharpe_crypto`,
+  tier 3 flat 0.5 with a WARN — **never the equity (SPY) vector**. A registry without a crypto sleeve ⇒ WARN
+  `no crypto benchmark sleeve in the registry`. Dry-run stdout adds `bench[crypto]: …` and `thresholds[crypto]: …`
+  (the dashboard/`parseActivationDryRun` regexes are anchored on `bench:` / `thresholds:`, so these fall through safely).
+- **Stamps / pending**: `strategy_activation_last_applied.bench_by_class.crypto` records the crypto run id.
+  `activation_apply._bench_sleeve_run_id(conn, *, instrument_class)`; `pending_state` adds `crypto_bench_run_id` and a pending
+  reason when the crypto sleeve's latest run differs from the marker.
+- **Promotion leg**: `src/lib/promotion_service.js` reads `strategy_activation_bench_sharpe_crypto` for crypto-class strategies
+  (0.5/regime + WARN naming that key as fallback; the equity key is never read for crypto); `benchCardPayload` carries `bench_by_class`.
+- **Expected first effects** (next 15:00 ET daily cycle): crypto cells re-judged against `S_beta_btc` run `12632bad`
+  (LOW 0.86 / TRANS 0.23 / HIGH −0.49 / CRISIS 0.60) instead of the SPY vector; halving CRISIS (0.64) switches ON, LOW/TRANS unchanged.
+  The next `crypto_sizing.shadow[…]` line shows `floor_usd ≈ 0.10·NAV` and a non-zero `pool=…`.
+- **Rollout**: the assigner change is live at the next daily cycle after merge (activation is not operator-gated); the sizer change
+  is SHADOW until `OPENCLAW_CRYPTO_POOLED_SIZING=1` (equity byte-identical); `promotion_service.js` runs inside johnbot ⇒ restart in a
+  window (21:30–22:00Z or after 23:30Z).
+- **Known**: if alphas net BTC short while the sleeve is LONG the floor lifts BTC to the positive floor (crypto is long-only anyway);
+  `test_transition_route_refactor.js` has a pre-existing failure unrelated to this change.
+
 ## 8. Left to the builder
 - Exact provider fallback ordering per field; which of Binance's spot `aggTrades` vs Coinbase trades is primary for
   large prints (coverage decides).
