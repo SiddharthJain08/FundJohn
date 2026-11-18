@@ -69,9 +69,16 @@ class TestGreenlistCards:
             assert sum(1 for other in strats if other in line) == 1
 
         # strategies come AFTER the metrics (last piece of info for the card)
-        ev_idx = _line_index(out, 'EV')
+        size_idx = _line_index(out, 'size ')
         first_strat_idx = min(_line_index(out, s) for s in strats)
-        assert first_strat_idx > ev_idx
+        assert first_strat_idx > size_idx >= 0
+
+    def test_card_has_no_ev_or_p_t1_cells(self):
+        orders = [_order('AMZN', 'long', 185.2, 0.042, 0.018, 0.62, ['S_a'])]
+        out = _fmt_greenlist('2026-06-08', _sized(orders))
+        assert 'EV' not in out
+        assert 'p(' not in out and 'p_t1' not in out
+        assert 'size 4.20%' in out
 
     def test_single_strategy_order(self):
         orders = [_order('TSLA', 'short', 242.1, 0.021, 0.009, 0.55,

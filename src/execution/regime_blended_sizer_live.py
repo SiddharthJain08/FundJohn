@@ -9,7 +9,7 @@ confirmer was retired 2026-07-20.)
 
 Output format: payload['orders'] shape:
   {ticker, strategy_id, direction, entry, stop, t1, t2, pct_nav, shares,
-   notional_usd, kelly_final, ev, p_t1, source_mode, contributing_strategies}
+   notional_usd, kelly_final, source_mode, contributing_strategies}
 
 alpaca_executor reads payload['orders']; strategy_id drives the
 already_executed() idempotency check.
@@ -196,8 +196,6 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
                         'shares':                  0,
                         'notional_usd':            round(notional_op, 2),
                         'kelly_final':             pct_nav_op,
-                        'ev':                      0.0,
-                        'p_t1':                    0.5,
                         'source_mode':             o.get('source_mode'),
                         'contributing_strategies': o.get('contributing_strategies') or [sid_op],
                         'contributions':           o.get('contributions') or [
@@ -227,8 +225,6 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
                 'shares':                  0,
                 'notional_usd':            round(notional_oc, 2),
                 'kelly_final':             pct_nav_oc,
-                'ev':                      0.0,
-                'p_t1':                    0.5,
                 'source_mode':             o.get('source_mode'),
                 'close_only':              True,
                 'contributing_strategies': o.get('contributing_strategies') or [sid_oc],
@@ -307,8 +303,6 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
             'shares':                  shares,
             'notional_usd':            round(float(o['notional_usd']), 2),
             'kelly_final':             pct_nav,  # best proxy; not a true Kelly calculation
-            'ev':                      o.get('ev'),
-            'p_t1':                    o.get('p_t1'),
             'source_mode':             o.get('source_mode'),
             'contributing_strategies': (o.get('contributing_strategies')
                                         or [c.get('strategy_id') for c in contributions]),

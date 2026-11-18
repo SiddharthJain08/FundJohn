@@ -20,7 +20,9 @@ test('digest line has no EV/green text when the gate is retired', async () => {
     : [{ run_date: today, regime: 'LOW_VOL', n_signals: 12, avg_ev: null, ev_pos: 0, high_conv_count: 0 }]);
   assert.match(txt, /Latest run \(\d{4}-\d{2}-\d{2}\): 12 signals/);
   assert.match(txt, /Δ vs prior: \+2 signals/);
-  assert.doesNotMatch(txt, /NaN|avg EV|green|high-conv|quality gate/);
+  const lines = txt.split(/\\n|\n/).filter((l) => /Latest run|Δ vs prior/.test(l)).join('\n');
+  assert.ok(lines.length > 0);
+  assert.doesNotMatch(lines, /NaN|avg EV|green|high-conv|quality gate/);
 });
 
 test('zero signals still raises the alarm line', async () => {

@@ -23,7 +23,7 @@ def _raw(ticker, sid, direction, usd, *, bracket=True, current=0.0, target=None)
         'ticker': ticker, 'strategy_id': sid, 'direction': direction,
         'notional_usd': abs(usd), 'pct_nav': abs(usd) / NAV, 'shares': 0,
         'entry': b.get('entry'), 'stop': b.get('stop'), 't1': b.get('t1'), 't2': b.get('t2'),
-        'kelly_final': abs(usd) / NAV, 'ev': 0.0, 'p_t1': 0.5, 'source_mode': 'sharpe_cadence',
+        'kelly_final': abs(usd) / NAV, 'source_mode': 'sharpe_cadence',
         'target_usd': usd if target is None else target, 'current_usd': current,
         'contributing_strategies': [sid], 'contributions': [{'strategy_id': sid,
                                                              'attribution_weight': 1.0}],
@@ -74,6 +74,7 @@ def test_pooled_orders_meet_the_executor_contract():
     assert not btc.get('close_only') and btc['direction'] == 'long'
     assert btc['pct_nav'] == pytest.approx(0.12) and btc['notional_usd'] == 12_000.0
     assert btc['strategy_id'] == 'S_beta_btc'
+    assert 'ev' not in btc and 'p_t1' not in btc
     assert eth['close_only'] is True and eth['direction'] == 'short'
     assert eth['notional_usd'] == 3_000.0
 

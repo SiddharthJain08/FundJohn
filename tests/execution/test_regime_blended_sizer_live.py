@@ -158,8 +158,6 @@ def _sharpe_cadence_order(ticker='AAPL', direction='long', notional=10050.0,
         't1':                      t1,
         't2':                      None,
         'kelly_final':             notional / 100_000,
-        'ev':                      0.0,
-        'p_t1':                    0.5,
         'source_mode':             'sharpe_cadence',
         'target_usd':              notional if direction == 'long' else -notional,
         'current_usd':             0.0,
@@ -188,6 +186,7 @@ class TestSharpeCadenceShape:
         assert sig['pct_nav'] > 0
         assert sig['strategy_id'] == 'S_a'   # top-level pass-through (joined)
         assert sig['source_mode'] == 'sharpe_cadence'
+        assert 'ev' not in sig and 'p_t1' not in sig
 
     def test_sharpe_cadence_short_order(self):
         from execution.regime_blended_sizer_live import _build_sized_payload

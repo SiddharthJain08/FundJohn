@@ -162,14 +162,11 @@ def _greenlist_card(o: dict) -> str:
     dir_label = 'SHORT' if is_short else 'LONG'
     entry     = o.get('entry', 0) or 0
     pct       = (o.get('pct_nav') or 0) * 100
-    ev, p     = o.get('ev'), o.get('p_t1')
-    ev_s      = f'{ev * 100:+.2f}' if ev is not None else 'n/a'
-    p_s       = f'{p * 100:.0f}'   if p  is not None else 'n/a'
     strats    = (o.get('contributing_strategies')
                  or ([o.get('strategy_id')] if o.get('strategy_id') else []))
     lines = [
         f' {ticker:<6} {arrow} {dir_label:<5}   ${entry:,.2f}',
-        f' size {pct:.2f}%   EV {ev_s}%   p(T1) {p_s}%',
+        f' size {pct:.2f}%',
         f' contributing strategies ({len(strats)}):',
     ]
     lines += [f'   • {s}' for s in strats]
@@ -220,14 +217,14 @@ def _fmt_greenlist(run_date: str, sized: dict) -> str:
     return '\n'.join(_greenlist_messages(run_date, sized))
 
 
-# Shared 9-column schema for under-/over-performance digests. Both come
+# Shared 8-column schema for under-/over-performance digests. Both come
 # from the SAME data source (signal_pnl × yesterday's structured handoff)
 # and carry the same fields — only the sign of sigma_delta differs. The
 # schema is operator-facing: identical column positions so the two
 # messages can be scanned side-by-side without remapping.
 _DIGEST_HEADER = (
     f'{"Ticker":<8} {"Strategy":<28} {"Dir":<5} {"Status":<18} '
-    f'{"EV%":>7} {"Actual%":>8} {"Delta%":>7} {"σΔ":>6} {"Days":>5}'
+    f'{"Actual%":>8} {"Delta%":>7} {"σΔ":>6} {"Days":>5}'
 )
 _DIGEST_ROWS_MAX = 25
 
@@ -260,7 +257,6 @@ def _fmt_outlier_row(r: dict) -> str:
         f'{(r.get("strategy_id") or "?")[:28]:<28} '
         f'{(r.get("direction") or "—")[:5]:<5} '
         f'{cls[:18]:<18} '
-        f'{_fmt_pct(r.get("ev_gbm"), 7)} '
         f'{_fmt_pct(actual, 8)} '
         f'{_fmt_pct(r.get("delta"), 7)} '
         f'{_fmt_sigma(r.get("sigma_delta"))} '
