@@ -125,6 +125,10 @@ ACTIVATION_HYSTERESIS = 0.10
 # backtest still has a real comparator instead of falling straight to
 # DEFAULT_MIN_SHARPE for every regime.
 CONFIG_KEY_BENCH_SHARPE = 'strategy_activation_bench_sharpe'
+# Per-class bench (2026-11-18 btc-sleeve-floor-and-class-bench, Task 4): the
+# tier-2 fail-safe vector for CRYPTO-class strategies, stamped from the crypto
+# sleeve's (S_beta_btc) run. Crypto never falls back to the equity key above.
+CONFIG_KEY_BENCH_SHARPE_CRYPTO = 'strategy_activation_bench_sharpe_crypto'
 # Registry `strategy_registry.parameters ->> 'benchmark_sleeve' = 'true'`
 # parameter key (same key execution.benchmark_sleeve.PARAM_KEY reads) and the
 # literal sleeve id used ONLY when that registry lookup fails or returns
@@ -171,7 +175,8 @@ def stamp_last_applied(conn, min_trades, activated: int,
                        bench_sharpe: Optional[dict] = None,
                        bench_run_id=None,
                        bench_regime_source: Optional[dict] = None,
-                       excess: Optional[float] = None) -> bool:
+                       excess: Optional[float] = None,
+                       bench_by_class: Optional[dict] = None) -> bool:
     """Upsert the last-applied marker. Non-fatal: returns False (and logs)
     on any failure — a marker miss only costs one redundant (idempotent)
     re-apply at the next daily cycle, never a trading day.
@@ -207,8 +212,13 @@ def stamp_last_applied(conn, min_trades, activated: int,
     stamp) is written explicitly rather than omitted, mirroring
     bench_regime_source's own back-compat convention above -- a reader
     (the dashboard excess card) treats a missing/null key the same as 0.0
-    (the rule was bench-only before this amendment, i.e. excess=0)."""
-    payload = json.dumps({
+    (the rule was bench-only before this amendment, i.e. excess=0).
+
+    bench_by_class (Task 4, 2026-11-18): per-class comparators other than
+    the equity one above, e.g. {'crypto': {'sleeve_id', 'bench_sharpe',
+    'bench_run_id', 'bench_regime_source'}}. The key is written ONLY when
+    given -- an equity-only apply's payload is byte-identical to before."""
+    data = {
         'min_trades': min_trades,
         'activated_cells': int(activated),
         'deactivated_cells': int(deactivated),
@@ -219,7 +229,10 @@ def stamp_last_applied(conn, min_trades, activated: int,
         'bench_regime_source': bench_regime_source,
         'bench_hysteresis': ACTIVATION_HYSTERESIS,
         'excess': excess,
-    }, sort_keys=True)
+    }
+    if bench_by_class is not None:
+        data['bench_by_class'] = bench_by_class
+    payload = json.dumps(data, sort_keys=True)
     try:
         cur = conn.cursor()
         cur.execute(
@@ -247,7 +260,8 @@ def stamp_last_applied(conn, min_trades, activated: int,
         return False
 
 
-def stamp_bench_sharpe_config(conn, bench: dict, regime_source: Optional[dict] = None) -> bool:
+def stamp_bench_sharpe_config(conn, bench: dict, regime_source: Optional[dict] = None, *,
+                              key: str = CONFIG_KEY_BENCH_SHARPE) -> bool:
     """Persist the resolved bench vector to pipeline_config (spec §2 tier 2
     fail-safe): a later run whose sleeve primary_window run is missing or
     stale falls back to THIS vector instead of jumping straight to
@@ -280,20 +294,39 @@ def stamp_bench_sharpe_config(conn, bench: dict, regime_source: Optional[dict] =
     excluded from the payload) does a write happen at all; if that leaves
     nothing to write (every regime defaulted this run), the write is also
     skipped (returns False, logged). regime_source=None (back-compat
-    direct callers) persists `bench` as-is, no filtering."""
+    direct callers) persists `bench` as-is, no filtering.
+
+    key (Task 4, 2026-11-18): CONFIG_KEY_BENCH_SHARPE (equity, default) or
+    CONFIG_KEY_BENCH_SHARPE_CRYPTO (the crypto sleeve's vector) -- same
+    skip rules either way."""
     to_write = bench
     if regime_source is not None:
         if any(src == 'pipeline_config' for src in regime_source.values()):
-            _log(f'{CONFIG_KEY_BENCH_SHARPE}: skipping write -- at least one regime this run '
+            _log(f'{key}: skipping write -- at least one regime this run '
                  f'is tier-2 (pipeline_config)-sourced; re-persisting it would refresh its '
                  f'updated_at and make a stale fallback look like a fresh observation. '
                  f'Leaving the existing row in place.')
             return False
         to_write = {r: v for r, v in bench.items() if regime_source.get(r) == 'sleeve'}
         if not to_write:
-            _log(f'{CONFIG_KEY_BENCH_SHARPE}: nothing to persist (every regime this run '
+            _log(f'{key}: nothing to persist (every regime this run '
                  f'came from DEFAULT_MIN_SHARPE)')
             return False
+    if key == CONFIG_KEY_BENCH_SHARPE_CRYPTO:
+        desc = ("Last-applied S_beta_btc (crypto benchmark sleeve) per-regime Sharpe "
+                'vector: tier-2 fail-safe for CRYPTO-class strategies only (never '
+                'read for equity, and crypto never reads the equity row). Written '
+                'by activation_assigner on every successful --all non-dry-run apply '
+                'that built a crypto vector. Regimes resolved via DEFAULT_MIN_SHARPE '
+                'are excluded -- see stamp_bench_sharpe_config docstring.')
+    else:
+        desc = ("Last-applied S_beta_spy per-regime Sharpe vector (spec "
+                '2026-09-25-activation-bench-relative-spec.md §2 tier 2 fail-safe): '
+                "used by a later run when it cannot read the benchmark sleeve's "
+                'primary_window strategy_backtest_regimes rows. Written by '
+                'activation_assigner on every successful --all non-dry-run apply. '
+                'Regimes resolved via DEFAULT_MIN_SHARPE are excluded -- see '
+                'stamp_bench_sharpe_config docstring.')
     try:
         cur = conn.cursor()
         cur.execute(
@@ -303,19 +336,12 @@ def stamp_bench_sharpe_config(conn, bench: dict, regime_source: Optional[dict] =
             ON CONFLICT (key) DO UPDATE
                SET value = EXCLUDED.value, updated_at = NOW()
             """,
-            (CONFIG_KEY_BENCH_SHARPE, json.dumps(to_write, sort_keys=True),
-             "Last-applied S_beta_spy per-regime Sharpe vector (spec "
-             '2026-09-25-activation-bench-relative-spec.md §2 tier 2 fail-safe): '
-             "used by a later run when it cannot read the benchmark sleeve's "
-             'primary_window strategy_backtest_regimes rows. Written by '
-             'activation_assigner on every successful --all non-dry-run apply. '
-             'Regimes resolved via DEFAULT_MIN_SHARPE are excluded -- see '
-             'stamp_bench_sharpe_config docstring.'))
+            (key, json.dumps(to_write, sort_keys=True), desc))
         conn.commit()
         cur.close()
         return True
     except Exception as e:  # pragma: no cover - defensive
-        _log(f'WARNING: could not stamp {CONFIG_KEY_BENCH_SHARPE}: {e}')
+        _log(f'WARNING: could not stamp {key}: {e}')
         try:
             conn.rollback()
         except Exception:
@@ -424,7 +450,11 @@ def get_activation_excess(cur) -> float:
 
 
 # ── Bench-relative comparator (spec 2026-09-25-activation-bench-relative) ──
-def _load_pipeline_config_bench_vector(conn) -> dict:
+class _NoSleeve(Exception):
+    """Internal: load_bench_sharpe's crypto path with no crypto sleeve --
+    skip the sleeve-run query entirely (never read the equity literal)."""
+
+def _load_pipeline_config_bench_vector(conn, key: str = CONFIG_KEY_BENCH_SHARPE) -> dict:
     """Read strategy_activation_bench_sharpe (JSON {regime: sharpe}) from
     pipeline_config -- fail-safe tier 2 (spec §2). Fail-safe: missing row /
     malformed top-level value / query error -> {} (caller falls through to
@@ -436,10 +466,13 @@ def _load_pipeline_config_bench_vector(conn) -> dict:
     not discard the OTHER three, otherwise-valid regimes. Each entry is
     resolved independently; only a malformed top-level payload (not a
     dict, or fails to parse at all) falls back to {} for the whole vector
-    (review carry-over, spec 2026-09-25 Task 1 review)."""
+    (review carry-over, spec 2026-09-25 Task 1 review).
+
+    key (Task 4, 2026-11-18): CONFIG_KEY_BENCH_SHARPE_CRYPTO for the crypto
+    class; default = the equity row."""
     try:
         cur = conn.cursor()
-        cur.execute("SELECT value FROM pipeline_config WHERE key=%s", (CONFIG_KEY_BENCH_SHARPE,))
+        cur.execute("SELECT value FROM pipeline_config WHERE key=%s", (key,))
         row = cur.fetchone()
         cur.close()
         if not row or row[0] is None:
@@ -526,7 +559,8 @@ def resolve_bench_sleeve_id(conn, sleeve_id: Optional[str] = None,
     return BENCH_SLEEVE_FALLBACK_ID, 'literal_fallback'
 
 
-def load_bench_sharpe(conn, sleeve_id: Optional[str] = None) -> tuple[dict, dict]:
+def load_bench_sharpe(conn, sleeve_id: Optional[str] = None, *,
+                      instrument_class: str = 'equity') -> tuple[dict, dict]:
     """Resolve the per-regime benchmark-sleeve Sharpe vector used as the
     activation comparator (spec §1, §2, §5-A).
 
@@ -555,13 +589,30 @@ def load_bench_sharpe(conn, sleeve_id: Optional[str] = None) -> tuple[dict, dict
     resolves it with a plain query here -- deliberately NOT
     load_benchmark_sleeve_ids, whose `with conn.cursor() as cur:` usage not
     every caller's cursor stub supports.
+
+    instrument_class (Task 4, 2026-11-18): 'crypto' builds the CRYPTO
+    comparator (S_beta_btc) -- the sleeve is resolved among crypto sleeves
+    only, and when the registry has none (`literal_fallback`) NO sleeve run
+    is read at all (the literal is the EQUITY sleeve; crypto must never be
+    judged against SPY): sleeve_id/run_id are None and every regime comes
+    from tier 2 (CONFIG_KEY_BENCH_SHARPE_CRYPTO, never the equity key) or
+    tier 3. meta gains 'instrument_class'.
     """
-    sleeve_id, sleeve_source = resolve_bench_sleeve_id(conn, sleeve_id)
+    cls = str(instrument_class or 'equity').strip().lower()
+    is_crypto = cls == 'crypto'
+    sleeve_id, sleeve_source = resolve_bench_sleeve_id(conn, sleeve_id, cls)
+    skip_sleeve = is_crypto and sleeve_source == 'literal_fallback'
+    if skip_sleeve:
+        sleeve_id = None
+        _log('WARN: no crypto benchmark sleeve in the registry; '
+             'crypto bench from pipeline_config/default')
 
     run_id = None
     sleeve_sharpe: dict = {}
     cur = conn.cursor()
     try:
+        if skip_sleeve:
+            raise _NoSleeve()
         cur.execute("""
             SELECT run_id FROM strategy_backtest_runs
             WHERE strategy_id = %s AND primary_window = TRUE
@@ -591,6 +642,8 @@ def load_bench_sharpe(conn, sleeve_id: Optional[str] = None) -> tuple[dict, dict
                          f'non-finite ({sharpe}); treating as missing for this regime')
                     continue
                 sleeve_sharpe[regime_state] = sharpe
+    except _NoSleeve:
+        pass
     except Exception as e:
         _log(f'bench sleeve run lookup failed ({e})')
         try:
@@ -606,7 +659,9 @@ def load_bench_sharpe(conn, sleeve_id: Optional[str] = None) -> tuple[dict, dict
     # while a real canonical regime is still absent, which would silently
     # skip the tier-2 fallback for it (review carry-over).
     missing = [r for r in CANONICAL_REGIMES if r not in sleeve_sharpe]
-    fallback_vector = _load_pipeline_config_bench_vector(conn) if missing else {}
+    tier2_key = CONFIG_KEY_BENCH_SHARPE_CRYPTO if is_crypto else CONFIG_KEY_BENCH_SHARPE
+    fallback_vector = _load_pipeline_config_bench_vector(conn, key=tier2_key) if missing else {}
+    cls_tag = '[crypto] ' if is_crypto else ''
 
     bench: dict = {}
     regime_source: dict = {}
@@ -617,12 +672,12 @@ def load_bench_sharpe(conn, sleeve_id: Optional[str] = None) -> tuple[dict, dict
         elif r in fallback_vector:
             bench[r] = fallback_vector[r]
             regime_source[r] = 'pipeline_config'
-            _log(f'WARN: {r} bench sharpe missing from sleeve run {run_id or "<none>"}; '
+            _log(f'WARN: {cls_tag}{r} bench sharpe missing from sleeve run {run_id or "<none>"}; '
                  f'using last-applied pipeline_config vector')
         else:
             bench[r] = DEFAULT_MIN_SHARPE
             regime_source[r] = 'default'
-            _log(f'WARN: {r} bench sharpe unavailable (no sleeve run, no pipeline_config '
+            _log(f'WARN: {cls_tag}{r} bench sharpe unavailable (no sleeve run, no pipeline_config '
                  f'vector); using DEFAULT_MIN_SHARPE={DEFAULT_MIN_SHARPE}')
 
     # str(): defensive against a psycopg2 typed adapter (e.g. a registered
@@ -632,7 +687,7 @@ def load_bench_sharpe(conn, sleeve_id: Optional[str] = None) -> tuple[dict, dict
     # cast is safe. The query above still uses the raw `run_id` variable.
     return bench, {'sleeve_id': sleeve_id, 'sleeve_source': sleeve_source,
                    'run_id': (str(run_id) if run_id is not None else None),
-                   'regime_source': regime_source}
+                   'regime_source': regime_source, 'instrument_class': cls}
 
 
 def _resolve_bench(bench: Optional[dict]) -> dict:
@@ -667,8 +722,13 @@ def _fmt_bench_vector(bench: dict, meta: dict) -> str:
     """Byte-shape for the 'bench:' stdout line (spec §5-E). Deliberately
     does NOT match activation_preview.js's HEADER_RE/DETAIL_RE/SUMMARY_RE
     (no '<token>: LOW_VOL: ' shape, no leading 'threshold=') -- new, unparsed
-    output the dashboard's existing assigner-output parser just ignores."""
-    return ('bench: sleeve={} source={} run={} '.format(
+    output the dashboard's existing assigner-output parser just ignores.
+
+    Task 4 (2026-11-18): meta['instrument_class'] == 'crypto' -> prefix
+    'bench[crypto]: ' (does not match BENCH_VECTOR_RE, so the dashboard's
+    equity bench card is unaffected); anything else -> 'bench: ' unchanged."""
+    prefix = 'bench[crypto]: ' if meta.get('instrument_class') == 'crypto' else 'bench: '
+    return (prefix + 'sleeve={} source={} run={} '.format(
                 meta.get('sleeve_id'), meta.get('sleeve_source'), meta.get('run_id'))
             + ' '.join(f'{r}={bench[r]}' for r in CANONICAL_REGIMES))
 
@@ -681,7 +741,7 @@ def _fmt_bench_diff(gained: dict, lost: dict) -> str:
         f'{r} +{gained.get(r, 0)}/-{lost.get(r, 0)}' for r in CANONICAL_REGIMES)
 
 
-def _fmt_thresholds(bench: dict, excess: float) -> str:
+def _fmt_thresholds(bench: dict, excess: float, *, instrument_class: str = 'equity') -> str:
     """Byte-shape for the 'thresholds:' stdout line (spec Amendment 1 §8):
     the EFFECTIVE per-regime comparator (bench[r] + excess -- the exact
     value _judge compares sharpe against) printed once per run so the
@@ -690,7 +750,8 @@ def _fmt_thresholds(bench: dict, excess: float) -> str:
     HEADER_RE/DETAIL_RE/SUMMARY_RE/BENCH_VECTOR_RE/BENCH_DIFF_RE/WARN_RE
     (no leading 'threshold=', no 'bench:'/'bench diff:'/'WARN:' prefix)."""
     parts = ' '.join(f'{r}={round(bench[r] + excess, 10)}' for r in CANONICAL_REGIMES)
-    return f'thresholds: {parts} (excess={excess})'
+    label = 'thresholds[crypto]' if instrument_class == 'crypto' else 'thresholds'
+    return f'{label}: {parts} (excess={excess})'
 
 
 # ── Eligibility computation ─────────────────────────────────────────────────
@@ -1095,7 +1156,8 @@ def apply_one(conn, strategy_id: str, *,
 def _notify_content(summary: str, newly_dormant: list, dry_run: bool,
                     bench_line: str = '', bench_diff_line: str = '',
                     thresholds_line: str = '',
-                    warn_lines: Optional[list] = None) -> str:
+                    warn_lines: Optional[list] = None,
+                    extra_lines: Optional[list] = None) -> str:
     """Pure assembly of the #botjohn-log post body (F1-b, fix round 1): the
     summary line, the `bench:` vector line, the `bench diff:` line, and
     every WARN line _log collected this run. Before this fix the post
@@ -1120,6 +1182,10 @@ def _notify_content(summary: str, newly_dormant: list, dry_run: bool,
         lines.append(bench_diff_line)
     if thresholds_line:
         lines.append(thresholds_line)
+    if extra_lines:
+        # Task 4: per-class (crypto) bench[crypto]:/thresholds[crypto]: lines,
+        # right after the equity thresholds line.
+        lines.extend(extra_lines)
     if warn_lines:
         lines.extend(warn_lines)
     if newly_dormant:
@@ -1130,7 +1196,8 @@ def _notify_content(summary: str, newly_dormant: list, dry_run: bool,
 def _notify_botjohn_log(summary: str, newly_dormant: list, dry_run: bool,
                         bench_line: str = '', bench_diff_line: str = '',
                         thresholds_line: str = '',
-                        warn_lines: Optional[list] = None) -> None:
+                        warn_lines: Optional[list] = None,
+                        extra_lines: Optional[list] = None) -> None:
     """Best-effort post to #botjohn-log. Mirrors regime_blended_sizer.py's
     _post_corr_cumsharpe_log / fold_report.py's webhook pattern: look up
     agent_registry.webhook_urls->>'botjohn-log', POST via urllib with an
@@ -1154,7 +1221,8 @@ def _notify_botjohn_log(summary: str, newly_dormant: list, dry_run: bool,
         import urllib.request as _ur
         content = _notify_content(summary, newly_dormant, dry_run,
                                   bench_line=bench_line, bench_diff_line=bench_diff_line,
-                                  thresholds_line=thresholds_line, warn_lines=warn_lines)
+                                  thresholds_line=thresholds_line, warn_lines=warn_lines,
+                                  extra_lines=extra_lines)
         req = _ur.Request(
             url, data=json.dumps({'content': content}).encode(), method='POST',
             headers={'Content-Type': 'application/json',
@@ -1323,6 +1391,31 @@ def main() -> int:
     bench_vector_line = _fmt_bench_vector(bench_vector, bench_meta)
     _log(bench_vector_line)
 
+    # Per-class bench (Task 4, 2026-11-18): crypto-class strategies (manifest
+    # instrument_class == 'crypto') are judged against the CRYPTO sleeve's
+    # vector (S_beta_btc), never the SPY vector above. No crypto sleeve in
+    # the registry but crypto strategies present -> load_bench_sharpe's
+    # crypto tier 2/3 (crypto pipeline_config key, then DEFAULT) -- still
+    # never the equity vector. Equity-only fleet -> no crypto vector at all.
+    _crypto_bench_ids = set(bench_ids) - _equity_bench_ids
+    crypto_vector = crypto_meta = None
+    crypto_vector_line = ''
+    if _crypto_bench_ids:
+        crypto_sleeve_id = ('S_beta_btc' if 'S_beta_btc' in _crypto_bench_ids
+                            else sorted(_crypto_bench_ids)[0])
+        crypto_vector, crypto_meta = load_bench_sharpe(conn, sleeve_id=crypto_sleeve_id,
+                                                       instrument_class='crypto')
+    elif any(c == 'crypto' for c in classes.values()):
+        crypto_vector, crypto_meta = load_bench_sharpe(conn, None, instrument_class='crypto')
+    if crypto_vector is not None:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        crypto_meta = dict(crypto_meta or {}, instrument_class='crypto')
+        crypto_vector_line = _fmt_bench_vector(crypto_vector, crypto_meta)
+        _log(crypto_vector_line)
+
     # NOTE: header + summary line formats are PINNED by activation_preview.js
     # (HEADER_RE / SUMMARY_RE, consumed by the dashboard dry-run endpoint) —
     # keep `threshold=… min_trades=… dry_run=… strategies=…` byte-stable
@@ -1366,7 +1459,10 @@ def main() -> int:
                           min_trades=resolved_min_trades,
                           instrument_class=classes.get(sid, 'equity'),
                           always_on=(sid in bench_ids),
-                          bench=bench_vector, excess=resolved_excess)
+                          bench=(crypto_vector if (crypto_vector is not None
+                                                   and classes.get(sid, 'equity') == 'crypto')
+                                 else bench_vector),
+                          excess=resolved_excess)
         except Exception as e:
             _log(f'  ERROR {sid}: {e}')
             try:
@@ -1418,6 +1514,12 @@ def main() -> int:
     # line (activation_preview.js THRESHOLDS_RE).
     thresholds_line = _fmt_thresholds(bench_vector, resolved_excess)
     _log(thresholds_line)
+    crypto_extra_lines: list = []
+    if crypto_vector is not None:
+        crypto_thresholds_line = _fmt_thresholds(crypto_vector, resolved_excess,
+                                                 instrument_class='crypto')
+        _log(crypto_thresholds_line)
+        crypto_extra_lines = [crypto_vector_line, crypto_thresholds_line]
 
     summary = (
         f'activation_assigner summary: {n_ok} strategies evaluated, '
@@ -1457,7 +1559,8 @@ def main() -> int:
         # every WARN: line _log collected this run.
         _notify_botjohn_log(notify_summary, newly_dormant, args.dry_run,
                             bench_line=bench_vector_line, bench_diff_line=bench_diff_line,
-                            thresholds_line=thresholds_line, warn_lines=list(_WARN_LINES))
+                            thresholds_line=thresholds_line, warn_lines=list(_WARN_LINES),
+                            extra_lines=crypto_extra_lines or None)
 
     # Markers: only a clean, complete, non-dry-run apply counts as "applied".
     # A run with per-strategy errors leaves the old markers so the next
@@ -1467,14 +1570,26 @@ def main() -> int:
     # above is display-only, for the printed header/summary lines, which
     # stay byte-stable for activation_preview.js.
     if args.all and not args.dry_run and n_errors == 0:
+        bench_by_class = None
+        if crypto_vector is not None:
+            bench_by_class = {'crypto': {
+                'sleeve_id': crypto_meta.get('sleeve_id'),
+                'bench_sharpe': crypto_vector,
+                'bench_run_id': crypto_meta.get('run_id'),
+                'bench_regime_source': crypto_meta.get('regime_source'),
+            }}
         if stamp_last_applied(conn, eff_min_trades, activated_cells,
                               deactivated_cells, trigger=args.trigger,
                               bench_sharpe=bench_vector, bench_run_id=bench_meta.get('run_id'),
                               bench_regime_source=bench_meta.get('regime_source'),
-                              excess=resolved_excess):
+                              excess=resolved_excess, bench_by_class=bench_by_class):
             _log(f'stamped {LAST_APPLIED_KEY} (trigger={args.trigger})')
         if stamp_bench_sharpe_config(conn, bench_vector, regime_source=bench_meta.get('regime_source')):
             _log(f'stamped {CONFIG_KEY_BENCH_SHARPE} (fail-safe tier 2 vector)')
+        if crypto_vector is not None and stamp_bench_sharpe_config(
+                conn, crypto_vector, regime_source=crypto_meta.get('regime_source'),
+                key=CONFIG_KEY_BENCH_SHARPE_CRYPTO):
+            _log(f'stamped {CONFIG_KEY_BENCH_SHARPE_CRYPTO} (fail-safe tier 2 vector, crypto)')
 
     conn.close()
     return 1 if n_errors else 0

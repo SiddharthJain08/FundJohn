@@ -77,6 +77,22 @@ _OK_RESULT = {'status': 'ok', 'strategy_id': 'S_test',
              'diag': {}, 'actions': {r: 'initialized' for r in aa.CANONICAL_REGIMES}}
 
 
+# Task 4 (2026-11-18 per-class bench): main() now builds a second, crypto
+# bench vector whenever the manifest carries a crypto-class strategy. These
+# tests pin the EQUITY-only wiring (one load_bench_sharpe vector, one tier-2
+# stamp), so isolate them from the real manifest (which has crypto rows).
+# The per-class behaviour is covered in test_activation_assigner_multi_sleeve.
+_classes_patcher = mock.patch.object(aa, '_load_instrument_classes', return_value={})
+
+
+def setUpModule():
+    _classes_patcher.start()
+
+
+def tearDownModule():
+    _classes_patcher.stop()
+
+
 class TestMainStampGating(unittest.TestCase):
     """The last-applied + tier-2 fail-safe stamps are only ever written on
     a --all, non-dry-run, zero-error run (main()'s existing gate, spec §2
