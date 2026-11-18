@@ -99,6 +99,31 @@ def pooled_scales(*, eq_gross: float, cr_gross: float, lam_global: float,
     return (lam_global * leq) * nav / g, (lam_global * lcr) * nav / g
 
 
+def floor_weight(w_btc: float, frac: float, *, eq_gross: float, cr_gross_other: float,
+                 lam_global: float, liq_cr: float) -> tuple[float, str]:
+    """BTC sleeve weight that lands the post-normaliser BTC dollars at frac·NAV.
+    With G = eq_gross + cr_gross_other and k = λ_global·clip(liq_cr, 0, 1), BTC
+    gets w·k·NAV/(G + w), so w_f = frac·G/(k − frac) for k > frac. Returns
+    (w_out, how), how ∈ {'own','floor','unit','off'}: 'off' = frac ≤ 0; 'unit' =
+    nothing else in the normaliser and no own weight (BTC alone takes λ·NAV,
+    the caller's clamp bounds it); 'floor' = floor weight beats own conviction;
+    degenerate k ≤ frac ⇒ max(w_btc, G) tagged 'floor' (caller logs the WARN).
+    Pure — the caller logs."""
+    w_btc = float(w_btc)
+    if frac <= 0:
+        return w_btc, 'off'
+    g = float(eq_gross) + float(cr_gross_other)
+    if g <= 0 and w_btc <= 0:
+        return 1.0, 'unit'
+    k = float(lam_global) * max(0.0, min(1.0, float(liq_cr)))
+    if k <= frac:
+        return max(w_btc, g), 'floor'
+    w_f = frac * g / (k - frac)
+    if w_f > w_btc:
+        return w_f, 'floor'
+    return w_btc, 'own'
+
+
 def stable_tickers() -> set[str]:
     """Crypto-universe tickers with role 'stable' (all rows, active or not)."""
     try:
@@ -116,15 +141,28 @@ def drop_stables(d: dict, stables: set[str]) -> tuple[dict, int]:
     return kept, len(d or {}) - len(kept)
 
 
-def crypto_gross_cap(crypto_targets: dict, nav: float, frac: float) -> tuple[dict, float]:
-    """Pro-rata shave so Σ|crypto| ≤ frac·NAV; returns (targets, shaved_usd)."""
+def crypto_gross_cap(crypto_targets: dict, nav: float, frac: float, *,
+                     protect: set | None = None) -> tuple[dict, float]:
+    """Pro-rata shave so Σ|crypto| ≤ frac·NAV; returns (targets, shaved_usd).
+    `protect` tickers are shaved only after the unprotected ones are exhausted
+    (then the protected set is shaved pro-rata); None/empty ⇒ plain pro-rata."""
     out = dict(crypto_targets or {})
     gross = sum(abs(v) for v in out.values())
     cap = max(0.0, float(frac)) * float(nav)
     if gross <= cap or gross <= 0:
         return out, 0.0
-    k = cap / gross
-    return {t: v * k for t, v in out.items()}, gross - cap
+    prot = set(protect or ())
+    if not prot:
+        k = cap / gross
+        return {t: v * k for t, v in out.items()}, gross - cap
+    p_gross = sum(abs(v) for t, v in out.items() if t in prot)
+    u_gross = gross - p_gross
+    excess = gross - cap
+    if u_gross >= excess:
+        ku = (u_gross - excess) / u_gross
+        return {t: (v if t in prot else v * ku) for t, v in out.items()}, excess
+    kp = cap / p_gross
+    return {t: (v * kp if t in prot else 0.0) for t, v in out.items()}, excess
 
 
 def funding_pass(crypto_targets: dict, non_marginable_bp: float | None,
@@ -195,7 +233,8 @@ def shadow_line(crypto_regime, s_m_crypto, before: dict, after: dict, dropped: l
                 funding_shortfall: float | None, hold_flat: bool, mode: str,
                 nav: float | None = None, stable_excluded: int = 0,
                 hold_zeroed: int = 0, short_clamped: int = 0,
-                eq_scale_ratio: float | None = None, btc_clamped_usd: float = 0.0) -> str:
+                eq_scale_ratio: float | None = None, btc_clamped_usd: float = 0.0,
+                floor_usd: float = 0.0, pool: float = 0.0) -> str:
     """One line per cycle. `before` = unconstrained crypto USD targets (post
     normaliser, pre caps); `after` = feasible targets (post caps, funding,
     hold-flat) — the shadow review sees both (spec §5.3b). `eq_scale_ratio` =
@@ -210,9 +249,9 @@ def shadow_line(crypto_regime, s_m_crypto, before: dict, after: dict, dropped: l
     top = sorted(((t, round(v)) for t, v in (after or {}).items() if v), key=lambda x: -abs(x[1]))[:8]
     return ('crypto_sizing.%s[%s]: S_m=%s n=%d gross=%.0f%s unconstrained=%.0f lam_nav=%.0f '
             'cap_shaved=%.0f funding_bind=%s hold=%d hold_zeroed=%d short_clamped=%d '
-            'stable_excluded=%d eq_scale_ratio=%s btc_clamped_usd=%.0f dropped=%d bench=%s top=%s' % (
+            'stable_excluded=%d eq_scale_ratio=%s btc_clamped_usd=%.0f dropped=%d bench=%s top=%s floor_usd=%.0f pool=%.2f' % (
                 mode, crypto_regime, _fmt_s_m(s_m_crypto), n, g1, pct, g0, lam_nav,
                 gross_cap_shaved, fb, 1 if hold_flat else 0, hold_zeroed, short_clamped,
                 stable_excluded, 'na' if eq_scale_ratio is None else '%.4f' % eq_scale_ratio,
                 btc_clamped_usd,
-                len(dropped or []), sorted(bench_tkrs or ()), top))
+                len(dropped or []), sorted(bench_tkrs or ()), top, floor_usd, pool))

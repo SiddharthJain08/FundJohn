@@ -97,6 +97,7 @@ def test_shadow_line_format():
                            funding_shortfall=1234.4, hold_flat=True, mode='apply')
     assert line2.startswith('crypto_sizing.apply[LOW_VOL]: S_m=na n=0 ')
     assert 'funding_bind=1234' in line2 and 'hold=1' in line2
+    assert line.endswith(' floor_usd=0 pool=0.00') and line2.endswith(' floor_usd=0 pool=0.00')
 
 
 class _Cur:
@@ -174,3 +175,37 @@ def test_shadow_line_eq_scale_ratio():
     line = ps.shadow_line('LOW_VOL', 0.1, {}, {}, [], set(), 0.0, gross_cap_shaved=0.0,
                           funding_shortfall=0.0, hold_flat=False, mode='shadow', eq_scale_ratio=0.73499)
     assert 'eq_scale_ratio=0.7350' in line
+
+
+def test_floor_weight_solves_for_target_fraction():
+    NAV, LAM, LIQ, F = 100_000.0, 2.0, 1.0, 0.10
+    w, how = ps.floor_weight(0.0, F, eq_gross=90.0, cr_gross_other=0.0, lam_global=LAM, liq_cr=LIQ)
+    assert how == 'floor'
+    _, scale_cr = ps.pooled_scales(eq_gross=90.0, cr_gross=w, lam_global=LAM, liq_eq=1.0, liq_cr=LIQ, nav=NAV)
+    assert abs(w * scale_cr - F * NAV) < 1e-6
+    w2, how2 = ps.floor_weight(50.0, F, eq_gross=90.0, cr_gross_other=0.0, lam_global=LAM, liq_cr=LIQ)
+    assert (w2, how2) == (50.0, 'own')                      # own conviction above the floor wins
+
+
+def test_floor_weight_zero_gross_returns_unit_weight():
+    assert ps.floor_weight(0.0, 0.10, eq_gross=0.0, cr_gross_other=0.0, lam_global=2.0, liq_cr=1.0) == (1.0, 'unit')
+    assert ps.floor_weight(0.0, 0.0, eq_gross=90.0, cr_gross_other=0.0, lam_global=2.0, liq_cr=1.0) == (0.0, 'off')
+    w, how = ps.floor_weight(0.0, 0.10, eq_gross=90.0, cr_gross_other=0.0, lam_global=0.05, liq_cr=1.0)
+    assert how == 'floor' and w == 90.0                      # k <= frac degenerate branch
+
+
+def test_crypto_gross_cap_protects_btc_first():
+    t = {'BTC-USD': 10_000.0, 'ETH-USD': 30_000.0, 'SOL-USD': 20_000.0}
+    out, shaved = ps.crypto_gross_cap(t, 100_000.0, 0.50, protect={'BTC-USD'})
+    assert out['BTC-USD'] == 10_000.0 and abs(shaved - 10_000.0) < 1e-6
+    assert abs(out['ETH-USD'] + out['SOL-USD'] - 40_000.0) < 1e-6 and abs(out['ETH-USD'] / out['SOL-USD'] - 1.5) < 1e-9
+    out2, shaved2 = ps.crypto_gross_cap({'BTC-USD': 60_000.0, 'ETH-USD': 5_000.0}, 100_000.0, 0.50, protect={'BTC-USD'})
+    assert out2['ETH-USD'] == 0.0 and abs(out2['BTC-USD'] - 50_000.0) < 1e-6 and abs(shaved2 - 15_000.0) < 1e-6
+    assert ps.crypto_gross_cap(t, 100_000.0, 0.50) == ps.crypto_gross_cap(t, 100_000.0, 0.50, protect=None)
+
+
+def test_shadow_line_floor_and_pool_fields():
+    line = ps.shadow_line('HIGH_VOL', 1.79, {'BTC-USD': 9_100.0}, {'BTC-USD': 9_100.0}, [], {'BTC-USD'},
+                          164_000.0, gross_cap_shaved=0.0, funding_shortfall=0.0, hold_flat=False,
+                          mode='shadow', nav=91_000.0, floor_usd=8_928.0, pool=0.0)
+    assert line.endswith("top=[('BTC-USD', 9100)] floor_usd=8928 pool=0.00")
