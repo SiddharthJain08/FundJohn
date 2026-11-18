@@ -147,6 +147,7 @@ a weekday. The 10:00 AM ET pipeline cycle should already have completed.
          WHERE submitted_at::date = '{{TODAY_ISO}}';
        SELECT state, vix_level, updated_at FROM market_regime
          ORDER BY updated_at DESC LIMIT 1;
+       -- EV columns (ev_pos, ev_neg, avg_ev, avg_p_t1, high_conv_count) are retired since 2026-11-18 and always 0/NULL; n_signals is the only live field — do not investigate zero green.
        SELECT * FROM daily_signal_summary
          WHERE run_date = '{{TODAY_ISO}}';
    - Run a specific system_check for finer-grained diagnostics:

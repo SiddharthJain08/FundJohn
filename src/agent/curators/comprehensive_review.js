@@ -262,9 +262,9 @@ Memo content must:
   * identify the single most costly parameter choice and quantify the
     counterfactual improvement (use the counterfactuals block)
   * reference the 30-day veto histogram when it concentrates on a
-    single reason code — that reason is a tuning signal (e.g. many
-    negative_kelly vetoes → p_t1 calibration is mismatched to R:R;
-    many prefilter_negative_ev → EV computation itself is suspect)
+    single reason code — that reason is a tuning signal (the EV/p_t1
+    prefilter was retired 2026-11-18; the only handoff veto reason is
+    untradable_at_alpaca)
   * recommend specific parameter tuning — reference the
     wider_stop / shorter_hold / larger_size counterfactuals by name
   * end with a 3-bullet "next-week actions" list
