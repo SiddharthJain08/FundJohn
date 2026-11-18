@@ -107,7 +107,8 @@ def floor_weight(w_btc: float, frac: float, *, eq_gross: float, cr_gross_other: 
     (w_out, how), how ∈ {'own','floor','unit','off'}: 'off' = frac ≤ 0; 'unit' =
     nothing else in the normaliser and no own weight (BTC alone takes λ·NAV,
     the caller's clamp bounds it); 'floor' = floor weight beats own conviction;
-    degenerate k ≤ frac ⇒ max(w_btc, G) tagged 'floor' (caller logs the WARN).
+    degenerate k ≤ frac ⇒ max(w_btc, G), tagged 'floor' when G wins and 'own'
+    when own conviction already exceeds G (caller logs the WARN).
     Pure — the caller logs."""
     w_btc = float(w_btc)
     if frac <= 0:
@@ -117,7 +118,7 @@ def floor_weight(w_btc: float, frac: float, *, eq_gross: float, cr_gross_other: 
         return 1.0, 'unit'
     k = float(lam_global) * max(0.0, min(1.0, float(liq_cr)))
     if k <= frac:
-        return max(w_btc, g), 'floor'
+        return max(w_btc, g), ('floor' if g > w_btc else 'own')
     w_f = frac * g / (k - frac)
     if w_f > w_btc:
         return w_f, 'floor'

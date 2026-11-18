@@ -192,6 +192,8 @@ def test_floor_weight_zero_gross_returns_unit_weight():
     assert ps.floor_weight(0.0, 0.0, eq_gross=90.0, cr_gross_other=0.0, lam_global=2.0, liq_cr=1.0) == (0.0, 'off')
     w, how = ps.floor_weight(0.0, 0.10, eq_gross=90.0, cr_gross_other=0.0, lam_global=0.05, liq_cr=1.0)
     assert how == 'floor' and w == 90.0                      # k <= frac degenerate branch
+    assert ps.floor_weight(120.0, 0.10, eq_gross=90.0, cr_gross_other=0.0,
+                           lam_global=0.05, liq_cr=1.0) == (120.0, 'own')   # own conviction > G
 
 
 def test_crypto_gross_cap_protects_btc_first():
