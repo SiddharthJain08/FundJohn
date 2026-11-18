@@ -4,7 +4,7 @@ trade_handoff_builder.py — deterministic feature builder for TradeJohn.
 
 Replaces research_report.py's signal-enrichment pass. Reads signals from
 execution_signals for the run_date, computes pure-Python features (HV,
-beta, momentum, GBM first-passage EV / p_t1, RSI), and writes a compact
+beta, momentum, RSI, direction-aware stop/target geometry), and writes a compact
 structured JSON handoff that TradeJohn consumes directly.
 
 No LLM, no Discord posts, no markdown. Size target: ≤ 30KB per cycle so
@@ -40,40 +40,10 @@ from backtest.risk_free import RISK_FREE_ANNUAL_CONST as _RF_CONST  # noqa: E402
 TRADING_DAYS_PER_YEAR = 252
 RISK_FREE_DAILY       = _RF_CONST / TRADING_DAYS_PER_YEAR  # unused here; kept for the cross-module equality test
 
-# Pre-filter: only signals clearing these gates are sent to TradeJohn.
-# Anything that fails here gets dropped to `prefiltered` with the reason —
-# those bubble into send_report.py's veto digest as a separate reason
-# bucket. Goal: keep TradeJohn's context focused on signals with real
-# positive-Kelly potential so it can spend its token budget on sizing
-# nuance instead of re-rejecting the same negative-EV signals every day.
-MIN_EV_GBM   = 0.005   # 0.5% expected value per trade — anything below
-                       # is below the friction+slippage floor for live
-                       # execution and never survives TradeJohn's gate
-                       # anyway. Empirically 99% of 04-23 vetoes were
-                       # below this line.
-MIN_P_T1     = 0.30    # target must be at least somewhat reachable;
-                       # strategies that report p_t1 < 30% are almost
-                       # always below the Kelly-viable boundary
-                       # (R/(R+1) ≈ 0.4 for R=1.5).
-
-# Per-strategy expected holding-period lookup. Keep in sync with the old
-# research_report; defaults cover any strategy not listed.
-_HP_OPTIONS = {'min': 1, 'target': 5, 'max': 21}
-HOLDING_PERIOD = {
-    'S9_dual_momentum':               {'min': 21, 'target': 63,  'max': 126},
-    'S_custom_jt_momentum_12mo':      {'min': 42, 'target': 105, 'max': 189},
-    'S10_quality_value':              {'min': 21, 'target': 63,  'max': 126},
-    'S12_insider':                    {'min': 10, 'target': 30,  'max': 63},
-    'S15_iv_rv_arb':                  {'min': 1,  'target': 10,  'max': 21},
-    'S_HV13_call_put_iv_spread':      _HP_OPTIONS,
-    'S_HV14_otm_skew_factor':         _HP_OPTIONS,
-    'S_HV15_iv_term_structure':       _HP_OPTIONS,
-    'S_HV16_gex_regime':              _HP_OPTIONS,
-    'S_HV17_earnings_straddle_fade':  {'min': 1, 'target': 3, 'max': 7},
-    'S_HV19_iv_surface_tilt':         _HP_OPTIONS,
-    'S_HV20_iv_dispersion_reversion': _HP_OPTIONS,
-}
-DEFAULT_HP = {'min': 1, 'target': 5, 'max': 21}
+# The GBM expected-value / target-probability prefilter (and its per-strategy
+# holding-period table) was retired 2026-11-18 (operator ruling): the model was
+# direction-blind and its drift mis-scaled, and the sizer never read it.
+# The only prefilter left is Alpaca tradability.
 
 
 # ── Loaders ────────────────────────────────────────────────────────────────
@@ -379,12 +349,16 @@ def load_yesterdays_performance_outliers(uri: str, run_date: str) -> tuple[list[
     # can recover ev_gbm + hv21 (the σ source) for each signal_pnl row.
     ev_lookup: dict[tuple, dict] = {}
     for s in (y_struct.get('signals') or []) + (y_struct.get('prefiltered') or []):
-        ev = s.get('ev_gbm')
-        if ev is None:
+        # Handoffs from 2026-11-18 on carry no ev_gbm (EV prefilter
+        # retired): key on hv21 and use a 0 expectation baseline, as the
+        # OUE classifier and backtest_panel do.
+        hv = s.get('hv21')
+        if hv is None:
             continue
+        ev = s.get('ev_gbm')
         ev_lookup[(s.get('ticker'), s.get('strategy_id'))] = {
-            'ev_gbm': float(ev),
-            'hv21':   float(s.get('hv21') or 0.0),
+            'ev_gbm': float(ev) if ev is not None else 0.0,
+            'hv21':   float(hv),
             'entry':  s.get('entry'),
         }
     if not ev_lookup:
@@ -604,47 +578,16 @@ def compute_features(sig: dict, px: pd.DataFrame, spy_returns: pd.Series, run_da
     loss  = (-delta.clip(upper=0)).mean()
     rsi   = float(100 - (100 / (1 + gain / loss))) if loss > 0 else 100.0
 
-    # Risk / reward geometry
-    risk_pts = entry - stop
-    t1_pts   = t1 - entry
-    t2_pts   = (t2 - entry) if t2 is not None else t1_pts * 2
+    # Risk / reward geometry — direction-aware magnitudes (a SHORT's stop is
+    # above entry and its targets below, so flip the sign; longs unchanged).
+    sgn      = -1.0 if str(sig.get('direction') or '').upper() == 'SHORT' else 1.0
+    risk_pts = sgn * (entry - stop)
+    t1_pts   = sgn * (t1 - entry)
+    t2_pts   = sgn * (t2 - entry) if t2 is not None else t1_pts * 2
     risk_pct = risk_pts / entry
     t1_pct   = t1_pts / entry
     t2_pct   = t2_pts / entry
     rr1      = t1_pts / max(risk_pts, 1e-6)
-
-    # GBM two-barrier EV
-    hp    = HOLDING_PERIOD.get(strat, DEFAULT_HP)
-    mu_d  = (mom_12m / hp['target']) if (mom_12m is not None) else 0.0
-    sig_d = hv21 / math.sqrt(TRADING_DAYS_PER_YEAR) if hv21 > 0 else 1e-6
-    a     = math.log(stop / entry)   # negative
-    b     = math.log(t1 / entry)     # positive
-    mu_adj = mu_d - 0.5 * sig_d ** 2
-    if sig_d > 0 and abs(mu_adj) < 1e-6:
-        p_t1 = -a / (b - a)
-    elif sig_d > 0:
-        lam = 2 * mu_adj / (sig_d ** 2)
-        try:
-            p_t1 = (1 - math.exp(lam * a)) / (math.exp(lam * b) - math.exp(lam * a))
-        except (OverflowError, ZeroDivisionError):
-            p_t1 = 1.0 if mu_adj > 0 else 0.0
-        p_t1 = max(0.0, min(1.0, p_t1))
-    else:
-        p_t1 = 0.5
-    p_stop = 1.0 - p_t1
-    ev_t1  = p_t1  * t1_pct  * 0.80   # 80% capture on reward
-    ev     = ev_t1 + p_stop * (-risk_pct)
-
-    # Expected exit
-    if sig_d > 0:
-        days_to_t1   = int(min(max((t1_pct / (mu_d + sig_d * 0.5)) if mu_d > 0 else hp['target'], hp['min']), hp['max']))
-        days_to_stop = int(min(max((risk_pct / (sig_d * 1.5)), 5), hp['target']))
-    else:
-        days_to_t1 = hp['target']
-        days_to_stop = hp['min']
-    exp_exit_days = int(p_t1 * days_to_t1 + p_stop * days_to_stop)
-    exp_exit_date = (datetime.strptime(run_date, '%Y-%m-%d').date()
-                     + timedelta(days=int(exp_exit_days * 7 / 5))).isoformat()
 
     # Strategy-populated features live in signal_params.features (engine.py
     # folds Signal.features there). Merge over computed features so the
@@ -679,10 +622,6 @@ def compute_features(sig: dict, px: pd.DataFrame, spy_returns: pd.Series, run_da
         'mom_3m':     _safe(mom_3m),
         'mom_6m':     _safe(mom_6m),
         'mom_12m':    _safe(mom_12m),
-        'ev_gbm':     _safe(ev),
-        'p_t1':       _safe(p_t1),
-        'exp_exit_days': exp_exit_days,
-        'exp_exit_date': exp_exit_date,
     }
     if strategy_features:
         out['strategy_features'] = strategy_features
@@ -779,14 +718,13 @@ def build(run_date: str) -> dict:
         run_date, uri
     )
 
-    # Pre-filter: split enriched into green-for-TradeJohn vs prefiltered.
-    # The prefiltered list flows through to #trade-reports via send_report
-    # so the operator still sees what got dropped and why.
+    # Pre-filter: the only gate left is Alpaca tradability (the GBM EV /
+    # p_t1 gates were retired 2026-11-18). The prefiltered list flows
+    # through to #trade-reports via send_report so the operator still sees
+    # what got dropped and why.
     green: list[dict] = []
     prefiltered: list[dict] = []
     for f in enriched:
-        # Tradability gate first — cheapest, no downstream value in
-        # scoring an untradable ticker.
         ticker = f.get('ticker')
         if tradable_symbols and ticker not in tradable_symbols:
             prefiltered.append({
@@ -794,30 +732,6 @@ def build(run_date: str) -> dict:
                 'strategy_id': f.get('strategy_id'),
                 'direction':   f.get('direction'),
                 'reason':      'untradable_at_alpaca',
-                'ev':          f.get('ev_gbm'),
-                'p_t1':        f.get('p_t1'),
-            })
-            continue
-        ev = f.get('ev_gbm')
-        p  = f.get('p_t1')
-        if ev is None or ev < MIN_EV_GBM:
-            prefiltered.append({
-                'ticker':      ticker,
-                'strategy_id': f.get('strategy_id'),
-                'direction':   f.get('direction'),
-                'reason':      'prefilter_negative_ev' if (ev is not None and ev < 0) else 'prefilter_low_ev',
-                'ev':          ev,
-                'p_t1':        p,
-            })
-            continue
-        if p is None or p < MIN_P_T1:
-            prefiltered.append({
-                'ticker':      ticker,
-                'strategy_id': f.get('strategy_id'),
-                'direction':   f.get('direction'),
-                'reason':      'prefilter_low_pt1',
-                'ev':          ev,
-                'p_t1':        p,
             })
             continue
         # Attach sentiment ONLY to green (prefiltered never reaches the
@@ -828,7 +742,7 @@ def build(run_date: str) -> dict:
         green.append(f)
     untradable_n = sum(1 for p in prefiltered if p.get('reason') == 'untradable_at_alpaca')
     print(f'[handoff] prefilter: {len(green)} green / {len(prefiltered)} filtered '
-          f'(min_ev={MIN_EV_GBM}, min_p_t1={MIN_P_T1}, untradable={untradable_n}, '
+          f'(untradable={untradable_n}, '
           f'universe_size={len(tradable_symbols) or "FAIL-OPEN"})')
 
     # ── Attach per-signal d-1 outlier context + per-strategy aggregates ────────
@@ -926,19 +840,11 @@ def build(run_date: str) -> dict:
     # making decisions on week-old EV / green counts. Same multi-source
     # silent pattern as the regime drift — consumer reads, producer is
     # gone, no one notices.
+    #
+    # 2026-11-18: the EV gate is retired. The row keeps its column list and
+    # one-row-per-handoff semantics; the NOT NULL counters are 0 and the
+    # averages NULL.
     try:
-        ev_vals  = [s.get('ev_gbm') for s in enriched if s.get('ev_gbm') is not None]
-        p_vals   = [s.get('p_t1')   for s in enriched if s.get('p_t1')   is not None]
-        ev_pos   = sum(1 for v in ev_vals if v >  0)
-        ev_neg   = sum(1 for v in ev_vals if v <= 0)
-        avg_ev   = (sum(ev_vals) / len(ev_vals)) if ev_vals else None
-        avg_p_t1 = (sum(p_vals)  / len(p_vals))  if p_vals  else None
-        # high-conv = green AND p_t1 >= 0.65 (≥65% chance of hitting target
-        # before stop). Threshold matches the historical ratio observed
-        # across pre-2026-04-22 rows (~40% of green).
-        high_conv_count = sum(
-            1 for s in green if (s.get('p_t1') or 0) >= 0.65
-        )
         with psycopg2.connect(uri) as _c, _c.cursor() as _cur:
             _cur.execute("""
                 INSERT INTO daily_signal_summary
@@ -946,17 +852,18 @@ def build(run_date: str) -> dict:
                    avg_ev, avg_p_t1, high_conv_count, metadata)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
             """, (
-                run_date, regime.get('state'), len(enriched), ev_pos, ev_neg,
-                avg_ev, avg_p_t1, high_conv_count,
+                run_date, regime.get('state'), len(enriched), 0, 0,
+                None, None, 0,
                 json.dumps({
                     'green':       len(green),
                     'prefiltered': len(prefiltered),
                     'd1_matches':  d1_matches,
+                    'ev_gate':     'retired 2026-11-18',
                 }),
             ))
             _c.commit()
         print(f'[handoff] daily_signal_summary appended: '
-              f'n={len(enriched)}, ev_pos={ev_pos}, high_conv={high_conv_count}')
+              f'n={len(enriched)} (ev gate retired)')
     except Exception as _e:
         # Surface as [WARN] for the cron alert-bubbler (silent-failure
         # pattern — never let a missing aggregate row cascade silently

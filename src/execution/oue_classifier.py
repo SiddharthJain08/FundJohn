@@ -49,8 +49,12 @@ def _get_sigma_gate(cur) -> float:
 
 def _load_signal_ev(signal_date: str, ticker: str, strategy_id: str) -> Optional[dict]:
     """Find the {ev_gbm, hv21} pair for a signal from its structured handoff.
-    Returns None if the JSON file is missing or the signal isn't in it
-    (handoffs older than ~30 days may have been rotated)."""
+
+    Handoffs from 2026-11-18 on carry no ev_gbm (the GBM EV prefilter was
+    retired), so the expectation baseline defaults to 0.0 whenever hv21 is
+    present — the same baseline backtest_panel classifies with. Returns None
+    only if the JSON file is missing, the signal isn't in it (handoffs older
+    than ~30 days may have been rotated), or the row lacks hv21."""
     path = HANDOFF_DIR / f'{signal_date}_structured.json'
     if not path.exists():
         return None
@@ -64,8 +68,9 @@ def _load_signal_ev(signal_date: str, ticker: str, strategy_id: str) -> Optional
             if s.get('ticker') == ticker and s.get('strategy_id') == strategy_id:
                 ev = s.get('ev_gbm')
                 hv = s.get('hv21')
-                if ev is not None and hv is not None:
-                    return {'ev_gbm': float(ev), 'hv21': float(hv)}
+                if hv is not None:
+                    return {'ev_gbm': float(ev) if ev is not None else 0.0,
+                            'hv21': float(hv)}
     return None
 
 
