@@ -109,7 +109,7 @@ def run(monkeypatch, *, crypto=True, pooled=False, bench_flag=False, s_m_eq=2.0,
                                'lane': 'window'})
         if strategy_ids is None:
             return [dict(s) for s in (eq_carried if eq_carried is not None else EQ_CARRIED)]
-        return [dict(s) for s in CR_CARRIED if s['strategy_id'] in strategy_ids]
+        return [dict(s) for s in (cr_carried or CR_CARRIED) if s['strategy_id'] in strategy_ids]
     monkeypatch.setattr(_sizer, '_load_active_window_signals', _window_loader)
 
     def _load_current(regime_state):
@@ -722,6 +722,20 @@ def test_floor_applies_with_negative_s_m_and_no_weight_row(monkeypatch):
     btc = _top_usd(line, 'BTC-USD')
     assert abs(btc - 0.10 * NAV) < 1.0
     assert abs(res['floor_usd'] - btc) < 1.0 and 'floor_usd=%.0f' % res['floor_usd'] in line
+    assert res['sleeve_acting'] is True and res['empty_reason'] is None
+    # the production loaders query by the weight-map KEYS: the weightless
+    # sleeve id must be handed to them (the stub itself ignores the map)
+    cr_call = [c for c in h.loader_calls if c['strategy_ids'] is not None][-1]
+    assert 'S_beta_btc' in cr_call['sids'] and 'lane' not in cr_call
+
+
+def test_floor_applies_with_no_weight_row_on_the_window_lane(monkeypatch):
+    _, h, res = _block_res(monkeypatch, lane='window', s_m_cr=-0.4, cr_rows=[_row('S_cr_a', 2.0)],
+                           cr_carried=[_carried('S_beta_btc', 'BTC-USD')])
+    cr_call = [c for c in h.loader_calls if c['strategy_ids'] is not None][-1]
+    assert cr_call.get('lane') == 'window' and 'S_beta_btc' in cr_call['sids']
+    btc = _top_usd(h.written[-1], 'BTC-USD')
+    assert abs(btc - 0.10 * NAV) < 1.0 and abs(res['floor_usd'] - btc) < 1.0
     assert res['sleeve_acting'] is True and res['empty_reason'] is None
 
 
