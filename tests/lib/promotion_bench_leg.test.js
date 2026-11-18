@@ -17,7 +17,7 @@ const SL = (regime, sharpe, trades = 200, dd = 5) => ({ regime_state: regime, sh
 // opts: bench (object|string|undefined=no row), excess, throwConfig, registryRows, throwRegistry
 function mk(sleeves, opts = {}) {
   const calls = [];
-  const q = async (sql) => {
+  const q = async (sql, params) => {
     calls.push(sql);
     if (/strategy_backtest_runs/.test(sql)) return { rows: [RUN] };
     if (/universe_shrink_metrics/.test(sql)) {
@@ -28,6 +28,11 @@ function mk(sleeves, opts = {}) {
     if (/pipeline_config/.test(sql)) {
       if (opts.throwConfig) throw new Error('db down');
       const rows = [];
+      if (opts.cfg) {   // key->value map; honours the requested keys ($1)
+        const want = (params && params[0]) || [];
+        for (const [k, v] of Object.entries(opts.cfg)) if (want.includes(k)) rows.push({ key: k, value: v });
+        return { rows };
+      }
       if (opts.bench !== undefined) rows.push({ key: 'strategy_activation_bench_sharpe', value: typeof opts.bench === 'string' ? opts.bench : JSON.stringify(opts.bench) });
       if (opts.excess !== undefined) rows.push({ key: 'strategy_activation_excess_sharpe', value: String(opts.excess) });
       return { rows };
@@ -287,4 +292,28 @@ test('transitionStrategy auto mode: sparse-CCA fixture is refused (422 shape), m
     assert.equal(r.failedGates[0], 'no_qualifying_regime');
     assert.equal(JSON.parse(fs.readFileSync(mp, 'utf8')).strategies.S_x.state, 'candidate');
   } finally { fs.rmSync(mp, { force: true }); }
+});
+
+const EQ_BAD = JSON.stringify({ LOW_VOL: 9, TRANSITIONING: 9, HIGH_VOL: 9, CRISIS: 9 });
+const CRYPTO_VEC = JSON.stringify({ LOW_VOL: 0.86, TRANSITIONING: 0.23, HIGH_VOL: -0.49, CRISIS: 0.60 });
+const autoCrypto = (q) => ps.computeQualifyingRegimes({ dbQuery: q, sid: 'S_btc_x', instrumentClass: 'crypto' });
+
+test('crypto-class gate reads the crypto bench key, never the equity key', async () => {
+  const q = mk([SL('TRANSITIONING', 0.9)], { cfg: { strategy_activation_bench_sharpe: EQ_BAD, strategy_activation_bench_sharpe_crypto: CRYPTO_VEC } });
+  const { r, warns } = await withWarns(() => autoCrypto(q));
+  assert.deepEqual(r.qualifying, ['TRANSITIONING']);
+  assert.equal(r.diag.TRANSITIONING.bench, 0.23);
+  assert.equal(warns.length, 0);
+  // equity class on the same config still reads the (impossible) equity vector
+  const re = (await withWarns(() => auto(mk([SL('TRANSITIONING', 0.9)], { cfg: { strategy_activation_bench_sharpe: EQ_BAD, strategy_activation_bench_sharpe_crypto: CRYPTO_VEC } })))).r;
+  assert.deepEqual(re.qualifying, []);
+});
+
+test('crypto-class gate without the crypto key falls back to 0.5 with a WARN naming the crypto key', async () => {
+  const q = mk([SL('TRANSITIONING', 0.9)], { cfg: { strategy_activation_bench_sharpe: EQ_BAD } });
+  const { r, warns } = await withWarns(() => autoCrypto(q));
+  assert.deepEqual(r.qualifying, ['TRANSITIONING']);   // 0.9 >= 0.5; the equity 9.0 is never consulted
+  assert.equal(r.diag.TRANSITIONING.bench, 0.5);
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /strategy_activation_bench_sharpe_crypto not set/);
 });

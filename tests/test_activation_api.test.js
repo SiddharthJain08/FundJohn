@@ -508,3 +508,33 @@ test('server.js wires GET/PUT /api/config/activation-excess-sharpe to clampExces
   const dryRunSlice = src.slice(dryRunStart, dryRunStart + 2000);
   assert.match(dryRunSlice, /clampExcessValue\(req\.body\.excess\)/);
 });
+
+test('crypto bench lines are ignored by the equity parser', () => {
+  const out = [
+    '[activation_assigner] threshold=0.9378 min_trades=100 dry_run=True strategies=1 excess=0.0',
+    '[activation_assigner] bench: sleeve=S_beta_spy source=registry run=rs LOW_VOL=0.9378 TRANSITIONING=0.4299 HIGH_VOL=0.5326 CRISIS=1.575',
+    '[activation_assigner] bench[crypto]: sleeve=S_beta_btc source=registry run=rb LOW_VOL=0.86 TRANSITIONING=0.23 HIGH_VOL=-0.49 CRISIS=0.6',
+    '[activation_assigner] thresholds: LOW_VOL=0.9378 TRANSITIONING=0.4299 HIGH_VOL=0.5326 CRISIS=1.575 (excess=0.0)',
+    '[activation_assigner] thresholds[crypto]: LOW_VOL=0.86 TRANSITIONING=0.23 HIGH_VOL=-0.49 CRISIS=0.6 (excess=0.0)',
+    '[activation_assigner]   S_btc_x: LOW_VOL: False->False, TRANSITIONING: False->True (activated), HIGH_VOL: False->False, CRISIS: False->False',
+    '[activation_assigner] activation_assigner summary: 1 strategies evaluated, 0 skipped (no corrected backtest), 1 cell(s) activated, 0 cell(s) deactivated, 0 newly-dormant strategies, threshold=0.9378, min_trades=100, dry_run=True, errors=0',
+  ].join('\n');
+  const p = parseActivationDryRun(out);
+  assert.equal(p.bench.sleeve_id, 'S_beta_spy');
+  assert.equal(p.bench.run_id, 'rs');
+  assert.equal(p.bench.values.LOW_VOL, 0.9378);
+  assert.equal(p.evaluated, 1);
+  // exactly one DETAIL line parsed (S_btc_x): each regime counted once, none from the crypto lines
+  for (const r of CANONICAL_REGIMES) assert.equal(p.per_regime[r].eligible_preview + p.per_regime[r].dormant_preview, 1, r);
+  assert.equal(p.thresholds.LOW_VOL, 0.9378);
+  assert.equal(p.thresholds.TRANSITIONING, 0.4299);
+  assert.equal(p.warnings.length, 0, p.warnings.join('|'));
+  assert.ok(!JSON.stringify(p).includes('S_beta_btc'));
+});
+
+test('benchCardPayload carries bench_by_class', () => {
+  const marker = { value: JSON.stringify({ bench_sharpe: { LOW_VOL: 1 }, bench_by_class: { crypto: { bench_run_id: 'rb' } } }) };
+  assert.equal(benchCardPayload(marker, null).bench_by_class.crypto.bench_run_id, 'rb');
+  assert.equal(benchCardPayload({ value: JSON.stringify({ bench_sharpe: { LOW_VOL: 1 } }) }, null).bench_by_class, null);
+  assert.equal(benchCardPayload(null, null).bench_by_class, null);
+});

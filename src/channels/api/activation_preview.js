@@ -387,6 +387,7 @@ function benchCardPayload(markerRow, benchRow, defaultBand) {
     regime_source: regimeSource,
     hysteresis:   (marker && marker.bench_hysteresis != null) ? marker.bench_hysteresis : band,
     bench_run_id: marker ? (marker.bench_run_id || null) : null,
+    bench_by_class: (marker && marker.bench_by_class && typeof marker.bench_by_class === 'object') ? marker.bench_by_class : null,
     source,
     applied_at:   markerRow ? (markerRow.updated_at != null ? markerRow.updated_at : null) : null,
     row_exists:   !!markerRow,

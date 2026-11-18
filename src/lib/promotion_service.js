@@ -44,6 +44,8 @@ const PROMOTION_THRESHOLDS = {
 };
 // ── Amendment 2: bench leg ──────────────────────────────────────────────────
 const BENCH_KEY = 'strategy_activation_bench_sharpe';
+// Crypto-class strategies are judged against the BTC sleeve vector, never the equity key.
+const BENCH_KEY_CRYPTO = 'strategy_activation_bench_sharpe_crypto';
 const EXCESS_KEY = 'strategy_activation_excess_sharpe';
 const BENCH_FALLBACK = 0.5;   // activation_assigner DEFAULT_MIN_SHARPE (tier 3)
 function benchGateEnabled() { return process.env.OPENCLAW_PROMOTION_BENCH_GATE !== '0'; }
@@ -60,14 +62,15 @@ async function _isBenchmarkSleeve(dbQuery, sid) {
 // One config query for both keys. Returns { bench: {regime: number}, excess }
 // with EVERY canonical regime present. One console.warn per call lists every
 // regime that fell back to BENCH_FALLBACK.
-async function _loadBenchVector(dbQuery) {
+async function _loadBenchVector(dbQuery, instrumentClass) {
+  const benchKey = instrumentClass === 'crypto' ? BENCH_KEY_CRYPTO : BENCH_KEY;
   const bench = {};
   let excess = 0;
   let raw = null, why = null;
   try {
-    const r = await dbQuery(`SELECT key, value FROM pipeline_config WHERE key = ANY($1)`, [[BENCH_KEY, EXCESS_KEY]]);
+    const r = await dbQuery(`SELECT key, value FROM pipeline_config WHERE key = ANY($1)`, [[benchKey, EXCESS_KEY]]);
     const rows = (r && r.rows) || [];
-    const bRow = rows.find(x => x.key === BENCH_KEY);
+    const bRow = rows.find(x => x.key === benchKey);
     const eRow = rows.find(x => x.key === EXCESS_KEY);
     // Mirrors activation_assigner.get_activation_excess: float(value); not
     // numeric / non-finite / NULL => 0.0. No snapping, no bounds.
@@ -76,11 +79,11 @@ async function _loadBenchVector(dbQuery) {
       const e = (sv === '' || typeof sv === 'boolean') ? NaN : Number(sv);
       excess = Number.isFinite(e) ? e : 0;
     }
-    if (!bRow || bRow.value == null) why = `${BENCH_KEY} not set`;
+    if (!bRow || bRow.value == null) why = `${benchKey} not set`;
     else {
       try { raw = typeof bRow.value === 'string' ? JSON.parse(bRow.value) : bRow.value; }
-      catch (_) { why = `${BENCH_KEY} is not valid JSON`; }
-      if (!why && (raw == null || typeof raw !== 'object' || Array.isArray(raw))) { why = `${BENCH_KEY} is not an object`; raw = null; }
+      catch (_) { why = `${benchKey} is not valid JSON`; }
+      if (!why && (raw == null || typeof raw !== 'object' || Array.isArray(raw))) { why = `${benchKey} is not an object`; raw = null; }
     }
   } catch (e) { why = `config read failed (${e && e.message})`; }
   const fell = [];
@@ -103,10 +106,10 @@ function _benchThreshold(vec, regime) {
 }
 // Resolve the bench vector for one gate evaluation, or null when the leg does
 // not apply (kill switch, or benchmark sleeve).
-async function _benchContext(dbQuery, sid) {
+async function _benchContext(dbQuery, sid, instrumentClass) {
   if (!benchGateEnabled()) return null;
   if (await _isBenchmarkSleeve(dbQuery, sid)) return null;
-  return _loadBenchVector(dbQuery);
+  return _loadBenchVector(dbQuery, instrumentClass);
 }
 const CANONICAL_REGIMES = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
 function getPromotionThreshold(instrumentClass) {
@@ -254,7 +257,7 @@ async function computeQualifyingRegimes({ dbQuery, sid, instrumentClass }) {
   if (await _holdCapMismatch(dbQuery, sid, run)) { out.exit_hook_hold_cap_mismatch = true; return out; }
   const byRegime = await _regimeSleeves(dbQuery, run.runId);
   if (!byRegime) return out;                       // no sleeves recorded → nothing qualifies
-  const bctx = byRegime.size > 0 ? await _benchContext(dbQuery, sid) : null;
+  const bctx = byRegime.size > 0 ? await _benchContext(dbQuery, sid, instrumentClass) : null;
   for (const regime of CANONICAL_REGIMES) {
     const row = byRegime.get(regime);
     if (!row) continue;                            // strategy never fired in this regime
@@ -297,7 +300,7 @@ async function evaluatePromotionGate({ dbQuery, sid, instrumentClass, force, eli
   const failedGates = [];
   // Amendment 2 bench leg: resolved once per evaluation, only when sleeves are
   // judged (the legacy total-window fallback below has no per-regime sleeve).
-  const bctx = (byRegime && byRegime.size > 0) ? await _benchContext(dbQuery, sid) : null;
+  const bctx = (byRegime && byRegime.size > 0) ? await _benchContext(dbQuery, sid, instrumentClass) : null;
   const ctxFor = (regime) => ({ instrumentClass, sid, regime,
     benchThreshold: bctx ? _benchThreshold(bctx, regime) : undefined });
   if (named) {
