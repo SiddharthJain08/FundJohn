@@ -99,7 +99,7 @@ def _log(msg: str) -> None:
     print(f'[{STEP}] {msg}', flush=True)
 
 
-def _bench_sleeve_run_id(conn) -> Optional[str]:
+def _bench_sleeve_run_id(conn, *, instrument_class: str = 'equity') -> Optional[str]:
     """Latest primary_window run_id for the registry's benchmark sleeve, as
     a string (matches backtest.activation_assigner.load_bench_sharpe's own
     `str(run_id)` cast, so the comparison in pending_state is string-to-
@@ -130,10 +130,12 @@ def _bench_sleeve_run_id(conn) -> Optional[str]:
     own resolution of "the sleeve's latest run"."""
     try:
         from backtest.activation_assigner import resolve_bench_sleeve_id
-        # Multi-sleeve (crypto engine Phase 3): the EQUITY sleeve, explicitly --
-        # it is the one the assigner builds the bench vector from; a crypto
-        # sleeve is always_on, so its runs never change any eligibility.
-        sleeve_id, _source = resolve_bench_sleeve_id(conn, instrument_class='equity')
+        # Multi-sleeve: default is the EQUITY sleeve (the equity bench vector's
+        # source); instrument_class='crypto' tracks the crypto sleeve the
+        # assigner now judges crypto strategies against (bench_by_class).
+        sleeve_id, _source = resolve_bench_sleeve_id(conn, instrument_class=instrument_class)
+        if instrument_class == 'crypto' and _source == 'literal_fallback':
+            return None   # no crypto sleeve registered; the returned id is the equity literal
         cur = conn.cursor()
         cur.execute("""SELECT run_id FROM strategy_backtest_runs
                         WHERE strategy_id = %s AND primary_window = TRUE
@@ -265,6 +267,22 @@ def pending_state(conn) -> dict:
                 f'benchmark sleeve primary run {bench_run_id!r} != last-applied '
                 f'bench_run_id {marker_bench_run_id!r} — eligibility derived from a '
                 f'stale or absent bench comparator')
+
+    # Crypto sleeve (bench_by_class): same rule against the marker's
+    # bench_by_class.crypto.bench_run_id; None (no sleeve / probe failed) adds no reason.
+    crypto_run = _bench_sleeve_run_id(conn, instrument_class='crypto')
+    out['crypto_bench_run_id'] = crypto_run
+    if crypto_run is not None:
+        m = out['marker']
+        by_class = m.get('bench_by_class') if isinstance(m, dict) else None
+        crypto_m = by_class.get('crypto') if isinstance(by_class, dict) else None
+        marker_val = crypto_m.get('bench_run_id') if isinstance(crypto_m, dict) else None
+        if marker_val != crypto_run:
+            out['pending'] = True
+            out['reasons'].append(
+                f'crypto benchmark sleeve primary run {crypto_run!r} != last-applied '
+                f'bench_by_class.crypto.bench_run_id {marker_val!r} — crypto eligibility '
+                f'derived from a stale or absent bench comparator')
     return out
 
 

@@ -55,6 +55,10 @@ class FakeCur:
 
     def fetchall(self):
         if 'strategy_registry' in self._last_sql:
+            # sleeve_ids are EQUITY sleeves: the crypto-class lookup (the SQL
+            # without the `<>` predicate) finds none -> literal_fallback.
+            if '<>' not in self._last_sql:
+                return []
             return [(sid,) for sid in self._sleeve_ids]
         return list(self._rows)
 
@@ -385,3 +389,69 @@ def test_bench_sleeve_run_id_resolves_the_equity_sleeve_only(monkeypatch):
     conn = FakeConn([], sleeve_ids=('S_beta_spy',), sleeve_run_id='r7')
     assert aa._bench_sleeve_run_id(conn) == 'r7'
     assert seen['instrument_class'] == 'equity'
+
+
+# ── crypto sleeve re-apply trigger (bench_by_class) ─────────────────────────
+class _SleeveCur(FakeCur):
+    """FakeCur whose sleeve-run query answers per sleeve id (params[0])."""
+    def __init__(self, rows, runs_by_sleeve, **kw):
+        super().__init__(rows, **kw)
+        self._runs_by_sleeve = runs_by_sleeve
+        self.queried = []
+
+    def execute(self, sql, params=()):
+        super().execute(sql, params)
+        if 'SELECT run_id FROM strategy_backtest_runs' in sql:
+            self.queried.append(params[0])
+            self._sleeve_run_id = self._runs_by_sleeve.get(params[0])
+
+
+def _pending(marker, sleeve_runs, monkeypatch=None):
+    """pending_state with resolve_bench_sleeve_id stubbed per class:
+    equity -> S_beta_spy, crypto -> S_beta_btc (registry) or, when the
+    crypto run is None, the equity literal with source 'literal_fallback'."""
+    from backtest import activation_assigner as assigner
+    mp = pytest.MonkeyPatch()
+    try:
+        def _resolve(conn, sleeve_id=None, instrument_class='equity'):
+            if instrument_class == 'crypto':
+                if sleeve_runs.get('crypto') is None:
+                    return ('S_beta_spy', 'literal_fallback')
+                return ('S_beta_btc', 'registry')
+            return ('S_beta_spy', 'registry')
+        mp.setattr(assigner, 'resolve_bench_sleeve_id', _resolve)
+        row = (aa.MARKER_KEY, json.dumps(dict(marker, threshold=0.5)), T0)
+        conn = FakeConn([row], newest_run=T0 - dt.timedelta(days=2))
+        conn._cur = _SleeveCur([row], {'S_beta_spy': sleeve_runs.get('equity'),
+                                       'S_beta_btc': sleeve_runs.get('crypto')},
+                               newest_run=T0 - dt.timedelta(days=2))
+        st = aa.pending_state(conn)
+        st['_queried'] = conn._cur.queried
+        return st
+    finally:
+        mp.undo()
+
+
+def test_pending_when_crypto_sleeve_run_differs_from_marker():
+    st = _pending(marker={'bench_run_id': 'rs', 'bench_by_class': {'crypto': {'bench_run_id': 'rb_old'}}},
+                  sleeve_runs={'equity': 'rs', 'crypto': 'rb_new'})
+    assert st['pending'] and any('crypto benchmark sleeve' in r for r in st['reasons'])
+    assert st['crypto_bench_run_id'] == 'rb_new'
+
+
+def test_not_pending_when_both_sleeve_runs_match_marker():
+    st = _pending(marker={'bench_run_id': 'rs', 'bench_by_class': {'crypto': {'bench_run_id': 'rb'}}},
+                  sleeve_runs={'equity': 'rs', 'crypto': 'rb'})
+    assert not any('benchmark sleeve' in r for r in st['reasons'])
+
+
+def test_no_crypto_sleeve_in_registry_is_not_pending_on_that_check():
+    st = _pending(marker={'bench_run_id': 'rs'}, sleeve_runs={'equity': 'rs', 'crypto': None})
+    assert not any('crypto benchmark sleeve' in r for r in st['reasons'])
+    assert st['crypto_bench_run_id'] is None
+    assert st['_queried'] == ['S_beta_spy']   # the equity literal is never queried for crypto
+
+
+def test_marker_without_bench_by_class_is_pending_when_crypto_sleeve_run_exists():
+    st = _pending(marker={'bench_run_id': 'rs'}, sleeve_runs={'equity': 'rs', 'crypto': 'rb'})
+    assert st['pending'] and any('crypto benchmark sleeve' in r for r in st['reasons'])
