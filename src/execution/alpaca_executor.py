@@ -4,7 +4,7 @@ alpaca_executor.py — final pipeline step. Reads the sized handoff written by
 regime_blended_sizer_live and submits bracket orders to Alpaca paper.
 
 Safety gates (in order, any failure → skip):
-  1. daily_signal_summary → same quality gate as the trade step.
+  1. (retired 2026-11-18: the signal-quality gate is gone with the handoff EV prefilter.)
   2. Idempotency — skip any (run_date, strategy_id, ticker) with an existing
      alpaca_order_id in position_recommendations.
 
@@ -332,27 +332,6 @@ def in_market_hours():
     is_open = _alpaca_session_kind() == 'rth'
     _market_hours_cache.update({'is_open': is_open, 'cached_at': now})
     return is_open
-
-
-def check_signal_quality(conn):
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT avg_ev, ev_pos, n_signals, run_date
-        FROM daily_signal_summary
-        ORDER BY run_date DESC, created_at DESC
-        LIMIT 1
-    """)
-    row = cur.fetchone()
-    cur.close()
-    if not row:
-        return True, 'no signal_summary row — allowing'
-    avg_ev_frac, ev_pos, n_signals, row_date = row
-    avg_ev_pct = float(avg_ev_frac) * 100 if avg_ev_frac is not None else 0.0
-    green_cnt  = int(ev_pos or 0)
-    # Mirror pipeline_orchestrator thresholds: block only if avg_ev < -0.5% AND zero green.
-    if avg_ev_pct < -0.5 and green_cnt < 1:
-        return False, f'avg EV={avg_ev_pct:+.2f}% ({green_cnt} green, {row_date}) — quality gate blocked'
-    return True, f'avg EV={avg_ev_pct:+.2f}%, green={green_cnt}, {n_signals} signals'
 
 
 def _wave_from_handoff(handoff) -> str:
@@ -2971,12 +2950,7 @@ def main():
 
     conn = psycopg2.connect(uri)
 
-    # Gate 1: signal quality
-    ok, why = check_signal_quality(conn)
-    if not ok:
-        log(f'Signal-quality gate blocked: {why}')
-        conn.close(); sys.exit(0)
-    log(f'Signal-quality OK — {why}')
+    log('signal-quality gate retired 2026-11-18 (handoff EV prefilter removed)')
 
     session = _alpaca_session_kind()
     rth = (session == 'rth')

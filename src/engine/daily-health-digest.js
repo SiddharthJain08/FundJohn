@@ -68,9 +68,9 @@ function exitHookLine(rows) {
 
 async function buildDigest(date = new Date(), failureCtx = null) {
   const [signalRow, prevSignalRow, openCounts, closedStats, freshness, curatorRow, hookRows] = await Promise.all([
-    dbQuery(`SELECT run_date, regime, n_signals, ev_pos, avg_ev, high_conv_count
+    dbQuery(`SELECT run_date, regime, n_signals
              FROM daily_signal_summary ORDER BY run_date DESC, created_at DESC LIMIT 1`),
-    dbQuery(`SELECT n_signals, ev_pos FROM daily_signal_summary
+    dbQuery(`SELECT n_signals FROM daily_signal_summary
              ORDER BY run_date DESC, created_at DESC OFFSET 1 LIMIT 1`),
     dbQuery(`SELECT COUNT(*) FILTER (WHERE status='open')   AS open_count,
                     COUNT(*) FILTER (WHERE status='closed') AS closed_count
@@ -104,15 +104,12 @@ async function buildDigest(date = new Date(), failureCtx = null) {
 
   const staleAlerts = freshness.filter(f => ['stale', 'very_stale', 'empty'].includes(f.status));
 
-  // Gate outcome
+  // Latest-run line (the EV/green quality gate was retired 2026-11-18)
   let gateLine;
   if (!sig) {
     gateLine = '⚠️ No signal summary rows yet (daily_signal_summary empty)';
   } else {
-    const avgEvPct = (parseFloat(sig.avg_ev) * 100).toFixed(2);
-    const greenCnt = Number(sig.ev_pos);
     const totalCnt = Number(sig.n_signals);
-    const highConv = Number(sig.high_conv_count);
     const runDay   = sig.run_date.toISOString().slice(0, 10);
     // The query is `ORDER BY run_date DESC LIMIT 1` with no date filter, so on a
     // day the engine never wrote a summary this silently shows the PREVIOUS day's
@@ -126,8 +123,7 @@ async function buildDigest(date = new Date(), failureCtx = null) {
       // was a total signal outage and the digest would have called it healthy.
       gateLine = `🚨 Latest run (${runDay}): **0 signals** — nothing computed, book cannot change. Check the signals step for rc=137 (OOM) / rc=124 (timeout).${staleTag}`;
     } else {
-      const evOk = parseFloat(avgEvPct) >= -0.5 || greenCnt >= 1;
-      gateLine = `${evOk ? '✅' : '🚫'} Latest run (${runDay}): ${totalCnt} signals, ${greenCnt} green, avg EV ${avgEvPct}%, ${highConv} high-conv — ${evOk ? 'trade step eligible' : 'trade step blocked by quality gate'}${staleTag}`;
+      gateLine = `📈 Latest run (${runDay}): ${totalCnt} signals${staleTag}`;
     }
   }
 
@@ -135,8 +131,7 @@ async function buildDigest(date = new Date(), failureCtx = null) {
   let deltaLine = '';
   if (sig && prev) {
     const d = Number(sig.n_signals) - Number(prev.n_signals);
-    const dg = Number(sig.ev_pos) - Number(prev.ev_pos);
-    deltaLine = `   Δ vs prior: ${d >= 0 ? '+' : ''}${d} signals, ${dg >= 0 ? '+' : ''}${dg} green`;
+    deltaLine = `   Δ vs prior: ${d >= 0 ? '+' : ''}${d} signals`;
   }
 
   // Positions

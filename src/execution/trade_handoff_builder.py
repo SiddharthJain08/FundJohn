@@ -829,17 +829,12 @@ def build(run_date: str) -> dict:
     print(f'[handoff] structured handoff written — {len(enriched)} signals, '
           f'{len(json.dumps(payload)) / 1024:.1f} KB')
 
-    # Persist the per-cycle aggregate row consumed by:
-    #   - pipeline_orchestrator.check_signal_quality (the trade-step gate)
-    #   - alpaca_executor (the alpaca-step gate)
-    #   - daily_health_digest "Latest run" line
-    # The original writer was research_report.py; when that script was
-    # retired and replaced by trade_handoff_builder (parquet-primary
-    # refactor), the INSERT was dropped. Result: daily_signal_summary
-    # stuck at 2026-04-22 for a full week, with the trade-quality gate
-    # making decisions on week-old EV / green counts. Same multi-source
-    # silent pattern as the regime drift — consumer reads, producer is
-    # gone, no one notices.
+    # Persist the per-cycle aggregate row. Informational only since
+    # 2026-11-18 (no execution gate reads it): consumed by the daily health
+    # digest "Latest run" line, maintenance checks and research.
+    # History: the original writer was research_report.py; when it was retired
+    # the INSERT was dropped and the table sat at 2026-04-22 for a week while
+    # a gate read it — a consumer reading a table whose producer is gone.
     #
     # 2026-11-18: the EV gate is retired. The row keeps its column list and
     # one-row-per-handoff semantics; the NOT NULL counters are 0 and the

@@ -12,6 +12,7 @@ Run:
 """
 from __future__ import annotations
 
+import inspect
 import io
 import sys
 import unittest
@@ -102,8 +103,6 @@ def _run_main(argv, *, doctor_rc=0, step_rc=0, postgres_uri='postgresql://x',
          patch('execution.pipeline_orchestrator.set_agent_status'), \
          patch('execution.pipeline_orchestrator.broadcast_dashboard_refresh'), \
          patch('execution.pipeline_orchestrator._emit_maintenance_report'), \
-         patch('execution.pipeline_orchestrator.check_signal_quality',
-               return_value=(True, 'ok')), \
          patch('execution.pipeline_orchestrator.check_budget',
                return_value=(True, 'ok')), \
          patch('execution.pipeline_orchestrator.STEPS', FAKE_STEPS):
@@ -112,6 +111,13 @@ def _run_main(argv, *, doctor_rc=0, step_rc=0, postgres_uri='postgresql://x',
 
     return rc, buf.getvalue(), scheduled_steps, doctor_invocations, \
         pipeline_feed_msgs, notify_msgs
+
+
+class TestNoSignalQualityGate(unittest.TestCase):
+    def test_orchestrator_has_no_signal_quality_gate(self):
+        self.assertFalse(hasattr(po, 'check_signal_quality'))
+        self.assertFalse(hasattr(po, 'SIGNAL_QUALITY_THRESHOLDS'))
+        self.assertNotIn('daily_signal_summary', inspect.getsource(po))
 
 
 class TestFilterSteps(unittest.TestCase):
