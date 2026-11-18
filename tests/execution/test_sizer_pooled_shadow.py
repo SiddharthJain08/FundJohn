@@ -64,7 +64,7 @@ class H:
 def run(monkeypatch, *, crypto=True, pooled=False, bench_flag=False, s_m_eq=2.0, s_m_cr=0.8,
         broker=None, nmbp=None, hold=None, eq_frac=10.0, btc_frac=0.25, gross_frac=0.50,
         eq_carried=None, cr_params=None, eq_params=None, lane='eod', eq_rows=None, cr_carried=None,
-        sigs=None, scalars=None, h=None):
+        sigs=None, scalars=None, h=None, cr_rows=None, min_frac=0.10, cr_budget='1'):
     h = h if h is not None else H()
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
     if lane == 'eod':
@@ -83,7 +83,10 @@ def run(monkeypatch, *, crypto=True, pooled=False, bench_flag=False, s_m_eq=2.0,
     else:
         monkeypatch.delenv(POOL_ENV, raising=False)
     monkeypatch.setenv(bz.BENCH_SIZING_ENV, '1' if bench_flag else '0')
-    monkeypatch.setenv(bz.BETA_BUDGET_ENV, '0')
+    monkeypatch.setenv(bz.BETA_BUDGET_ENV, '0')          # SPY flag: must NOT gate the crypto pool
+    monkeypatch.setenv(bz.CRYPTO_BETA_BUDGET_ENV, cr_budget)
+    monkeypatch.setattr(bz, 'benchmark_min_nav_frac',
+                        lambda conn=None, *, instrument_class='crypto': min_frac)
 
     def _max_frac(default=1.0, conn=None, *, instrument_class='equity'):
         return btc_frac if instrument_class == 'crypto' else eq_frac
@@ -112,7 +115,8 @@ def run(monkeypatch, *, crypto=True, pooled=False, bench_flag=False, s_m_eq=2.0,
     def _load_current(regime_state):
         h.load_current.append(regime_state)
         return [dict(r) for r in ((EQ_ROWS if eq_rows is None else eq_rows)
-                                  if regime_state == EQ_REGIME else CR_ROWS)]
+                                  if regime_state == EQ_REGIME
+                                  else (CR_ROWS if cr_rows is None else cr_rows))]
 
     def _s_m(regime_state, run_date, *, benchmark='SPY', horizon=None, **_k):
         return s_m_cr if benchmark == 'BTC-USD' else s_m_eq
@@ -205,7 +209,7 @@ def test_pooled_shadow_block_failure_is_fail_open(monkeypatch):
 
 
 def test_pooled_apply_emits_crypto_targets(monkeypatch):
-    orders, h = run(monkeypatch, pooled=True, gross_frac=10.0)
+    orders, h = run(monkeypatch, pooled=True, gross_frac=10.0, cr_budget='0')  # crypto beta budget OFF: pins the pre-11-18 geometry
     gross = LAM * NAV
     # pooled normaliser: Σ|w| = 6.1 (equity, rule C shadow) + 1.0 BTC + 1.2 ETH (hurdled 2.0-0.8)
     G = 6.1 + 2.2
@@ -241,7 +245,8 @@ def test_crypto_min_acting_and_liquidity_from_crypto_params(monkeypatch):
 # ── Review Focus 3 (per-class hurdle) ───────────────────────────────────────
 
 def test_per_class_hurdle_uses_each_s_m(monkeypatch):
-    orders, h = run(monkeypatch, pooled=True, bench_flag=True, s_m_eq=2.0, s_m_cr=0.8, gross_frac=10.0)
+    orders, h = run(monkeypatch, pooled=True, bench_flag=True, s_m_eq=2.0, s_m_cr=0.8, gross_frac=10.0,
+                    cr_budget='0')  # crypto beta budget OFF: pins the pre-11-18 geometry
     e, c = eq_t(orders), cr_t(orders)
     G = (2.0 + 0.6) + (1.0 + 1.2)     # SPY + ZZTA(2.6-2.0) ; BTC + ETH(2.0-0.8)
     assert 'ZZTB' not in e and 'SOL-USD' not in c
@@ -261,13 +266,14 @@ def test_negative_s_m_crypto_floors_hurdle_at_zero(monkeypatch):
 # ── caps ────────────────────────────────────────────────────────────────────
 
 def test_crypto_gross_cap_and_bench_cap(monkeypatch):
-    orders, h = run(monkeypatch, pooled=True, btc_frac=0.10, gross_frac=0.30)
+    orders, h = run(monkeypatch, pooled=True, btc_frac=0.10, gross_frac=0.30, cr_budget='0')  # crypto beta budget OFF: pins the pre-11-18 geometry
     c = cr_t(orders)
     G = 6.1 + 2.2
     eth_raw = LAM * NAV * 1.2 / G                    # 28.9k
     btc = 0.10 * NAV                                 # 24.1k raw -> 10k by the BTC D-4' clamp
-    k = (0.30 * NAV) / (btc + eth_raw)               # gross cap pro-rata after the clamp
-    assert abs(c['BTC-USD'] - btc * k) < 1e-6 and abs(c['ETH-USD'] - eth_raw * k) < 1e-6
+    # gross cap after the clamp: the acting sleeve's BTC is PROTECTED, the alts
+    # absorb the whole shave first (2026-11-18; was pro-rata)
+    assert abs(c['BTC-USD'] - btc) < 1e-6 and abs(c['ETH-USD'] - (0.30 * NAV - btc)) < 1e-6
     assert abs(sum(abs(v) for v in c.values()) - 0.30 * NAV) < 1e-6
     ln = shadow_lines(h, 'apply')[0]
     assert 'cap_shaved=%.0f' % (btc + eth_raw - 0.30 * NAV) in ln
@@ -332,7 +338,7 @@ def test_equity_empty_apply_emits_crypto_and_holds_equity(monkeypatch):
     # the lone equity name fails the EQUITY acting gate (min_acting=2); crypto keeps min_acting=1
     broker = {'ZZTB': 2_000.0, 'BTC-USD': 1_000.0}
     orders, h = run(monkeypatch, pooled=True, gross_frac=10.0, eq_params=_params(min_acting=2),
-                    eq_carried=[_carried('S_lo', 'ZZTB')], broker=broker)
+                    eq_carried=[_carried('S_lo', 'ZZTB')], broker=broker, cr_budget='0')  # crypto beta budget OFF: pins the pre-11-18 geometry
     assert h.flatten == ['equity']                                   # per-class equity flatten asked
     assert not any(o['ticker'] == 'ZZTB' for o in orders)            # equity HELD (flatten not armed)
     c = cr_t(orders)
@@ -605,8 +611,10 @@ def test_stable_excluded_counts_tickers(monkeypatch):
 
 
 def test_shadow_line_eq_scale_ratio(monkeypatch):
-    _, h = run(monkeypatch)
+    _, h = run(monkeypatch, cr_budget='0')
     assert 'eq_scale_ratio=%.4f' % (6.1 / (6.1 + 2.2)) in shadow_lines(h)[0]
+    _, h1 = run(monkeypatch)                          # budget ON: BTC +1.30 pool, Σ crypto conserved = 3.5
+    assert 'eq_scale_ratio=%.4f' % (6.1 / (6.1 + 3.5)) in shadow_lines(h1)[0]
 
 
 def test_pooled_attribution_uses_size_scalar_adjusted_weights(monkeypatch):
@@ -683,3 +691,101 @@ def test_crypto_line_posts_with_the_corr_cumsharpe_gate_expired(monkeypatch):
     _sizer._post_crypto_sizing_line('crypto_sizing.shadow[CRISIS]: S_m=0.10 n=1')
     assert len(sent) == 1 and b'crypto_sizing.shadow[CRISIS]' in sent[0].data
     assert sent[0].get_header('User-agent') == 'fundjohn-sizer/1.0'
+
+
+# ── BTC sleeve floor + crypto beta budget (2026-11-18) ─────────────────────
+
+def _top_usd(line, ticker):
+    """USD of `ticker` in the line's top=[...] list (0.0 when absent)."""
+    import ast
+    body = line.split(' top=', 1)[1]
+    lst = body[:body.index(']') + 1]
+    return float(dict(ast.literal_eval(lst)).get(ticker, 0.0))
+
+
+def _block_res(monkeypatch, **kw):
+    """Run the harness and capture the crypto block's return dict."""
+    seen = []
+    real = _sizer._crypto_pooled_block
+    monkeypatch.setattr(_sizer, '_crypto_pooled_block',
+                        lambda **k: seen.append(real(**k)) or seen[-1])
+    orders, h = run(monkeypatch, **kw)
+    return orders, h, seen[-1]
+
+
+def test_floor_applies_with_negative_s_m_and_no_weight_row(monkeypatch):
+    # sleeve weight row absent (S_m<0 -> weight 0), only the sleeve signal present
+    _, h, res = _block_res(monkeypatch, s_m_cr=-0.4, cr_rows=[_row('S_cr_a', 2.0)],
+                           cr_carried=[_carried('S_beta_btc', 'BTC-USD')])
+    line = h.written[-1]
+    assert 'floor_usd=' in line and " top=[('BTC-USD', " in line
+    btc = _top_usd(line, 'BTC-USD')
+    assert abs(btc - 0.10 * NAV) < 1.0
+    assert abs(res['floor_usd'] - btc) < 1.0 and 'floor_usd=%.0f' % res['floor_usd'] in line
+    assert res['sleeve_acting'] is True and res['empty_reason'] is None
+
+
+def test_floor_conserves_lambda_nav_under_pooling(monkeypatch):
+    orders, h = run(monkeypatch, pooled=True, s_m_cr=0.8, btc_frac=10.0, gross_frac=10.0)
+    eq_gross = sum(abs(o['target_usd']) for o in orders if o['ticker'] not in CRYPTO_TKRS)
+    cr_gross = sum(abs(o['target_usd']) for o in orders if o['ticker'] in CRYPTO_TKRS)
+    assert abs(eq_gross + cr_gross - LAM * NAV) < 1.0
+    assert _top_usd(h.written[-1], 'BTC-USD') >= 0.10 * NAV - 1.0
+
+
+def test_floor_injected_when_own_conviction_is_below_frac(monkeypatch):
+    # tiny sleeve weight: own BTC ≈ 1.2k, floor lifts it to exactly 0.10·NAV in apply mode
+    rows = [_row('S_beta_btc', 0.05), _row('S_cr_a', 2.0), _row('S_cr_b', 0.5)]
+    orders, h, res = _block_res(monkeypatch, pooled=True, s_m_cr=0.8, cr_rows=rows,
+                                btc_frac=10.0, gross_frac=10.0, cr_budget='0')
+    assert abs(cr_t(orders)['BTC-USD'] - 0.10 * NAV) < 1.0
+    assert res['floor_usd'] > 0 and 'floor_usd=%.0f' % res['floor_usd'] in h.written[-1]
+    eq_gross = sum(abs(v) for t, v in targets(orders).items() if t not in CRYPTO_TKRS)
+    assert abs(eq_gross + sum(cr_t(orders).values()) - LAM * NAV) < 1.0
+
+
+def test_floor_inactive_without_sleeve_signal(monkeypatch):
+    _, h, res = _block_res(monkeypatch, cr_carried=[_carried('S_cr_a', 'ETH-USD')])
+    assert ' floor_usd=0 ' in h.written[-1] + ' '
+    assert res['sleeve_acting'] is False and res['floor_usd'] == 0.0
+
+
+def test_floor_bounded_by_btc_clamp_and_hold_flat(monkeypatch):
+    _, h = run(monkeypatch, min_frac=0.25, btc_frac=0.25)
+    assert _top_usd(h.written[-1], 'BTC-USD') <= 0.25 * NAV + 1.0
+    _, h2 = run(monkeypatch, hold={'sleeve': {'since': 1}, 'tickers': {}})
+    assert 'hold=1' in h2.written[-1] and "('BTC-USD'" not in h2.written[-1].split('top=')[1]
+
+
+def test_floor_scaled_by_funding_pass(monkeypatch):
+    _, h = run(monkeypatch, nmbp=2_000.0)
+    assert _top_usd(h.written[-1], 'BTC-USD') <= 2_000.0 + 1.0 and 'funding_bind=' in h.written[-1]
+
+
+def test_gross_cap_shaves_alts_before_btc(monkeypatch):
+    _, h = run(monkeypatch, gross_frac=0.12, min_frac=0.10, cr_budget='0',
+               cr_rows=[_row('S_beta_btc', 0.05), _row('S_cr_a', 2.0), _row('S_cr_b', 0.5)])
+    assert abs(_top_usd(h.written[-1], 'BTC-USD') - 0.10 * NAV) < 1.0
+
+
+def test_crypto_beta_budget_flag_and_pool_on_line(monkeypatch):
+    s_m = 0.8
+    # pool = Σ over non-bench crypto tickers of min(|S_adj|, S_m); with no
+    # similarity matrix (load_groups stubbed None) S_adj = the raw crypto-regime
+    # weights of the loaded, non-stable tickers: ETH (S_cr_a) and SOL (S_cr_b)
+    w = {r['strategy_id']: r['daily_weight'] for r in CR_ROWS}
+    expected = min(abs(w['S_cr_a']), s_m) + min(abs(w['S_cr_b']), s_m)
+    assert '%.2f' % expected == '1.30'
+    _, h, res = _block_res(monkeypatch, s_m_cr=s_m, cr_budget='1')
+    assert 'pool=%.2f' % expected in h.written[-1] and abs(res['pool'] - expected) < 1e-9
+    _, h0 = run(monkeypatch, s_m_cr=s_m, cr_budget='0')
+    assert 'pool=0.00' in h0.written[-1]
+    monkeypatch.setenv(bz.BETA_BUDGET_ENV, '0')                  # SPY flag off must not disable the crypto budget
+    assert 'pool=%.2f' % expected in run(monkeypatch, s_m_cr=s_m, cr_budget='1')[1].written[-1]
+
+
+def test_equity_empty_floor_is_capped_not_nan(monkeypatch):
+    _, h = run(monkeypatch, eq_carried=[], s_m_cr=-0.4, cr_rows=[_row('S_cr_a', 2.0)],
+               cr_carried=[_carried('S_beta_btc', 'BTC-USD')])
+    btc = _top_usd(h.written[-1], 'BTC-USD')
+    assert 0 < btc <= 0.25 * NAV + 1.0

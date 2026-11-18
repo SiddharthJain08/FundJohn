@@ -1689,13 +1689,20 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
       equity universe stays us_equity-only) → stablecoins dropped → S_adj
       (crypto-regime similarity) → acting gate (crypto params) → S_m_crypto
       hurdle (floor_zero; applied only with a qualified BTC sleeve ticker) →
-      beta budget (per class; OFF in production) → pooled normaliser → dust →
+      crypto beta budget (OPENCLAW_CRYPTO_BETA_BUDGET, default ON; independent
+      of the SPY flag) → BTC sleeve floor (benchmark_min_nav_frac_crypto;
+      weight-injected so the post-normaliser BTC lands at frac·NAV, runs
+      whenever the sleeve's BTC LONG signal is loaded, S_m-independent and
+      even with no weight row / no other crypto signal; exempt from the
+      per-ticker and cluster caps, protected by crypto_gross_cap) → pooled
+      normaliser → dust →
       per-ticker cap → cluster cap → BTC corr removal → BTC D-4′ clamp
       (benchmark_max_nav_frac_crypto) → long-only clamp → crypto_gross_cap →
       funding_pass (net new buying vs nmbp) → hold-flat. Then the shadow/apply line (log + #botjohn-log + pipeline_config).
 
     Returns {'targets', 'ticker_meta', 'gate_net_sharpe', 'rows', 'crypto_ids',
-    'active', 'bench_tkrs', 'gross_w', 'line', 'empty_reason'}."""
+    'active', 'bench_tkrs', 'gross_w', 'line', 'empty_reason', 'floor_usd',
+    'pool', 'sleeve_acting'}."""
     from collections import defaultdict
     from execution import pooled_sizing as _ps
     from execution import strategy_weights as _sw
@@ -1705,7 +1712,8 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
     res = {'targets': {}, 'ticker_meta': {}, 'gate_net_sharpe': {}, 'rows': [],
            'crypto_ids': set(), 'active': [], 'bench_tkrs': set(), 'bench_ids': set(), 'eff_by': {},
            'gross_w': 0.0,
-           'line': None, 'empty_reason': None}
+           'line': None, 'empty_reason': None,
+           'floor_usd': 0.0, 'pool': 0.0, 'sleeve_acting': False}
     crypto_ids_all = {s for s, c in classes.items() if c == 'crypto'}
     res['crypto_ids'] = crypto_ids_all
     rows = [r for r in (_sw.load_current(crypto_regime_state) or [])
@@ -1728,16 +1736,28 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
     # the crypto label would drop crypto signals on any day the labels differ.
     # Crypto eligibility is decided at mint (engine uses the crypto regime);
     # here the cadence window alone bounds the set (regime_state=None).
+    # The BTC sleeve's signal is loaded even with no weight row (S_m ≤ 0 ⇒
+    # weight 0 ⇒ no row): the floor below keys on it. The loaders query by
+    # the keys of the weight map, so the sleeve ids ride in a LOAD-only map
+    # (weight 0.0, cadence fallback 1.0 = today's signal); w_by/eff_by and
+    # the sized set are unchanged.
+    sleeve_ids = set(bench_ids or ()) & crypto_ids_all
     active = []
-    if w_by:
+    if w_by or sleeve_ids:
         _kw = dict(strategy_ids=crypto_ids_all, tradable_classes=('crypto',))
+        w_load = dict(w_by)
+        for _sid in sleeve_ids:
+            w_load.setdefault(_sid, 0.0)
         if _eod_signal_register_lane():
-            active = _load_approved_carried_signals(w_by, cad_by, regime_state=None, **_kw)
+            active = _load_approved_carried_signals(w_load, cad_by, regime_state=None, **_kw)
         else:
-            active = _load_active_window_signals(None, w_by, cad_by, **_kw)
+            active = _load_active_window_signals(None, w_load, cad_by, **_kw)
     active = [s for s in (active or [])
-              if s.get('strategy_id') in w_by
-              and not ((s.get('signal_params') or {}).get('option_spec'))]
+              if not ((s.get('signal_params') or {}).get('option_spec'))]
+    sleeve_acting = any(s.get('strategy_id') in sleeve_ids and s.get('ticker') == BTC_TICKER
+                        and _dir_to_int(s.get('direction')) > 0 for s in active)
+    res['sleeve_acting'] = sleeve_acting
+    active = [s for s in active if s.get('strategy_id') in w_by]
     stables = _ps.stable_tickers()
     res['active'] = [s for s in active if s.get('ticker') not in stables]
 
@@ -1775,66 +1795,97 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
     btc_clamped = 0.0
     bench_cr: set = set()
     gate_net: dict = {}
-    if meta:
-        try:
-            from execution import strategy_similarity as _ss
-            groups = _ss.load_groups(crypto_regime_state)
-        except Exception as e:  # noqa: BLE001
-            logger.warning('crypto_sizing: load_groups failed (%s)', e)
-            groups = None
-        _sim = (groups or {}).get('matrix') or {}
-        from execution import orthogonalization as _ogtf
-        _twf_on = trade_weight_factor_enabled()
-        _anchor = _load_trade_factor_anchor() if _twf_on else None
-        _f = {sid: (_ogtf.trade_weight_factor(n_by.get(sid), anchor=_anchor) if _twf_on else 1.0)
-              for sid in w_by}
-        _gamma = _tangency_gamma_for_cycle(groups) if _tangency_sadj_enabled() else None
-        gate_net, size_adj, _, _ = _corr_adjusted_maps(
-            meta, {s: w * _f[s] for s, w in w_by.items()},
-            {s: w * _f.get(s, 1.0) for s, w in eff_by.items()}, _sim, gamma=_gamma, diag={})
-        net_sign = _net_signs(gate_net, dict(naive_w))
-        acting = _acting_counts(meta, net_sign)
-        bench_cr = _bsl.benchmark_tickers(meta, bench_ids, net_sign=net_sign)
-        w = dict(size_adj)
-        min_acting = _resolve_min_acting_strategies(crypto_params)
-        if min_acting > MIN_ACTING_STRATEGIES_LO:
-            for t in [t for t in w if acting.get(t, 0) < min_acting and t not in bench_cr]:
-                w.pop(t, None)
-        # S_m_crypto hurdle (None ⇒ no hurdle, fail-open like the SPY path).
+    pool = 0.0
+    floor_usd = 0.0
+    own_w = None                      # BTC own weight when the floor injected; None = not injected
+    hurdle_applied = False
+    liq_cr = float((crypto_params or {}).get('liquidity_param', 1.0))
+
+    def _load_s_m():
+        # S_m_crypto (None ⇒ no hurdle, fail-open like the SPY path).
         try:
             _h = _bsz.load_benchmark_horizon()
-            s_m = _bsz.regime_benchmark_sharpe_for_sizing(
+            return _bsz.regime_benchmark_sharpe_for_sizing(
                 crypto_regime_state, date.today(), benchmark='BTC-USD', horizon=_h)
         except Exception as e:  # noqa: BLE001
             logger.warning('crypto_sizing: S_m_crypto failed (%s); no hurdle', e)
-            s_m = None
+            return None
+
+    if meta or sleeve_acting:
+        w: dict = {}
+        if meta:
+            try:
+                from execution import strategy_similarity as _ss
+                groups = _ss.load_groups(crypto_regime_state)
+            except Exception as e:  # noqa: BLE001
+                logger.warning('crypto_sizing: load_groups failed (%s)', e)
+                groups = None
+            _sim = (groups or {}).get('matrix') or {}
+            from execution import orthogonalization as _ogtf
+            _twf_on = trade_weight_factor_enabled()
+            _anchor = _load_trade_factor_anchor() if _twf_on else None
+            _f = {sid: (_ogtf.trade_weight_factor(n_by.get(sid), anchor=_anchor) if _twf_on else 1.0)
+                  for sid in w_by}
+            _gamma = _tangency_gamma_for_cycle(groups) if _tangency_sadj_enabled() else None
+            gate_net, size_adj, _, _ = _corr_adjusted_maps(
+                meta, {s: w * _f[s] for s, w in w_by.items()},
+                {s: w * _f.get(s, 1.0) for s, w in eff_by.items()}, _sim, gamma=_gamma, diag={})
+            net_sign = _net_signs(gate_net, dict(naive_w))
+            acting = _acting_counts(meta, net_sign)
+            bench_cr = _bsl.benchmark_tickers(meta, bench_ids, net_sign=net_sign)
+            w = dict(size_adj)
+            min_acting = _resolve_min_acting_strategies(crypto_params)
+            if min_acting > MIN_ACTING_STRATEGIES_LO:
+                for t in [t for t in w if acting.get(t, 0) < min_acting and t not in bench_cr]:
+                    w.pop(t, None)
+        s_m = _load_s_m()
         hurdle_applied = bool(bench_cr) and s_m is not None
         if hurdle_applied:
             hurdled, dropped = _bsz.apply_benchmark_hurdle(w, s_m, bench_cr, floor_zero=True)
-            if _bsz.beta_budget_enabled():
-                hurdled, _ = _bsz.apply_beta_budget(w, hurdled, max(float(s_m), 0.0), bench_cr)
+            if _bsz.crypto_beta_budget_enabled():
+                hurdled, pool = _bsz.apply_beta_budget(w, hurdled, max(float(s_m), 0.0), bench_cr)
             w = hurdled
+        # BTC sleeve floor: inject the weight that lands the post-normaliser
+        # BTC dollars at frac·NAV (S_m-independent; never lowers own conviction).
+        if sleeve_acting:
+            frac = _bsz.benchmark_min_nav_frac(instrument_class='crypto')
+            w_btc = float(w.get(BTC_TICKER, 0.0))
+            other = sum(abs(v) for t, v in w.items() if t != BTC_TICKER)
+            w_new, how = _ps.floor_weight(w_btc, frac, eq_gross=eq_gross, cr_gross_other=other,
+                                          lam_global=lam_global, liq_cr=liq_cr)
+            if w_new > w_btc:
+                w[BTC_TICKER] = w_new
+                own_w = w_btc
+                logger.info('crypto_sizing.floor: how=%s frac=%.3f w_btc %.4f -> %.4f',
+                            how, frac, w_btc, w_new)
+                if how == 'floor' and lam_global * min(1.0, max(0.0, liq_cr)) <= frac:
+                    logger.warning('crypto_sizing.floor: degenerate (lambda*liq <= frac); '
+                                   'using half-book weight')
         w = {t: v for t, v in w.items() if v}
         res['gross_w'] = sum(abs(v) for v in w.values())
         if w:
-            liq_cr = float((crypto_params or {}).get('liquidity_param', 1.0))
             _, scale_cr = _ps.pooled_scales(eq_gross=eq_gross, cr_gross=res['gross_w'],
                                             lam_global=lam_global, liq_eq=liq_eq,
                                             liq_cr=liq_cr, nav=nav)
             targets = {t: v * scale_cr for t, v in w.items()}
+            if own_w is not None:
+                floor_usd = max(0.0, targets.get(BTC_TICKER, 0.0) - own_w * scale_cr)
             for t in _dust_tickers(targets, DUST_FLOOR_USD):
                 targets.pop(t, None)
             before_usd = dict(targets)
             exempt = bench_cr if hurdle_applied else set()
+            # the injected floor is exempt from the per-ticker and cluster caps
+            # (the BTC D-4' clamp, gross cap, funding and hold-flat still bind)
+            cap_exempt = set(exempt) | ({BTC_TICKER} if own_w is not None else set())
             if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1' or os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1':
                 for t, usd in list(targets.items()):
                     gs = gate_net.get(t)
-                    if t in exempt or gs is None:
+                    if t in cap_exempt or gs is None:
                         continue
                     cap = PER_TICKER_CAP_SHARPE_FRAC * (abs(gs) + 1.0) * lam_global * nav
                     if abs(usd) > cap:
                         targets[t] = math.copysign(cap, usd)
-            targets = _apply_asset_corr_cap(targets, gate_net, nav, lam=lam_global, exclude=exempt)
+            targets = _apply_asset_corr_cap(targets, gate_net, nav, lam=lam_global, exclude=cap_exempt)
             targets = _apply_benchmark_corr_removal(targets, exempt, nav)
             # BTC 25 % NAV cap BY TICKER (final-review ruling): BTC-USD is
             # clamped whenever it carries a crypto target, sleeve-qualified or
@@ -1846,7 +1897,9 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
                     btc_clamped += abs(usd) - max_btc
                     targets[t] = math.copysign(max_btc, usd)
             targets, n_short = _ps.clamp_long_only(targets)
-            targets, shaved = _ps.crypto_gross_cap(targets, nav, _bsz.crypto_gross_max_nav_frac())
+            targets, shaved = _ps.crypto_gross_cap(
+                targets, nav, _bsz.crypto_gross_max_nav_frac(),
+                protect={BTC_TICKER} if sleeve_acting else None)
             _nmbp = (account_state or {}).get('non_marginable_buying_power')
             targets, shortfall = _ps.funding_pass(
                 targets, _nmbp, current=_crypto_held_usd() if _nmbp is not None else None)
@@ -1855,7 +1908,7 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
             elif shortfall > 0:
                 logger.warning('crypto_sizing.funding_bind=%.0f (crypto scaled pro-rata to nmbp)', shortfall)
         else:
-            res['empty_reason'] = 'gated'
+            res['empty_reason'] = 'gated' if meta else 'no_signals'
     else:
         res['empty_reason'] = 'no_signals'
     try:
@@ -1876,7 +1929,9 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
         gross_cap_shaved=shaved, funding_shortfall=shortfall, hold_flat=hold, mode=mode,
         nav=nav, stable_excluded=n_stable, hold_zeroed=n_held, short_clamped=n_short,
         eq_scale_ratio=(eq_gross / (eq_gross + res['gross_w'])) if eq_gross > 0 else None,
-        btc_clamped_usd=btc_clamped)
+        btc_clamped_usd=btc_clamped, floor_usd=floor_usd, pool=pool)
+    res['floor_usd'] = floor_usd
+    res['pool'] = pool
     logger.info(res['line'])
     if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
         _post_crypto_sizing_line(res['line'])
