@@ -388,6 +388,8 @@ _IMPL_MAP = {
     'S_rachev_ratio_etf_scenario_opt_tv2': ('strategies.implementations.S_rachev_ratio_etf_scenario_opt_tv2', 'RachevRatioEtfScenarioOptTv2'),
     'S_garch_copula_cvar_scenario': ('strategies.implementations.S_garch_copula_cvar_scenario', 'GarchCopulaCvarScenario'),
     'S_garch_copula_cvar_scenario_tv2': ('strategies.implementations.S_garch_copula_cvar_scenario_tv2', 'GarchCopulaCvarScenarioTv2'),
+    'S_cvar_minvar_etf_diversification': ('strategies.implementations.S_cvar_minvar_etf_diversification', 'CvarMinVarEtfDiversification'),
+    'S_cvar_minvar_etf_diversification_tv2': ('strategies.implementations.S_cvar_minvar_etf_diversification_tv2', 'CvarMinVarEtfDiversificationTv2'),
     'S_pre_earnings_vol_runup': ('strategies.implementations.S_pre_earnings_vol_runup', 'PreEarningsVolRunup'),
     'S_amortized_neural_filter_stat_arb': ('strategies.implementations.S_amortized_neural_filter_stat_arb', 'AmortizedNeuralFilterStatArb'),
     'S_amortized_neural_filter_stat_arb_tv2': ('strategies.implementations.S_amortized_neural_filter_stat_arb_tv2', 'AmortizedNeuralFilterStatArbTv2'),

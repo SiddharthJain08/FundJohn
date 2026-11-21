@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-11-14T21:31:14.922Z",
+  "updated_at": "2026-11-21T20:00:41.092Z",
   "strategies": {
     "S_diversified_risk_perception_es_tv2": {
       "state": "candidate",
@@ -2539,95 +2539,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_visibility_graph_rsi": {
-      "state": "candidate",
-      "state_since": "2026-10-24T22:49:19.432085+00:00",
-      "metadata": {
-        "canonical_file": "S_visibility_graph_rsi.py",
-        "class": "VisibilityGraphRSI",
-        "description": "Backward-visibility graph RSI oscillator: LONG on oversold cross-up (VGRSI<30→>30), SHORT on overbought cross-down (VGRSI>70→<70).",
-        "eligible_regimes": [
-          "CRISIS"
-        ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-05-19T07:19:07.681Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard (override) [regimes via custom: CRISIS]",
-          "metadata": {
-            "override": true,
-            "failed_gates": [],
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "CRISIS"
-            ]
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-07-06T04:00:02.898321+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_weekly_cron",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-07-26T00:22:34.052Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": [
-              "TRANSITIONING",
-              "HIGH_VOL",
-              "CRISIS"
-            ],
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:03:59.316973+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-09-19T19:02:24.569Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": [
-              "CRISIS"
-            ],
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-10-24T22:49:19.432085+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S_price_filter_rule_trend": {
       "state": "live",
       "state_since": "2026-05-24T15:32:46.669Z",
@@ -3039,26 +2950,9 @@
       ],
       "instrument_class": "etp"
     },
-    "S_btc_donchian_breakout_realistic_costs": {
-      "state": "candidate",
-      "state_since": "2026-10-31T18:20:13.183104+00:00",
-      "metadata": {
-        "canonical_file": "S_btc_donchian_breakout_realistic_costs.py",
-        "class": "BtcDonchianBreakoutRealisticCosts",
-        "description": "Donchian(20) channel breakout on BTC-USD close with a 10bps realistic-cost breakout margin filter; LONG above the upper band, FLAT below the lower band.",
-        "eligible_regimes": [
-          "LOW_VOL"
-        ],
-        "backtest_tickers": [
-          "BTC-USD"
-        ]
-      },
-      "history": [],
-      "instrument_class": "crypto"
-    },
     "S_btc_momentum": {
-      "state": "live",
-      "state_since": "2026-09-05T20:37:35.058Z",
+      "state": "candidate",
+      "state_since": "2026-11-16T05:00:18.920326+00:00",
       "metadata": {
         "canonical_file": "S_btc_momentum.py",
         "class": "BtcMomentum",
@@ -3106,6 +3000,14 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-11-16T05:00:18.920326+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_weekly_cron",
+          "metadata": {}
         }
       ],
       "instrument_class": "crypto"
@@ -3760,68 +3662,6 @@
       ],
       "instrument_class": "etp"
     },
-    "oxf_orbp_momentum": {
-      "state": "candidate",
-      "state_since": "2026-10-24T22:49:19.457672+00:00",
-      "metadata": {
-        "canonical_file": "oxf_orbp_momentum.py",
-        "class": "OxfOrbpMomentum",
-        "description": "ORBP opening-range-breakout-preference with momentum trend filter on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat orbp-trend). Buy stop at Open+Stretch confirmed on signal-day OHLC; close[t+1] fill.",
-        "eligible_regimes": [
-          "HIGH_VOL"
-        ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-07-13T12:52:59.307Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:03:59.576727+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-09-19T19:06:03.430Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": [
-              "CRISIS"
-            ],
-            "eligible_regimes_after": [
-              "HIGH_VOL"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-10-24T22:49:19.457672+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "etp"
-    },
     "oxf_rsi2_meanrev": {
       "state": "live",
       "state_since": "2026-06-16T04:49:35.122Z",
@@ -4303,51 +4143,6 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
-        }
-      ],
-      "instrument_class": "etp"
-    },
-    "S_ast_pairs_trading_with_country_etfs": {
-      "state": "candidate",
-      "state_since": "2026-10-26T04:00:14.367687+00:00",
-      "metadata": {
-        "canonical_file": "S_ast_pairs_trading_with_country_etfs.py",
-        "class": "AstPairsTradingWithCountryEtfs",
-        "description": "Mean-reversion pairs trading across 23 iShares MSCI country ETFs + SPY; long undervalued / short overvalued leg when spread exceeds 0.5 std dev.",
-        "eligible_regimes": [
-          "HIGH_VOL",
-          "CRISIS"
-        ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-07-13T12:52:55.089Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": [
-              "LOW_VOL",
-              "TRANSITIONING",
-              "HIGH_VOL",
-              "CRISIS"
-            ],
-            "eligible_regimes_after": [
-              "HIGH_VOL",
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-10-26T04:00:14.367687+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_weekly_cron",
-          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5475,220 +5270,6 @@
       ],
       "instrument_class": "equity"
     },
-    "oxf_bollinger_momentum": {
-      "state": "candidate",
-      "state_since": "2026-10-24T22:49:19.628017+00:00",
-      "metadata": {
-        "canonical_file": "oxf_bollinger_momentum.py",
-        "class": "OxfBollingerMomentum",
-        "description": "Bollinger-band momentum breakout on liquid ETFs (oxfordstrat bollinger-bands). Daily-bar, close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r1000",
-        "eligible_regimes": [
-          "LOW_VOL"
-        ]
-      },
-      "history": [
-        {
-          "from_state": "ejected",
-          "to_state": "candidate",
-          "timestamp": "2026-07-17T12:14:51.460Z",
-          "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-08-09T00:08:47.589Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "LOW_VOL",
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:04:00.007624+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-09-19T19:03:42.037Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": [
-              "LOW_VOL",
-              "CRISIS"
-            ],
-            "eligible_regimes_after": [
-              "LOW_VOL"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-10-24T22:49:19.628017+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "etp"
-    },
-    "oxf_donchian_breakout": {
-      "state": "candidate",
-      "state_since": "2026-10-24T22:49:19.653117+00:00",
-      "metadata": {
-        "canonical_file": "oxf_donchian_breakout.py",
-        "class": "OxfDonchianBreakout",
-        "description": "Donchian N-day channel breakout on liquid ETFs (oxfordstrat donchian-channel-2). Daily-bar, close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r1000",
-        "eligible_regimes": [
-          "LOW_VOL"
-        ]
-      },
-      "history": [
-        {
-          "from_state": "ejected",
-          "to_state": "candidate",
-          "timestamp": "2026-07-17T12:14:51.460Z",
-          "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-08-09T00:08:47.622Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "HIGH_VOL",
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:04:00.075258+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-09-19T19:03:59.565Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": [
-              "HIGH_VOL",
-              "CRISIS"
-            ],
-            "eligible_regimes_after": [
-              "LOW_VOL"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-10-24T22:49:19.653117+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "etp"
-    },
-    "oxf_dow_theory": {
-      "state": "candidate",
-      "state_since": "2026-10-24T22:49:19.680068+00:00",
-      "metadata": {
-        "canonical_file": "oxf_dow_theory.py",
-        "class": "OxfDowTheory",
-        "description": "Dow-theory swing-pivot breakout on liquid ETFs (oxfordstrat dow-theory-trend). Close breaks the most-recent pivot. Daily-bar, close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
-        "eligible_regimes": [
-          "LOW_VOL"
-        ]
-      },
-      "history": [
-        {
-          "from_state": "ejected",
-          "to_state": "candidate",
-          "timestamp": "2026-07-17T12:14:51.460Z",
-          "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-08-09T00:08:47.634Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:04:00.160233+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-09-19T19:04:20.171Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": [
-              "CRISIS"
-            ],
-            "eligible_regimes_after": [
-              "LOW_VOL"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-10-24T22:49:19.680068+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "etp"
-    },
     "oxf_dual_momentum_roc": {
       "state": "live",
       "state_since": "2026-08-09T00:08:47.653Z",
@@ -5723,148 +5304,6 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
-        }
-      ],
-      "instrument_class": "etp"
-    },
-    "oxf_livermore": {
-      "state": "candidate",
-      "state_since": "2026-10-24T22:49:19.704949+00:00",
-      "metadata": {
-        "canonical_file": "oxf_livermore.py",
-        "class": "OxfLivermore",
-        "description": "Livermore pivotal-point breakout on liquid ETFs (oxfordstrat livermore-system-1). Penetrates 2 most-recent swing pivots by >= noise. Daily-bar, close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
-        "eligible_regimes": [
-          "LOW_VOL",
-          "HIGH_VOL"
-        ]
-      },
-      "history": [
-        {
-          "from_state": "ejected",
-          "to_state": "candidate",
-          "timestamp": "2026-07-17T12:14:51.460Z",
-          "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-08-09T00:08:47.728Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:04:00.316806+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-09-19T19:04:40.280Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": [
-              "CRISIS"
-            ],
-            "eligible_regimes_after": [
-              "LOW_VOL",
-              "HIGH_VOL"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-10-24T22:49:19.704949+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "etp"
-    },
-    "oxf_nr7": {
-      "state": "candidate",
-      "state_since": "2026-10-24T22:49:19.728170+00:00",
-      "metadata": {
-        "canonical_file": "oxf_nr7.py",
-        "class": "OxfNR7",
-        "description": "NR7 narrow-range breakout on liquid ETFs — daily-bar confirmed-breakout adaptation (oxfordstrat nr7). close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
-        "eligible_regimes": [
-          "CRISIS"
-        ]
-      },
-      "history": [
-        {
-          "from_state": "ejected",
-          "to_state": "candidate",
-          "timestamp": "2026-07-17T12:14:51.460Z",
-          "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-08-09T00:08:47.753Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:04:00.406175+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-09-19T19:05:25.638Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": [
-              "CRISIS"
-            ],
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-10-24T22:49:19.728170+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5971,78 +5410,6 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
-        }
-      ],
-      "instrument_class": "etp"
-    },
-    "oxf_welles_wilder_breakout": {
-      "state": "candidate",
-      "state_since": "2026-10-24T22:49:19.751083+00:00",
-      "metadata": {
-        "canonical_file": "oxf_welles_wilder_breakout.py",
-        "class": "OxfWellesWilderBreakout",
-        "description": "Welles Wilder volatility breakout on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat welles-wilder-1). Close move over the lookback exceeds ARC = ATR*const (stateless SIC proxy); close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
-        "eligible_regimes": [
-          "LOW_VOL",
-          "CRISIS"
-        ]
-      },
-      "history": [
-        {
-          "from_state": "ejected",
-          "to_state": "candidate",
-          "timestamp": "2026-07-17T12:14:51.460Z",
-          "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-07-26T00:22:34.127Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-09-12T19:04:00.560280+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-09-19T19:09:22.672Z",
-          "actor": "system:sunday-auto-approval",
-          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
-          "metadata": {
-            "eligible_regimes_before": [
-              "CRISIS"
-            ],
-            "eligible_regimes_after": [
-              "LOW_VOL",
-              "CRISIS"
-            ],
-            "eligible_regimes_source": "gate_auto_qualifying"
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-10-24T22:49:19.751083+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -6749,8 +6116,8 @@
       "instrument_class": "crypto"
     },
     "S_covariance_shrinkage_minvar": {
-      "state": "live",
-      "state_since": "2026-10-10T22:16:29.191Z",
+      "state": "candidate",
+      "state_since": "2026-11-16T05:00:18.975347+00:00",
       "metadata": {
         "canonical_file": "S_covariance_shrinkage_minvar.py",
         "class": "CovarianceShrinkageMinVar",
@@ -6776,6 +6143,14 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-11-16T05:00:18.975347+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_weekly_cron",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -7296,17 +6671,6 @@
       ],
       "instrument_class": "etp"
     },
-    "S_rachev_ratio_etf_scenario_opt_tv2": {
-      "state": "candidate",
-      "state_since": "2026-10-24T22:18:50.340012+00:00",
-      "metadata": {
-        "canonical_file": "S_rachev_ratio_etf_scenario_opt_tv2.py",
-        "class": "RachevRatioEtfScenarioOptTv2",
-        "description": "LONG-only top-K equal-weight sleeve across 11 sector SPDRs + SPY (variant 2 of 2), gated on each ETF clearing an absolute Rachev-ratio (symmetric 5%/5% tail CVaR) breakeven of 1.0 from historical return scenarios; rebalanced quarterly."
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
     "S_graham_number_value_screen_tv2": {
       "state": "live",
       "state_since": "2026-11-07T20:00:10.687Z",
@@ -7369,159 +6733,6 @@
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
-        }
-      ],
-      "instrument_class": "etp"
-    },
-    "S_spx_straddle_rl_exit_timing": {
-      "state": "candidate",
-      "state_since": "2026-10-24T23:22:29.902298+00:00",
-      "metadata": {
-        "canonical_file": "S_spx_straddle_rl_exit_timing.py",
-        "class": "SpxStraddleRlExitTiming",
-        "description": "Sells SPX (SPY-proxy) ATM straddles when the vol risk premium is positive; approximates the paper's oracle-guided MLP+RL exit timing by conditioning the options engine's only honored exit-timing lever (roll_dte) on entry-time vrp/iv_rank conviction instead of a fixed roll schedule.",
-        "universe_filter_ref": "src.strategies.universe_default:sp500",
-        "universe_filter_source": "fused_approval_default"
-      },
-      "history": [
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-10-24T23:00:00.000Z",
-          "actor": "strategycoder",
-          "reason": "Implementation landed: src/strategies/implementations/S_spx_straddle_rl_exit_timing.py + registry + requirements.json",
-          "metadata": {}
-        },
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-10-24T22:32:25.268Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "options_eod: backfilled but insufficient (2026-04-08→2026-10-22; needs ≥ 2026-02-14)",
-                "prices: backfilled (2016-01-04→2026-10-22, providers polygon/alpaca/yahoo/alpha_vantage)"
-              ],
-              "missing_columns": [
-                "options_eod"
-              ],
-              "provider_route": [
-                {
-                  "provider": "alpaca",
-                  "column": "options_eod",
-                  "data_type": "options",
-                  "gap_from": "2026-02-14",
-                  "gap_to": "2026-04-08"
-                }
-              ]
-            },
-            "candidate_id": "cf3688f5-952b-4532-945f-80a5a7782533"
-          }
-        }
-      ],
-      "instrument_class": "option"
-    },
-    "S_iv_surface_no_arb_relative_value": {
-      "state": "candidate",
-      "state_since": "2026-10-24T22:43:48.061794+00:00",
-      "metadata": {
-        "canonical_file": "S_iv_surface_no_arb_relative_value.py",
-        "class": "IvSurfaceNoArbRelativeValue",
-        "description": "A no-arbitrage-consistent IV surface fitted from sparse option quotes reveals which listed quotes deviate from fair value; those deviations are tradeable mispricings that persist because dealers cannot instantly re-price the whole surface after each sparse quote update.",
-        "universe_filter_ref": "src.strategies.universe_default:options_eligible_only",
-        "universe_filter_source": "paperhunter_inferred"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-10-24T22:32:25.268Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "options_eod: backfilled but insufficient (2026-04-08→2026-10-22; needs ≥ 2025-06-07)",
-                "prices: backfilled (2016-01-04→2026-10-22, providers polygon/alpaca/yahoo/alpha_vantage)"
-              ],
-              "missing_columns": [
-                "options_eod"
-              ],
-              "provider_route": [
-                {
-                  "provider": "alpaca",
-                  "column": "options_eod",
-                  "data_type": "options",
-                  "gap_from": "2025-06-07",
-                  "gap_to": "2026-04-08"
-                }
-              ]
-            },
-            "candidate_id": "1e3d8349-9c0b-4213-b165-65e92a0df6d7"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-10-24T22:43:48.061794+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "option"
-    },
-    "S_sector_fund_annual_momentum_rotation": {
-      "state": "candidate",
-      "state_since": "2026-10-24T23:14:06.884386+00:00",
-      "metadata": {
-        "canonical_file": "S_sector_fund_annual_momentum_rotation.py",
-        "class": "SectorFundAnnualMomentumRotation",
-        "description": "Buying the prior calendar year's best-performing sector/country fund each January (half capital in Treasuries, 35% stop on the fund leg) is claimed to exploit sector momentum, but the author's own test shows it beats the group average only 10/26 years and underperforms outside th",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
-        "universe_filter_source": "fused_approval_default"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-10-24T22:32:25.268Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-01-04→2026-10-22, providers polygon/alpaca/yahoo/alpha_vantage)",
-                "macro: reachable but not backfilled (providers yfinance+fred+nyfed)"
-              ],
-              "missing_columns": [
-                "macro"
-              ],
-              "provider_route": [
-                {
-                  "provider": "yfinance+fred+nyfed",
-                  "column": "macro",
-                  "data_type": "macro",
-                  "gap_from": "2025-06-07",
-                  "gap_to": "2026-10-24"
-                }
-              ]
-            },
-            "candidate_id": "ab61e90f-fc13-4028-9a6e-d508957c5af0"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-10-24T23:14:06.884386+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 5.69, DD 4.2%, trades 48",
-          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -7707,20 +6918,6 @@
       ],
       "instrument_class": "etp"
     },
-    "S_btc_donchian_breakout_realistic_costs_tv2": {
-      "state": "candidate",
-      "state_since": "2026-10-31T00:00:00.000Z",
-      "metadata": {
-        "canonical_file": "S_btc_donchian_breakout_realistic_costs_tv2.py",
-        "class": "BtcDonchianBreakoutRealisticCostsTv2",
-        "description": "Donchian(55) breakout on BTC-USD close requiring 3-bar confirmation before LONG entry, single-bar exit below the lower band; realistic-cost ATR sizing haircut.",
-        "backtest_tickers": [
-          "BTC-USD"
-        ]
-      },
-      "history": [],
-      "instrument_class": "crypto"
-    },
     "S_rsi2_hourly_gold_meanrev_tv2": {
       "state": "live",
       "state_since": "2026-11-07T20:01:36.953Z",
@@ -7826,56 +7023,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_fade_quarterly_theory_q2": {
-      "state": "candidate",
-      "state_since": "2026-10-31T19:09:18.342623+00:00",
-      "metadata": {
-        "canonical_file": "S_fade_quarterly_theory_q2.py",
-        "class": "FadeQuarterlyTheoryQ2",
-        "description": "Fades a new day-high/day-low set during the Q2 RTH window on liquid ETPs; the published 'extreme forms in Q2' rule tests below the 25% chance rate (16.6% hit rate, 2,162 trades, 2019-2021).",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
-        "universe_filter_source": "fused_approval_default"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-10-31T18:50:49.235Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices_30m: reachable but not backfilled (providers alpaca)",
-                "prices: backfilled (2016-01-04→2026-10-28, providers polygon/alpaca/yahoo/alpha_vantage)"
-              ],
-              "missing_columns": [
-                "prices_30m"
-              ],
-              "provider_route": [
-                {
-                  "provider": "alpaca",
-                  "column": "prices_30m",
-                  "gap_from": "2026-02-21",
-                  "gap_to": "2026-10-31"
-                }
-              ]
-            },
-            "candidate_id": "06753544-4ee5-4eca-b37d-14f1c16d6074"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-10-31T19:09:18.342623+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe -1.90, DD 17.4%, trades 491",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "etp"
-    },
     "S_index_trend_filtered_orb": {
       "state": "candidate",
       "state_since": "2026-11-07T20:22:35.883685+00:00",
@@ -7925,106 +7072,6 @@
         }
       ],
       "instrument_class": "etp"
-    },
-    "S_short_volume_settlement_predictor": {
-      "state": "candidate",
-      "state_since": "2026-10-31T19:41:11.110569+00:00",
-      "metadata": {
-        "canonical_file": "S_short_volume_settlement_predictor.py",
-        "class": "S_short_volume_settlement_predictor",
-        "description": "Daily short-volume data can predict the official bi-monthly FINRA short-interest settlement figure before it is publicly reported, letting a trader position ahead of the price reaction to the eventual short-interest surprise.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
-        "universe_filter_source": "fused_approval_default"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-10-31T18:50:49.235Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "short_interest: reachable but not backfilled (providers finra)",
-                "prices: backfilled (2016-01-04→2026-10-28, providers polygon/alpaca/yahoo/alpha_vantage)"
-              ],
-              "missing_columns": [
-                "short_interest"
-              ],
-              "provider_route": [
-                {
-                  "provider": "finra",
-                  "column": "short_interest",
-                  "gap_from": "2025-06-14",
-                  "gap_to": "2026-10-31"
-                }
-              ]
-            },
-            "candidate_id": "fb65e485-0964-4242-82d7-65df31fb8e13"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-10-31T19:41:11.110569+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.19, DD 28.4%, trades 334",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_weekend_crypto_vol_monday_premium": {
-      "state": "candidate",
-      "state_since": "2026-10-31T19:31:11.407599Z",
-      "metadata": {
-        "canonical_file": "S_weekend_crypto_vol_monday_premium.py",
-        "class": "WeekendCryptoVolMondayPremium",
-        "description": "Weekend BTC/ETH/XRP realized-variance (a common crypto factor) carries predictive content for Monday equity variance post-2024, so going long volatility (e.g. SPY ATM straddle) ahead of Monday open when the weekend crypto-vol factor is elevated captures the forecast variance prem"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-10-31T18:50:49.235Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-01-04→2026-10-28, providers polygon/alpaca/yahoo/alpha_vantage)",
-                "options_eod: backfilled but insufficient (2026-04-08→2026-10-28; needs ≥ 2025-06-14)",
-                "realized_vol: backfilled (2016-01-04→2026-10-28, providers polygon/yahoo/alpha_vantage/computed)"
-              ],
-              "missing_columns": [
-                "options_eod"
-              ],
-              "provider_route": [
-                {
-                  "provider": "alpaca",
-                  "column": "options_eod",
-                  "data_type": "options",
-                  "gap_from": "2025-06-14",
-                  "gap_to": "2026-04-08"
-                }
-              ]
-            },
-            "candidate_id": "ae7eb315-c1ab-420f-9049-d3235e5cd76d"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-10-31T19:31:11.407599Z",
-          "actor": "strategycoder",
-          "reason": "Implementation landed: src/strategies/implementations/S_weekend_crypto_vol_monday_premium.py + registry + requirements.json",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "option"
     },
     "S_eigenportfolio_collision_penalty": {
       "state": "candidate",
@@ -8231,7 +7278,6 @@
         "class": "FiveMinORBSP500",
         "description": "Classic 5-minute opening-range breakout (long on break above the first-5-min high, short on break below the first-5-min low) claimed 72.17% win rate elsewhere, but this control-group audit measured only 65.9% on 1,250 S&P 500 trades — below both the 66.7% cost-adjusted breakeven "
       },
-      "instrument_class": "equity",
       "history": [
         {
           "from_state": null,
@@ -8260,7 +7306,33 @@
             "candidate_id": "6983c3da-67fb-49a3-87fd-7f37d58f070c"
           }
         }
-      ]
+      ],
+      "instrument_class": "equity"
+    },
+    "S_cvar_minvar_etf_diversification": {
+      "state": "candidate",
+      "state_since": "2026-11-21T19:19:37.871029+00:00",
+      "metadata": {
+        "canonical_file": "S_cvar_minvar_etf_diversification.py",
+        "class": "CvarMinVarEtfDiversification",
+        "description": "LONG-only global-minimum-variance weekly allocation across 30 global equity-bond ETFs from a GARCH-proxy conditional covariance matrix; active only in HIGH_VOL/CRISIS regimes (Afroz et al. 2026).",
+        "eligible_regimes": [
+          "LOW_VOL"
+        ]
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_cvar_minvar_etf_diversification_tv2": {
+      "state": "candidate",
+      "state_since": "2026-11-21T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_cvar_minvar_etf_diversification_tv2.py",
+        "class": "CvarMinVarEtfDiversificationTv2",
+        "description": "LONG-only minimum-EVaR (historical-CVaR) monthly allocation across 30 equity-bond ETFs from the raw empirical historical-return loss distribution; active only in HIGH_VOL/CRISIS regimes (Afroz et al. 2026, variant 2/2)."
+      },
+      "history": [],
+      "instrument_class": "etp"
     }
   },
   "decommissioned": {

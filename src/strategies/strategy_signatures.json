@@ -104,16 +104,33 @@
       "TRANSITIONING"
     ]
   },
-  "S_9sig_tqqq_nav_rebalance_tv2": {
-    "regime_set_hash": "10b0b5eb7bebe610",
-    "direction_hash": "a8f3862b96300e62",
+  "S_adaptive_hedge_ratio_ensemble": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
     "formula_tokens": [
-      "atr",
+      "beta",
+      "correlation",
+      "dispersion",
       "regime",
       "rv",
       "value"
     ],
     "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_adaptive_hedge_ratio_ensemble_tv2": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "beta",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
       "LOW_VOL",
       "TRANSITIONING"
     ]
@@ -188,23 +205,6 @@
       "rank_pct",
       "sma",
       "volume"
-    ]
-  },
-  "S_amortized_neural_filter_stat_arb_tv2": {
-    "regime_set_hash": "c722b3f150c07554",
-    "direction_hash": "ad8944b86def7516",
-    "formula_tokens": [
-      "beta",
-      "gamma",
-      "regime",
-      "reversion",
-      "rv",
-      "value"
-    ],
-    "regimes": [
-      "HIGH_VOL",
-      "LOW_VOL",
-      "TRANSITIONING"
     ]
   },
   "S_ast_asset_class_trend_following": {
@@ -449,6 +449,21 @@
       "value"
     ],
     "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_beta_btc": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "beta",
+      "regime",
+      "value",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
       "LOW_VOL",
       "TRANSITIONING"
     ]
@@ -770,6 +785,24 @@
       "TRANSITIONING"
     ]
   },
+  "S_diversified_risk_perception_es_tv2": {
+    "regime_set_hash": "169a8bbb4e444919",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "gamma",
+      "quality",
+      "regime",
+      "tilt",
+      "value",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL",
+      "TRANSITIONING"
+    ]
+  },
   "S_diversity_weighted_price_generated": {
     "regime_set_hash": "c722b3f150c07554",
     "direction_hash": "a8f3862b96300e62",
@@ -851,6 +884,37 @@
     "formula_tokens": [
       "regime",
       "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_effective_rank_diversification_collapse": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "f2a0793adc86d594",
+    "formula_tokens": [
+      "atr",
+      "correlation",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_effective_rank_diversification_collapse_tv2": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "beta",
+      "correlation",
+      "regime",
       "value"
     ],
     "regimes": [
@@ -1004,6 +1068,55 @@
     "formula_tokens": [
       "momentum",
       "regime",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_five_min_orb_sp500": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "breakout",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_garch_copula_cvar_scenario": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "correlation",
+      "delta",
+      "realized_vol",
+      "regime",
+      "value",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_garch_copula_cvar_scenario_tv2": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "correlation",
+      "delta",
+      "realized_vol",
+      "regime",
+      "rv",
+      "value",
       "weighted"
     ],
     "regimes": [
@@ -1478,6 +1591,24 @@
       "TRANSITIONING"
     ]
   },
+  "S_momentum_lowvol_interaction_tv2": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "momentum",
+      "realized_vol",
+      "regime",
+      "rv",
+      "tilt",
+      "value",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
   "S_mpc_score_rebalanced_equity_tv2": {
     "regime_set_hash": "631d94ef719aeb42",
     "direction_hash": "a8f3862b96300e62",
@@ -1765,21 +1896,6 @@
       "LOW_VOL",
       "TRANSITIONING",
       "TREND"
-    ]
-  },
-  "S_return_stacking_gold_managed_futures": {
-    "regime_set_hash": "c722b3f150c07554",
-    "direction_hash": "a8f3862b96300e62",
-    "formula_tokens": [
-      "beta",
-      "momentum",
-      "regime",
-      "value"
-    ],
-    "regimes": [
-      "HIGH_VOL",
-      "LOW_VOL",
-      "TRANSITIONING"
     ]
   },
   "S_reversal_momentum_transition_earnings": {
@@ -2409,26 +2525,6 @@
     "regimes": [
       "LOW_VOL",
       "TRANSITIONING"
-    ]
-  },
-  "oxf_bollinger_momentum_dsl": {
-    "regime_set_hash": "10b0b5eb7bebe610",
-    "direction_hash": "ad8944b86def7516",
-    "formula_tokens": [
-      "breakout",
-      "momentum",
-      "regime",
-      "value"
-    ],
-    "regimes": [
-      "LOW_VOL",
-      "TRANSITIONING"
-    ],
-    "formula_hash": "66de85067fa58e8d",
-    "formula_ops": [
-      "close",
-      "sma",
-      "std"
     ]
   },
   "oxf_donchian_breakout": {
@@ -4489,5 +4585,79 @@
     ],
     "ejected": true,
     "ejected_at": "2026-11-07"
+  },
+  "S_9sig_tqqq_nav_rebalance_tv2": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-14"
+  },
+  "S_amortized_neural_filter_stat_arb_tv2": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "beta",
+      "gamma",
+      "regime",
+      "reversion",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-14"
+  },
+  "S_return_stacking_gold_managed_futures": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "beta",
+      "momentum",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-14"
+  },
+  "oxf_bollinger_momentum_dsl": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "breakout",
+      "momentum",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "formula_hash": "66de85067fa58e8d",
+    "formula_ops": [
+      "close",
+      "sma",
+      "std"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-14"
   }
 }
