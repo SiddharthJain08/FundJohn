@@ -7,6 +7,17 @@ architecture see /README.md and /ARCHITECTURE.md.
 
 ## Recent Changes
 
+### 2026-11-23 — Fractional shares across the board (equity executor)
+- `src/execution/alpaca_executor.py` `_size_qty(side, notional, price, *, fractionable)`: longs on fractionable assets size to `round(notional/price, 6)` (exact to 6 dp); shorts and non-fractionable assets floor to whole shares, never round up; targets below `DUST_FLOOR_USD` ($1) are skipped. `_qty_str` formats any qty for the CLI and logs (≤ 6 dp, no trailing zeros, no scientific notation).
+- Skip reasons, each logged as `SKIP <ticker>: <reason>`: `dust_below_1usd`, `short_sub_share` (short target under one share), `not_fractionable_sub_share` (long on a non-fractionable asset under one share), `reduce_rounds_to_zero` (partial reduce that floors to zero shares and is not a full exit; checked before any cancel or close call).
+- Partial reduces (`_rth_position_close`) submit a decimal `position close --qty` from `_reduce_qty`, computed off the signed broker position (`_fetch_position_signed_qty`, `position get`): longs exact to 6 dp, shorts floored. If the position lookup fails, the reduce falls back to the legacy `--percentage` form, so a transient CLI error cannot block a reduce.
+- Fractional opens go out as simple DAY orders with no bracket (`↓ fractional → simple order_class`); whole-share opens keep the market DAY bracket. Alpaca rejects fractional brackets, GTC fractional orders and fractional shorts (probe 2026-11-23, spec §7).
+- OPG guard: a fractional position skips the premarket OPG close (`OPG not allowed`) and falls back to the RTH day-sweep; filled-qty bookkeeping on the OPG and day-sweep paths is float, not `int()`.
+- `src/execution/stop_reattach.py`: decimal qty on the protective STOP and OCO body (`_qty_str`); `_tif_for_qty` returns `day` for fractional qty and `gtc` otherwise. A fractional position gets one simple DAY stop with no OCO (`submit_protective_stop`), after a coverage check against `fetch_active_stops()` by quantity (`already_covered` counted and skipped). Otherwise the existing stop is cancelled first (`cancel_stops_for`), the freed shares are awaited (`_wait_qty_freed`), then the new stop is armed. Whole-share positions keep OCO/GTC.
+- `src/execution/afterhours_tp.py`: `desired_tps` and `monitor_plan` keep float qty instead of `int()` truncation; plan logs use `:g`.
+- `_is_fractionable(ticker)` reads `alpaca_tradable_universe.fractionable` once per process (one DB connect, cached); DB unreachable or row absent fails open (assumes fractionable) with one WARN line.
+- Protection gap (by design): a fractional position carries no overnight broker stop (fractional GTC is rejected). The DAY stop is re-armed by `stop_reattach` after each execute, and the 5-min position and account breakers cover intraday.
+
 ### 2026-11-23 — BTC sleeve floor takes the equity scale (no crypto-regime discount, no cliff)
 - `pooled_sizing.floor_weight(…, liq_floor=liq_eq, liq_own=liq_cr)`: the floor is a beta allocation. Own conviction wins iff
   its real dollars at the crypto scale reach frac·NAV; otherwise `max(w_f, w_btc)` (k = λ·liq_eq) enters the normaliser and
