@@ -347,12 +347,14 @@ class TestGateOnBestEffort(_GateOnMixin, unittest.TestCase):
 
 class TestGateOnPartialReduce(_GateOnMixin, unittest.TestCase):
     def test_partial_reduce_cancels_first(self):
-        """Case 5: partial reduce (notional < current ⇒ --percentage path)
-        also cancels resting orders first under gate ON."""
+        """Case 5: partial reduce (notional < current ⇒ decimal --qty path,
+        sized from the signed `position get` lookup) also cancels resting
+        orders first under gate ON."""
         order_list = [{'id': 'oid-R1', 'symbol': 'AAPL'}]
         responses = {
             'order list': (True, order_list, None),
             'order cancel': (True, {'status': 'canceled'}, None),
+            'position get': (True, {'qty': '5', 'side': 'long'}, None),
             'position close': (True, {'id': 'close-7', 'qty': '5', 'notional': '1000'}, None),
         }
         with patch.object(ae, '_run_alpaca_cli',
@@ -362,8 +364,10 @@ class TestGateOnPartialReduce(_GateOnMixin, unittest.TestCase):
                 equity=100000.0, pct_nav=0.01)
         self.assertEqual(res['status'], 'submitted')
         cmds = [_cmd(c) for c in mock_cli.call_args_list]
-        # confirm this is the --percentage path
-        self.assertTrue(any('--percentage' in c for c in cmds))
+        # confirm this is the decimal --qty path (5 sh long, half reduced)
+        close_cmd = [c for c in cmds if 'position close' in c][0]
+        self.assertIn('--qty 2.5', close_cmd)
+        self.assertNotIn('--percentage', close_cmd)
         cancel_idxs = [i for i, c in enumerate(cmds) if 'order cancel' in c]
         close_idxs = [i for i, c in enumerate(cmds) if 'position close' in c]
         self.assertEqual(len(cancel_idxs), 1)
