@@ -143,7 +143,7 @@ def test_protective_stop_fractional_args(monkeypatch):
 - Test: `tests/execution/test_alpaca_executor_fractional.py` (append)
 
 **Interfaces:**
-- Consumes: `_size_qty`, `_qty_str` (Task 1); `_is_fractional_qty(q: float) -> bool` — add to alpaca_executor too (same 1-line contract as Task 3).
+- Consumes: `_size_qty`, `_qty_str` (Task 1); `_is_fractional_qty(q: float) -> bool` (added to alpaca_executor by Task 2 for the OPG guard; same 1-line contract as Task 3's copy).
 
 - [ ] **Step 1: Failing test**: through `execute_single` with the cli-test fixtures: a LONG whose qty is fractional (0.15 sh) submits with `--order-class` ABSENT (simple), `--time-in-force day`, `--qty 0.15`, and the log contains `fractional → simple order_class`; a LONG with qty 3 (whole) still submits `--order-class bracket` with `--take-profit`/`--stop-loss`.
 - [ ] **Step 2: RED**.
