@@ -62,6 +62,11 @@ class TestSubmitHappyPath(unittest.TestCase):
         ae._unsupported_assets.clear()
         ae._market_hours_cache.update({'is_open': None, 'cached_at': 0.0})
         ae._session_kind_cache.update({'session': None, 'cached_at': 0.0})
+        # These cases assert the whole-share bracket; keep them off the
+        # fractional path (and off the DB) regardless of notional/price.
+        p = patch.object(ae, '_is_fractionable', return_value=False)
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_submit_happy_path_shells_correct_args(self):
         # Mock quote near entry so the pre-flight snap doesn't fire.
@@ -271,7 +276,8 @@ class TestBasePriceRetry(unittest.TestCase):
         self.assertEqual(result['order_class'], 'simple')
         ae._broker_positions_cache.clear()
 
-    def test_buy_on_no_position_keeps_bracket(self):
+    @patch.object(ae, "_is_fractionable", return_value=False)
+    def test_buy_on_no_position_keeps_bracket(self, _frac):
         """Sanity check the gate: with no current position the buy still
         rides a bracket (the normal long-open path)."""
         sess = _mock_session(quote_bid=149.9, quote_ask=150.1)

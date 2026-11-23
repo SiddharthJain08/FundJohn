@@ -64,7 +64,7 @@ def desired_tps(positions, bracket_lookup, tp_covered=None):
         if not tp or float(tp) <= 0:
             continue
         exit_side = 'sell' if side == 'long' else 'buy'
-        out.append({'ticker': sym, 'side': exit_side, 'qty': int(qty),
+        out.append({'ticker': sym, 'side': exit_side, 'qty': qty,
                     'tp': float(tp)})
     return out
 
@@ -94,7 +94,7 @@ def _place_plan(plan, dry_run: bool) -> int:
     for o in plan:
         coid = f"ahtp_{o['ticker']}_{int(datetime.now(timezone.utc).timestamp())}"
         if dry_run:
-            log(f"  DRY-RUN {o['ticker']} {o['side'].upper()} LIMIT x{o['qty']} "
+            log(f"  DRY-RUN {o['ticker']} {o['side'].upper()} LIMIT x{o['qty']:g} "
                 f"@ {o['tp']:.2f} ext_hours=True")
             n += 1
             continue
@@ -103,7 +103,7 @@ def _place_plan(plan, dry_run: bool) -> int:
             limit_price=o['tp'], tif='day', order_class='simple',
             order_type='limit', extended_hours=True, coid=coid)
         if ok:
-            log(f"  ✔ {o['ticker']} ext-hours TP x{o['qty']} @ {o['tp']:.2f}")
+            log(f"  ✔ {o['ticker']} ext-hours TP x{o['qty']:g} @ {o['tp']:.2f}")
             n += 1
         else:
             log(f"  ✘ {o['ticker']} ext-hours TP failed: {(err or {}).get('error','?')}")
@@ -354,7 +354,7 @@ def monitor_plan(positions, protection, slip_pct, resting_exit_syms=frozenset())
             continue
         exit_side = 'sell' if side == 'long' else 'buy'
         limit = current * (1 - slip_pct) if exit_side == 'sell' else current * (1 + slip_pct)
-        out.append({'ticker': sym, 'side': exit_side, 'qty': int(qty),
+        out.append({'ticker': sym, 'side': exit_side, 'qty': qty,
                     'limit': round(limit, 2), 'reason': reason,
                     'level': level, 'current': current, 'stop': stop})
     return out
@@ -485,7 +485,7 @@ def run_stop_monitor(dry_run: bool) -> dict:
                 f"{a['limit']:.2f} → {quoted:.2f}")
             a['limit'] = quoted
         log(f"  {sym}: {a['reason']} (cur={a['current']:.2f} level={a['level']:.2f}) "
-            f"→ ext-hours {a['side'].upper()} LIMIT x{a['qty']} @ {a['limit']:.2f}")
+            f"→ ext-hours {a['side'].upper()} LIMIT x{a['qty']:g} @ {a['limit']:.2f}")
         if dry_run:
             stats['exits'] += 1
             continue
@@ -520,7 +520,7 @@ def run_stop_monitor(dry_run: bool) -> dict:
             _save_intents(intents)
             _post_alert(f"🌙 **after-hours exit** {sym}: {a['reason']} "
                         f"cur={a['current']:.2f} level={a['level']:.2f} — "
-                        f"{a['side']} limit x{a['qty']} @ {a['limit']:.2f} placed",
+                        f"{a['side']} limit x{a['qty']:g} @ {a['limit']:.2f} placed",
                         channel='trade-reports')
         else:
             stats['failed'] += 1

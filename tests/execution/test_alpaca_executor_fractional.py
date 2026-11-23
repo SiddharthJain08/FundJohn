@@ -307,3 +307,38 @@ def test_fetch_position_signed_qty(monkeypatch):
     mk(True, {'qty': '0'}); assert ae._fetch_position_signed_qty('T') is None
     mk(True, {}); assert ae._fetch_position_signed_qty('T') is None
     mk(False, None); assert ae._fetch_position_signed_qty('T') is None
+
+
+# ── Task 4: fractional opens are simple DAY orders ───────────────────────────
+def _open_long(monkeypatch, pct_nav, capsys=None):
+    monkeypatch.setattr(ae, '_alpaca_session_kind', lambda: 'rth')
+    monkeypatch.setattr(ae, '_is_fractionable', lambda t: True)
+    monkeypatch.setattr(ae, '_would_close_or_reverse', lambda s, t: False)
+    ae._asset_cache.clear()
+    ae._unsupported_assets.clear()
+    order = {'ticker': 'ZZZQ', 'strategy_id': 'S_x', 'direction': 'long',
+             'pct_nav': pct_nav, 'entry': 40.0, 'stop': 36.0, 't1': 46.0}
+    with patch('execution.alpaca_executor.subprocess.run',
+               return_value=_mock_proc(0, json.dumps({'id': 'oid-1', 'status': 'accepted'}), '')) as run:
+        res = ae.execute_single(_mock_session(), equity=3000.0, order=order,
+                                run_date='2026-11-23')
+    return res, run.call_args[0][0]
+
+
+def test_rth_fractional_long_open_is_simple_day(monkeypatch, capsys):
+    res, argv = _open_long(monkeypatch, 0.002)       # $6 / $40 = 0.15 sh
+    assert res['status'] == 'submitted'
+    assert '--order-class' not in argv
+    assert '--take-profit' not in argv and '--stop-loss' not in argv
+    assert argv[argv.index('--time-in-force') + 1] == 'day'
+    assert argv[argv.index('--qty') + 1] == '0.15'
+    assert 'fractional → simple order_class' in capsys.readouterr().out
+
+
+def test_rth_whole_long_open_keeps_bracket(monkeypatch, capsys):
+    res, argv = _open_long(monkeypatch, 0.04)        # $120 / $40 = 3 sh
+    assert res['status'] == 'submitted'
+    assert argv[argv.index('--order-class') + 1] == 'bracket'
+    assert '--take-profit' in argv and '--stop-loss' in argv
+    assert argv[argv.index('--qty') + 1] == '3'
+    assert 'fractional → simple' not in capsys.readouterr().out

@@ -617,3 +617,18 @@ def test_monitor_skips_and_keeps_journal_when_positions_unavailable(
     assert calls['submits'] == [] and calls['cancels'] == []
     j = _json.loads((tmp_path / 'pending.json').read_text())
     assert 'AXTI' in j          # a CLI glitch is not "position closed"
+
+
+def test_desired_tps_fractional_qty_preserved():
+    positions = [{'symbol': 'FRX', 'side': 'long', 'qty': '0.4'},
+                 {'symbol': 'WHL', 'side': 'long', 'qty': '3'}]
+    lookup = lambda s, side: {'target': 50.0}
+    out = {d['ticker']: d for d in ah.desired_tps(positions, lookup)}
+    assert out['FRX']['qty'] == 0.4
+    assert out['WHL']['qty'] == 3
+
+
+def test_monitor_plan_fractional_qty_preserved():
+    positions = [{'symbol': 'FRX', 'side': 'long', 'qty': '0.4', 'current_price': 9.0}]
+    out = ah.monitor_plan(positions, {'FRX': {'stop': 10.0, 'tp': None}}, 0.01)
+    assert out and out[0]['qty'] == 0.4

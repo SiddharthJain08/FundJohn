@@ -2814,6 +2814,12 @@ def execute_single(sess, equity, order, run_date):
         log(f'  ↓ {ticker}: short → simple order_class (bracket-on-short rejected by Alpaca paper)')
         order_class = 'simple'
 
+    # 2026-11-23: Alpaca rejects fractional orders unless order_class=simple
+    # (and TIF=day, long-only). Whole-share longs keep the bracket.
+    if order_class == 'bracket' and _is_fractional_qty(qty):
+        log(f'  ↓ {ticker}: fractional → simple order_class (Alpaca: fractional orders must have order_class=simple)')
+        order_class = 'simple'
+
     # 2026-05-22 incident fix: buys that would close/reverse an existing
     # short (or sells that would close/reverse an existing long) also get
     # rejected by Alpaca with "bracket orders must be entry orders" because
