@@ -792,7 +792,7 @@ def emergency_exit_breached(breached: list[dict], positions: list[dict],
         exit_side = 'sell' if b['side'] == 'long' else 'buy'
         if dry_run:
             b['action'] = 'exit_dry_run'
-            log(f'  DRY-RUN emergency exit {sym} {exit_side.upper()} x{qty:.0f} '
+            log(f'  DRY-RUN emergency exit {sym} {exit_side.upper()} x{_qty_str(qty)} '
                 f'({"RTH marketable limit" if is_open else "journal -> monitor"})')
             continue
 
@@ -832,12 +832,12 @@ def emergency_exit_breached(breached: list[dict], positions: list[dict],
             intents.pop(sym, None)
             ahtp._save_intents(intents)
             b['action'] = f'exit_submitted @ {limit:.2f}'
-            log(f'  ⛑ {sym}: EMERGENCY EXIT {exit_side.upper()} x{qty:.0f} '
+            log(f'  ⛑ {sym}: EMERGENCY EXIT {exit_side.upper()} x{_qty_str(qty)} '
                 f'@ {limit:.2f} (past stop {b["breached_stop"]:.2f}, '
                 f'cur {current:.2f})  order={coid}')
             _post_alert(f'⛑ **emergency exit** {sym}: past stop '
                         f'{b["breached_stop"]:.2f} (cur {current:.2f}) — '
-                        f'{exit_side} limit x{qty:.0f} @ {limit:.2f} placed',
+                        f'{exit_side} limit x{_qty_str(qty)} @ {limit:.2f} placed',
                         channel='trade-reports')
         else:
             b['action'] = 'exit_failed (journaled for retry)'
@@ -996,6 +996,7 @@ def run_oco_reattach(conn, positions: list[dict], dry_run: bool) -> dict:
     stats = {'oco': 0, 'already_tp': 0, 'no_sub': 0, 'degenerate': 0,
              'breached': 0, 'reached': 0, 'rejected': 0, 'restored': 0,
              'tp_missing': 0, 'closed_mid_pass': 0}
+    frac_cov = None
     for pos in positions:
         sym = pos.get('symbol')
         try:
@@ -1022,13 +1023,31 @@ def run_oco_reattach(conn, positions: list[dict], dry_run: bool) -> dict:
             continue
         if _is_fractional_qty(pos_qty):
             # Alpaca: fractional orders must be order_class=simple + DAY, so
-            # no OCO; arm one simple DAY stop instead.
+            # no OCO; arm one simple DAY stop instead. Coverage is by qty only
+            # (the whole-share floor pass has no stop-price hysteresis either).
+            if frac_cov is None:
+                frac_cov = fetch_active_stops()
+            cov = frac_cov.get(sym, 0.0)
+            if cov >= pos_qty - 1e-6:
+                log(f'  = {sym}: fractional position already stop-covered '
+                    f'({_qty_str(cov)} sh)')
+                stats['already_covered'] = stats.get('already_covered', 0) + 1
+                continue
             log(f'  ↓ {sym}: fractional position → simple DAY stop (no OCO)')
+            ncanc = cancel_stops_for(sym, dry_run, include_reserving=True,
+                                     exit_side='sell' if side == 'long' else 'buy')
+            if not dry_run and ncanc and not _wait_qty_freed(sym, pos_qty):
+                if not _position_still_open(sym):
+                    stats['closed_mid_pass'] += 1
+                    log(f'  ○ {sym}: position closed mid-pass — no stop')
+                    continue
+                log(f'  ⚠ {sym}: shares not freed after stop cancel — restoring stop')
             rr = submit_protective_stop(ticker=sym, position_side=side,
                                         qty=pos_qty, stop_price=new_stop,
                                         dry_run=dry_run)
-            stats['fractional_stop'] = stats.get('fractional_stop', 0) + 1
-            if rr.get('status') not in ('submitted', 'dry_run'):
+            if rr.get('status') in ('submitted', 'dry_run'):
+                stats['fractional_stop'] = stats.get('fractional_stop', 0) + 1
+            else:
                 stats['rejected'] += 1
             continue
         if tstatus != 'ok':

@@ -45,24 +45,29 @@ def test_protective_stop_whole_args(monkeypatch):
     assert a[a.index('--time-in-force') + 1] == 'gtc'
 
 
-def _drive(monkeypatch, qty):
-    calls = {'oco': 0, 'cli': []}
+def _drive(monkeypatch, qty, active=None, dry_run=False, cli_ok=True):
+    calls = {'oco': 0, 'cli': [], 'cancel': 0}
+    monkeypatch.setattr(sr, 'fetch_active_stops', lambda: dict(active or {}))
     monkeypatch.setattr(sr, 'fetch_tp_covered', lambda linked_only=False: {})
     monkeypatch.setattr(sr, '_resolve_intended_bracket',
                         lambda conn, sym, side: {'stop': 10.0, 'target': 14.0})
     monkeypatch.setattr(sr, '_compute_new_stop', lambda pos, sub: (10.0, 'ok'))
     monkeypatch.setattr(sr, '_compute_new_target', lambda pos, sub: (14.0, 'ok'))
-    monkeypatch.setattr(sr, 'cancel_stops_for', lambda *a, **k: 0)
+    def cancel(*a, **k):
+        calls['cancel'] += 1
+        return 1 if active else 0
+    monkeypatch.setattr(sr, 'cancel_stops_for', cancel)
+    monkeypatch.setattr(sr, '_wait_qty_freed', lambda *a, **k: True)
     def oco(**k):
         calls['oco'] += 1
         return {'status': 'submitted'}
     monkeypatch.setattr(sr, 'submit_protective_oco', oco)
     def cli(args, timeout=15):
         calls['cli'].append(args)
-        return True, {'id': 'x'}, None
+        return (True, {'id': 'x'}, None) if cli_ok else (False, None, {'error': 'no'})
     monkeypatch.setattr(sr, '_run_cli', cli)
     pos = [{'symbol': 'F', 'qty': str(qty), 'side': 'long'}]
-    return sr.run_oco_reattach(None, pos, False), calls
+    return sr.run_oco_reattach(None, pos, dry_run), calls
 
 
 def test_run_oco_reattach_fractional_uses_stop_not_oco(monkeypatch):
@@ -78,3 +83,27 @@ def test_run_oco_reattach_fractional_uses_stop_not_oco(monkeypatch):
 def test_run_oco_reattach_whole_share_still_oco(monkeypatch):
     stats, calls = _drive(monkeypatch, 3)
     assert calls['oco'] == 1 and stats['oco'] == 1 and not calls['cli']
+
+
+def test_fractional_already_covered_skips(monkeypatch):
+    stats, calls = _drive(monkeypatch, 0.4, active={'F': 0.4})
+    assert not calls['cli'] and calls['oco'] == 0 and calls['cancel'] == 0
+    assert stats['already_covered'] == 1 and stats.get('fractional_stop', 0) == 0
+
+
+def test_fractional_stale_stop_cancelled_then_stop(monkeypatch):
+    stats, calls = _drive(monkeypatch, 0.4, active={'F': 0.1})
+    assert calls['cancel'] == 1 and calls['oco'] == 0 and len(calls['cli']) == 1
+    a = calls['cli'][0]
+    assert a[a.index('--time-in-force') + 1] == 'day'
+    assert stats['fractional_stop'] == 1
+
+
+def test_fractional_dry_run_counts_no_cli(monkeypatch):
+    stats, calls = _drive(monkeypatch, 0.4, dry_run=True)
+    assert stats['fractional_stop'] == 1 and not calls['cli']
+
+
+def test_fractional_rejected_not_counted(monkeypatch):
+    stats, calls = _drive(monkeypatch, 0.4, cli_ok=False)
+    assert stats.get('fractional_stop', 0) == 0 and stats['rejected'] == 1
