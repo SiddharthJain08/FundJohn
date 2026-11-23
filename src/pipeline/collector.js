@@ -1999,6 +1999,44 @@ function _classifyMarketTicker(ticker) {
   return 'etf';
 }
 
+// Crypto self-heal window (decision 4): getGaps compares against the
+// data_coverage date RANGE, so a hole inside the range (weekend bars missed by
+// an aborted collect) is never re-requested. For crypto we always also request
+// the trailing N days; the parquet writer dedups on (ticker,date) so it is idempotent.
+// OPENCLAW_CRYPTO_BARS_HEAL_DAYS: default 10, 0 disables, junk/negative -> 10.
+function cryptoHealDays(env = process.env) {
+  const raw = env.OPENCLAW_CRYPTO_BARS_HEAL_DAYS;
+  if (raw === undefined || raw === null || String(raw).trim() === '') return 10;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return 10;
+  return Math.floor(n);
+}
+
+function _isoPlusDays(iso, days) {
+  return new Date(Date.parse(`${iso}T00:00:00Z`) + days * 86400_000).toISOString().slice(0, 10);
+}
+
+// Union of two {from,to} lists (ISO dates) into disjoint ranges sorted by from;
+// overlapping or adjacent (next.from <= cur.to + 1 day) ranges merge.
+function _mergeGaps(a, b) {
+  const all = [...(a || []), ...(b || [])]
+    .map(r => ({ from: r.from, to: r.to }))
+    .sort((x, y) => (x.from < y.from ? -1 : x.from > y.from ? 1 : 0));
+  const out = [];
+  for (const r of all) {
+    const cur = out[out.length - 1];
+    if (cur && r.from <= _isoPlusDays(cur.to, 1)) {
+      if (r.to > cur.to) cur.to = r.to;
+    } else {
+      out.push(r);
+    }
+  }
+  return out;
+}
+
+// Test seam: lets tests replace the network fill without touching exports.
+const _testHooks = {};
+
 async function _fillMarketTicker(category, ticker, fromDate, toDate) {
   switch (category) {
     case 'etf':     return fillPricesAlpaca(ticker, fromDate, toDate);
@@ -2029,6 +2067,11 @@ async function runMarketPricesNonEquity(tickers, historyDays = 3650) {
   const fetchable = [...buckets.etf, ...buckets.crypto, ...buckets.index, ...buckets.forex];
   if (fetchable.length === 0) return;
 
+  const healDays = cryptoHealDays();
+  if (healDays > 0 && buckets.crypto.length > 0) {
+    notify(`🌐 Market prices: crypto self-heal window ${healDays} d (coverage-range gaps cannot see holes)`);
+  }
+
   notify(`🌐 Market prices: ${buckets.etf.length} ETF + ${buckets.crypto.length} crypto + ${buckets.index.length} index + ${buckets.forex.length} forex (${fromDate}→${toDate})`);
   _progress = { phase: '🌐 Market Prices', current: 0, total: fetchable.length, ticker: null, phaseStart: Date.now(), rowsThisPhase: 0 };
 
@@ -2039,7 +2082,11 @@ async function runMarketPricesNonEquity(tickers, historyDays = 3650) {
     const category = _classifyMarketTicker(ticker);
     if (_paused) { notify('⏸️ Paused — waiting...'); while (_paused) await sleep(1000); }
 
-    const gaps = await store.getGaps(ticker, 'prices', fromDate, toDate);
+    let gaps = await store.getGaps(ticker, 'prices', fromDate, toDate);
+    if (category === 'crypto' && healDays > 0) {
+      const healFrom = _isoPlusDays(toDate, -healDays);
+      gaps = _mergeGaps(gaps, [{ from: healFrom > fromDate ? healFrom : fromDate, to: toDate }]);
+    }
     if (gaps.length === 0) {
       skipped++;
       tickProgress('🌐 Market Prices', i + 1, fetchable.length, ticker, 0);
@@ -2052,7 +2099,7 @@ async function runMarketPricesNonEquity(tickers, historyDays = 3650) {
         // Coverage NOT written here — same buffered-vs-durable lie as the equity
         // path; these writers share _buffers.prices, so store.flushPrices()
         // commits coverage from the rows it actually wrote.
-        const written = await _fillMarketTicker(category, ticker, gap.from, gap.to);
+        const written = await (_testHooks.fillMarketTicker || _fillMarketTicker)(category, ticker, gap.from, gap.to);
         totalWritten += written;
         totalCalls++;
       } catch (err) {
@@ -2927,4 +2974,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions, _httpError, _classifyFmpError, _capScope, _inCycleOptionsEnabled, _insiderWalkScope, runInsiderStreamMerge, _fmpCallOutcome, _makeHeartbeat, _withPhasePing };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaBatch, _groupGapItems, _multiBarsChunkSize, _isAlpacaStockSymbol, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions, _httpError, _classifyFmpError, _capScope, _inCycleOptionsEnabled, _insiderWalkScope, runInsiderStreamMerge, _fmpCallOutcome, _makeHeartbeat, _withPhasePing, runMarketPricesNonEquity, cryptoHealDays, _mergeGaps, _testHooks };
