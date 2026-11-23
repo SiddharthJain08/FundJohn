@@ -2256,6 +2256,7 @@ def _open_close_mode() -> str:
 
 _FRACTIONABLE_CACHE: dict = {}
 _FRACTIONABLE_WARNED = [False]
+_FRACTIONABLE_LOADED = [False]   # one connect attempt per process
 
 
 def _qty_str(q: float) -> str:
@@ -2263,6 +2264,23 @@ def _qty_str(q: float) -> str:
     never scientific notation (1.0 -> '1', 0.1234567 -> '0.123457')."""
     s = f'{float(q):.6f}'.rstrip('0').rstrip('.')
     return s if s not in ('', '-0') else '0'
+
+
+def _is_fractional_qty(q: float) -> bool:
+    """True when q is not a whole number of shares (Alpaca rejects fractional
+    non-DAY orders, so such a qty must never be sent with tif=opg)."""
+    return abs(float(q) - round(float(q))) > 1e-9
+
+
+def _reduce_qty(pos_qty: float, notional_oc: float, current_oc: float, *, is_short: bool) -> float:
+    """Shares to close for a partial REDUCE: |pos| * notional/current, capped at
+    |pos|. Shorts floor to whole shares (never round up); longs are exact to
+    6 dp. current_oc <= 0 -> treat as a full close (|pos|)."""
+    full = abs(float(pos_qty))
+    if current_oc <= 0:
+        return full
+    q = min(full, full * notional_oc / current_oc)
+    return float(math.floor(q)) if is_short else round(q, 6)
 
 
 def _size_qty(side: str, notional: float, price: float, *, fractionable: bool):
@@ -2290,21 +2308,28 @@ def _size_qty(side: str, notional: float, price: float, *, fractionable: bool):
 def _is_fractionable(ticker: str) -> bool:
     """alpaca_tradable_universe.fractionable, read once per process (cached).
     DB unreachable / row absent -> True (fail-open, one WARN log)."""
-    if not _FRACTIONABLE_CACHE:
+    if not _FRACTIONABLE_LOADED[0]:
+        _FRACTIONABLE_LOADED[0] = True
+        conn = None
         try:
             uri = os.environ.get('POSTGRES_URI', '')
             if not uri:
                 raise RuntimeError('POSTGRES_URI not set')
-            with psycopg2.connect(uri) as conn:
-                with conn.cursor() as cur:
-                    cur.execute('SELECT symbol, fractionable FROM alpaca_tradable_universe')
-                    for sym, frac in cur.fetchall():
-                        _FRACTIONABLE_CACHE[sym] = bool(frac)
+            conn = psycopg2.connect(uri)
+            with conn.cursor() as cur:
+                cur.execute('SELECT symbol, fractionable FROM alpaca_tradable_universe')
+                for sym, frac in cur.fetchall():
+                    _FRACTIONABLE_CACHE[sym] = bool(frac)
         except Exception as e:   # noqa: BLE001 — fail-open
             if not _FRACTIONABLE_WARNED[0]:
                 _FRACTIONABLE_WARNED[0] = True
                 log(f'WARN fractionable lookup unavailable ({e}) — assuming fractionable')
-            return True
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:   # noqa: BLE001
+                    pass
     return _FRACTIONABLE_CACHE.get(ticker, True)
 
 
@@ -2348,7 +2373,7 @@ def _opg_terminal_filled(final: dict | None, requested_qty: float) -> bool:
 
 def _rth_position_close(ticker, coid, *, notional_usd, current_usd, equity, pct_nav):
     """The shared RTH `alpaca position close` submission (full close or partial
-    REDUCE via --percentage). Returns (result_dict, order_id).
+    REDUCE via decimal --qty). Returns (result_dict, order_id).
 
     Extracted so BOTH the legacy non-dropped close path and the is_dropped
     rth_market / day-sweep paths submit identically; the is_dropped paths then
@@ -2357,11 +2382,18 @@ def _rth_position_close(ticker, coid, *, notional_usd, current_usd, equity, pct_
     current_oc = abs(float(current_usd or 0))
     cli_args_oc = ['position', 'close', '--symbol-or-asset-id', ticker]
     is_partial_reduce = (current_oc > 0 and notional_oc < current_oc * 0.999)
-    pct_oc = None
+    reduce_qty = None
     if is_partial_reduce:
-        pct_oc = round((notional_oc / current_oc) * 100.0, 2)
-        pct_oc = max(0.01, min(99.99, pct_oc))
-        cli_args_oc += ['--percentage', str(pct_oc)]
+        # Fractional shares: reduce by an explicit decimal --qty (shorts floor
+        # to whole shares). Zero → SKIP before any cancel/close broker call.
+        pos_qty = float(_fetch_position_qty(ticker))
+        reduce_qty = _reduce_qty(pos_qty, notional_oc, current_oc, is_short=pos_qty < 0)
+        if reduce_qty <= 0:
+            log(f'  SKIP {ticker}: reduce_rounds_to_zero (reduce ${notional_oc:,.2f} of ${current_oc:,.2f})')
+            return ({'ticker': ticker, 'status': 'SKIP', 'reason': 'reduce_rounds_to_zero',
+                     'client_order_id': coid, 'tif': 'day', 'order_class': 'simple'},
+                    None)
+        cli_args_oc += ['--qty', _qty_str(reduce_qty)]
     # SP-6 Phase C: resting GTC OCO take-profit/stop legs reserve the full
     # position qty → `position close` 403s "insufficient qty available"
     # (proven 2026-06-04: all 4 EOD orphan closes rejected). Cancel them
@@ -2389,10 +2421,10 @@ def _rth_position_close(ticker, coid, *, notional_usd, current_usd, equity, pct_
                 None)
     order_id = ((pay_co or {}).get('id') or (pay_co or {}).get('order_id'))
     notional_co = abs(float((pay_co or {}).get('notional') or equity * pct_nav))
-    qty_co_r = int((pay_co or {}).get('qty') or 0)
+    qty_co_r = abs(float((pay_co or {}).get('qty') or 0))
     entry_approx = round(notional_co / qty_co_r, 4) if qty_co_r > 0 else 0.0
     kind_co = 'REDUCE' if is_partial_reduce else 'CLOSE'
-    pct_tag = f' ({pct_oc}%)' if is_partial_reduce else ''
+    pct_tag = f' (x{_qty_str(reduce_qty)} sh)' if is_partial_reduce else ''
     log(f'↩ {ticker} {kind_co}{pct_tag}  notional≈${notional_co:,.0f}'
         f'  order={order_id or "?"}')
     return ({'ticker': ticker, 'status': 'submitted',
@@ -2504,6 +2536,9 @@ def execute_single(sess, equity, order, run_date):
                 qty_opg = float(_fetch_position_qty(ticker))
                 if qty_opg <= 0:
                     log(f'{ticker} OPG: no broker qty resolved — falling back to RTH day-sweep')
+                elif _is_fractional_qty(qty_opg):
+                    log(f'{ticker} OPG: fractional position ({_qty_str(qty_opg)} sh) — '
+                        f'OPG not allowed, falling back to RTH day-sweep')
                 else:
                     # 2026-07-01: 55 of 73 premarket OPG closes 403'd
                     # "insufficient qty available (requested N, available 0)" —
@@ -2619,9 +2654,9 @@ def execute_single(sess, equity, order, run_date):
             # RTH: `alpaca position close` flattens by default. For a partial
             # REDUCE (ticker still in signals but target < |current|), the
             # sizer emits close_only with notional_usd = |delta| < |current_usd|;
-            # we pass --percentage so only the delta portion is liquidated.
+            # we pass a decimal --qty so only the delta portion is liquidated.
             # Orphan closes (target_usd = 0 → |notional| == |current|) take
-            # the full-close branch (no --percentage flag).
+            # the full-close branch (no --qty flag).
             res_oc, _oid = _rth_position_close(
                 ticker, coid,
                 notional_usd=order.get('notional_usd'),
