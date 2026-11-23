@@ -457,29 +457,44 @@ def _compute_new_stop(position: dict, submission: dict) -> tuple[float | None, s
     return round(new_stop, 2), 'ok'
 
 
+def _qty_str(q: float) -> str:
+    """Decimal qty for the broker: <= 6 dp, no trailing zeros, no sci notation."""
+    out = f'{float(q):.6f}'.rstrip('0').rstrip('.')
+    return out if out and out != '-0' else '0'
+
+
+def _is_fractional_qty(q: float) -> bool:
+    return abs(q - round(q)) > 1e-9
+
+
+def _tif_for_qty(q: float) -> str:
+    """Alpaca rejects fractional GTC; fractional exits must be DAY."""
+    return 'day' if _is_fractional_qty(q) else 'gtc'
+
+
 def submit_protective_stop(*, ticker: str, position_side: str, qty: float,
                            stop_price: float, dry_run: bool) -> dict:
-    """Stand-alone STOP order with tif=gtc, side opposite the position."""
+    """Stand-alone STOP order (gtc; day for fractional qty), side opposite the position."""
     side = 'sell' if position_side == 'long' else 'buy'
     coid = f'sr_{ticker}_{int(datetime.utcnow().timestamp())}'
     args = [
         'order', 'submit',
         '--symbol',          ticker,
         '--side',            side,
-        '--qty',             str(int(qty)),
+        '--qty',             _qty_str(qty),
         '--type',            'stop',
-        '--time-in-force',   'gtc',
+        '--time-in-force',   _tif_for_qty(qty),
         '--stop-price',      f'{stop_price:.2f}',
         '--client-order-id', coid,
     ]
     if dry_run:
-        log(f'  DRY-RUN {ticker} {side.upper()} STOP qty={int(qty)} @ {stop_price:.2f}  coid={coid}')
+        log(f'  DRY-RUN {ticker} {side.upper()} STOP qty={_qty_str(qty)} @ {stop_price:.2f}  coid={coid}')
         return {'ticker': ticker, 'status': 'dry_run', 'side': side, 'qty': qty,
                 'stop_price': stop_price, 'coid': coid}
     ok, payload, err = _run_cli(args, timeout=15)
     if ok:
         oid = (payload or {}).get('id', '?') if isinstance(payload, dict) else '?'
-        log(f'  ✔ {ticker} {side.upper()} STOP qty={int(qty)} @ {stop_price:.2f}  order={oid}')
+        log(f'  ✔ {ticker} {side.upper()} STOP qty={_qty_str(qty)} @ {stop_price:.2f}  order={oid}')
         return {'ticker': ticker, 'status': 'submitted', 'side': side, 'qty': qty,
                 'stop_price': stop_price, 'order_id': oid, 'coid': coid}
     err_msg = (err or {}).get('error', 'unknown')
@@ -546,10 +561,10 @@ def _oco_order_body(ticker: str, exit_side: str, qty: float,
     bracket and invert the leg relationship."""
     return {
         'symbol':         ticker,
-        'qty':            str(int(qty)),
+        'qty':            _qty_str(qty),
         'side':           exit_side,
         'type':           'limit',
-        'time_in_force':  'gtc',
+        'time_in_force':  _tif_for_qty(qty),
         'order_class':    'oco',
         'take_profit':    {'limit_price': f'{target_price:.2f}'},
         'stop_loss':      {'stop_price':  f'{stop_price:.2f}'},
@@ -598,14 +613,14 @@ def submit_protective_oco(*, ticker: str, position_side: str, qty: float,
     coid = f'oco_{ticker}_{int(datetime.utcnow().timestamp())}'
     body = _oco_order_body(ticker, exit_side, qty, target_price, stop_price, coid)
     if dry_run:
-        log(f'  DRY-RUN {ticker} OCO {exit_side.upper()} qty={int(qty)} '
+        log(f'  DRY-RUN {ticker} OCO {exit_side.upper()} qty={_qty_str(qty)} '
             f'TP={target_price:.2f} STOP={stop_price:.2f}  body={json.dumps(body)}')
         return {'ticker': ticker, 'status': 'dry_run', 'side': exit_side, 'qty': qty,
                 'target_price': target_price, 'stop_price': stop_price, 'coid': coid}
     ok, payload, err = _alpaca_rest_post('/v2/orders', body)
     if ok:
         oid = (payload or {}).get('id', '?') if isinstance(payload, dict) else '?'
-        log(f'  ✔ {ticker} OCO {exit_side.upper()} qty={int(qty)} '
+        log(f'  ✔ {ticker} OCO {exit_side.upper()} qty={_qty_str(qty)} '
             f'TP={target_price:.2f} STOP={stop_price:.2f}  order={oid}')
         return {'ticker': ticker, 'status': 'submitted', 'side': exit_side, 'qty': qty,
                 'target_price': target_price, 'stop_price': stop_price,
@@ -809,7 +824,7 @@ def emergency_exit_breached(breached: list[dict], positions: list[dict],
         limit = ahtp.reprice_exit(action, bid, ask, slip)
         coid = f'emex_{sym}_{int(_t.time())}'
         ok_s, _pay, err = ahtp._submit_limit(
-            ticker=sym, side=exit_side, qty=int(qty), limit_price=limit,
+            ticker=sym, side=exit_side, qty=qty, limit_price=limit,
             tif='day', order_class='simple', order_type='limit',
             extended_hours=False, coid=coid)
         if ok_s:
@@ -1004,6 +1019,17 @@ def run_oco_reattach(conn, positions: list[dict], dry_run: bool) -> dict:
             continue
         if sstatus != 'ok':
             stats['degenerate'] += 1
+            continue
+        if _is_fractional_qty(pos_qty):
+            # Alpaca: fractional orders must be order_class=simple + DAY, so
+            # no OCO; arm one simple DAY stop instead.
+            log(f'  ↓ {sym}: fractional position → simple DAY stop (no OCO)')
+            rr = submit_protective_stop(ticker=sym, position_side=side,
+                                        qty=pos_qty, stop_price=new_stop,
+                                        dry_run=dry_run)
+            stats['fractional_stop'] = stats.get('fractional_stop', 0) + 1
+            if rr.get('status') not in ('submitted', 'dry_run'):
+                stats['rejected'] += 1
             continue
         if tstatus != 'ok':
             # Never silently drop the TP: leave the loss side to the bare-stop
