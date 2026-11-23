@@ -7,6 +7,13 @@ architecture see /README.md and /ARCHITECTURE.md.
 
 ## Recent Changes
 
+### 2026-11-23 — Open re-arm of protective stops (09:36 ET, `sameday-open-reattach-0936`)
+- Operator decision (option 2) after fractional shares went live: fractional LONG positions can carry only a simple DAY stop
+  (Alpaca rejects fractional GTC/OCO/bracket), and `stop_reattach` ran only after the ~10:25 and ~15:58 ET execute lanes, so
+  longs had no broker-side stop from the close to ~10:25 the next day. A third `stop_reattach`-only cycle now runs at 09:36 ET
+  (after the 09:32 OPG sweep); whole-share positions already covered by a GTC OCO are no-ops. Kill switch `OPENCLAW_OPEN_REATTACH=0`.
+  The overnight gap itself is inherent to the broker's fractional rules (5-min position/account breakers cover 09:30–09:36).
+
 ### 2026-11-23 — Crypto daily bars: self-healing gap fetch (Phase 3 decision 4)
 - Defect: `store.getGaps` checks only the `data_coverage` date range, so a hole inside that range is invisible. BTC-USD missed 11-14/15; ETH/ADA/DOGE/SOL/XRP missed 28 days each since 2026-06-06; AVAX 97 days. Holes form when a day's market-prices phase does not write while the intraday snapshot stamps coverage forward.
 - Fix (`src/pipeline/collector.js`, `runMarketPricesNonEquity`): crypto tickers also request the trailing `OPENCLAW_CRYPTO_BARS_HEAL_DAYS` (default 10; 0 disables; junk or negative → 10), merged with the coverage-range gaps by `_mergeGaps`. Crypto-only; equity, ETF, index and forex paths are unchanged.

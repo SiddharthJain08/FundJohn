@@ -615,6 +615,23 @@ function start(swarm, generateId, notifyDiscord) {
                 }
             }, { timezone: 'America/New_York' });
 
+            // 09:36 ET — open re-arm of protective stops (operator decision
+            // 2026-11-23, option 2). Fractional LONG positions can carry only a
+            // simple DAY stop (Alpaca rejects fractional GTC/OCO/bracket), and
+            // the existing reattach passes run at ~10:25 and ~15:58 ET, leaving
+            // longs without a broker-side stop from the close to ~10:25 the next
+            // day. This pass re-arms them minutes after the open (the 09:32 OPG
+            // sweep has settled); whole-share positions already covered by a GTC
+            // OCO are no-ops. Kill switch OPENCLAW_OPEN_REATTACH=0.
+            _sched('sameday-open-reattach-0936', '36 9 * * 1-5', () => {
+                if (process.env.OPENCLAW_OPEN_REATTACH !== '0') {
+                    log('open re-arm of protective stops (9:36am ET): stop_reattach');
+                    dispatchCycle('sameday-open-reattach', ['stop_reattach']);
+                } else {
+                    log('open re-arm skipped (OPENCLAW_OPEN_REATTACH=0)');
+                }
+            }, { timezone: 'America/New_York' });
+
             // 15:00 ET — compute: sentiment → signals(proxy) → gates → sized
             // handoff. NO full collect in the critical path (67-min aux
             // collection is the 16:15 slot's job; the tier-1 overlay above is
