@@ -556,6 +556,12 @@ Design: `docs/superpowers/specs/2026-11-18-btc-sleeve-floor-and-class-bench-desi
   `0` disables; a value above `benchmark_max_nav_frac_crypto` is clamped to it with a WARN. Non-crypto classes read no key (0.0).
 - **Floor is a WEIGHT, not a dollar target**: injected before the one λ·NAV normaliser by `pooled_sizing.floor_weight`
   (`w_f = frac·G/(k−frac)`, G = Σ other weights, k = λ·clip(liq)); the pooled book still sums to λ·NAV (shave, never redistribute).
+  **Amended 2026-11-23** (main, after the 11-20/11-23 live shadow lines showed `eq_scale_ratio=0.8000` under crypto CRISIS
+  liq 0.5 — equity paid 20 % for a 10 % floor): the floor is a beta allocation and is never run through the crypto regime
+  dampener. `floor_weight(..., liq_floor=liq_eq, liq_own=liq_cr)` decides in DOLLARS — own conviction wins iff its real
+  post-normaliser dollars `w_btc·λ·liq_cr·NAV/(G+w_btc)` reach frac·NAV; otherwise `max(w_f, w_btc)` (k = λ·liq_eq) stays
+  in the normaliser and the BTC leg is priced at exactly frac·NAV. Equity gives up exactly its pro-rata share of frac·NAV
+  in every crypto regime (`eq_scale_ratio` 0.90 at λ·liq_eq = 1); continuous on both sides of the boundary (no cliff).
   A BTC weight already above the floor is left alone (label `own`). Degenerate `k <= frac` (no positive solution): BTC takes the
   half-book weight `max(w_btc, G)` — still a weight, so Σ = λ·NAV is conserved — with a WARN, bounded by the 25 % clamp / gross cap /
   funding / hold-flat (no post-normaliser dollar floor; own conviction above G keeps the label `own`).

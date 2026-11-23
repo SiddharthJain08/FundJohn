@@ -82,6 +82,10 @@ Why it matters now: two clean shadow cycles are on the books; the pooled flip is
 5. johnbot restart in a window for `promotion_service.js`.
 6. Record: spec §7d (as-built), Phase 3 ledger (decisions 14/15 RESOLVED), CLAUDE.md crypto line, memory.
 
+**Post-build amendment 2026-11-23**: the floor weight is solved with the EQUITY liquidity param (k = λ·liq_eq) and the
+floor/own decision is made in own-conviction dollars; the floored BTC leg is priced at exactly frac·NAV. As built on 11-18
+it used k = λ·liq_cr and scale_cr, which under crypto CRISIS (liq 0.5) cost equity 20 % for a 10 % floor. See crypto spec §7d.
+
 ## 6. Left to the builder
 - Exact algebra of `floor_weight` against `pooled_sizing.pooled_scales` (liquidity params per class; dust floor interaction).
 - How "sleeve acting" is detected from the crypto signal set when the sleeve weight row is absent (likely: keep the sleeve signal through aggregation with weight 0 and flag it, or query the signal set directly before `drop_stables`).
