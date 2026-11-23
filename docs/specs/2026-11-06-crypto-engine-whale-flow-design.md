@@ -626,6 +626,8 @@ Design: `docs/superpowers/specs/2026-11-18-btc-sleeve-floor-and-class-bench-desi
 
 Still open: none that block Phase 1. (The threshold placeholders marked *(my call)* get reviewed in the shadow weeks.)
 
+**Decision 4 (BTC gap backfill + weekend-bar collect defect) — CLOSED 2026-11-23.** BTC-USD was missing 11-14/15 and five other crypto tickers had 28-day holes since 2026-06-06 (AVAX 97). Holes sat inside the coverage range, which `getGaps` cannot see. Fix: the daily collect now always re-requests a trailing `OPENCLAW_CRYPTO_BARS_HEAL_DAYS` window (default 10, 0 disables) for crypto tickers only, idempotent via the parquet (ticker, date) merge. One-off backfill of the 7 present crypto tickers armed 23:35Z 11-23. The 29 crypto symbols with no bars are Phase 4 scope. Design: `docs/superpowers/specs/2026-11-23-crypto-bars-self-heal-design.md`.
+
 ## 10. Free data catalogue and how to grant access
 
 Every row below was probed from this box on 2026-11-05/06. "Operator action" is what you do to turn on the extra

@@ -7,6 +7,14 @@ architecture see /README.md and /ARCHITECTURE.md.
 
 ## Recent Changes
 
+### 2026-11-23 — Crypto daily bars: self-healing gap fetch (Phase 3 decision 4)
+- Defect: `store.getGaps` checks only the `data_coverage` date range, so a hole inside that range is invisible. BTC-USD missed 11-14/15; ETH/ADA/DOGE/SOL/XRP missed 28 days each since 2026-06-06; AVAX 97 days. Holes form when a day's market-prices phase does not write while the intraday snapshot stamps coverage forward.
+- Fix (`src/pipeline/collector.js`, `runMarketPricesNonEquity`): crypto tickers also request the trailing `OPENCLAW_CRYPTO_BARS_HEAL_DAYS` (default 10; 0 disables; junk or negative → 10), merged with the coverage-range gaps by `_mergeGaps`. Crypto-only; equity, ETF, index and forex paths are unchanged.
+- Idempotent: the parquet merge keeps existing (ticker, date) rows, so re-fetching the window adds nothing that is already present.
+- One `notify` line per phase when any crypto ticker is present: `🌐 Market prices: crypto self-heal window N d (coverage-range gaps cannot see holes)`.
+- Exports for tests: `cryptoHealDays`, `_mergeGaps`, `_testHooks` (network-fill seam). Tests in `tests/test_collector_crypto_heal.test.js`.
+- One-off backfill of the 7 present crypto tickers from 2021-01-01 to today, armed 23:35Z 11-23. 29 of the 36 tradable crypto symbols still have no bars at all; that is out of scope here and belongs to Phase 4. Design: `docs/superpowers/specs/2026-11-23-crypto-bars-self-heal-design.md`.
+
 ### 2026-11-23 — Fractional shares across the board (equity executor)
 - `src/execution/alpaca_executor.py` `_size_qty(side, notional, price, *, fractionable)`: longs on fractionable assets size to `round(notional/price, 6)` (exact to 6 dp); shorts and non-fractionable assets floor to whole shares, never round up; targets below `DUST_FLOOR_USD` ($1) are skipped. `_qty_str` formats any qty for the CLI and logs (≤ 6 dp, no trailing zeros, no scientific notation).
 - Skip reasons, each logged as `SKIP <ticker>: <reason>`: `dust_below_1usd`, `short_sub_share` (short target under one share), `not_fractionable_sub_share` (long on a non-fractionable asset under one share), `reduce_rounds_to_zero` (partial reduce that floors to zero shares and is not a full exit; checked before any cancel or close call).
