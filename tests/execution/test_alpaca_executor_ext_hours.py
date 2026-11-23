@@ -377,7 +377,7 @@ class TestCloseOnlyOrderIdCapture(unittest.TestCase):
             'ticker': 'STX', 'strategy_id': '__close_orphan__',
             'direction': 'short',
             'close_only': True,
-            'pct_nav': 0.0,
+            'pct_nav': 0.01,
             'notional_usd': 33000.0,
             'current_usd': 33000.0,
         }
@@ -512,7 +512,7 @@ class TestCloseOnlyOrderIdCapture(unittest.TestCase):
         order = {
             'ticker': 'STX', 'strategy_id': '__close_orphan__',
             'direction': 'short', 'close_only': True,
-            'pct_nav': 0.0, 'notional_usd': 33000.0, 'current_usd': 33000.0,
+            'pct_nav': 0.01, 'notional_usd': 33000.0, 'current_usd': 33000.0,
         }
         with patch.object(ae, '_alpaca_session_kind', return_value='afterhours'), \
              patch('execution.alpaca_executor.subprocess.run',

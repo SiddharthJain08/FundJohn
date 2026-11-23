@@ -36,6 +36,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -1971,7 +1972,7 @@ def _submit_order_via_cli(*, ticker, side, qty, tif, order_class, target, stop, 
         'order', 'submit',
         '--symbol',          ticker,
         '--side',             side,
-        '--qty',              str(qty),
+        '--qty',              _qty_str(qty),
         '--type',             order_type,
         '--time-in-force',    tif,
         '--client-order-id',  coid,
@@ -2253,6 +2254,60 @@ def _open_close_mode() -> str:
     return mode if mode in _OPEN_CLOSE_MODES else 'rth_market'
 
 
+_FRACTIONABLE_CACHE: dict = {}
+_FRACTIONABLE_WARNED = [False]
+
+
+def _qty_str(q: float) -> str:
+    """Format a share qty for the CLI / logs: up to 6 dp, no trailing zeros,
+    never scientific notation (1.0 -> '1', 0.1234567 -> '0.123457')."""
+    s = f'{float(q):.6f}'.rstrip('0').rstrip('.')
+    return s if s not in ('', '-0') else '0'
+
+
+def _size_qty(side: str, notional: float, price: float, *, fractionable: bool):
+    """Size an equity order. Returns (qty, skip_reason).
+
+    Alpaca fractional orders are LONG-ONLY, so shorts (side == 'sell' on the
+    open path) and non-fractionable assets floor to whole shares (never round
+    up); a sub-share result is skipped. Longs on fractionable assets get
+    round(notional/price, 6). Below DUST_FLOOR_USD -> skip."""
+    # lazy: regime_blended_sizer imports this module at load (circular)
+    from execution.regime_blended_sizer import DUST_FLOOR_USD
+    if notional < DUST_FLOOR_USD or price <= 0:
+        return 0.0, 'dust_below_1usd'
+    if side == 'sell' or not fractionable:
+        q = float(math.floor(notional / price))
+        if q == 0:
+            return 0.0, 'short_sub_share' if side == 'sell' else 'not_fractionable_sub_share'
+        return q, None
+    q = round(notional / price, 6)
+    if q <= 0:
+        return 0.0, 'dust_below_1usd'
+    return q, None
+
+
+def _is_fractionable(ticker: str) -> bool:
+    """alpaca_tradable_universe.fractionable, read once per process (cached).
+    DB unreachable / row absent -> True (fail-open, one WARN log)."""
+    if not _FRACTIONABLE_CACHE:
+        try:
+            uri = os.environ.get('POSTGRES_URI', '')
+            if not uri:
+                raise RuntimeError('POSTGRES_URI not set')
+            with psycopg2.connect(uri) as conn:
+                with conn.cursor() as cur:
+                    cur.execute('SELECT symbol, fractionable FROM alpaca_tradable_universe')
+                    for sym, frac in cur.fetchall():
+                        _FRACTIONABLE_CACHE[sym] = bool(frac)
+        except Exception as e:   # noqa: BLE001 — fail-open
+            if not _FRACTIONABLE_WARNED[0]:
+                _FRACTIONABLE_WARNED[0] = True
+                log(f'WARN fractionable lookup unavailable ({e}) — assuming fractionable')
+            return True
+    return _FRACTIONABLE_CACHE.get(ticker, True)
+
+
 def _fetch_position_qty(ticker: str) -> float:
     """Return the ABSOLUTE current broker position qty for a ticker via
     `alpaca position get`, or 0.0 if no position / lookup fails.
@@ -2446,8 +2501,8 @@ def execute_single(sess, equity, order, run_date):
             # while still pre-open; once RTH the OPG window is gone, so we fall
             # straight to the polled RTH close below.
             if mode in ('opg_then_day', 'opg_live') and session_co == 'premarket':
-                qty_opg = int(_fetch_position_qty(ticker))
-                if qty_opg < 1:
+                qty_opg = float(_fetch_position_qty(ticker))
+                if qty_opg <= 0:
                     log(f'{ticker} OPG: no broker qty resolved — falling back to RTH day-sweep')
                 else:
                     # 2026-07-01: 55 of 73 premarket OPG closes 403'd
@@ -2478,18 +2533,18 @@ def execute_single(sess, equity, order, run_date):
                                 'tif': 'opg', 'order_class': 'simple', 'client_order_id': coid}
                     opg_order_id = ((pay_opg or {}).get('id')
                                     or (pay_opg or {}).get('order_id'))
-                    log(f'↩ {ticker} OPG (pre-open) x{qty_opg}  order={opg_order_id or "?"}')
+                    log(f'↩ {ticker} OPG (pre-open) x{_qty_str(qty_opg)}  order={opg_order_id or "?"}')
                     # NEVER ack=fill: poll the OPG order to a terminal status.
                     final_opg = _poll_to_terminal(opg_order_id, timeout_s=3600, interval_s=3)
                     if _opg_terminal_filled(final_opg, qty_opg):
-                        filled_qty = int(abs(float((final_opg or {}).get('filled_qty') or qty_opg)))
+                        filled_qty = float(abs(float((final_opg or {}).get('filled_qty') or qty_opg)))
                         fill_px = (final_opg or {}).get('filled_avg_price')
                         try:
                             fill_px = float(fill_px) if fill_px is not None else 0.0
                         except (TypeError, ValueError):
                             fill_px = 0.0
                         notional_f = round(fill_px * filled_qty, 2) if fill_px > 0 else 0.0
-                        log(f'↩ {ticker} OPG FILLED x{filled_qty}  px={fill_px:.2f}'
+                        log(f'↩ {ticker} OPG FILLED x{_qty_str(filled_qty)}  px={fill_px:.2f}'
                             f'  order={opg_order_id or "?"}')
                         return {'ticker': ticker, 'status': 'filled',
                                 'qty': filled_qty, 'notional': notional_f, 'entry': fill_px,
@@ -2537,8 +2592,8 @@ def execute_single(sess, equity, order, run_date):
             req_qty = float(res_sweep.get('qty') or 0) or current_d or 1.0
             final_sweep = _poll_to_terminal(sweep_oid, timeout_s=300, interval_s=3)
             if _opg_terminal_filled(final_sweep, req_qty):
-                filled_qty = int(abs(float((final_sweep or {}).get('filled_qty')
-                                           or res_sweep.get('qty') or 0)))
+                filled_qty = float(abs(float((final_sweep or {}).get('filled_qty')
+                                             or res_sweep.get('qty') or 0)))
                 fill_px = (final_sweep or {}).get('filled_avg_price')
                 try:
                     fill_px = float(fill_px) if fill_px is not None else float(res_sweep.get('entry') or 0.0)
@@ -2546,7 +2601,7 @@ def execute_single(sess, equity, order, run_date):
                     fill_px = float(res_sweep.get('entry') or 0.0)
                 notional_f = round(fill_px * filled_qty, 2) if (fill_px > 0 and filled_qty) \
                     else res_sweep.get('notional')
-                log(f'↩ {ticker} day-sweep FILLED x{filled_qty}  px={fill_px:.4f}'
+                log(f'↩ {ticker} day-sweep FILLED x{_qty_str(filled_qty)}  px={fill_px:.4f}'
                     f'  order={sweep_oid or "?"}')
                 res_sweep.update({'status': 'filled', 'qty': filled_qty,
                                   'entry': fill_px, 'notional': notional_f})
@@ -2587,7 +2642,13 @@ def execute_single(sess, equity, order, run_date):
                         'reason': 'close_only: no quote/trade for limit price',
                         'client_order_id': coid, 'tif': 'day', 'order_class': 'simple'}
             notional_co = equity * pct_nav
-            qty_co = max(1, int(notional_co / lp_co)) if lp_co > 0 else 1
+            qty_co, _skip_co = _size_qty('buy',  # close of an existing position: never a short-open
+                                         notional_co, lp_co, fractionable=_is_fractionable(ticker)) \
+                if lp_co > 0 else (0.0, 'dust_below_1usd')
+            if _skip_co:
+                log(f'  SKIP {ticker}: {_skip_co} (target ${notional_co:,.2f} @ {lp_co:.2f})')
+                return {'ticker': ticker, 'status': 'SKIP', 'reason': _skip_co,
+                        'client_order_id': coid, 'tif': 'day', 'order_class': 'simple'}
             ok_co, pay_co, err_co = _submit_order_via_cli(
                 ticker=ticker, side=side, qty=qty_co, tif='day',
                 order_class='simple', target=None, stop=None, coid=coid,
@@ -2602,7 +2663,7 @@ def execute_single(sess, equity, order, run_date):
                     (pay_co or {}).get('id')
                     or (pay_co or {}).get('order_id')
                 )
-                log(f'↩ {ticker} CLOSE x{qty_co} sh  LIMIT={lp_co:.2f}  notional=${qty_co*lp_co:,.0f}'
+                log(f'↩ {ticker} CLOSE x{_qty_str(qty_co)} sh  LIMIT={lp_co:.2f}  notional=${qty_co*lp_co:,.0f}'
                     f'  order={oid_co or "?"}')
                 return {'ticker': ticker, 'status': 'submitted', 'qty': qty_co,
                         'notional': qty_co * lp_co, 'entry': lp_co,
@@ -2632,7 +2693,11 @@ def execute_single(sess, equity, order, run_date):
                 'client_order_id': coid}
 
     notional = equity * pct_nav
-    qty = max(1, int(notional / entry))
+    qty, _skip_q = _size_qty(side, notional, entry, fractionable=_is_fractionable(ticker))
+    if _skip_q:
+        log(f'  SKIP {ticker}: {_skip_q} (target ${notional:,.2f} @ {entry:.2f})')
+        return {'ticker': ticker, 'status': 'SKIP', 'reason': _skip_q,
+                'client_order_id': coid}
     # Session-aware order shape (Phase 3, 2026-05-19):
     #   - rth        → market day bracket (or simple-on-short workaround below)
     #   - premarket  → limit day simple + --extended-hours
@@ -2760,9 +2825,9 @@ def execute_single(sess, equity, order, run_date):
         if ok:
             oid = (payload or {}).get('id', '?') if isinstance(payload, dict) else '?'
             if order_type == 'limit':
-                log(f'OK  {ticker} {side.upper()} x{qty} sh  LIMIT={limit_price:.2f}  ext_hours={ext_hours}  notional=${notional:,.0f}  order={oid}')
+                log(f'OK  {ticker} {side.upper()} x{_qty_str(qty)} sh  LIMIT={limit_price:.2f}  ext_hours={ext_hours}  notional=${notional:,.0f}  order={oid}')
             else:
-                log(f'OK  {ticker} {side.upper()} x{qty} sh  entry~{entry:.2f}  TP={target:.2f}  SL={stop:.2f}  notional=${notional:,.0f}  order={oid}')
+                log(f'OK  {ticker} {side.upper()} x{_qty_str(qty)} sh  entry~{entry:.2f}  TP={target:.2f}  SL={stop:.2f}  notional=${notional:,.0f}  order={oid}')
             return {'ticker': ticker, 'status': 'submitted', 'order_id': oid,
                     'side': side, 'qty': qty, 'notional': notional,
                     'entry': entry, 'stop': stop, 'target': target,
@@ -2819,7 +2884,7 @@ def execute_single(sess, equity, order, run_date):
                     )
                     if ok3:
                         oid = (payload3 or {}).get('id', '?') if isinstance(payload3, dict) else '?'
-                        log(f'OK  {ticker} {side.upper()} x{qty} sh  entry~{r_entry:.2f}  TP={r_target:.2f}  SL={r_stop:.2f}  notional=${notional:,.0f}  order={oid} (recompute-retry)')
+                        log(f'OK  {ticker} {side.upper()} x{_qty_str(qty)} sh  entry~{r_entry:.2f}  TP={r_target:.2f}  SL={r_stop:.2f}  notional=${notional:,.0f}  order={oid} (recompute-retry)')
                         return {'ticker': ticker, 'status': 'submitted', 'order_id': oid,
                                 'side': side, 'qty': qty, 'notional': notional,
                                 'entry': r_entry, 'stop': r_stop, 'target': r_target,
