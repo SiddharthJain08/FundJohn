@@ -179,21 +179,32 @@ def test_shadow_line_eq_scale_ratio():
 
 def test_floor_weight_solves_for_target_fraction():
     NAV, LAM, LIQ, F = 100_000.0, 2.0, 1.0, 0.10
-    w, how = ps.floor_weight(0.0, F, eq_gross=90.0, cr_gross_other=0.0, lam_global=LAM, liq_cr=LIQ)
+    w, how = ps.floor_weight(0.0, F, eq_gross=90.0, cr_gross_other=0.0, lam_global=LAM, liq_floor=LIQ)
     assert how == 'floor'
     _, scale_cr = ps.pooled_scales(eq_gross=90.0, cr_gross=w, lam_global=LAM, liq_eq=1.0, liq_cr=LIQ, nav=NAV)
     assert abs(w * scale_cr - F * NAV) < 1e-6
-    w2, how2 = ps.floor_weight(50.0, F, eq_gross=90.0, cr_gross_other=0.0, lam_global=LAM, liq_cr=LIQ)
+    w2, how2 = ps.floor_weight(50.0, F, eq_gross=90.0, cr_gross_other=0.0, lam_global=LAM, liq_floor=LIQ)
     assert (w2, how2) == (50.0, 'own')                      # own conviction above the floor wins
 
 
+def test_floor_weight_uses_the_equity_scale_not_the_crypto_dampener():
+    # k = λ·liq_eq: with crypto liq 0.5 the floor leg still lands at F·NAV at the
+    # EQUITY scale and the equity book keeps exactly (1 − F/(λ·liq_eq)) of its weight
+    NAV, LAM, F = 100_000.0, 1.0, 0.10
+    w, how = ps.floor_weight(0.0, F, eq_gross=90.0, cr_gross_other=0.0, lam_global=LAM, liq_floor=1.0)
+    assert how == 'floor' and abs(w - 10.0) < 1e-9                 # 0.10·90/(1−0.10)
+    scale_eq, scale_cr = ps.pooled_scales(eq_gross=90.0, cr_gross=w, lam_global=LAM, liq_eq=1.0, liq_cr=0.5, nav=NAV)
+    assert abs(w * scale_eq - F * NAV) < 1e-6                      # floor leg at the equity scale
+    assert abs(90.0 / (90.0 + w) - 0.90) < 1e-9                    # equity keeps 90 %
+
+
 def test_floor_weight_zero_gross_returns_unit_weight():
-    assert ps.floor_weight(0.0, 0.10, eq_gross=0.0, cr_gross_other=0.0, lam_global=2.0, liq_cr=1.0) == (1.0, 'unit')
-    assert ps.floor_weight(0.0, 0.0, eq_gross=90.0, cr_gross_other=0.0, lam_global=2.0, liq_cr=1.0) == (0.0, 'off')
-    w, how = ps.floor_weight(0.0, 0.10, eq_gross=90.0, cr_gross_other=0.0, lam_global=0.05, liq_cr=1.0)
+    assert ps.floor_weight(0.0, 0.10, eq_gross=0.0, cr_gross_other=0.0, lam_global=2.0, liq_floor=1.0) == (1.0, 'unit')
+    assert ps.floor_weight(0.0, 0.0, eq_gross=90.0, cr_gross_other=0.0, lam_global=2.0, liq_floor=1.0) == (0.0, 'off')
+    w, how = ps.floor_weight(0.0, 0.10, eq_gross=90.0, cr_gross_other=0.0, lam_global=0.05, liq_floor=1.0)
     assert how == 'floor' and w == 90.0                      # k <= frac degenerate branch
     assert ps.floor_weight(120.0, 0.10, eq_gross=90.0, cr_gross_other=0.0,
-                           lam_global=0.05, liq_cr=1.0) == (120.0, 'own')   # own conviction > G
+                           lam_global=0.05, liq_floor=1.0) == (120.0, 'own')   # own conviction > G
 
 
 def test_crypto_gross_cap_protects_btc_first():

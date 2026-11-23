@@ -750,6 +750,23 @@ def test_floor_conserves_lambda_nav_under_pooling(monkeypatch):
     assert _top_usd(h.written[-1], 'BTC-USD') >= 0.10 * NAV - 1.0
 
 
+def test_floor_is_independent_of_the_crypto_liquidity_dampener(monkeypatch):
+    # The floor leg is a beta allocation: with the sleeve as the only crypto row it lands
+    # at exactly 0.10·NAV whether crypto liq is 1.0 or 0.5, the pool stays λ·NAV, and
+    # equity keeps 1 − f/(λ·liq_eq) = 0.95 of its weight (LAM=2). Before the fix the
+    # 11-20 live line showed eq_scale_ratio=0.8000 under crypto CRISIS liq 0.5.
+    for liq in (1.0, 0.5):
+        rows = [_row('S_beta_btc', 0.05)]
+        orders, h, res = _block_res(monkeypatch, pooled=True, s_m_cr=0.8, cr_rows=rows,
+                                    btc_frac=10.0, gross_frac=10.0, cr_budget='0',
+                                    cr_params=_params(liq=liq))
+        assert abs(cr_t(orders)['BTC-USD'] - 0.10 * NAV) < 1.0, liq
+        eq_gross = sum(abs(v) for t, v in targets(orders).items() if t not in CRYPTO_TKRS)
+        assert abs(eq_gross + cr_t(orders)['BTC-USD'] - LAM * NAV) < 1.0, liq
+        assert 'eq_scale_ratio=0.9500' in h.written[-1], (liq, h.written[-1])
+        assert 0.05 * NAV < res['floor_usd'] < 0.10 * NAV   # top-up over ~1.6k own conviction
+
+
 def test_floor_injected_when_own_conviction_is_below_frac(monkeypatch):
     # tiny sleeve weight: own BTC ≈ 1.2k, floor lifts it to exactly 0.10·NAV in apply mode
     rows = [_row('S_beta_btc', 0.05), _row('S_cr_a', 2.0), _row('S_cr_b', 0.5)]

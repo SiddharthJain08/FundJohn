@@ -1859,24 +1859,29 @@ def _crypto_pooled_block(*, crypto_regime_state, crypto_params, nav, lam_global,
             frac = _bsz.benchmark_min_nav_frac(instrument_class='crypto')
             w_btc = float(w.get(BTC_TICKER, 0.0))
             other = sum(abs(v) for t, v in w.items() if t != BTC_TICKER)
+            # k = λ·liq_eq: the floor is a beta allocation and takes the EQUITY scale
+            # below, so equity gives up exactly frac·NAV in every crypto regime.
             w_new, how = _ps.floor_weight(w_btc, frac, eq_gross=eq_gross, cr_gross_other=other,
-                                          lam_global=lam_global, liq_cr=liq_cr)
+                                          lam_global=lam_global, liq_floor=liq_eq)
             if w_new > w_btc:
                 w[BTC_TICKER] = w_new
                 own_w = max(w_btc, 0.0)   # net-short alpha BTC is not own conviction
                 logger.info('crypto_sizing.floor: how=%s frac=%.3f w_btc %.4f -> %.4f',
                             how, frac, w_btc, w_new)
-                if how == 'floor' and lam_global * min(1.0, max(0.0, liq_cr)) <= frac:
+                if how == 'floor' and lam_global * min(1.0, max(0.0, liq_eq)) <= frac:
                     logger.warning('crypto_sizing.floor: degenerate (lambda*liq <= frac); '
                                    'using half-book weight')
         w = {t: v for t, v in w.items() if v}
         res['gross_w'] = sum(abs(v) for v in w.values())
         if w:
-            _, scale_cr = _ps.pooled_scales(eq_gross=eq_gross, cr_gross=res['gross_w'],
-                                            lam_global=lam_global, liq_eq=liq_eq,
-                                            liq_cr=liq_cr, nav=nav)
+            scale_eq, scale_cr = _ps.pooled_scales(eq_gross=eq_gross, cr_gross=res['gross_w'],
+                                                   lam_global=lam_global, liq_eq=liq_eq,
+                                                   liq_cr=liq_cr, nav=nav)
             targets = {t: v * scale_cr for t, v in w.items()}
             if own_w is not None:
+                # floored BTC leg at the equity scale (beta allocation, undiscounted
+                # by the crypto regime); own conviction above the floor stays on scale_cr
+                targets[BTC_TICKER] = w[BTC_TICKER] * scale_eq
                 floor_usd = max(0.0, targets.get(BTC_TICKER, 0.0) - own_w * scale_cr)
             for t in _dust_tickers(targets, DUST_FLOOR_USD):
                 targets.pop(t, None)

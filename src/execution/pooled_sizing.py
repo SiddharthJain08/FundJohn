@@ -100,10 +100,15 @@ def pooled_scales(*, eq_gross: float, cr_gross: float, lam_global: float,
 
 
 def floor_weight(w_btc: float, frac: float, *, eq_gross: float, cr_gross_other: float,
-                 lam_global: float, liq_cr: float) -> tuple[float, str]:
+                 lam_global: float, liq_floor: float) -> tuple[float, str]:
     """BTC sleeve weight that lands the post-normaliser BTC dollars at frac·NAV.
-    With G = eq_gross + cr_gross_other and k = λ_global·clip(liq_cr, 0, 1), BTC
-    gets w·k·NAV/(G + w), so w_f = frac·G/(k − frac) for k > frac. Returns
+    With G = eq_gross + cr_gross_other and k = λ_global·clip(liq_floor, 0, 1), BTC
+    gets w·k·NAV/(G + w), so w_f = frac·G/(k − frac) for k > frac. ``liq_floor``
+    is the EQUITY liquidity param: the floor is a beta allocation, not crypto
+    conviction, so it is never run through the crypto regime dampener — the
+    caller scales the floored BTC leg at the equity scale, which makes the
+    equity book give up exactly frac·NAV (2026-11-23 fix; the 11-20 live line
+    showed eq_scale_ratio=0.8000 under crypto CRISIS liq 0.5). Returns
     (w_out, how), how ∈ {'own','floor','unit','off'}: 'off' = frac ≤ 0; 'unit' =
     nothing else in the normaliser and no own weight (BTC alone takes λ·NAV,
     the caller's clamp bounds it); 'floor' = floor weight beats own conviction;
@@ -116,7 +121,7 @@ def floor_weight(w_btc: float, frac: float, *, eq_gross: float, cr_gross_other: 
     g = float(eq_gross) + float(cr_gross_other)
     if g <= 0 and w_btc <= 0:
         return 1.0, 'unit'
-    k = float(lam_global) * max(0.0, min(1.0, float(liq_cr)))
+    k = float(lam_global) * max(0.0, min(1.0, float(liq_floor)))
     if k <= frac:
         return max(w_btc, g), ('floor' if g > w_btc else 'own')
     w_f = frac * g / (k - frac)
