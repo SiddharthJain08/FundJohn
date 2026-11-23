@@ -273,6 +273,20 @@ def execute_alpaca_orders(green_opts, run_date=None):
     return results
 
 
+def _fmt_qty(q) -> str:
+    """Decimal share qty for the broker: <= 6 dp, no trailing zeros, no sci notation."""
+    out = f'{float(q):.6f}'.rstrip('0').rstrip('.')
+    return out if out and out != '-0' else '0'
+
+
+def _reduce_third(qty: float) -> float:
+    """One third of a position, fractional-safe (whole positions keep the
+    legacy floor-with-minimum-1 behaviour)."""
+    if abs(qty - round(qty)) > 1e-9:
+        return round(qty / 3.0, 6)
+    return float(max(1, int(round(qty)) // 3))
+
+
 def get_positions(sess):
     """Return list of open positions from Alpaca paper account."""
     try:
@@ -282,7 +296,7 @@ def get_positions(sess):
         for p in r.json():
             out.append({
                 'symbol':            p.get('symbol', ''),
-                'qty':               int(float(p.get('qty', 0))),
+                'qty':               float(p.get('qty', 0)),
                 'avg_entry_price':   float(p.get('avg_entry_price') or 0),
                 'current_price':     float(p.get('current_price') or 0),
                 'unrealized_plpc':   float(p.get('unrealized_plpc') or 0),
@@ -377,7 +391,7 @@ def execute_recommendation(rec_id, postgres_uri):
                 pos = next((p for p in positions if p['symbol'] == ticker), None)
                 qty = pos['qty'] if pos else 1
                 body = {
-                    'symbol': ticker, 'qty': str(qty), 'side': 'sell',
+                    'symbol': ticker, 'qty': _fmt_qty(qty), 'side': 'sell',
                     'type': 'market', 'time_in_force': 'day',
                 }
                 r2 = sess.post(f"{base}/v2/orders", json=body, timeout=15)
@@ -385,7 +399,7 @@ def execute_recommendation(rec_id, postgres_uri):
                     ok = True
                     order_id = r2.json().get('id')
                     alpaca_stat = 'submitted'
-                    detail = f'market sell fallback x{qty}sh'
+                    detail = f'market sell fallback x{_fmt_qty(qty)}sh'
                 else:
                     alpaca_err = r2.text[:200]
                     detail = f'sell fallback failed: {r2.status_code}'
@@ -420,9 +434,9 @@ def execute_recommendation(rec_id, postgres_uri):
         elif action == 'REDUCE_SIZE':
             positions = get_positions(sess)
             pos = next((p for p in positions if p['symbol'] == ticker), None)
-            qty = max(1, (pos['qty'] // 3)) if pos and pos['qty'] > 0 else 1
+            qty = _reduce_third(pos['qty']) if pos and pos['qty'] > 0 else 1
             body = {
-                'symbol': ticker, 'qty': str(qty), 'side': 'sell',
+                'symbol': ticker, 'qty': _fmt_qty(qty), 'side': 'sell',
                 'type': 'market', 'time_in_force': 'day',
             }
             r = sess.post(f"{base}/v2/orders", json=body, timeout=15)
@@ -430,7 +444,7 @@ def execute_recommendation(rec_id, postgres_uri):
                 ok = True
                 order_id = r.json().get('id')
                 alpaca_stat = 'submitted'
-                detail = f'sold x{qty}sh (1/3 reduction)'
+                detail = f'sold x{_fmt_qty(qty)}sh (1/3 reduction)'
             else:
                 alpaca_err = r.text[:200]
                 detail = f'reduce failed: {r.status_code}'

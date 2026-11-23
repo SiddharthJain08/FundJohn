@@ -142,3 +142,45 @@ def test_breaker_fires_identically_in_every_regime(regime):
     fire, ratio = should_fire_breaker(pos, 100_000, thresholds[regime])
     assert fire is True
     assert ratio == pytest.approx(-0.025, abs=1e-6)
+
+
+# ── fractional shares: get_positions must keep qty fractional ────────────────
+def test_fractional_losing_position_fires_like_whole_share_position():
+    """0.4 sh bought at 1000, now 890: loss $44 on a $2,000 NAV = -2.2 %.
+    With qty truncated to int (0) this read as zero loss and never fired."""
+    from execution import alpaca_trader as at
+    from unittest.mock import MagicMock
+    sess = MagicMock(); sess._base = 'http://x'
+    sess.get.return_value.json.return_value = [{
+        'symbol': 'BIG', 'qty': '0.4', 'avg_entry_price': '1000',
+        'current_price': '890', 'unrealized_plpc': '-0.1', 'side': 'long',
+        'market_value': '360'}]
+    p = at.get_positions(sess)[0]
+    assert p['qty'] == pytest.approx(0.4) and isinstance(p['qty'], float)
+    pos = {'ticker': p['symbol'], 'qty': p['qty'],
+           'avg_entry_price': p['avg_entry_price'], 'mark': p['current_price']}
+    fire, ratio = should_fire_breaker(pos, 2_000, threshold_pct=0.02)
+    assert ratio == pytest.approx(-0.022, abs=1e-9)
+    assert fire is True
+    # same loss/NAV ratio on a whole-share position fires at the same threshold
+    whole = {'ticker': 'W', 'qty': 4, 'avg_entry_price': 100, 'mark': 89}
+    assert should_fire_breaker(whole, 2_000, threshold_pct=0.02)[0] is True
+
+
+def test_get_positions_keeps_fractional_short_qty_and_whole():
+    from execution import alpaca_trader as at
+    from unittest.mock import MagicMock
+    sess = MagicMock(); sess._base = 'http://x'
+    sess.get.return_value.json.return_value = [
+        {'symbol': 'A', 'qty': '2.7', 'side': 'long'},
+        {'symbol': 'B', 'qty': '-3', 'side': 'short'}]
+    out = at.get_positions(sess)
+    assert out[0]['qty'] == pytest.approx(2.7) and out[1]['qty'] == -3.0
+
+
+def test_reduce_third_and_fmt_qty_stay_fractional():
+    from execution import alpaca_trader as at
+    assert at._reduce_third(0.9) == pytest.approx(0.3)
+    assert at._reduce_third(2.7) == pytest.approx(0.9)
+    assert at._reduce_third(9.0) == 3.0 and at._reduce_third(2.0) == 1.0
+    assert at._fmt_qty(0.3) == '0.3' and at._fmt_qty(3.0) == '3'

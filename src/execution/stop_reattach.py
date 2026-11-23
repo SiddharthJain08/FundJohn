@@ -457,6 +457,9 @@ def _compute_new_stop(position: dict, submission: dict) -> tuple[float | None, s
     return round(new_stop, 2), 'ok'
 
 
+QTY_EPS = 1e-6  # absolute share tolerance (fractional positions can be < 0.01 sh)
+
+
 def _qty_str(q: float) -> str:
     """Decimal qty for the broker: <= 6 dp, no trailing zeros, no sci notation."""
     out = f'{float(q):.6f}'.rstrip('0').rstrip('.')
@@ -868,8 +871,8 @@ def audit_naked_positions(positions: list[dict], breached: list[dict],
         if not sym or q <= 0:
             continue
         gap = q - covered.get(sym, 0.0)
-        if gap > 0.01:
-            naked.append(f'{sym} ({gap:.0f}/{q:.0f} sh uncovered)')
+        if gap > QTY_EPS:
+            naked.append(f'{sym} ({_qty_str(gap)}/{_qty_str(q)} sh uncovered)')
     if (naked or breached) and not dry_run:
         lines = ['⚠️ **stop_reattach: positions without full downside protection**']
         if naked:
@@ -899,7 +902,7 @@ def _wait_qty_freed(symbol: str, need: float, timeout: int = 12) -> bool:
                         avail = abs(float(p.get('qty_available') or 0))
                     except (TypeError, ValueError):
                         avail = 0.0
-                    if avail >= need - 0.01:
+                    if avail >= need - QTY_EPS:
                         return True
                     break
         time.sleep(1.0)
@@ -1005,7 +1008,7 @@ def run_oco_reattach(conn, positions: list[dict], dry_run: bool) -> dict:
             pos_qty = 0.0
         if pos_qty <= 0 or not sym:
             continue
-        if tp_cov.get(sym, 0.0) >= pos_qty - 0.01:
+        if tp_cov.get(sym, 0.0) >= pos_qty - QTY_EPS:
             stats['already_tp'] += 1
             continue
         side = (pos.get('side') or '').lower()
@@ -1191,7 +1194,7 @@ def main():
         covered = fetch_active_stops()
         for _sym_tp, _q_tp in fetch_tp_covered(linked_only=True).items():
             covered[_sym_tp] = max(covered.get(_sym_tp, 0.0), _q_tp)
-        log(f'active stops/oco cover {len(covered)} symbols (total {sum(covered.values()):.0f} shares)')
+        log(f'active stops/oco cover {len(covered)} symbols (total {_qty_str(sum(covered.values()))} shares)')
         for pos in positions:
             sym = pos.get('symbol')
             try:
@@ -1202,7 +1205,7 @@ def main():
                 continue
             already = covered.get(sym, 0.0)
             need = pos_qty - already
-            if need <= 0.01:
+            if need <= QTY_EPS:
                 skips['already_covered'] += 1
                 continue
 
@@ -1254,7 +1257,7 @@ def main():
             log(f'⚠ {len(breached)} positions PAST their strategy stop — emergency-exit pass:')
             for b in breached:
                 log(f'    {b["ticker"]:6} {b["side"]:5} cur={b["current"]:.2f} breached_stop={b["breached_stop"]:.2f} '
-                    f'unrealized=${b["unrealized_pl"]:.2f} qty={b["qty"]:.0f} → {b.get("action", "flag_only")}')
+                    f'unrealized=${b["unrealized_pl"]:.2f} qty={_qty_str(b["qty"])} → {b.get("action", "flag_only")}')
         naked = audit_naked_positions(positions, breached, args.dry_run)
         if naked:
             log(f'⚠ NAKED after pass: {", ".join(naked)}')

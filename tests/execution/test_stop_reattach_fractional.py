@@ -107,3 +107,26 @@ def test_fractional_dry_run_counts_no_cli(monkeypatch):
 def test_fractional_rejected_not_counted(monkeypatch):
     stats, calls = _drive(monkeypatch, 0.4, cli_ok=False)
     assert stats.get('fractional_stop', 0) == 0 and stats['rejected'] == 1
+
+
+# ── 1e-6 tolerance (was 0.01): tiny fractional positions must not read covered
+def test_tiny_fractional_position_gets_day_stop(monkeypatch):
+    stats, calls = _drive(monkeypatch, 0.008)
+    assert calls['oco'] == 0 and len(calls['cli']) == 1
+    a = calls['cli'][0]
+    assert a[a.index('--qty') + 1] == '0.008'
+    assert a[a.index('--time-in-force') + 1] == 'day'
+    assert stats['fractional_stop'] == 1 and stats['already_tp'] == 0
+
+
+def test_naked_audit_reports_tiny_gap(monkeypatch):
+    monkeypatch.setattr(sr, 'fetch_active_stops', lambda: {})
+    monkeypatch.setattr(sr, 'fetch_tp_covered', lambda linked_only=False: {})
+    msgs = []
+    monkeypatch.setattr(sr, 'post_discord', lambda *a, **k: msgs.append(a), raising=False)
+    out = sr.audit_naked_positions([{'symbol': 'F', 'qty': '0.008', 'side': 'long'}], [], True)
+    assert out == ['F (0.008/0.008 sh uncovered)']
+
+
+def test_floor_pass_need_tolerance_is_qty_eps():
+    assert sr.QTY_EPS == 1e-6

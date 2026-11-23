@@ -142,8 +142,8 @@ def _live_positions_have_stops():
             qty = abs(float(p.get('qty') or 0))
         except (TypeError, ValueError):
             qty = 0.0
-        if qty > 0 and covered.get(sym, 0) + 0.01 < qty:
-            naked.append(f'{sym} ({int(qty)})')
+        if qty > 0 and covered.get(sym, 0) + 1e-6 < qty:
+            naked.append(f'{sym} ({qty:g})')
     if naked:
         return Status.FAIL, (f'{len(naked)}/{len(equity_pos)} equity positions without a covering stop: '
                              + ', '.join(naked[:8]))

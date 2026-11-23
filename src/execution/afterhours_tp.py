@@ -190,7 +190,7 @@ def reconcile_afterhours(dry_run: bool) -> dict:
             # No position data for this symbol — cannot confirm it shrank; skip.
             continue
         if stop_qty > held + 0.01:
-            log(f"  ⚠ {sym}: stop qty {stop_qty:.0f} > held {held:.0f} "
+            log(f"  ⚠ {sym}: stop qty {stop_qty:g} > held {held:g} "
                 f"(ext-hours TP filled) — cancel+resize")
             if dry_run:
                 stats['stops_resized'] += 1

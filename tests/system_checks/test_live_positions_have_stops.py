@@ -116,3 +116,10 @@ def test_order_list_is_capped_at_500_and_keyset_paginated(monkeypatch):
     assert seen[0][seen[0].index('--limit') + 1] == '500'
     assert '--nested' in seen[0] and seen[0][seen[0].index('--direction') + 1] == 'asc'
     assert seen[1][seen[1].index('--after-order-id') + 1] == 'o499'
+
+
+def test_fractional_position_uncovered_reported_fractionally(monkeypatch):
+    pos = [{'symbol': 'FRX', 'qty': '0.008', 'asset_class': 'us_equity'}]
+    monkeypatch.setattr(subprocess, 'run', _fake_run(pos, []))
+    status, msg = broker._live_positions_have_stops()
+    assert status is Status.FAIL and 'FRX (0.008)' in msg

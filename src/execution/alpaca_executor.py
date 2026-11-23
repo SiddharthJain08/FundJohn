@@ -2416,6 +2416,9 @@ def _rth_position_close(ticker, coid, *, notional_usd, current_usd, equity, pct_
             cli_args_oc += ['--percentage', str(pct_oc)]
         else:
             reduce_qty = _reduce_qty(pos_qty, notional_oc, current_oc, is_short=pos_qty < 0)
+            if pos_qty > 0 and not _is_fractionable(ticker):
+                # Non-fractionable long: the broker rejects a fractional --qty.
+                reduce_qty = float(math.floor(reduce_qty + 1e-9))
             if reduce_qty <= 0:
                 log(f'  SKIP {ticker}: reduce_rounds_to_zero (reduce ${notional_oc:,.2f} of ${current_oc:,.2f})')
                 return ({'ticker': ticker, 'status': 'SKIP', 'reason': 'reduce_rounds_to_zero',
@@ -2710,7 +2713,10 @@ def execute_single(sess, equity, order, run_date):
                         'reason': 'close_only: no quote/trade for limit price',
                         'client_order_id': coid, 'tif': 'day', 'order_class': 'simple'}
             notional_co = equity * pct_nav
-            qty_co, _skip_co = _size_qty('buy',  # close of an existing position: never a short-open
+            # Sizing side is the OPPOSITE of the close side: a buy-to-cover closes a
+            # SHORT (whole shares only -> 'sell' floors), a sell closes a long
+            # (fractional ok -> 'buy').
+            qty_co, _skip_co = _size_qty('sell' if side == 'buy' else 'buy',
                                          notional_co, lp_co, fractionable=_is_fractionable(ticker)) \
                 if lp_co > 0 else (0.0, 'dust_below_1usd')
             if _skip_co:

@@ -1,5 +1,6 @@
 import json
 import unittest
+import pytest
 from unittest.mock import MagicMock, patch
 
 from execution import alpaca_executor as ae
@@ -228,7 +229,8 @@ def test_is_fractionable_reads_flag_and_closes(monkeypatch):
 
 # ── carry-over 2: close-only extended-hours path ─────────────────────────────
 def _ext_close_order(notional_pct_nav):
-    return {'ticker': 'ZZZQ', 'strategy_id': '__close_orphan__', 'direction': 'long',
+    # direction == trade side: 'short' -> sell (closing a long; fractional ok)
+    return {'ticker': 'ZZZQ', 'strategy_id': '__close_orphan__', 'direction': 'short',
             'close_only': True, 'pct_nav': notional_pct_nav,
             'notional_usd': 10.0, 'current_usd': 10.0}
 
@@ -342,3 +344,54 @@ def test_rth_whole_long_open_keeps_bracket(monkeypatch, capsys):
     assert '--take-profit' in argv and '--stop-loss' in argv
     assert argv[argv.index('--qty') + 1] == '3'
     assert 'fractional → simple' not in capsys.readouterr().out
+
+
+def test_rth_nonfractionable_long_reduce_floors(monkeypatch):
+    monkeypatch.setattr(ae, '_is_fractionable', lambda t: False)
+    _, _, calls = _rth_close(_long(3), 80.0, 120.0, monkeypatch)   # 2.0 exact
+    argv = [c for c in calls if c[:2] == ['position', 'close']][0]
+    assert argv[argv.index('--qty') + 1] == '2'
+    _, _, calls = _rth_close(_long(5), 70.0, 100.0, monkeypatch)   # 3.5 -> 3
+    argv = [c for c in calls if c[:2] == ['position', 'close']][0]
+    assert argv[argv.index('--qty') + 1] == '3'
+
+
+def test_rth_nonfractionable_long_reduce_rounding_to_zero_skips(monkeypatch):
+    monkeypatch.setattr(ae, '_is_fractionable', lambda t: False)
+    res, oid, calls = _rth_close(_long(3), 30.0, 120.0, monkeypatch)  # 0.75 -> 0
+    assert res['status'] == 'SKIP' and res['reason'] == 'reduce_rounds_to_zero'
+    assert not [c for c in calls if c[:2] == ['position', 'close']]
+
+
+def test_rth_fractionable_long_reduce_unchanged(monkeypatch):
+    monkeypatch.setattr(ae, '_is_fractionable', lambda t: True)
+    _, _, calls = _rth_close(_long(5), 70.0, 100.0, monkeypatch)
+    argv = [c for c in calls if c[:2] == ['position', 'close']][0]
+    assert argv[argv.index('--qty') + 1] == '3.5'
+
+
+def test_close_only_ext_hours_cover_short_floors_to_whole(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ae, '_alpaca_session_kind', lambda: 'premarket')
+    monkeypatch.setattr(ae, '_skip_extended_hours', lambda t, s: None)
+    monkeypatch.setattr(ae, '_pick_limit_price', lambda t, s: 40.0)
+    monkeypatch.setattr(ae, '_is_fractionable', lambda t: True)
+    monkeypatch.setattr(ae, '_submit_order_via_cli',
+                        lambda **kw: (calls.append(kw) or (True, {'id': 'o'}, {})))
+    o = _ext_close_order(0.002)
+    o['direction'] = 'long'          # trade side 'buy' => covering a short
+    res = ae.execute_single(_mock_session(), equity=30000.0, order=o, run_date='2026-11-23')
+    # $60 / $40 = 1.5 -> floored to 1 whole share (no fractional cover buy)
+    assert calls and calls[0]['side'] == 'buy' and calls[0]['qty'] == 1.0
+
+
+def test_close_only_ext_hours_cover_short_sub_share_skips(monkeypatch):
+    monkeypatch.setattr(ae, '_alpaca_session_kind', lambda: 'premarket')
+    monkeypatch.setattr(ae, '_skip_extended_hours', lambda t, s: None)
+    monkeypatch.setattr(ae, '_pick_limit_price', lambda t, s: 40.0)
+    monkeypatch.setattr(ae, '_is_fractionable', lambda t: True)
+    monkeypatch.setattr(ae, '_submit_order_via_cli', lambda **kw: pytest.fail('no submit'))
+    o = _ext_close_order(0.002)
+    o['direction'] = 'long'
+    res = ae.execute_single(_mock_session(), equity=3000.0, order=o, run_date='2026-11-23')
+    assert res['status'] == 'SKIP' and res['reason'] == 'short_sub_share'
