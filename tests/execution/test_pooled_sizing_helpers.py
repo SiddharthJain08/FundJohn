@@ -198,6 +198,22 @@ def test_floor_weight_uses_the_equity_scale_not_the_crypto_dampener():
     assert abs(90.0 / (90.0 + w) - 0.90) < 1e-9                    # equity keeps 90 %
 
 
+def test_floor_weight_decides_in_own_dollars_no_cliff():
+    # λ=1, liq_eq=1, crypto liq 0.5, E=9 ⇒ w_f = 1.0. Own conviction is priced at the crypto
+    # scale, so w_btc=1.01 is only ~5 % NAV: the floor must still bind (max(w_f, w_btc) kept
+    # in the normaliser, caller lands exactly F·NAV). Own wins only once its own dollars
+    # reach F·NAV: w·0.5/(9+w) ≥ 0.10 ⇔ w ≥ 2.25.
+    F = 0.10
+    w, how = ps.floor_weight(1.01, F, eq_gross=9.0, cr_gross_other=0.0, lam_global=1.0, liq_floor=1.0, liq_own=0.5)
+    assert (w, how) == (1.01, 'floor')
+    w, how = ps.floor_weight(0.3, F, eq_gross=9.0, cr_gross_other=0.0, lam_global=1.0, liq_floor=1.0, liq_own=0.5)
+    assert how == 'floor' and abs(w - 1.0) < 1e-9
+    w, how = ps.floor_weight(2.26, F, eq_gross=9.0, cr_gross_other=0.0, lam_global=1.0, liq_floor=1.0, liq_own=0.5)
+    assert (w, how) == (2.26, 'own')
+    w, how = ps.floor_weight(2.24, F, eq_gross=9.0, cr_gross_other=0.0, lam_global=1.0, liq_floor=1.0, liq_own=0.5)
+    assert (w, how) == (2.24, 'floor')
+
+
 def test_floor_weight_zero_gross_returns_unit_weight():
     assert ps.floor_weight(0.0, 0.10, eq_gross=0.0, cr_gross_other=0.0, lam_global=2.0, liq_floor=1.0) == (1.0, 'unit')
     assert ps.floor_weight(0.0, 0.0, eq_gross=90.0, cr_gross_other=0.0, lam_global=2.0, liq_floor=1.0) == (0.0, 'off')

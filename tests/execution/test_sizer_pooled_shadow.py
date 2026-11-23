@@ -767,6 +767,23 @@ def test_floor_is_independent_of_the_crypto_liquidity_dampener(monkeypatch):
         assert 0.05 * NAV < res['floor_usd'] < 0.10 * NAV   # top-up over ~1.6k own conviction
 
 
+def test_floor_no_cliff_when_own_conviction_sits_between_floor_weight_and_boundary(monkeypatch):
+    # crypto liq 0.5: own BTC conviction priced at the crypto scale lands between 5 and
+    # 10 % NAV ⇒ the floor still binds at exactly 0.10·NAV; above the boundary own wins
+    # and BTC follows own dollars (> 0.10·NAV). Before this fix the band landed at 5–10 %.
+    # harness LAM=2, E≈6.1: w_f≈0.32; own dollars w/(E+w) cross 0.10·NAV at w≈0.68
+    seen = {}
+    for wt in (0.3, 0.6, 1.4):
+        rows = [_row('S_beta_btc', wt)]
+        orders, h, res = _block_res(monkeypatch, pooled=True, s_m_cr=0.8, cr_rows=rows,
+                                    btc_frac=50.0, gross_frac=50.0, cr_budget='0',
+                                    cr_params=_params(liq=0.5))
+        seen[wt] = (cr_t(orders)['BTC-USD'], res['floor_usd'])
+    assert abs(seen[0.3][0] - 0.10 * NAV) < 1.0 and seen[0.3][1] > 0   # below w_f: injected
+    assert abs(seen[0.6][0] - 0.10 * NAV) < 1.0 and seen[0.6][1] > 0   # between w_f and boundary: still 10 %
+    assert seen[1.4][0] > 0.10 * NAV + 1.0 and seen[1.4][1] == 0.0      # own conviction wins
+
+
 def test_floor_injected_when_own_conviction_is_below_frac(monkeypatch):
     # tiny sleeve weight: own BTC ≈ 1.2k, floor lifts it to exactly 0.10·NAV in apply mode
     rows = [_row('S_beta_btc', 0.05), _row('S_cr_a', 2.0), _row('S_cr_b', 0.5)]

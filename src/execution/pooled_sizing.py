@@ -100,21 +100,22 @@ def pooled_scales(*, eq_gross: float, cr_gross: float, lam_global: float,
 
 
 def floor_weight(w_btc: float, frac: float, *, eq_gross: float, cr_gross_other: float,
-                 lam_global: float, liq_floor: float) -> tuple[float, str]:
+                 lam_global: float, liq_floor: float, liq_own: float = 1.0) -> tuple[float, str]:
     """BTC sleeve weight that lands the post-normaliser BTC dollars at frac·NAV.
-    With G = eq_gross + cr_gross_other and k = λ_global·clip(liq_floor, 0, 1), BTC
-    gets w·k·NAV/(G + w), so w_f = frac·G/(k − frac) for k > frac. ``liq_floor``
-    is the EQUITY liquidity param: the floor is a beta allocation, not crypto
-    conviction, so it is never run through the crypto regime dampener — the
-    caller scales the floored BTC leg at the equity scale, which makes the
-    equity book give up exactly frac·NAV (2026-11-23 fix; the 11-20 live line
-    showed eq_scale_ratio=0.8000 under crypto CRISIS liq 0.5). Returns
-    (w_out, how), how ∈ {'own','floor','unit','off'}: 'off' = frac ≤ 0; 'unit' =
-    nothing else in the normaliser and no own weight (BTC alone takes λ·NAV,
-    the caller's clamp bounds it); 'floor' = floor weight beats own conviction;
-    degenerate k ≤ frac ⇒ max(w_btc, G), tagged 'floor' when G wins and 'own'
-    when own conviction already exceeds G (caller logs the WARN).
-    Pure — the caller logs."""
+    The floor is a beta allocation, not crypto conviction, so it is never run
+    through the crypto regime dampener: the decision is made in DOLLARS — own
+    conviction wins ('own') iff w_btc·λ·liq_own·NAV/(G + w_btc) ≥ frac·NAV (its
+    real post-normaliser dollars at the crypto scale); otherwise ('floor') the
+    weight is max(w_f, w_btc) with w_f = frac·G/(k − frac), k = λ·clip(liq_floor)
+    (the EQUITY liquidity param), and the caller prices the BTC leg at exactly
+    frac·NAV — continuous on both sides of the boundary, equity gives up exactly
+    its share of frac·NAV (2026-11-23 fix; the 11-20 live line showed
+    eq_scale_ratio=0.8000 under crypto CRISIS liq 0.5). G = eq_gross +
+    cr_gross_other. Returns (w_out, how), how ∈ {'own','floor','unit','off'}:
+    'off' = frac ≤ 0; 'unit' = nothing else in the normaliser and no own weight
+    (BTC alone takes λ·NAV, the caller's clamp bounds it); degenerate k ≤ frac ⇒
+    max(w_btc, G), tagged 'floor' when G wins and 'own' when own conviction
+    already exceeds G (caller logs the WARN). Pure — the caller logs."""
     w_btc = float(w_btc)
     if frac <= 0:
         return w_btc, 'off'
@@ -124,10 +125,12 @@ def floor_weight(w_btc: float, frac: float, *, eq_gross: float, cr_gross_other: 
     k = float(lam_global) * max(0.0, min(1.0, float(liq_floor)))
     if k <= frac:
         return max(w_btc, g), ('floor' if g > w_btc else 'own')
+    k_own = float(lam_global) * max(0.0, min(1.0, float(liq_own)))
+    own_frac = (w_btc * k_own / (g + w_btc)) if (g + w_btc) > 0 and w_btc > 0 else 0.0
+    if own_frac >= frac:
+        return w_btc, 'own'
     w_f = frac * g / (k - frac)
-    if w_f > w_btc:
-        return w_f, 'floor'
-    return w_btc, 'own'
+    return max(w_f, w_btc), 'floor'
 
 
 def stable_tickers() -> set[str]:
