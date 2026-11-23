@@ -2353,6 +2353,26 @@ def _fetch_position_qty(ticker: str) -> float:
         return 0.0
 
 
+def _fetch_position_signed_qty(ticker: str):
+    """SIGNED broker position qty (negative = short) via `alpaca position get`,
+    or None when the lookup fails / the payload has no usable qty. Unlike
+    _fetch_position_qty (abs), the sign survives so a short reduce is floored."""
+    ok, payload, _err = _run_alpaca_cli(
+        ['position', 'get', '--symbol-or-asset-id', ticker], timeout=10,
+    )
+    if not ok or not isinstance(payload, dict):
+        return None
+    try:
+        q = float(payload.get('qty'))
+    except (TypeError, ValueError):
+        return None
+    if q == 0:
+        return None
+    if str(payload.get('side') or '').lower() == 'short' or q < 0:
+        return -abs(q)
+    return abs(q)
+
+
 def _opg_terminal_filled(final: dict | None, requested_qty: float) -> bool:
     """True iff a polled OPG/sweep order dict represents a CONFIRMED fill.
 
@@ -2387,8 +2407,8 @@ def _rth_position_close(ticker, coid, *, notional_usd, current_usd, equity, pct_
     if is_partial_reduce:
         # Fractional shares: reduce by an explicit decimal --qty (shorts floor
         # to whole shares). Zero → SKIP before any cancel/close broker call.
-        pos_qty = float(_fetch_position_qty(ticker))
-        if pos_qty == 0:
+        pos_qty = _fetch_position_signed_qty(ticker)
+        if pos_qty is None:
             # Lookup failed / qty unknown (sign unknown too): fall back to the
             # legacy percentage reduce so a transient CLI error cannot block it.
             pct_oc = max(0.01, min(99.99, round((notional_oc / current_oc) * 100.0, 2)))

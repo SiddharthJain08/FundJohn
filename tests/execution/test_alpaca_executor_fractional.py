@@ -115,22 +115,30 @@ def test_is_fractional_qty():
     assert not ae._is_fractional_qty(3.0) and not ae._is_fractional_qty(3.0000000001)
 
 
-def _rth_close(pos_qty, notional, current, monkeypatch):
+def _rth_close(pos_payload, notional, current, monkeypatch):
+    """pos_payload: dict returned by `position get`, or None for a lookup failure."""
     calls = []
 
     def fake_cli(args, timeout=None):
         calls.append(list(args))
+        if args[:2] == ['position', 'get']:
+            if pos_payload is None:
+                return False, None, {'exit_code': 1, 'error': 'boom'}
+            return True, pos_payload, {}
         return True, {'id': 'oid-9', 'qty': '1', 'notional': '80'}, {}
     monkeypatch.setattr(ae, '_run_alpaca_cli', fake_cli)
-    monkeypatch.setattr(ae, '_fetch_position_qty', lambda t: pos_qty)
     monkeypatch.setattr(ae, '_cancel_open_equity_orders', lambda t: None)
     res, oid = ae._rth_position_close('T', 'coid1', notional_usd=notional,
                                       current_usd=current, equity=3000.0, pct_nav=0.01)
-    return res, oid, calls
+    return res, oid, [c for c in calls if c[:2] != ['position', 'get']]
+
+
+def _long(q):
+    return {'qty': str(q), 'side': 'long'}
 
 
 def test_rth_short_reduce_rounding_to_zero_skips_without_cli(monkeypatch):
-    res, oid, calls = _rth_close(-1.0, 70.0, 100.0, monkeypatch)
+    res, oid, calls = _rth_close({'qty': '1', 'side': 'short'}, 70.0, 100.0, monkeypatch)
     assert res['status'] == 'SKIP' and res['reason'] == 'reduce_rounds_to_zero'
     assert res['tif'] == 'day' and res['order_class'] == 'simple' and res['client_order_id'] == 'coid1'
     assert oid is None
@@ -138,7 +146,7 @@ def test_rth_short_reduce_rounding_to_zero_skips_without_cli(monkeypatch):
 
 
 def test_rth_long_partial_reduce_passes_qty(monkeypatch):
-    res, oid, calls = _rth_close(3.0, 80.0, 120.0, monkeypatch)
+    res, oid, calls = _rth_close(_long(3), 80.0, 120.0, monkeypatch)
     close = [c for c in calls if c[:2] == ['position', 'close']]
     assert len(close) == 1
     argv = close[0]
@@ -149,26 +157,26 @@ def test_rth_long_partial_reduce_passes_qty(monkeypatch):
 
 
 def test_rth_long_one_third_reduce_qty(monkeypatch):
-    _, _, calls = _rth_close(3.0, 40.0, 120.0, monkeypatch)
+    _, _, calls = _rth_close(_long(3), 40.0, 120.0, monkeypatch)
     argv = [c for c in calls if c[:2] == ['position', 'close']][0]
     assert argv[argv.index('--qty') + 1] == '1'
 
 
 def test_rth_fractional_position_reduce_qty(monkeypatch):
-    _, _, calls = _rth_close(0.5, 40.0, 100.0, monkeypatch)
+    _, _, calls = _rth_close(_long(0.5), 40.0, 100.0, monkeypatch)
     argv = [c for c in calls if c[:2] == ['position', 'close']][0]
     assert argv[argv.index('--qty') + 1] == '0.2'
 
 
 def test_rth_reduce_lookup_failure_falls_back_to_percentage(monkeypatch):
-    res, _, calls = _rth_close(0.0, 70.0, 100.0, monkeypatch)
+    res, _, calls = _rth_close(None, 70.0, 100.0, monkeypatch)
     argv = [c for c in calls if c[:2] == ['position', 'close']][0]
     assert argv[argv.index('--percentage') + 1] == '70.0'
     assert '--qty' not in argv and res['status'] == 'submitted'
 
 
 def test_rth_full_close_has_no_qty_or_percentage(monkeypatch):
-    _, _, calls = _rth_close(3.0, 120.0, 120.0, monkeypatch)
+    _, _, calls = _rth_close(_long(3), 120.0, 120.0, monkeypatch)
     argv = [c for c in calls if c[:2] == ['position', 'close']][0]
     assert argv == ['position', 'close', '--symbol-or-asset-id', 'T']
 
@@ -282,3 +290,20 @@ def test_opg_fractional_position_falls_back_to_day_sweep(monkeypatch):
     assert not [s for s in submitted if s.get('tif') == 'opg']
     assert not any('opg' in c for c in calls)
     assert res['status'] == 'filled'
+
+
+def test_rth_short_reduce_sign_from_payload_floors(monkeypatch):
+    _, _, calls = _rth_close({'qty': '-5', 'side': 'short'}, 55.0, 100.0, monkeypatch)
+    argv = [c for c in calls if c[:2] == ['position', 'close']][0]
+    assert argv[argv.index('--qty') + 1] == '2'
+
+
+def test_fetch_position_signed_qty(monkeypatch):
+    def mk(ok, pay):
+        monkeypatch.setattr(ae, '_run_alpaca_cli', lambda a, timeout=None: (ok, pay, {}))
+    mk(True, {'qty': '1', 'side': 'short'}); assert ae._fetch_position_signed_qty('T') == -1.0
+    mk(True, {'qty': '-5'}); assert ae._fetch_position_signed_qty('T') == -5.0
+    mk(True, {'qty': '2.5', 'side': 'long'}); assert ae._fetch_position_signed_qty('T') == 2.5
+    mk(True, {'qty': '0'}); assert ae._fetch_position_signed_qty('T') is None
+    mk(True, {}); assert ae._fetch_position_signed_qty('T') is None
+    mk(False, None); assert ae._fetch_position_signed_qty('T') is None
