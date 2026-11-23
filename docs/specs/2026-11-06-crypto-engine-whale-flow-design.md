@@ -560,8 +560,10 @@ Design: `docs/superpowers/specs/2026-11-18-btc-sleeve-floor-and-class-bench-desi
   liq 0.5 — equity paid 20 % for a 10 % floor): the floor is a beta allocation and is never run through the crypto regime
   dampener. `floor_weight(..., liq_floor=liq_eq, liq_own=liq_cr)` decides in DOLLARS — own conviction wins iff its real
   post-normaliser dollars `w_btc·λ·liq_cr·NAV/(G+w_btc)` reach frac·NAV; otherwise `max(w_f, w_btc)` (k = λ·liq_eq) stays
-  in the normaliser and the BTC leg is priced at exactly frac·NAV. Equity gives up exactly its pro-rata share of frac·NAV
-  in every crypto regime (`eq_scale_ratio` 0.90 at λ·liq_eq = 1); continuous on both sides of the boundary (no cliff).
+  in the normaliser and the BTC leg is priced at exactly frac·NAV. When the floor is injected (own below w_f) equity gives up
+  exactly its pro-rata share of frac·NAV in every crypto regime (`eq_scale_ratio` 0.90 at λ·liq_eq = 1). In the narrow band
+  w_f < w_btc < boundary (only when liq_cr < liq_eq) the own weight stays in the denominator, so the pool leaves the
+  difference uninvested — accepted as the price of continuity (no cliff on either side).
   A BTC weight already above the floor is left alone (label `own`). Degenerate `k <= frac` (no positive solution): BTC takes the
   half-book weight `max(w_btc, G)` — still a weight, so Σ = λ·NAV is conserved — with a WARN, bounded by the 25 % clamp / gross cap /
   funding / hold-flat (no post-normaliser dollar floor; own conviction above G keeps the label `own`).
