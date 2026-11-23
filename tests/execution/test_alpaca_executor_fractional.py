@@ -148,10 +148,23 @@ def test_rth_long_partial_reduce_passes_qty(monkeypatch):
     assert res['status'] == 'submitted' and oid == 'oid-9'
 
 
-def test_rth_long_fractional_reduce_qty(monkeypatch):
+def test_rth_long_one_third_reduce_qty(monkeypatch):
     _, _, calls = _rth_close(3.0, 40.0, 120.0, monkeypatch)
     argv = [c for c in calls if c[:2] == ['position', 'close']][0]
     assert argv[argv.index('--qty') + 1] == '1'
+
+
+def test_rth_fractional_position_reduce_qty(monkeypatch):
+    _, _, calls = _rth_close(0.5, 40.0, 100.0, monkeypatch)
+    argv = [c for c in calls if c[:2] == ['position', 'close']][0]
+    assert argv[argv.index('--qty') + 1] == '0.2'
+
+
+def test_rth_reduce_lookup_failure_falls_back_to_percentage(monkeypatch):
+    res, _, calls = _rth_close(0.0, 70.0, 100.0, monkeypatch)
+    argv = [c for c in calls if c[:2] == ['position', 'close']][0]
+    assert argv[argv.index('--percentage') + 1] == '70.0'
+    assert '--qty' not in argv and res['status'] == 'submitted'
 
 
 def test_rth_full_close_has_no_qty_or_percentage(monkeypatch):

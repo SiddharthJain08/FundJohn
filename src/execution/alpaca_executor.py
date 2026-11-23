@@ -2383,17 +2383,25 @@ def _rth_position_close(ticker, coid, *, notional_usd, current_usd, equity, pct_
     cli_args_oc = ['position', 'close', '--symbol-or-asset-id', ticker]
     is_partial_reduce = (current_oc > 0 and notional_oc < current_oc * 0.999)
     reduce_qty = None
+    pct_oc = None
     if is_partial_reduce:
         # Fractional shares: reduce by an explicit decimal --qty (shorts floor
         # to whole shares). Zero → SKIP before any cancel/close broker call.
         pos_qty = float(_fetch_position_qty(ticker))
-        reduce_qty = _reduce_qty(pos_qty, notional_oc, current_oc, is_short=pos_qty < 0)
-        if reduce_qty <= 0:
-            log(f'  SKIP {ticker}: reduce_rounds_to_zero (reduce ${notional_oc:,.2f} of ${current_oc:,.2f})')
-            return ({'ticker': ticker, 'status': 'SKIP', 'reason': 'reduce_rounds_to_zero',
-                     'client_order_id': coid, 'tif': 'day', 'order_class': 'simple'},
-                    None)
-        cli_args_oc += ['--qty', _qty_str(reduce_qty)]
+        if pos_qty == 0:
+            # Lookup failed / qty unknown (sign unknown too): fall back to the
+            # legacy percentage reduce so a transient CLI error cannot block it.
+            pct_oc = max(0.01, min(99.99, round((notional_oc / current_oc) * 100.0, 2)))
+            log(f'  ↳ {ticker}: position qty unavailable — reducing by percentage ({pct_oc}%)')
+            cli_args_oc += ['--percentage', str(pct_oc)]
+        else:
+            reduce_qty = _reduce_qty(pos_qty, notional_oc, current_oc, is_short=pos_qty < 0)
+            if reduce_qty <= 0:
+                log(f'  SKIP {ticker}: reduce_rounds_to_zero (reduce ${notional_oc:,.2f} of ${current_oc:,.2f})')
+                return ({'ticker': ticker, 'status': 'SKIP', 'reason': 'reduce_rounds_to_zero',
+                         'client_order_id': coid, 'tif': 'day', 'order_class': 'simple'},
+                        None)
+            cli_args_oc += ['--qty', _qty_str(reduce_qty)]
     # SP-6 Phase C: resting GTC OCO take-profit/stop legs reserve the full
     # position qty → `position close` 403s "insufficient qty available"
     # (proven 2026-06-04: all 4 EOD orphan closes rejected). Cancel them
@@ -2424,7 +2432,12 @@ def _rth_position_close(ticker, coid, *, notional_usd, current_usd, equity, pct_
     qty_co_r = abs(float((pay_co or {}).get('qty') or 0))
     entry_approx = round(notional_co / qty_co_r, 4) if qty_co_r > 0 else 0.0
     kind_co = 'REDUCE' if is_partial_reduce else 'CLOSE'
-    pct_tag = f' (x{_qty_str(reduce_qty)} sh)' if is_partial_reduce else ''
+    if not is_partial_reduce:
+        pct_tag = ''
+    elif reduce_qty is not None:
+        pct_tag = f' (x{_qty_str(reduce_qty)} sh)'
+    else:
+        pct_tag = f' ({pct_oc}%)'
     log(f'↩ {ticker} {kind_co}{pct_tag}  notional≈${notional_co:,.0f}'
         f'  order={order_id or "?"}')
     return ({'ticker': ticker, 'status': 'submitted',
