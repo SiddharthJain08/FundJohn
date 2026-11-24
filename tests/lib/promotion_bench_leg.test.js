@@ -220,7 +220,7 @@ test('chosen shrink-tier sleeves win over strategy_backtest_regimes', async () =
   const { r } = await withWarns(() => auto(q));
   assert.deepEqual(r.qualifying, []);                   // full sleeve would pass; chosen tier does not
   assert.deepEqual(r.diag.CRISIS.failed, ['bench']);
-  assert.ok(q.calls.some(s => /universe_shrink_metrics[\s\S]*chosen[\s\S]*<> 'TOTAL'/.test(s)));
+  assert.ok(q.calls.some(s => /FROM universe_shrink_metrics_effective[\s\S]*chosen[\s\S]*<> 'TOTAL'/.test(s)));
   assert.equal(q.calls.filter(s => /FROM strategy_backtest_regimes/.test(s)).length, 0);
 });
 test('empty shrink => falls back to strategy_backtest_regimes', async () => {

@@ -230,8 +230,10 @@ async function _regimeSleeves(dbQuery, runId) {
   if (benchGateEnabled()) {
     try {
       const sh = await dbQuery(
+        // 2026-11-24: the _effective view substitutes the run-of-record row
+        // for equal-trade-count cells (same source as activation_assigner).
         `SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
-           FROM universe_shrink_metrics
+           FROM universe_shrink_metrics_effective
           WHERE run_id = $1 AND chosen AND regime_state <> 'TOTAL'`, [runId]);
       if (sh && sh.rows && sh.rows.length > 0) return new Map(sh.rows.map(r => [r.regime_state, r]));
     } catch (_) { /* fall through to the full-run sleeves */ }

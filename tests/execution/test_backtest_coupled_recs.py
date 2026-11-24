@@ -218,6 +218,27 @@ def test_stored_baseline_parses_config_json_string(monkeypatch):
     assert base['median_stop_pct'] is None
 
 
+def test_chosen_baseline_sharpe_reads_effective_view(monkeypatch):
+    """2026-11-24 shrink Sharpe marks fix: the chosen-tier baseline reads the
+    universe_shrink_metrics_effective view (run-of-record TOTAL row wherever
+    the tier's trade_count equals the run's)."""
+    import psycopg2
+    sqls = []
+
+    class _Cur(_FakeOneCursor):
+        def execute(self, sql, *a, **k):
+            sqls.append(sql)
+
+    class _Conn(_FakeOneConn):
+        def cursor(self):
+            return _Cur(self._results)
+
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://stub')
+    monkeypatch.setattr(psycopg2, 'connect', lambda uri: _Conn([(0.94,)]))
+    assert bc._chosen_baseline_sharpe('S_x', 'tier_liquid') == 0.94
+    assert len(sqls) == 1 and 'FROM universe_shrink_metrics_effective' in sqls[0]
+
+
 def test_stored_baseline_none_only_when_missing(monkeypatch):
     # No staleness fallback under the no-refresh regime: an old canonical row
     # just means nothing changed since — it is still the baseline.

@@ -161,7 +161,8 @@ def _chosen_baseline_sharpe(strategy_id, tier):
     import psycopg2
     try:
         with psycopg2.connect(os.environ['POSTGRES_URI']) as conn, conn.cursor() as cur:
-            cur.execute("""SELECT sharpe FROM universe_shrink_metrics
+            # 2026-11-24: _effective view = run-of-record TOTAL when trade counts match.
+            cur.execute("""SELECT sharpe FROM universe_shrink_metrics_effective
                             WHERE strategy_id=%s AND tier=%s AND regime_state='TOTAL'
                             ORDER BY computed_at DESC LIMIT 1""",
                         (strategy_id, tier))
