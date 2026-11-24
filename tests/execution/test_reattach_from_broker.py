@@ -208,3 +208,36 @@ def test_sweep_noop_when_broker_unreadable(monkeypatch):
         raise AssertionError('must not list or cancel orders')
     monkeypatch.setattr(sr, '_run_cli', _cli)
     assert sr.sweep_orphan_exits(dry_run=False) == []
+
+
+def test_sweep_matches_crypto_order_symbol_to_position_symbol(monkeypatch):
+    """2026-11-24 incident: Alpaca lists a crypto POSITION as 'BTCUSD' but its
+    resting stop ORDER as 'BTC/USD'. The sweep compared the raw strings, saw no
+    position for 'BTC/USD' and cancelled the only protective stop on a held
+    0.148 BTC. Symbols must be compared in a normalised form; an equity stop on
+    a flat symbol is still cancelled."""
+    monkeypatch.setattr(sr, '_post_alert', lambda *a, **k: None)
+    orders = [
+        {'symbol': 'BTC/USD', 'type': 'stop_limit', 'qty': '0.111292', 'id': 'c1',
+         'status': 'new', 'client_order_id': 'FJ-stop'},
+        {'symbol': 'ETH/USD', 'type': 'stop_limit', 'qty': '1.5', 'id': 'c2',
+         'status': 'new', 'client_order_id': 'FJ-stop2'},
+        {'symbol': 'KLAC', 'type': 'stop', 'qty': '4', 'id': 'o1',
+         'status': 'new', 'client_order_id': 'x1'},
+    ]
+    cancels = []
+    monkeypatch.setattr(sr, '_run_cli', _sweep_cli(
+        [{'symbol': 'BTCUSD', 'qty': '0.148292179', 'asset_class': 'crypto'}],
+        orders, cancels))
+    sr.sweep_orphan_exits(dry_run=False)
+    assert cancels == ['c2', 'o1']          # ETH flat → cancel; BTC held → keep
+
+
+def test_sweep_only_filter_accepts_either_crypto_form(monkeypatch):
+    monkeypatch.setattr(sr, '_post_alert', lambda *a, **k: None)
+    orders = [{'symbol': 'ETH/USD', 'type': 'stop_limit', 'qty': '1.5', 'id': 'c2',
+               'status': 'new', 'client_order_id': 'FJ-stop2'}]
+    cancels = []
+    monkeypatch.setattr(sr, '_run_cli', _sweep_cli([], orders, cancels))
+    sr.sweep_orphan_exits(dry_run=False, only='ETH-USD')
+    assert cancels == ['c2']

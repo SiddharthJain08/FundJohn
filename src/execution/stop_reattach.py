@@ -930,6 +930,15 @@ def _position_still_open(symbol: str) -> bool:
     return False
 
 
+def _flat_symbol(sym) -> str:
+    """Broker symbol in a form that is identical for a crypto POSITION ('BTCUSD'),
+    its ORDER ('BTC/USD') and the engine ticker ('BTC-USD'): strip '/' and '-',
+    upper-case. Equity symbols carry neither character (Alpaca uses 'BRK.B'), so
+    they are unchanged. 2026-11-24: the orphan sweep compared the raw strings
+    and cancelled the only protective stop on a held 0.148 BTC."""
+    return str(sym or '').replace('/', '').replace('-', '').strip().upper()
+
+
 def sweep_orphan_exits(dry_run: bool, only: str | None = None) -> list[str]:
     """Cancel EXIT orders whose symbol has no open position — a triggered
     orphan doesn't close anything, it opens a fresh unintended position.
@@ -948,9 +957,9 @@ def sweep_orphan_exits(dry_run: bool, only: str | None = None) -> list[str]:
     for p in (positions or []):
         try:
             if abs(float(p.get('qty') or 0)) > 0:
-                pos_syms.add(p.get('symbol'))
+                pos_syms.add(_flat_symbol(p.get('symbol')))
         except (TypeError, ValueError):
-            pos_syms.add(p.get('symbol'))
+            pos_syms.add(_flat_symbol(p.get('symbol')))
     ok, orders, _ = _fetch_open_orders()
     if not ok:
         log('orphan sweep skipped: order list unavailable')
@@ -958,7 +967,10 @@ def sweep_orphan_exits(dry_run: bool, only: str | None = None) -> list[str]:
     cancelled: list[str] = []
     for o in (orders or []):
         sym = o.get('symbol')
-        if not sym or sym in pos_syms or (only and sym != only):
+        # Compare in the flat form: a crypto stop lists as 'BTC/USD' while the
+        # position it protects lists as 'BTCUSD' (and --only may say 'BTC-USD').
+        if (not sym or _flat_symbol(sym) in pos_syms
+                or (only and _flat_symbol(sym) != _flat_symbol(only))):
             continue
         if (o.get('status') or '') == 'pending_cancel':
             continue
