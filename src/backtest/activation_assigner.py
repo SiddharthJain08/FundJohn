@@ -779,14 +779,18 @@ def _fetch_backtest_rows(conn, strategy_id: str):
     # strategy no longer trades. Falls back to the full-run sleeves when no
     # chosen rows exist (no shrink yet / non-ladder predicate).
     cur.execute("""
-        SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
-        FROM universe_shrink_metrics
+        SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar, from_run_row
+        FROM universe_shrink_metrics_effective
         WHERE run_id = %s AND chosen AND regime_state <> 'TOTAL'
     """, (run_id,))
     rows = cur.fetchall()
     if rows:
+        # 2026-11-24 (shrink Sharpe marks fix, Part A): the view substitutes
+        # the run-of-record row wherever the chosen tier has the run's own
+        # trade_count (identical trade set, smear vs marks methodology).
+        n_run = sum(1 for r in rows if r.get('from_run_row'))
         _log(f'{strategy_id}: eligibility from chosen shrink sleeves '
-             f'({len(rows)} regimes)')
+             f'({len(rows)} regimes, {n_run} from run rows)')
     else:
         cur.execute("""
             SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar

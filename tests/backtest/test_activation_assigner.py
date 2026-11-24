@@ -164,7 +164,7 @@ class TestComputeEligible(unittest.TestCase):
         eligible, diag = aa.compute_eligible(conn, 'S_test')
         self.assertTrue(eligible['LOW_VOL'])
         self.assertEqual(len(conn.executed), 2)      # no fallback query
-        self.assertIn('universe_shrink_metrics', conn.executed[1][0])
+        self.assertIn('universe_shrink_metrics_effective', conn.executed[1][0])
 
     def test_sharpe_threshold_boundary(self):
         # 2026-09-25 bench-relative: `threshold` is retired plumbing; the

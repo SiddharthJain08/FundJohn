@@ -399,7 +399,9 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
     seen_strats = set()
 
     # Tier 0 (universe ladder campaign, 2026-07-21): CHOSEN-tier sleeves from
-    # the universe shrink (universe_shrink_metrics.chosen). When a strategy's
+    # the universe shrink (universe_shrink_metrics.chosen, read through the
+    # universe_shrink_metrics_effective view since 2026-11-24 so equal-count
+    # cells carry the run-of-record numbers). When a strategy's
     # live universe is a ladder tier selected by the shrink pass, its weights
     # must derive from THAT tier's sleeves — the full-universe run describes
     # a universe it no longer trades. A strategy with any chosen rows is
@@ -410,7 +412,7 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
         cur.execute('''
             SELECT latest.strategy_id, m.regime_state, m.sharpe, m.trade_count,
                    m.mean_holding_days
-            FROM universe_shrink_metrics m
+            FROM universe_shrink_metrics_effective m
             JOIN (
                 SELECT DISTINCT ON (strategy_id) strategy_id, run_id
                 FROM strategy_backtest_runs

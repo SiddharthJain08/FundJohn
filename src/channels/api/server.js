@@ -1722,8 +1722,8 @@ app.get('/api/strategies', async (req, res) => {
     const shrinkChosenRows = (await dbQuery(`
       SELECT m.strategy_id, m.tier, m.regime_state, m.sharpe, m.max_dd_pct,
              m.trade_count, m.win_rate, m.sortino, m.calmar,
-             m.mean_holding_days, m.return_pct
-        FROM universe_shrink_metrics m
+             m.mean_holding_days, m.return_pct, m.from_run_row
+        FROM universe_shrink_metrics_effective m
         JOIN (SELECT DISTINCT ON (strategy_id) strategy_id, run_id
                 FROM strategy_backtest_runs WHERE primary_window = TRUE
                ORDER BY strategy_id, run_at DESC) r ON r.run_id = m.run_id
@@ -1746,6 +1746,7 @@ app.get('/api/strategies', async (req, res) => {
           sharpe: m.sharpe, sortino: m.sortino, calmar: m.calmar,
           return_pct: m.return_pct, max_dd_pct: m.max_dd_pct,
           trade_count: m.trade_count, universe_tier: m.tier,
+          shrink_from_run_row: m.from_run_row === true,
         });
       } else {
         const prior = entry.regime_breakdown[m.regime_state] || {};
@@ -1763,6 +1764,7 @@ app.get('/api/strategies', async (req, res) => {
           universe_tier:     m.tier,
           sortino:           m.sortino,
           calmar:            m.calmar,
+          from_run_row:      m.from_run_row === true,
         };
       }
     }
