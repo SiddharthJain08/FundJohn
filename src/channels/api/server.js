@@ -8,6 +8,7 @@ const { verdictCache, query: dbQuery } = require('../../database/postgres');
 const { readParquet } = require('../../data/parquet_store');
 const fs = require('fs');
 const { runAlpaca } = require('./alpaca_cli');
+const { engineTicker, mapBrokerPositions, buildBrokerBrackets } = require('./broker_symbols');
 const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
 const { buildStrategyRow } = require('./strategy_row');
 const { blendScope } = require('./blend_scope');
@@ -352,42 +353,16 @@ app.get('/api/portfolio/positions', async (req, res) => {
     // and the expanded sub-rows from strategy intents. Pre-fix the rollup
     // summed intents and produced > 100% NAV on multi-strategy tickers
     // (WBD hit 409% across 17 strategies).
-    const brokerPositions = {};
+    let brokerPositions = {};
     let brokerFetchOk = false;   // ok + parseable — an EMPTY list is still truth
     try {
       const positionsResp = await runAlpaca(['position', 'list'], { timeout: 10_000 });
       brokerFetchOk = Boolean(positionsResp && positionsResp.ok
         && Array.isArray(positionsResp.payload));
-      const list = brokerFetchOk ? positionsResp.payload : [];
-      for (const p of list) {
-        if (!p || !p.symbol) continue;
-        const qty  = parseFloat(p.qty);
-        const mv   = parseFloat(p.market_value);
-        const avg  = parseFloat(p.avg_entry_price);
-        const cur  = parseFloat(p.current_price);
-        const plpc = parseFloat(p.unrealized_plpc);
-        // Capture the broker's actual position-lifetime $ P&L so the
-        // dashboard tile can display it directly (matching the % shown
-        // alongside). Without this field the client falls back to
-        // nav × contrib_pct, which is DB-derived from signal_pnl marks
-        // and disagrees with the live broker number whenever today's
-        // price has moved since the last reconcile.
-        const upl  = parseFloat(p.unrealized_pl);
-        brokerPositions[p.symbol] = {
-          qty:               Number.isFinite(qty)  ? qty  : null,
-          market_value:      Number.isFinite(mv)   ? mv   : null,
-          avg_entry_price:   Number.isFinite(avg)  ? avg  : null,
-          current_price:     Number.isFinite(cur)  ? cur  : null,
-          unrealized_plpc:   Number.isFinite(plpc) ? plpc : null,
-          unrealized_pl:     Number.isFinite(upl)  ? upl  : null,
-          // size_pct = market_value / NAV, normalised to a fraction (0.05 = 5%).
-          // Absolute value so shorts contribute positive size to the heatmap
-          // tile area; direction (side) is the qty sign carrier.
-          size_pct: (Number.isFinite(mv) && nav && nav > 0)
-            ? Math.abs(mv) / nav : null,
-          side: Number.isFinite(qty) ? (qty >= 0 ? 'long' : 'short') : null,
-        };
-      }
+      // Keyed by ENGINE ticker (BTCUSD -> BTC-USD) so crypto rows survive the
+      // broker-truth filter below. Per-field parsing lives in broker_symbols.js;
+      // p.unrealized_pl is the broker's position-lifetime $ P&L (see tile note).
+      brokerPositions = mapBrokerPositions(brokerFetchOk ? positionsResp.payload : [], nav);
     } catch (_) { /* broker leg degraded — rows ship without broker_position */ }
 
     // Resting exit legs at the broker (2026-07-15), keyed by symbol. This is
@@ -418,32 +393,14 @@ app.get('/api/portfolio/positions', async (req, res) => {
     // would do, but a silently truncated page would drop real brackets and
     // report them as absent — the same false alarm, arriving later and only
     // once the book grows.
-    const brokerBrackets = {};
+    let brokerBrackets = {};
     let brokerBracketsOk = false;
-    const absorbLeg = (o) => {
-      if (!o || !o.symbol || o.status === 'pending_cancel') return;
-      const leg = brokerBrackets[o.symbol]
-        || (brokerBrackets[o.symbol] = { stop: null, target: null, exiting: null });
-      const sp = parseFloat(o.stop_price);
-      const lp = parseFloat(o.limit_price);
-      // emex_ (past-stop emergency exit) / ahsx_ (ext-hours monitor exit) are
-      // LIQUIDATIONS at ~current price, not take-profits — folding their limit
-      // into `target` would paint a breached position as happily bracketed.
-      const coid = o.client_order_id || '';
-      if (coid.startsWith('emex_') || coid.startsWith('ahsx_')) {
-        if (Number.isFinite(lp)) leg.exiting = lp;
-        return;
-      }
-      if (Number.isFinite(sp)) leg.stop = sp;
-      if (Number.isFinite(lp)) leg.target = lp;
-      for (const child of (o.legs || [])) absorbLeg(child);
-    };
     try {
       const ordersResp = await runAlpaca(
         ['order', 'list', '--nested', '--limit', '500'], { timeout: 10_000 });
       if (ordersResp && ordersResp.ok && Array.isArray(ordersResp.payload)) {
         brokerBracketsOk = true;
-        for (const o of ordersResp.payload) absorbLeg(o);
+        brokerBrackets = buildBrokerBrackets(ordersResp.payload);
       }
     } catch (_) { /* brokerBracketsOk stays false — panel renders brackets as unknown */ }
 
@@ -460,7 +417,7 @@ app.get('/api/portfolio/positions', async (req, res) => {
       const nowS = Date.now() / 1000;
       for (const [sym, it] of Object.entries(raw)) {
         if (it && typeof it === 'object' && nowS - (it.ts || 0) < 24 * 3600) {
-          pendingExitSyms.add(sym);
+          pendingExitSyms.add(engineTicker(sym));
         }
       }
     } catch (_) { /* no journal file = nothing queued */ }
