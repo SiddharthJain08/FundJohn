@@ -8,7 +8,7 @@ const { verdictCache, query: dbQuery } = require('../../database/postgres');
 const { readParquet } = require('../../data/parquet_store');
 const fs = require('fs');
 const { runAlpaca } = require('./alpaca_cli');
-const { engineTicker, mapBrokerPositions, buildBrokerBrackets } = require('./broker_symbols');
+const { mapBrokerPositions, buildBrokerBrackets, pendingExitKeys } = require('./broker_symbols');
 const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
 const { buildStrategyRow } = require('./strategy_row');
 const { blendScope } = require('./blend_scope');
@@ -417,7 +417,7 @@ app.get('/api/portfolio/positions', async (req, res) => {
       const nowS = Date.now() / 1000;
       for (const [sym, it] of Object.entries(raw)) {
         if (it && typeof it === 'object' && nowS - (it.ts || 0) < 24 * 3600) {
-          pendingExitSyms.add(engineTicker(sym));
+          for (const k of pendingExitKeys(sym, brokerPositions)) pendingExitSyms.add(k);
         }
       }
     } catch (_) { /* no journal file = nothing queued */ }

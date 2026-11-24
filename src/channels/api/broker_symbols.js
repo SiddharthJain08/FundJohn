@@ -62,4 +62,15 @@ function buildBrokerBrackets(orders) {
   return out;
 }
 
-module.exports = { engineTicker, mapBrokerPositions, buildBrokerBrackets };
+// Keys under which a pending-exit journal symbol should be matched. The journal
+// is keyed by the broker position symbol (BTCUSD, no asset_class), so also add
+// the crypto engine ticker when the broker actually holds it.
+function pendingExitKeys(sym, brokerPositions) {
+  const key = engineTicker(sym);
+  const alt = engineTicker(sym, 'crypto');
+  const keys = [key];
+  if (alt !== key && brokerPositions && brokerPositions[alt]) keys.push(alt);
+  return keys;
+}
+
+module.exports = { engineTicker, mapBrokerPositions, buildBrokerBrackets, pendingExitKeys };

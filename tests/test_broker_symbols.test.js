@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { engineTicker, mapBrokerPositions, buildBrokerBrackets } =
+const { engineTicker, mapBrokerPositions, buildBrokerBrackets, pendingExitKeys } =
   require('../src/channels/api/broker_symbols');
 
 test('engineTicker: crypto broker forms map to BASE-USD', () => {
@@ -55,4 +55,11 @@ test('buildBrokerBrackets: crypto order symbol, legs, pending_cancel, emex_', ()
   assert.deepEqual(b['BTC-USD'], { stop: 80000, target: 99000, exiting: null });
   assert.deepEqual(b.SPY, { stop: 400, target: null, exiting: null });
   assert.deepEqual(b.AAPL, { stop: null, target: null, exiting: 190 });
+});
+
+test('pendingExitKeys: journal keyed by broker symbol', () => {
+  assert.deepEqual(pendingExitKeys('BTCUSD', { 'BTC-USD': {} }), ['BTCUSD', 'BTC-USD']);
+  assert.deepEqual(pendingExitKeys('BTC/USD', {}), ['BTC-USD']);
+  assert.deepEqual(pendingExitKeys('AAPL', { AAPL: {} }), ['AAPL']);
+  assert.deepEqual(pendingExitKeys('BTCUSD', {}), ['BTCUSD']);
 });
