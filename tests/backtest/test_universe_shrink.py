@@ -132,3 +132,68 @@ def test_mean_tier_sizes_window_scoped():
     sizes = mean_tier_sizes(SNAPS, MEMBERS, '2024-01-01', '2024-02-28')
     assert sizes['sp500'] == 1.0 and sizes['tier_liquid'] == 4.0
     assert mean_tier_sizes(SNAPS, MEMBERS, '2030-01-01', '2030-12-31')['sp500'] is None
+
+
+# ── marks-based shrink (2026-11-24 shrink Sharpe fix, Part B) ───────────────
+def _closes(start='2024-01-02', end='2024-04-30', step=0.003):
+    idx = pd.bdate_range(start, end)
+    vals = [100.0 * (1.0 + step * ((i % 7) - 3)) for i in range(len(idx))]
+    return pd.Series(vals, index=pd.DatetimeIndex(idx), dtype=float)
+
+
+def test_prepare_for_shrink_attaches_marks():
+    from backtest.universe_shrink import prepare_for_shrink
+    closes = {'AAA': _closes()}
+    with_path = dict(_trade('AAA', '2024-02-05', pnl=0.05, hold=3),
+                     direction='LONG', exit_date=date(2024, 2, 16))
+    no_path = dict(_trade('ZZZ', '2024-02-05', pnl=0.02, hold=3),
+                   direction='SHORT', exit_date=date(2024, 2, 16))
+    out = prepare_for_shrink([with_path, no_path], closes.get)
+    assert 'daily_marks' not in with_path              # inputs not mutated
+    marks = out[0]['daily_marks']
+    assert marks and all(pd.Timestamp('2024-02-05') < d <= pd.Timestamp('2024-02-16')
+                         for d, _ in marks)
+    prod = 1.0
+    for _, r in marks:
+        prod *= 1.0 + r
+    assert abs(prod - 1.05) < 1e-9                     # endpoint-exact
+    assert 'daily_marks' not in out[1]                 # no closes → smear
+    assert out[1]['holding_days'] == 11                # calendar span
+    # bucketing keys pass through untouched
+    assert out[0]['ticker'] == 'AAA' and out[0]['entry_date'] == date(2024, 2, 5)
+
+
+def test_shrink_and_select_aggregates_on_marks():
+    from backtest.unified_backtest import aggregate_metrics
+    from backtest.universe_shrink import prepare_for_shrink
+    closes = {'AAA': _closes(), 'DDD': _closes(step=-0.004)}
+    trades = []
+    for d in range(1, 21):
+        trades.append(dict(_trade('AAA', f'2024-02-{d:02d}', pnl=0.01 + 0.002 * (d % 5)),
+                           direction='LONG',
+                           exit_date=pd.Timestamp(f'2024-02-{d:02d}').date()
+                           + pd.Timedelta(days=6).to_pytimedelta()))
+        trades.append(dict(_trade('DDD', f'2024-03-{d:02d}', pnl=-0.01 - 0.002 * (d % 3)),
+                           direction='SHORT',
+                           exit_date=pd.Timestamp(f'2024-03-{d:02d}').date()
+                           + pd.Timedelta(days=5).to_pytimedelta()))
+    prepared = prepare_for_shrink(trades, closes.get)
+    assert all('daily_marks' in t for t in prepared)
+    res = shrink_and_select(prepared, SNAPS, MEMBERS, _regimes_series(), DAY_FREQ)
+    expect = aggregate_metrics(prepared)['sharpe']
+    assert res['totals_by_tier'][FULL_TIER]['sharpe'] == expect
+    # ... and it is NOT the smear number (marks actually changed the result)
+    smear = aggregate_metrics(trades)['sharpe']
+    assert expect != smear
+
+
+def test_parity_check_tolerance_and_nulls():
+    from backtest.universe_shrink import parity_check
+    assert parity_check(0.66, 0.70, 0.10) is True
+    assert parity_check(0.66, 0.77, 0.10) is False
+    assert parity_check(0.30, 0.66, 0.10) is False
+    assert parity_check(None, 0.66, 0.10) is True
+    assert parity_check(0.66, None, 0.10) is True
+    assert parity_check(float('nan'), 0.66, 0.10) is True
+    assert parity_check(0.66, float('inf'), 0.10) is True
+    assert parity_check(0.5, 0.5, 0.0) is True

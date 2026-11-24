@@ -46,11 +46,13 @@ from backtest.universe_ladder_selection import LADDER_TIERS  # noqa: E402
 from backtest import universe_ladder_recs as recs  # noqa: E402
 from backtest.universe_shrink import (  # noqa: E402
     FULL_TIER, load_membership, mean_tier_sizes, shrink_and_select, db_rows,
+    parity_check, prepare_for_shrink,
 )
 from backtest.trades_primary import trades_source  # noqa: E402
 
 MANIFEST = ROOT / 'src' / 'strategies' / 'manifest.json'
 REGIMES_PARQUET = ROOT / 'data' / 'master' / 'historical_regimes.parquet'
+PARITY_TOL_ENV = 'OPENCLAW_SHRINK_PARITY_TOL'
 GRID_KEYS = ('sharpe', 'max_dd_pct', 'win_rate', 'trades_n', 'sortino',
              'calmar', 'mean_holding_days', 'mean_universe_size')
 
@@ -124,7 +126,9 @@ def main() -> int:
     ap.add_argument('--limit', type=int)
     args = ap.parse_args()
 
+    import gc
     import pandas as pd
+    from backtest import backtest_panel
     from backtest.unified_backtest import load_regimes
     from backtest.regime_blended_backtest import regime_day_frequency
 
@@ -134,6 +138,7 @@ def main() -> int:
     regimes = load_regimes()
     day_freq = regime_day_frequency(REGIMES_PARQUET)
     candidate_set_id = f'shrink-1-{artifact_run_id}'
+    parity_tol = float(os.environ.get(PARITY_TOL_ENV) or 0.10)
 
     manifest = json.loads(MANIFEST.read_text())['strategies']
     states = {s.strip() for s in args.states.split(',')}
@@ -144,10 +149,11 @@ def main() -> int:
     with pg.cursor() as cur:
         cur.execute("""
             SELECT DISTINCT ON (strategy_id) strategy_id, run_id::text,
-                   start_date, end_date
+                   start_date, end_date, total_sharpe
               FROM strategy_backtest_runs WHERE primary_window
              ORDER BY strategy_id, run_at DESC""")
-        primaries = {r[0]: {'run_id': r[1], 'start': r[2], 'end': r[3]}
+        primaries = {r[0]: {'run_id': r[1], 'start': r[2], 'end': r[3],
+                            'total_sharpe': r[4]}
                      for r in cur.fetchall()}
 
     sids = []
@@ -164,9 +170,11 @@ def main() -> int:
     if args.limit:
         sids = sids[:args.limit]
     print(f'[shrink] strategies={len(sids)} candidate_set={candidate_set_id} '
-          f'adopt={args.adopt} dry_run={args.dry_run}')
+          f'adopt={args.adopt} dry_run={args.dry_run} parity_tol={parity_tol}')
 
     changes, no_changes, adopted_ids, skipped = [], [], [], 0
+    parity_fails: list[str] = []
+    errors: list[str] = []
     for sid in sids:
         run = primaries[sid]
         with pg.cursor() as cur:
@@ -189,21 +197,52 @@ def main() -> int:
                 skipped += 1
                 continue
             cur.execute(f"""
-                SELECT ticker, entry_date, pnl_pct, holding_days, entry_regime
+                SELECT ticker, direction, entry_date, exit_date, pnl_pct,
+                       holding_days, entry_regime
                   FROM {trades_source()} WHERE run_id=%s""",
                         (run['run_id'],))
-            trades = [dict(zip(('ticker', 'entry_date', 'pnl_pct',
-                                'holding_days', 'entry_regime'), r))
+            trades = [dict(zip(('ticker', 'direction', 'entry_date',
+                                'exit_date', 'pnl_pct', 'holding_days',
+                                'entry_regime'), r))
                       for r in cur.fetchall()]
 
         w = (str(run['start']), str(run['end']))
         entry = manifest[sid]
         ic = entry.get('instrument_class') or 'equity'
-        result = shrink_and_select(
-            trades, snaps, members,
-            regimes.loc[pd.Timestamp(w[0]):pd.Timestamp(w[1])], day_freq,
-            instrument_class=ic,
-            sizes=mean_tier_sizes(snaps, members, w[0], w[1]))
+        # TRUE close-path marks (2026-11-24): without them aggregate_metrics
+        # falls back to the calendar smear and the full tier disagrees with
+        # the backtest of record. Prices are loaded per strategy (filtered
+        # read over its own tickers) and released before the next one.
+        prices = closes_for = prepared = None
+        try:
+            prices = backtest_panel.load_prices(
+                sorted({t['ticker'] for t in trades if t.get('ticker')}))
+            closes_for = backtest_panel.build_close_lookup(prices)
+            prepared = prepare_for_shrink(trades, closes_for)
+            n_marked = sum(1 for t in prepared if t.get('daily_marks'))
+            result = shrink_and_select(
+                prepared, snaps, members,
+                regimes.loc[pd.Timestamp(w[0]):pd.Timestamp(w[1])], day_freq,
+                instrument_class=ic,
+                sizes=mean_tier_sizes(snaps, members, w[0], w[1]))
+        except Exception as e:  # one strategy must not sink the pass
+            print(f'  [shrink] ERROR {sid}: {type(e).__name__}: {e} '
+                  '— rows NOT written')
+            errors.append(sid)
+            continue
+        finally:
+            del prices, closes_for, prepared
+            gc.collect()
+
+        full_total = (result['totals_by_tier'].get(FULL_TIER) or {}).get('sharpe')
+        run_total = run.get('total_sharpe')
+        if not parity_check(full_total, run_total, parity_tol):
+            print(f'[shrink] PARITY FAIL {sid} full={full_total} '
+                  f'run={run_total} — rows NOT written')
+            parity_fails.append(sid)
+            continue
+        print(f'  [shrink] parity ok {sid} full={full_total} run={run_total} '
+              f'marked={n_marked}/{len(trades)}')
         verdict = result['verdict']
         current = _current_predicate(entry)
         if verdict['verdict'] == 'no_signal':
@@ -275,13 +314,22 @@ def main() -> int:
                (' (pending rec %d)' % rec_id if verdict_name == 'change' else '')))
 
     print(f'[shrink] DONE changes={len(changes)} no_change={len(no_changes)} '
-          f'adopted={len(adopted_ids)} skipped_existing={skipped}')
+          f'adopted={len(adopted_ids)} skipped_existing={skipped} '
+          f'parity_fail={len(parity_fails)} errors={len(errors)}')
+    if parity_fails:
+        print(f'[shrink] parity_fail ids: {",".join(parity_fails)}')
+    if errors:
+        print(f'[shrink] error ids: {",".join(errors)}')
 
-    if not args.dry_run and (changes or no_changes):
+    if not args.dry_run and (changes or no_changes or parity_fails or errors):
         head = (f'**Universe Shrink — {candidate_set_id}** '
                 f'({len(changes)} changes, {len(adopted_ids)} adopted, '
-                f'{len(no_changes)} unchanged)')
+                f'{len(no_changes)} unchanged, {len(parity_fails)} parity '
+                f'fail, {len(errors)} errors)')
         lines = [head] + [f'- {c}' for c in changes]
+        lines += [f'- PARITY FAIL (rows NOT written, tol {parity_tol}): {sid}'
+                  for sid in parity_fails]
+        lines += [f'- ERROR (rows NOT written): {sid}' for sid in errors]
         buf = ''
         for ln in lines:
             if len(buf) + len(ln) + 1 > 1800:

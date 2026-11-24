@@ -15,9 +15,13 @@ would have been offered its ticker that month).
 Aggregation reuses the canonical helpers so shrunk numbers are shaped
 exactly like grid-cell metrics: aggregate_per_regime (per-sleeve) +
 universe_grid_cli.blend_metrics (day-frequency-blended TOTAL, the number
-select_tier compares). Sub-universe daily marks are not persisted, so all
-tiers AND the full baseline aggregate via the pnl smear path — tier-vs-tier
-and tier-vs-full comparisons are methodologically identical.
+select_tier compares). Daily marks are not persisted, so the driver
+re-attaches TRUE close-path marks (prepare_for_shrink → backtest_panel.
+prepare_trades_for_curve) before shrink_and_select; trades without a close
+path fall back to the calendar-span smear. All tiers AND the full baseline go
+through the same path — tier-vs-tier and tier-vs-full comparisons stay
+methodologically identical, and the full tier now reproduces the run of
+record (parity_check guards that; 2026-11-24 shrink Sharpe fix).
 """
 from __future__ import annotations
 
@@ -79,6 +83,35 @@ def mean_tier_sizes(snaps: list[str], members, window_start: str,
         sizes = [len(members[t][s]) for s in inside if s in members[t]]
         out[t] = round(sum(sizes) / len(sizes), 2) if sizes else None
     return out
+
+
+# ── marks + parity (2026-11-24 shrink Sharpe fix) ──────────────────────────
+def prepare_for_shrink(trades: list[dict], closes_for) -> list[dict]:
+    """Copy of `trades` with `daily_marks` attached along each ticker's close
+    path (closes_for(ticker) -> ascending datetime-indexed close Series or
+    None), so aggregate_metrics compounds true marks instead of the calendar
+    smear. Trades without a usable path get holding_days := calendar span
+    (the panel's smear fallback). All other keys (ticker, entry_date, …) pass
+    through untouched for bucket_trades. Thin wrapper over
+    backtest_panel.prepare_trades_for_curve (the chart's own preparation)."""
+    from backtest.backtest_panel import prepare_trades_for_curve
+    return prepare_trades_for_curve(trades, closes_for)
+
+
+def parity_check(full_total_sharpe, run_total_sharpe, tol: float) -> bool:
+    """True = OK. The shrink's full-tier whole-window Sharpe must agree with
+    the backtest of record within `tol`. Only a disagreement between two
+    FINITE values counts as failure — a NULL/NaN on either side (e.g. a run
+    total nulled by the std floor) is not evidence of drift."""
+    import math
+    try:
+        a = float(full_total_sharpe)
+        b = float(run_total_sharpe)
+    except (TypeError, ValueError):
+        return True
+    if not (math.isfinite(a) and math.isfinite(b)):
+        return True
+    return abs(a - b) <= tol
 
 
 # ── metrics + selection ─────────────────────────────────────────────────────
