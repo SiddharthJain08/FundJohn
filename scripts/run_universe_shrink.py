@@ -215,10 +215,16 @@ def main() -> int:
         # read over its own tickers) and released before the next one.
         prices = closes_for = prepared = None
         try:
-            prices = backtest_panel.load_prices(
-                sorted({t['ticker'] for t in trades if t.get('ticker')}))
-            closes_for = backtest_panel.build_close_lookup(prices)
-            prepared = prepare_for_shrink(trades, closes_for)
+            tickers = sorted({t['ticker'] for t in trades if t.get('ticker')})
+            if tickers:
+                prices = backtest_panel.load_prices(tickers)
+                closes_for = backtest_panel.build_close_lookup(prices)
+                prepared = prepare_for_shrink(trades, closes_for)
+            else:
+                # load_prices([]) reads the WHOLE panel (filters=None) — a
+                # zero-trade run (73 primaries on 11-24) must stay as cheap
+                # as before: no read, no marks, the trades as loaded.
+                prepared = list(trades)
             n_marked = sum(1 for t in prepared if t.get('daily_marks'))
             result = shrink_and_select(
                 prepared, snaps, members,
