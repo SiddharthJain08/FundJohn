@@ -61,6 +61,12 @@ ALPACA_CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
 # TTLs
 COOLDOWN_TTL_S = 3600     # 60 min — blocks back-to-back redeploys
 SENTINEL_TTL_S = 86400    # 24h — same-transition idempotency
+# 2026-11-25 operator ruling: a redeploy that lands outside RTH is DEFERRED to
+# the open, not dropped. The marker is consumed by run_intraday_market_state.py
+# at the first live tick in [09:35, 15:30) ET. Latest transition wins (one key).
+# 4 days so a Friday 16:00 ET flip survives a long weekend.
+DEFERRED_KEY = 'redeploy:deferred'
+DEFERRED_TTL_S = 4 * 86400
 REASON_MAX_LEN = 80
 ORCHESTRATOR_TIMEOUT_S = 1800   # 30 min
 
@@ -138,6 +144,23 @@ def _close_execute_inflight(r, run_date) -> bool:
     try:
         return bool(r.get(f'execute:close:inflight:{run_date}'))
     except Exception:
+        return False
+
+
+def defer_to_open(r, reason: str, run_date: str, episode: str | None) -> bool:
+    """Record this redeploy for the next RTH open (overwrites an older
+    marker — the newest transition is the one the book should reflect).
+    Returns True when the marker was written."""
+    if r is None:
+        return False
+    try:
+        r.set(DEFERRED_KEY, json.dumps({
+            'reason': reason, 'episode': episode, 'date': run_date,
+            'deferred_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+        }), ex=DEFERRED_TTL_S)
+        return True
+    except Exception as e:   # noqa: BLE001
+        logger.warning('failed to write %s: %s', DEFERRED_KEY, e)
         return False
 
 
@@ -256,7 +279,7 @@ def _report_failed(reason: str, rc: int, duration_s: float,
 
 # ── Steps ────────────────────────────────────────────────────────────────────
 
-REDEPLOY_STEPS = 'signals,handoff,trade,alpaca,reconcile'
+REDEPLOY_STEPS = 'signals,handoff,trade,alpaca,reconcile,stop_reattach'
 
 # The redeploy REGENERATES signals in its `signals` step, so — unlike the daily
 # cycle, which is news-gated by the 9:15 ET pre-market gate before its trade step —
@@ -266,8 +289,17 @@ REDEPLOY_STEPS = 'signals,handoff,trade,alpaca,reconcile'
 # the news gate over them, THEN handoff→trade→… so news-rejected signals never reach
 # the sizer. (run_gate updates execution_signals.lifecycle_state, exactly as it does
 # for the daily flow.)
+#
+# `stop_reattach` runs last (2026-11-09): every cron-schedule.js dispatch chain
+# that submits orders (scheduled-execute, eod-into-close-fill, sameday-execute)
+# follows alpaca→reconcile with stop_reattach, but this redeploy path didn't —
+# an intraday regime-transition redeploy (e.g. TRANSITIONING→LOW_VOL) could
+# submit hundreds of new orders via `alpaca` and leave every one of them naked
+# until the next scheduled stop_reattach pass (up to ~6h later). Found 2026-11-09
+# when a 10:08 ET redeploy (INTRADAY_HMM_TRANSITIONING_LOW_VOL, 426 orders) left
+# 368/370 equity positions without a covering stop.
 _REDEPLOY_STEPS_PRE_GATE = 'signals'
-_REDEPLOY_STEPS_POST_GATE = 'handoff,trade,alpaca,reconcile'
+_REDEPLOY_STEPS_POST_GATE = 'handoff,trade,alpaca,reconcile,stop_reattach'
 
 
 def _run_intraday_news_gate(run_date: str, dry_run: bool) -> None:
@@ -495,19 +527,36 @@ def main(argv=None) -> int:
         except Exception as e:
             logger.warning('redis gate check failed: %s', e)
 
-    # ── Extended-hours gate (Phase-3-deferred) ───────────────────────────
-    # Until alpaca_executor lands extended-hours support (Phase 3), we
-    # refuse after-hours spawns by default; flip OPENCLAW_REDEPLOY_EXTENDED_HOURS=1
-    # only when Phase 3 is live.
+    # ── Extended-hours gate → DEFER TO THE OPEN (2026-11-25 operator ruling) ──
+    # Outside RTH (or when the clock cannot be read) the redeploy is not
+    # executed as ext-hours limit orders — thin after-hours books fill at stub
+    # quotes (the 11-25 spill-over incident) — and it is not dropped either:
+    # a marker is left for run_intraday_market_state.py, which spawns this
+    # script again at the first live tick ≥ 09:35 ET so the resize happens in
+    # regular hours. OPENCLAW_REDEPLOY_EXTENDED_HOURS=1 keeps the old opt-in
+    # ext-hours pass-through.
     ok, is_open = _alpaca_clock_is_rth()
     ext_enabled = os.environ.get('OPENCLAW_REDEPLOY_EXTENDED_HOURS') == '1'
     if not ok or not is_open:
         if not ext_enabled:
             if _pf.prefetch_enabled():
                 _pf.release_inflight(r)
+            deferred = defer_to_open(r, reason, run_date, args.episode)
+            why = 'market not in RTH' if ok else 'alpaca clock unavailable'
+            if deferred:
+                _post_webhook(
+                    'intraday-regime',
+                    f'⏸ redeploy deferred to the open | reason={reason} — {why}; '
+                    f'no ext-hours orders; fires at the first intraday tick ≥ 09:35 ET',
+                )
+            else:
+                logger.warning('redeploy %s blocked outside RTH and NOT deferred (no redis)', reason)
             _print_action({
-                'action': 'blocked',
-                'reason': 'extended_hours_disabled_until_phase3',
+                'action': 'deferred' if deferred else 'blocked',
+                'reason': 'extended_hours_deferred_to_open' if deferred
+                          else 'extended_hours_blocked_no_redis',
+                'redeploy_reason': reason,
+                'clock_ok': ok,
             })
             return 0
 

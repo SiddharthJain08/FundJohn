@@ -709,6 +709,83 @@ def _spawn_refetch_prices(date_str: str) -> str:
 
 # ── Redeploy spawner (Phase 2) ───────────────────────────────────────────────
 
+# ── Deferred redeploy (2026-11-25 operator ruling) ───────────────────────────
+# redeploy_pipeline.py leaves `redeploy:deferred` when a confirmed transition
+# lands outside RTH (16:00–16:15 ET ticks, clock failures). The first live tick
+# in [09:35, 15:30) ET fires it here so the resize happens in regular hours —
+# never as ext-hours limit orders. 09:35 skips the opening auction; 15:30 keeps
+# it clear of the 15:00 compute / 15:50 execute lane (a marker seen later waits
+# for the next morning).
+DEFERRED_KEY = 'redeploy:deferred'
+DEFERRED_FIRE_OPEN_MIN = 9 * 60 + 35
+DEFERRED_FIRE_CLOSE_MIN = 15 * 60 + 30
+
+
+def _deferred_window(ts_utc) -> bool:
+    """True on an NYSE session day between 09:35 and 15:30 ET."""
+    ts = pd.Timestamp(ts_utc)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize('UTC')
+    et = ts.tz_convert('America/New_York')
+    from lib.trading_calendar import is_session
+    if not is_session(et.date()):
+        return False
+    minutes = et.hour * 60 + et.minute
+    return DEFERRED_FIRE_OPEN_MIN <= minutes < DEFERRED_FIRE_CLOSE_MIN
+
+
+def _pop_deferred(rcli) -> dict | None:
+    """Read AND delete the deferred marker (one fire per marker)."""
+    if rcli is None:
+        return None
+    try:
+        raw = rcli.get(DEFERRED_KEY)
+        if not raw:
+            return None
+        rcli.delete(DEFERRED_KEY)
+        marker = json.loads(raw)
+        return marker if isinstance(marker, dict) and marker.get('reason') else None
+    except Exception as e:   # noqa: BLE001
+        logger.warning('deferred redeploy marker unreadable: %s', e)
+        return None
+
+
+def _maybe_fire_deferred_redeploy(ts_utc, *, dry_run: bool) -> str | None:
+    """Fire a deferred redeploy if one is pending and we are inside the
+    window. Never raises (the tick must finish). Returns the transition tag
+    or None when nothing fired."""
+    try:
+        if not _deferred_window(ts_utc):
+            return None
+        rcli = _redis()
+        marker = _pop_deferred(rcli)
+        if marker is None:
+            return None
+        from src.execution.intraday_prefetch import acquire_inflight, prefetch_enabled
+        if prefetch_enabled() and not acquire_inflight(rcli):
+            # another redeploy is running — put the marker back for the next tick
+            try:
+                rcli.set(DEFERRED_KEY, json.dumps(marker), ex=4 * 86400)
+            except Exception:   # noqa: BLE001
+                pass
+            logger.info('deferred redeploy %s waits — redeploy already in flight', marker['reason'])
+            return None
+        date_str = pd.Timestamp(ts_utc).strftime('%Y-%m-%d')
+        reason = f"{marker['reason']}_DEFERRED"[:80]
+        spawn_kind = _spawn_redeploy_cmd(reason, date_str, dry_run=dry_run, episode=None)
+        logger.info('deferred redeploy fired at the open: %s (%s) — deferred_at=%s',
+                    reason, spawn_kind, marker.get('deferred_at'))
+        _post_to_discord(
+            'intraday-regime',
+            f':sunrise: **deferred redeploy** firing in RTH — {marker["reason"]} '
+            f'(deferred {marker.get("deferred_at", "?")}) → {spawn_kind}',
+        )
+        return f'DEFERRED_REDEPLOY_{spawn_kind.upper()}'
+    except Exception as e:   # noqa: BLE001
+        logger.warning('deferred redeploy check failed: %s', e)
+        return None
+
+
 def _spawn_redeploy(prior_state: str, new_state: str, date_str: str,
                     *, dry_run: bool, episode: str | None = None) -> str:
     """Spawn scripts/redeploy_pipeline.py DETACHED. Returns 'spawned' or
@@ -725,6 +802,13 @@ def _spawn_redeploy(prior_state: str, new_state: str, date_str: str,
     (legacy/flag-OFF path) leaves the gate's episode-matching a no-op.
     """
     reason = f'INTRADAY_HMM_{prior_state}_{new_state}'
+    return _spawn_redeploy_cmd(reason, date_str, dry_run=dry_run, episode=episode)
+
+
+def _spawn_redeploy_cmd(reason: str, date_str: str, *, dry_run: bool,
+                        episode: str | None = None) -> str:
+    """The detached Popen of scripts/redeploy_pipeline.py for `reason`
+    (shared by confirmed transitions and the deferred-at-open fire)."""
     log_dir = ROOT / 'logs'
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -850,7 +934,10 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
         # excludes it from training) and the DB row's features_json.
         features['source_quality_flag'] = 3
     intraday.append_features_row(features)
-
+    if market_open and not force_dry_run:
+        # 2026-11-25: a redeploy that landed outside RTH yesterday/at 16:00
+        # fires here, in regular hours, instead of as ext-hours limit orders.
+        _maybe_fire_deferred_redeploy(features['ts_utc'], dry_run=(not _is_live_intraday()))
     if not market_open:
         conn = _connect_postgres()
         if conn is None:

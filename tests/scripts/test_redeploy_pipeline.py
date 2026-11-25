@@ -177,19 +177,51 @@ class TestBlockedBySentinel:
 
 
 class TestExtendedHoursGate:
-    def test_blocked_by_extended_hours_disabled(self, capsys):
-        """Outside RTH AND env var not set → block."""
-        rc, action, popen_calls, _ = _run_main(
+    def test_outside_rth_defers_to_open(self, capsys):
+        """Outside RTH AND env var not set → DEFERRED (2026-11-25): marker
+        written for the detector's first live tick, webhook posted, no spawn."""
+        import json
+        r = _fake_redis_clear()
+        rc, action, popen_calls, webhook_calls = _run_main(
             ['--reason', 'INTRADAY_HMM_LOW_VOL_HIGH_VOL',
-             '--date', '2026-05-19'],
-            redis_client=_fake_redis_clear(),
+             '--date', '2026-05-19', '--episode', 'ep-1'],
+            redis_client=r,
             clock_ok=True, clock_is_open=False,
             ext_hours_env=False,
             capsys=capsys,
         )
         assert rc == 0
-        assert action['action'] == 'blocked'
-        assert action['reason'] == 'extended_hours_disabled_until_phase3'
+        assert action['action'] == 'deferred'
+        assert action['reason'] == 'extended_hours_deferred_to_open'
+        assert action['redeploy_reason'] == 'INTRADAY_HMM_LOW_VOL_HIGH_VOL'
+        assert _orchestrator_calls(popen_calls) == []
+        sets = [c for c in r.set.call_args_list if c.args and c.args[0] == redeploy.DEFERRED_KEY]
+        assert len(sets) == 1
+        marker = json.loads(sets[0].args[1])
+        assert marker['reason'] == 'INTRADAY_HMM_LOW_VOL_HIGH_VOL'
+        assert marker['episode'] == 'ep-1' and marker['date'] == '2026-05-19'
+        assert sets[0].kwargs.get('ex') == redeploy.DEFERRED_TTL_S
+        assert webhook_calls and 'deferred to the open' in webhook_calls[0][1]
+        # the sentinel is NOT set — the deferred run must not be treated as fired
+        assert not any(c.args and 'fired' in str(c.args[0]) for c in r.set.call_args_list)
+
+    def test_clock_failure_defers_too(self, capsys):
+        """Clock unreadable → never guess the session: defer."""
+        r = _fake_redis_clear()
+        rc, action, popen_calls, _ = _run_main(
+            ['--reason', 'INTRADAY_HMM_LOW_VOL_HIGH_VOL', '--date', '2026-05-19'],
+            redis_client=r, clock_ok=False, clock_is_open=False, capsys=capsys,
+        )
+        assert rc == 0 and action['action'] == 'deferred' and action['clock_ok'] is False
+        assert _orchestrator_calls(popen_calls) == []
+
+    def test_outside_rth_without_redis_blocks_like_before(self, capsys):
+        rc, action, popen_calls, _ = _run_main(
+            ['--reason', 'INTRADAY_HMM_LOW_VOL_HIGH_VOL', '--date', '2026-05-19'],
+            redis_client=None, clock_ok=True, clock_is_open=False, capsys=capsys,
+        )
+        assert rc == 0 and action['action'] == 'blocked'
+        assert action['reason'] == 'extended_hours_blocked_no_redis'
         assert _orchestrator_calls(popen_calls) == []
 
     def test_extended_hours_enabled_passes_through(self, capsys):
@@ -212,7 +244,7 @@ class TestExtendedHoursGate:
         cmd0 = spawns[0]['cmd']
         assert '--steps' in cmd0 and cmd0[cmd0.index('--steps') + 1] == 'signals'
         cmd1 = spawns[1]['cmd']
-        assert '--steps' in cmd1 and cmd1[cmd1.index('--steps') + 1] == 'handoff,trade,alpaca,reconcile'
+        assert '--steps' in cmd1 and cmd1[cmd1.index('--steps') + 1] == 'handoff,trade,alpaca,reconcile,stop_reattach'   # stop_reattach appended 2026-11-09
         # both carry --reason + --date
         for cmd in (cmd0, cmd1):
             assert '--reason' in cmd and 'INTRADAY_HMM_LOW_VOL_HIGH_VOL' in cmd
