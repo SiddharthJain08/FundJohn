@@ -10,7 +10,7 @@ def test_redeploy_inherits_engine_universe():
     """Redeploy re-runs the engine signals step — it must have NO independent
     universe authority (it inherits C1 automatically)."""
     src = (ROOT / "scripts/redeploy_pipeline.py").read_text()
-    assert "REDEPLOY_STEPS = 'signals,handoff,trade,alpaca,reconcile'" in src
+    assert "REDEPLOY_STEPS = 'signals,handoff,trade,alpaca,reconcile,stop_reattach'" in src   # stop_reattach appended 2026-11-09
     assert "universe_resolver" not in src
     assert "universe_config" not in src
 

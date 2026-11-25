@@ -152,7 +152,7 @@ class TestProceedPath:
         # Split around the intraday news gate: signal-gen then handoff→trade→…
         assert len(spawn_calls) == 2, f'expected 2 orchestrator calls (news-gate split), got {spawn_calls}'
         assert spawn_calls[0]['steps'] == 'signals'
-        assert spawn_calls[1]['steps'] == 'handoff,trade,alpaca,reconcile'
+        assert spawn_calls[1]['steps'] == 'handoff,trade,alpaca,reconcile,stop_reattach'   # stop_reattach appended 2026-11-09
         assert spawn_calls[0]['reason'] == 'TEST_T_HV'
         assert spawn_calls[0]['run_date'] == '2026-06-09'
 
