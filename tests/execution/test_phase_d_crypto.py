@@ -190,6 +190,7 @@ def test_crypto_close_cancels_open_stop_first(monkeypatch):
             return True, {'id': 'close-1', 'qty': '0.0002', 'notional': '15.0'}, None
         return True, {}, None
     monkeypatch.setattr(ax, '_run_alpaca_cli', fake_cli)
+    monkeypatch.setattr(ax, '_poll_to_terminal', lambda *a, **k: {'status': 'canceled'})
     order = {'close_only': True, 'ticker': 'BTC-USD', 'notional_usd': 15.0, 'current_usd': 15.0}
     res = ax._route_crypto_close(order, 'BTC/USD', 'BTC-USD', 'c1')
     assert res['status'] == 'submitted'

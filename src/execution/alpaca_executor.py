@@ -1395,6 +1395,17 @@ def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
         return {'ticker': api_symbol, 'status': 'SKIP',
                 'reason': f'crypto: qty rounds to 0 (notional={notional:.2f} price={price:.2f})',
                 'client_order_id': coid, 'tif': _CRYPTO_TIF, 'order_class': 'simple'}
+    # 2026-11-25: an ADD to a position with a resting sell stop is refused by
+    # the broker ("potential wash trade detected", 11-24 15:59 ET BTC-USD
+    # top-up). Cancel the resting stop(s) first (settle-polled), remember
+    # them, and re-rest ONE stop on the WHOLE position after the entry fills
+    # (or restore the prior stop if the entry is rejected / unfilled).
+    prior_stops: list[dict] = []
+    if side == 'buy':
+        try:
+            prior_stops = _cancel_open_crypto_stops_detail(api_symbol, why='before add')
+        except Exception as _cx:   # noqa: BLE001 — the entry attempt must proceed
+            log(f'  ↳ crypto stop-cancel before add failed (continuing): {_cx}')
     ok, pay, err = _submit_order_via_cli(
         ticker=api_symbol, side=side, qty=qty, tif=_CRYPTO_TIF,
         order_class='simple', target=None, stop=None, coid=coid,
@@ -1405,6 +1416,8 @@ def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
         log(f'✔ {raw_ticker} CRYPTO {side.upper()} x{qty}  ~${notional:,.0f} @ {price:,.2f}'
             f'  order={oid or "?"}')
         stop_px = float(order.get('stop') or 0.0)
+        if stop_px <= 0 and prior_stops:
+            stop_px = float(prior_stops[0].get('stop_price') or 0.0)
         if stop_px > 0 and oid:
             # Best-effort resting stop. This runs AFTER a successful entry and
             # ABOVE execute_single's try-block, so it must never raise — a CLI
@@ -1415,7 +1428,15 @@ def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
                 # skips the protective stop (observed in the Phase D live smoke).
                 filled_qty = _poll_crypto_fill(oid, timeout=45.0)
                 if filled_qty > 0:
-                    _submit_crypto_stop(api_symbol, stop_px, filled_qty, coid)
+                    # Whole position (held + this fill), not just this fill:
+                    # the prior stop covering the held qty was cancelled above.
+                    held = _crypto_position_qty(api_symbol)
+                    stop_qty = held if held and held > 0 else (
+                        filled_qty + sum(float(o.get('qty') or 0.0) for o in prior_stops))
+                    _submit_crypto_stop(api_symbol, stop_px, stop_qty, coid)
+                elif prior_stops:
+                    log(f'  ↳ crypto entry {oid} not filled in time — restoring prior stop')
+                    _restore_crypto_stops(api_symbol, prior_stops, f'{coid}-restore')
                 else:
                     log(f'  ↳ crypto stop skipped — entry {oid} not filled in time (entry stands)')
             except Exception as _stop_err:   # noqa: BLE001 — entry must stand
@@ -1424,6 +1445,12 @@ def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
                 'notional': notional, 'entry': price, 'order_id': oid, 'http': 200,
                 'tif': _CRYPTO_TIF, 'order_class': 'simple', 'client_order_id': coid}
     log(f'CLI rc={err.get("exit_code",1)} {raw_ticker} (crypto open): {err.get("error","")}')
+    if prior_stops:
+        # The add was refused — the position is unchanged, so put its stop back.
+        try:
+            _restore_crypto_stops(api_symbol, prior_stops, f'{coid}-restore')
+        except Exception as _rx:   # noqa: BLE001
+            log(f'  ↳ crypto stop restore failed after rejected add: {_rx}')
     return {'ticker': api_symbol, 'status': 'rejected',
             'reason': err.get('error') or 'crypto order submit failed',
             'http': err.get('status'), 'body': str(err),
@@ -1442,8 +1469,9 @@ def _route_crypto_close(order: dict, api_symbol: str, raw_ticker: str, coid: str
         cli_args += ['--percentage', str(pct)]
     # Phase D: a resting sell stop reserves the position → close would 403.
     # Best-effort + guarded: a CLI hang here must never abort the close.
+    prior_stops: list[dict] = []
     try:
-        _cancel_open_crypto_stops(api_symbol)
+        prior_stops = _cancel_open_crypto_stops_detail(api_symbol, why='before close')
     except Exception as _cx:   # noqa: BLE001 — close must proceed
         log(f'  ↳ crypto stop-cancel best-effort failed (continuing to close): {_cx}')
     ok, pay, err = _run_alpaca_cli(cli_args, timeout=15)
@@ -1455,6 +1483,29 @@ def _route_crypto_close(order: dict, api_symbol: str, raw_ticker: str, coid: str
         entry_approx = round(notional_close / qty_close, 6) if qty_close > 0 else 0.0
         kind = 'REDUCE' if is_partial else 'CLOSE'
         log(f'↩ {raw_ticker} CRYPTO {kind}  notional≈${notional_close:,.0f}  order={order_id or "?"}')
+        if is_partial:
+            # 2026-11-25: the 15:55 ET REDUCE (a $44 trim) cancelled the BTC
+            # stop and left the remaining 0.1476 BTC unprotected. Re-rest ONE
+            # stop on what is still held, at the sized stop (or the cancelled
+            # stop's price). Best-effort: the reduce stands regardless.
+            try:
+                stop_px = float(order.get('stop') or 0.0)
+                if stop_px <= 0 and prior_stops:
+                    stop_px = float(prior_stops[0].get('stop_price') or 0.0)
+                if stop_px > 0:
+                    filled = _poll_crypto_fill(order_id, timeout=45.0) if order_id else 0.0
+                    held = _crypto_position_qty(api_symbol)
+                    if not (held and held > 0):
+                        prior_qty = sum(float(o.get('qty') or 0.0) for o in prior_stops)
+                        held = prior_qty - filled if prior_qty > 0 else 0.0
+                    if held and held > 0:
+                        _submit_crypto_stop(api_symbol, stop_px, held, f'{coid}-rerest')
+                    else:
+                        log(f'  ↳ crypto stop re-rest skipped after REDUCE — remaining qty unknown')
+                elif prior_stops:
+                    log(f'  ↳ crypto stop re-rest skipped after REDUCE — no stop price')
+            except Exception as _rx:   # noqa: BLE001 — reduce stands
+                log(f'  ↳ crypto stop re-rest failed after REDUCE (reduce stands): {_rx}')
         return {'ticker': api_symbol, 'status': 'submitted', 'qty': qty_close,
                 'notional': notional_close, 'entry': entry_approx, 'order_id': order_id,
                 'http': 200, 'tif': _CRYPTO_TIF, 'order_class': 'simple',
@@ -1500,6 +1551,13 @@ def _poll_crypto_fill(order_id: str, timeout: float = 10.0,
     return 0.0
 
 
+def _crypto_qty_str(qty: float) -> str:
+    """Crypto qty for the CLI: up to _CRYPTO_QTY_DECIMALS dp, trailing zeros
+    trimmed, never scientific notation (str(1e-05) would be rejected)."""
+    s = f'{float(qty):.{_CRYPTO_QTY_DECIMALS}f}'.rstrip('0').rstrip('.')
+    return s or '0'
+
+
 def _submit_crypto_stop(api_symbol: str, stop_price: float, qty: float,
                         coid: str) -> dict | None:
     """SP-3.1 Phase D: place a resting SELL stop_limit on a crypto long position.
@@ -1517,7 +1575,7 @@ def _submit_crypto_stop(api_symbol: str, stop_price: float, qty: float,
         'order', 'submit',
         '--symbol',           api_symbol,
         '--side',             'sell',
-        '--qty',              str(qty),
+        '--qty',              _crypto_qty_str(qty),
         '--type',             'stop_limit',
         '--stop-price',       _price_str(stop_price),
         '--limit-price',      _price_str(limit_price),
@@ -1545,25 +1603,81 @@ def _cancel_open_crypto_stops(api_symbol: str) -> int:
     2026-08-18: server-side --symbols filter added (accepts the slashed crypto
     form, verified live) — the unfiltered call returned the 50-row default page
     and the 150+-order equity book pushed crypto stops off it. See
-    _cancel_open_equity_orders for the full incident note."""
+    _cancel_open_equity_orders for the full incident note.
+
+    2026-11-25: thin wrapper over _cancel_open_crypto_stops_detail (which also
+    returns what was cancelled so the caller can re-rest it)."""
+    return len(_cancel_open_crypto_stops_detail(api_symbol, why='before close'))
+
+
+def _cancel_open_crypto_stops_detail(api_symbol: str, *, why: str = 'before close') -> list[dict]:
+    """Cancel every OPEN crypto order for api_symbol and return the cancelled
+    orders as [{'id', 'stop_price', 'limit_price', 'qty', 'type'}] so the
+    caller can re-rest the protective stop after a REDUCE / ADD. Each cancel
+    is settle-polled to a terminal status (bounded, best-effort): the broker
+    releases the qty hold — and stops flagging the next same-side order as a
+    wash trade — only once the cancel has settled, not on the ACK.
+    Returns [] on any CLI-error response."""
     ok, payload, _err = _run_alpaca_cli(['order', 'list', '--status', 'open',
                                          '--symbols', api_symbol, '--limit', '500'],
                                         timeout=10)
     if not ok or not isinstance(payload, list):
-        return 0
-    n = 0
+        return []
+    cancelled: list[dict] = []
     for o in payload:
-        if not isinstance(o, dict):
+        if not isinstance(o, dict) or o.get('symbol') != api_symbol:
             continue
-        if o.get('symbol') == api_symbol:
-            oid = o.get('id') or o.get('order_id')
-            if oid:
-                c_ok, _p, _e = _run_alpaca_cli(['order', 'cancel', '--order-id', oid], timeout=10)
-                if c_ok:
-                    n += 1
-    if n:
-        log(f'  ↳ cancelled {n} open crypto order(s) for {api_symbol} before close')
-    return n
+        oid = o.get('id') or o.get('order_id')
+        if not oid:
+            continue
+        c_ok, _p, _e = _run_alpaca_cli(['order', 'cancel', '--order-id', oid], timeout=10)
+        if not c_ok:
+            continue
+        def _f(v):
+            try:
+                return float(v) if v not in (None, '') else 0.0
+            except (TypeError, ValueError):
+                return 0.0
+        cancelled.append({'id': oid, 'type': o.get('type'),
+                          'stop_price': _f(o.get('stop_price')),
+                          'limit_price': _f(o.get('limit_price')),
+                          'qty': _f(o.get('qty'))})
+        try:
+            _poll_to_terminal(oid, timeout_s=5, interval_s=0.5)
+        except Exception as _px:   # noqa: BLE001 — settle poll is best-effort
+            log(f'  ↳ crypto cancel settle-poll failed for {oid}: {_px}')
+    if cancelled:
+        log(f'  ↳ cancelled {len(cancelled)} open crypto order(s) for {api_symbol} {why}')
+    return cancelled
+
+
+def _crypto_position_qty(api_symbol: str) -> float | None:
+    """Held qty of a crypto position via `position list` (positions report the
+    flat symbol 'BTCUSD' while orders use 'BTC/USD' — the 11-24 orphan-sweep
+    incident). None when the lookup fails or nothing is held."""
+    ok, payload, _err = _run_alpaca_cli(['position', 'list'], timeout=15)
+    if not ok or not isinstance(payload, list):
+        return None
+    want = api_symbol.replace('/', '').upper()
+    for p in payload:
+        if not isinstance(p, dict):
+            continue
+        if str(p.get('symbol') or '').replace('/', '').upper() == want:
+            try:
+                q = abs(float(p.get('qty') or 0.0))
+            except (TypeError, ValueError):
+                return None
+            return q if q > 0 else None
+    return None
+
+
+def _restore_crypto_stops(api_symbol: str, prior_stops: list[dict], coid: str) -> None:
+    """Put back the stop(s) _cancel_open_crypto_stops_detail removed when the
+    order that needed them out of the way did not change the position."""
+    for i, o in enumerate(prior_stops):
+        px, q = float(o.get('stop_price') or 0.0), float(o.get('qty') or 0.0)
+        if px > 0 and q > 0:
+            _submit_crypto_stop(api_symbol, px, q, coid if i == 0 else f'{coid}{i}')
 
 
 def _cancel_open_equity_orders(ticker: str) -> int:
