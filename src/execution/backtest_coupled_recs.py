@@ -481,8 +481,10 @@ def run(rec_date=None, dry_run: bool = False, log=print) -> dict:
                 log(f'[coupling] {sid}: panel rebuild skipped: {e}')
         if resolver is not None and canonical_committed:
             # Refresh the chosen-tier sleeves + per-regime eligibility from the
-            # just-committed canonical trades (fail-soft). No --adopt: universe
-            # re-SELECTION belongs to the fleet/creation processes, not here.
+            # just-committed canonical trades (fail-soft). Since 2026-11-25
+            # the shrink driver ADOPTS 'change' verdicts by default (operator
+            # ruling: auto-adoption is the norm), so a tier change on the new
+            # canonical trades takes effect here too.
             try:
                 import subprocess
                 import sys as _sys

@@ -8,8 +8,9 @@ re-runs — then feeds the prefer-largest select_tier (W1) and persists:
   * universe_shrink_metrics rows (5 tiers × TOTAL+4 regimes, upserted)
   * a strategy_universe_recommendations row (candidate_set_id
     'shrink-1-<artifact run id>'; skipped if one already exists — resume-safe)
-  * with --adopt: 'change' verdicts are adopted immediately
-    (lifecycle_universe_adoption, actor auto:universe-shrink)
+  * 'change' verdicts are adopted immediately (DEFAULT since 2026-11-25,
+    operator ruling; lifecycle_universe_adoption, actor auto:universe-shrink);
+    --no-adopt leaves them as pending recommendations for review
   * chosen flags: the tier the strategy ACTUALLY trades after this pass
     (adopted choice, else its current predicate when that is a ladder tier)
     — consumed by the activation assigner + dashboard.
@@ -22,7 +23,7 @@ re-derived from the CHOSEN tier's sleeves — the driver prints the reminder
 
 Usage:
   python3 scripts/run_universe_shrink.py [--strategy SID[,SID…]]
-      [--adopt] [--reassign] [--dry-run] [--artifact PATH]
+      [--no-adopt] [--reassign] [--dry-run] [--artifact PATH]
       [--states live,candidate] [--limit N]
 """
 from __future__ import annotations
@@ -111,8 +112,12 @@ def grid_summary(result: dict, window, verdict_name: str) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--strategy', help='comma-separated strategy ids')
-    ap.add_argument('--adopt', action='store_true',
-                    help="adopt 'change' verdicts immediately")
+    # 2026-11-25 operator ruling: adoption is the NORM. 'change' verdicts are
+    # adopted in the same pass unless --no-adopt is given (review-only mode).
+    ap.add_argument('--adopt', dest='adopt', action='store_true', default=True,
+                    help="adopt 'change' verdicts immediately (DEFAULT)")
+    ap.add_argument('--no-adopt', dest='adopt', action='store_false',
+                    help="leave 'change' verdicts as pending recommendations")
     ap.add_argument('--reassign', action='store_true',
                     help='re-run the activation assigner after adoptions')
     ap.add_argument('--dry-run', action='store_true',

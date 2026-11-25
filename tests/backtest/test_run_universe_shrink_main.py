@@ -144,3 +144,74 @@ def test_main_parity_fail_error_and_zero_trade(monkeypatch, tmp_path, capsys):
     assert 'parity_fail=1 errors=1' in out
     joined = '\n'.join(posts)
     assert 'PARITY FAIL' in joined and 'S_par' in joined and 'S_err' in joined
+
+
+def _wire_change_pass(monkeypatch, tmp_path, mod, pg):
+    """Minimal stub wiring for a one-strategy pass (S_zero: no trades, so no
+    price read) whose shrink verdict is a 'change' sp500 -> tier_liquid."""
+    import backtest.unified_backtest as ub
+    import backtest.regime_blended_backtest as rbb
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text(json.dumps({'strategies': {
+        'S_zero': {'state': 'live', 'instrument_class': 'equity'}}}))
+    monkeypatch.setattr(mod, 'MANIFEST', manifest)
+    monkeypatch.setattr(mod, '_pg', lambda: pg)
+    monkeypatch.setattr(mod, 'ensure_artifact',
+                        lambda args: (tmp_path / 'a.parquet', 'shrink-test'))
+    monkeypatch.setattr(mod, 'load_membership', lambda p: ([], {}))
+    monkeypatch.setattr(ub, 'load_regimes', lambda: pd.Series(
+        'LOW_VOL', index=pd.bdate_range('2024-01-01', '2024-04-30')))
+    monkeypatch.setattr(rbb, 'regime_day_frequency', lambda p: {'LOW_VOL': 1.0})
+    tiers = (*mod.LADDER_TIERS, mod.FULL_TIER)
+    monkeypatch.setattr(mod, 'shrink_and_select', lambda trades, *a, **k: {
+        'metrics_by_tier': {t: {'trades_n': 0} for t in tiers},
+        'regime_by_tier': {t: {} for t in tiers},
+        'totals_by_tier': {mod.FULL_TIER: {'sharpe': 0.5}},
+        'verdict': {'verdict': 'change', 'choice': 'tier_liquid'}})
+    monkeypatch.setattr(mod, 'db_rows', lambda sid, run_id, result, **k:
+                        [(sid, run_id, 'full', 'TOTAL')])
+    monkeypatch.setattr(mod, 'execute_values', lambda cur, sql, rows, **k: None)
+    monkeypatch.setattr(mod.recs, 'build_rationale', lambda v, window=None: 'r')
+    monkeypatch.setattr(mod.recs, 'insert_recommendation', lambda pg_, **k: 7)
+    monkeypatch.setattr(mod.recs, 'post_discord', lambda pg_, msg: None)
+    monkeypatch.delenv('OPENCLAW_SHRINK_PARITY_TOL', raising=False)
+    # the adoption import is local to the loop: stub the module it imports
+    import types
+    adopted = []
+    stub = types.ModuleType('src.strategies.lifecycle_universe_adoption')
+    stub.adopt_universe_recommendation = (
+        lambda rec_id, actor='system', **k: adopted.append((rec_id, actor)))
+    monkeypatch.setitem(sys.modules, 'src.strategies.lifecycle_universe_adoption', stub)
+    return adopted
+
+
+def test_change_verdict_is_adopted_by_default(monkeypatch, tmp_path, capsys):
+    """2026-11-25 operator ruling: auto-adoption is the norm — no flag needed."""
+    mod = _load_script()
+    pg = _Pg()
+    adopted = _wire_change_pass(monkeypatch, tmp_path, mod, pg)
+    monkeypatch.setattr(sys, 'argv', ['run_universe_shrink.py', '--force',
+                                      '--strategy', 'S_zero'])
+    assert mod.main() == 0
+    out = capsys.readouterr().out
+    assert adopted == [(7, 'auto:universe-shrink')]
+    assert 'adopted=1' in out
+    # chosen flags follow the ADOPTED tier, not the old predicate
+    flag_updates = [p for sql, p in pg.log
+                    if 'UPDATE universe_shrink_metrics' in sql]
+    assert flag_updates and flag_updates[-1][0] == 'tier_liquid'
+
+
+def test_no_adopt_leaves_a_pending_recommendation(monkeypatch, tmp_path, capsys):
+    mod = _load_script()
+    pg = _Pg()
+    adopted = _wire_change_pass(monkeypatch, tmp_path, mod, pg)
+    monkeypatch.setattr(sys, 'argv', ['run_universe_shrink.py', '--force',
+                                      '--no-adopt', '--strategy', 'S_zero'])
+    assert mod.main() == 0
+    out = capsys.readouterr().out
+    assert adopted == []
+    assert 'changes=1' in out and 'adopted=0' in out
+    flag_updates = [p for sql, p in pg.log
+                    if 'UPDATE universe_shrink_metrics' in sql]
+    assert flag_updates and flag_updates[-1][0] == 'sp500'   # current predicate kept
