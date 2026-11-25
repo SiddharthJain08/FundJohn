@@ -141,6 +141,33 @@ def _current_broker_qty(ticker: str) -> float:
     return float(_broker_positions_cache.get(ticker, 0.0))
 
 
+def _is_same_direction_add(side: str, ticker: str) -> bool:
+    """True when a new order on `side` ADDS to a position the broker already
+    holds in that direction (buy on a long, sell on a short)."""
+    cur = _current_broker_qty(ticker)
+    return (side == 'buy' and cur > 0) or (side == 'sell' and cur < 0)
+
+
+def _clear_resting_exits_before_add(ticker: str, why: str) -> int:
+    """2026-11-25 wash-trade guard. An ADD to a held position while its
+    protective exit rests (fractional DAY stop from the 09:36 re-arm, GTC OCO
+    legs on whole-share positions) is refused by the broker: 403 'potential
+    wash trade detected. use complex orders' (12 refusals in the 30 d to
+    11-25; 5 on 11-25 alone). Cancel the symbol's resting orders first —
+    settle-polled by _cancel_open_equity_orders — and let the chain's
+    stop_reattach step re-arm protection on the enlarged position minutes
+    later. Best-effort: never raises, the submit proceeds regardless."""
+    try:
+        n = _cancel_open_equity_orders(ticker)
+    except Exception as _wx:   # noqa: BLE001 — submit must proceed
+        log(f'  ↳ {ticker}: wash-trade guard cancel failed ({why}; continuing to submit): {_wx}')
+        return 0
+    if n:
+        log(f'  ↳ {ticker}: ADD to held position — cancelled {n} resting exit order(s) '
+            f'({why}; stop_reattach re-arms after the batch)')
+    return n
+
+
 def _would_close_or_reverse(side: str, ticker: str) -> bool:
     """True if a new order on this side would close or reverse an existing
     position in the opposite direction. Alpaca rejects bracket orders on
@@ -3092,12 +3119,26 @@ def execute_single(sess, equity, order, run_date):
     if adjusted_notes:
         log(f'  ↪ {ticker}: bracket recomputed — {", ".join(adjusted_notes)}')
 
+    is_add = _is_same_direction_add(side, ticker)
+    if is_add:
+        _clear_resting_exits_before_add(ticker, 'wash-trade guard')
     try:
         ok, payload, err = _submit_order_via_cli(
             ticker=ticker, side=side, qty=qty, tif=tif,
             order_class=order_class, target=target, stop=stop, coid=coid,
             order_type=order_type, extended_hours=ext_hours, limit_price=limit_price,
         )
+        if not ok and 'wash trade' in (err.get('error') or '').lower():
+            # Reactive leg of the guard: a cancel can settle late, or an exit
+            # order can appear between the pre-submit sweep and the submit.
+            # Clear again and retry ONCE (same coid → the broker dedups).
+            n_w = _clear_resting_exits_before_add(ticker, 'after wash-trade refusal')
+            log(f'  ↻ {ticker}: wash-trade refusal — {n_w} resting order(s) cleared, retrying once')
+            ok, payload, err = _submit_order_via_cli(
+                ticker=ticker, side=side, qty=qty, tif=tif,
+                order_class=order_class, target=target, stop=stop, coid=coid,
+                order_type=order_type, extended_hours=ext_hours, limit_price=limit_price,
+            )
         if ok:
             oid = (payload or {}).get('id', '?') if isinstance(payload, dict) else '?'
             if order_type == 'limit':
