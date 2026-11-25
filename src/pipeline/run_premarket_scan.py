@@ -19,6 +19,7 @@ import urllib.request
 import uuid as _uuid_mod
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import psycopg2
@@ -37,6 +38,46 @@ from src.sentiment.sonnet_premarket_confirmer import (
     confirm_panic,
 )
 from src.execution.regime_liquidator import close_subset
+
+# ── Deferred news-veto exits (2026-11-25 operator ruling) ────────────────────
+# Pre-market scans (07:30 / 09:00 ET) no longer flatten flagged positions into
+# the thin pre-market book (ext-hours limit at bid −0.5 %, no spread bound).
+# They JOURNAL the tickers; the 09:35 ET scan instance (first regular-hours
+# scan, after the opening auction) drains the journal with RTH `position
+# close` orders — and still scans fresh news itself. Journal: one JSON file
+# keyed by trading day; stale days are dropped on load.
+DEFERRED_EXITS_PATH = Path(__file__).resolve().parents[2] / 'output' / 'premarket_deferred_exits.json'
+_AUTOCLOSE_OK_STATUSES = {'filled', 'pending', 'accepted', 'partial'}
+
+
+def _market_is_rth() -> bool:
+    """Regular hours per the broker clock (fails closed → defer)."""
+    from src.execution.regime_liquidator import _market_is_open
+    try:
+        return bool(_market_is_open())
+    except Exception as e:   # noqa: BLE001
+        log.warning('clock check failed (%s) — treating as not RTH', e)
+        return False
+
+
+def _load_deferred_exits(trading_day: str) -> dict:
+    """{ticker: info} journaled for `trading_day` (other days discarded)."""
+    try:
+        data = json.loads(DEFERRED_EXITS_PATH.read_text())
+    except FileNotFoundError:
+        return {}
+    except Exception as e:   # noqa: BLE001
+        log.warning('deferred-exits journal unreadable (%s) — starting empty', e)
+        return {}
+    entries = data.get(trading_day) if isinstance(data, dict) else None
+    return dict(entries) if isinstance(entries, dict) else {}
+
+
+def _save_deferred_exits(trading_day: str, entries: dict) -> None:
+    DEFERRED_EXITS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = DEFERRED_EXITS_PATH.with_suffix('.json.tmp')
+    tmp.write_text(json.dumps({trading_day: entries} if entries else {}, indent=1, default=str))
+    os.replace(tmp, DEFERRED_EXITS_PATH)
 
 
 log = logging.getLogger(__name__)
@@ -207,11 +248,15 @@ def _persist_alert_rows(rows: list[dict]) -> None:
         conn.commit()
 
 
-def _format_discord_summary(rows: list[dict], scan_label: str) -> str:
+def _format_discord_summary(rows: list[dict], scan_label: str,
+                            drained: list[dict] | None = None) -> str:
     fired = [r for r in rows if r.get('advisory_fired')]
-    if not fired:
+    if not fired and not drained:
         return ''  # silent on calm mornings
     lines = [f'**Pre-market panic scan — {scan_label} ET**']
+    for d in (drained or []):
+        lines.append(f"• `{d['ticker']}` deferred veto exit (flagged {d.get('scan_label', '?')} ET) "
+                     f"→ RTH close: {d.get('status') or 'no outcome'}")
     for r in fired:
         ticker = r['ticker']
         score = r['panic_score']
@@ -226,6 +271,8 @@ def _format_discord_summary(rows: list[dict], scan_label: str) -> str:
             lines.append(f'    {rationale[:300]}')
         if r.get('autoclose_fired'):
             lines.append('    AUTO-CLOSE submitted.')
+        elif r.get('autoclose_deferred'):
+            lines.append('    AUTO-CLOSE deferred to the open (09:35 ET scan closes in regular hours).')
     return '\n'.join(lines)
 
 
@@ -355,23 +402,47 @@ def run_scan(scan_label: str, ticker_override: list[str] | None = None) -> int:
         for p in positions
     ]
 
-    # Auto-close gate
+    # Auto-close gate — pre-market: journal for the open; RTH: close now
+    # (2026-11-25 operator ruling: no exits into the pre-market book).
+    drained: list[dict] = []
     if cfg.autoclose_enabled:
         flagged = [r for r in rows if _should_autoclose(r, cfg)]
-        if flagged:
-            outcomes = close_subset(
-                [r['ticker'] for r in flagged], reason='PREMARKET_PANIC',
-            )
-            by_ticker = {o['ticker']: o for o in outcomes}
-            for r in flagged:
-                o = by_ticker.get(r['ticker'], {})
-                r['autoclose_fired'] = o.get('status') in {'filled', 'pending', 'accepted'}
-                r['autoclose_liquidation_id'] = o.get('liquidation_id')
+        trading_day = scan_ts.astimezone(_ET).date().isoformat()
+        deferred = _load_deferred_exits(trading_day)
+        if flagged or deferred:
+            if _market_is_rth():
+                tickers = [r['ticker'] for r in flagged]
+                tickers += [t for t in deferred if t not in tickers]
+                outcomes = close_subset(tickers, reason='PREMARKET_PANIC', rth=True)
+                by_ticker = {o['ticker']: o for o in outcomes}
+                for r in flagged:
+                    o = by_ticker.get(r['ticker'], {})
+                    r['autoclose_fired'] = o.get('status') in _AUTOCLOSE_OK_STATUSES
+                    r['autoclose_liquidation_id'] = o.get('liquidation_id')
+                remaining = {}
+                for t, info in deferred.items():
+                    o = by_ticker.get(t, {})
+                    ok = o.get('status') in _AUTOCLOSE_OK_STATUSES or o.get('status') == 'no_position'
+                    drained.append({'ticker': t, 'status': o.get('status'), **(info or {})})
+                    if not ok:
+                        remaining[t] = info
+                _save_deferred_exits(trading_day, remaining)
+            else:
+                for r in flagged:
+                    deferred[r['ticker']] = {
+                        'scan_label': scan_label, 'severity': r.get('sonnet_severity'),
+                        'verdict': r.get('sonnet_verdict'),
+                        'flagged_at': scan_ts.isoformat(timespec='seconds'),
+                    }
+                    r['autoclose_deferred'] = True
+                _save_deferred_exits(trading_day, deferred)
+                log.info('autoclose deferred to the open for %s (market not in RTH)',
+                         sorted(deferred))
 
     _persist_alert_rows(rows)
 
     webhook = resolve_premarket_webhook()
-    summary = _format_discord_summary(rows, scan_label)
+    summary = _format_discord_summary(rows, scan_label, drained=drained)
     if webhook and summary:
         _post_discord(webhook, summary)
 
@@ -399,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser()
-    parser.add_argument('--scan-label', required=True, choices=['07:30', '09:00'])
+    parser.add_argument('--scan-label', required=True, choices=['07:30', '09:00', '09:35'])
     parser.add_argument('--tickers', nargs='*',
                         help='override broker-position lookup for debugging')
     args = parser.parse_args(argv)

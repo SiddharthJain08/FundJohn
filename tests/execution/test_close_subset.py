@@ -96,3 +96,38 @@ def test_close_subset_skips_unknown_ticker(mock_load, mock_submit, mock_audit):
     statuses = {r['ticker']: r['status'] for r in out}
     assert statuses['GLW'] != 'submit_error'
     assert statuses['NOSUCH'] == 'no_position'
+
+
+# ── 2026-11-25: rth=True → regular-hours position close, never an ext-hours limit ──
+@patch('src.execution.regime_liquidator._write_liquidation_audit', return_value='aud-1')
+@patch('src.execution.regime_liquidator._poll_to_terminal')
+@patch('src.execution.regime_liquidator._close_symbol')
+@patch('src.execution.regime_liquidator._submit_extended_hours_close')
+@patch('src.execution.regime_liquidator._load_broker_positions_list')
+def test_close_subset_rth_uses_position_close_not_ext_hours(
+        mock_load, mock_ext, mock_close, mock_poll, mock_audit):
+    from src.execution.regime_liquidator import close_subset
+    mock_load.return_value = [
+        {'symbol': 'GLW', 'qty': '100', 'asset_class': 'us_equity', 'market_value': '3210'},
+    ]
+    mock_close.return_value = (True, {'id': 'o-1', 'status': 'accepted'})
+    mock_poll.return_value = {'id': 'o-1', 'status': 'filled', 'filled_qty': '100',
+                              'filled_avg_price': '32.10'}
+    out = close_subset(['GLW'], reason='PREMARKET_PANIC', rth=True)
+    mock_ext.assert_not_called()
+    mock_close.assert_called_once_with('GLW', 100.0)
+    assert out == [{'ticker': 'GLW', 'status': 'filled', 'qty': 100.0, 'filled_qty': 100.0,
+                    'avg_fill_price': 32.10, 'liquidation_id': 'aud-1'}]
+    row = mock_audit.call_args.args[0]
+    assert row['regime_from'] == 'PREMARKET_PANIC' and row['result_status'] == 'filled'
+
+
+@patch('src.execution.regime_liquidator._write_liquidation_audit', return_value=None)
+@patch('src.execution.regime_liquidator._close_symbol', return_value=(False, {'message': 'nope'}))
+@patch('src.execution.regime_liquidator._load_broker_positions_list')
+def test_close_subset_rth_failure_is_submit_error(mock_load, mock_close, mock_audit):
+    from src.execution.regime_liquidator import close_subset
+    mock_load.return_value = [{'symbol': 'GLW', 'qty': '-7', 'asset_class': 'us_equity'}]
+    out = close_subset(['GLW'], reason='PREMARKET_PANIC', rth=True)
+    assert out[0]['status'] == 'submit_error' and 'nope' in out[0]['error']
+    assert mock_audit.call_args.args[0]['direction'] == 'short'

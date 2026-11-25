@@ -1067,8 +1067,37 @@ def _write_liquidation_audit(row: dict) -> str | None:
         return None
 
 
-def close_subset(tickers: list[str], reason: str) -> list[dict]:
-    """Flatten a SUBSET of broker equity positions using extended-hours limit orders.
+def _submit_rth_close(order: dict) -> dict:
+    """2026-11-25: regular-hours sibling of _submit_extended_hours_close for
+    the deferred premarket news-veto exits — `alpaca position close` via
+    _close_symbol (cancel-then-retry when a resting protective order holds
+    the qty), polled to a terminal status so the audit records the fill.
+    Same return shape as the ext-hours submitter."""
+    symbol, qty = order['symbol'], float(order['qty'])
+    ok, payload = _close_symbol(symbol, qty)
+    if not ok:
+        raise RuntimeError(f'position close failed: {payload}')
+    pay = payload if isinstance(payload, dict) else {}
+    oid = pay.get('id') or pay.get('order_id')
+    final = _poll_to_terminal(oid, timeout_s=30, interval_s=2) if oid else pay
+    status = _classify_outcome(True, final, qty)
+    f = final if isinstance(final, dict) else pay
+    try:
+        filled = float(f.get('filled_qty') or 0)
+    except (TypeError, ValueError):
+        filled = 0.0
+    try:
+        avg = float(f.get('filled_avg_price') or 0)
+    except (TypeError, ValueError):
+        avg = 0.0
+    return {'status': status, 'filled_qty': filled, 'avg_fill_price': avg,
+            'order_id': oid, 'client_order_id': None}
+
+
+def close_subset(tickers: list[str], reason: str, *, rth: bool = False) -> list[dict]:
+    """Flatten a SUBSET of broker equity positions. Default (rth=False): extended-hours
+    limit orders (pre/post-market book). rth=True (2026-11-25, deferred premarket
+    news-veto exits fired at the open): regular-hours `position close` via _submit_rth_close.
 
     Does NOT touch the existing liquidate_on_regime_change / _close_symbol path.
     Filters broker positions to us_equity asset_class only (crypto/options skipped).
@@ -1082,6 +1111,7 @@ def close_subset(tickers: list[str], reason: str) -> list[dict]:
     """
     if not tickers:
         return []
+    submit = _submit_rth_close if rth else _submit_extended_hours_close
     from datetime import date as _date
     positions = _load_broker_positions_list()
     by_sym = {
@@ -1108,7 +1138,7 @@ def close_subset(tickers: list[str], reason: str) -> list[dict]:
         side = 'sell' if signed_qty > 0 else 'buy'
 
         try:
-            outcome = _submit_extended_hours_close({
+            outcome = submit({
                 'symbol': ticker, 'side': side, 'qty': abs_qty,
             })
             audit_id = _write_liquidation_audit({
