@@ -45,8 +45,9 @@ CRON_POLICIES: dict[str, Policy] = {
         'legacy-daily-cycle-1000', 'closeexec-compute-1510', 'closeexec-execute-1555',
         'closeexec-sod-refresh-0935', 'eod-signal-register-1615', 'premarket-news-0905',
         'premarket-gate-0915', 'open-reconcile-0925', 'opg-sweep-0932', 'eod-into-close-fill-1555',
-        'tier1-acting-ingest-1430', 'sameday-compute-1500', 'sameday-execute-1555',
+        'tier1-acting-ingest-1430', 'sameday-compute-1500', 'sameday-execute-1550',
         'sameday-eod-collect-1615', 'sameday-evening-marks-1620', 'sameday-sod-refresh-0935',
+        'sameday-open-reattach-0936',   # 09:36 ET fractional DAY-stop re-arm (2026-11-23); policy added 2026-11-25
         'morning-regime-0900', 'options-aggregates-refresh-0605')},
 }
 

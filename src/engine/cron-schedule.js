@@ -649,7 +649,11 @@ function start(swarm, generateId, notifyDiscord) {
             // TODAY (a stale/missing handoff means the 15:00 compute failed —
             // submitting yesterday's sizing would be exactly the staleness
             // this pivot removes).
-            _sched('sameday-execute-1555', '55 15 * * 1-5', () => {
+            // 2026-11-25: moved 15:55 → 15:50 ET. The 11-25 batch (269 orders ≈ 1.3 s
+            // each + a 429 retry) ran 349 s and spilled past the close; the tail
+            // became ext-hours limit fills at stub asks (−$3.4k). Ten minutes of
+            // runway + the executor's rth_spillover guard (no submits after close).
+            _sched('sameday-execute-1550', '50 15 * * 1-5', () => {
                 const fs = require('fs');
                 const today = new Date().toISOString().slice(0, 10);
                 const handoff = path.join(ROOT, 'output', 'handoffs', `${today}_sized.json`);
@@ -657,7 +661,7 @@ function start(swarm, generateId, notifyDiscord) {
                     log(`same-day execute ABORT: no ${today}_sized.json — 15:00 compute did not complete; nothing submitted`);
                     return;
                 }
-                log('same-day execute (3:55pm ET): alpaca → reconcile → stop_reattach → report → shadow → health');
+                log('same-day execute (3:50pm ET): alpaca → reconcile → stop_reattach → report → shadow → health');
                 dispatchCycle('sameday-execute',
                               ['alpaca', 'reconcile', 'stop_reattach', 'report', 'pyportfolioopt_shadow', 'health']);
             }, { timezone: 'America/New_York' });

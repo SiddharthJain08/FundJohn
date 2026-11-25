@@ -232,7 +232,7 @@ def in_exec_window(now_utc) -> bool:
     et = now_utc.astimezone(_ET)
     if et.weekday() >= 5:
         return False
-    return (15, 55) <= (et.hour, et.minute) < (16, 5)
+    return (15, 50) <= (et.hour, et.minute) < (16, 5)   # 2026-11-25: execute lane moved to 15:50 ET
 
 
 def _redis():
@@ -928,7 +928,7 @@ def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(description='Crypto drawdown circuit breaker (one tick)')
     ap.add_argument('--dry-run', action='store_true', help='evaluate + post, never order')
-    ap.add_argument('--force', action='store_true', help='ignore the 15:55-16:05 ET exec window')
+    ap.add_argument('--force', action='store_true', help='ignore the 15:50-16:05 ET exec window')
     a = ap.parse_args(argv)
     try:
         os.nice(10)

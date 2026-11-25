@@ -292,6 +292,76 @@ def _alpaca_session_kind() -> str:
     return session
 
 
+# ── RTH spill-over guard (2026-11-25) ────────────────────────────────────────
+# The 15:55 ET execute batch overran 16:00 ET (269 orders ≈ 1.3 s each + a 429
+# retry); _alpaca_session_kind() flipped to 'afterhours' mid-batch and the last
+# 35 orders went out as ext-hours LIMIT at ask+0.5 % — 34 filled at stale/stub
+# asks on thin names (ACT 72.32 vs ~45) ≈ −$3.4k of paper NAV in 23 s, six of
+# them past their stop within a minute. The pre/afterhours order shape is for
+# lanes that START in those sessions; a batch that began in RTH must not drift
+# into it. main() stamps the batch session + today's close (clock.next_close,
+# half-day aware; static 16:00 ET fallback); execute_single refuses every
+# open AND close once the close has passed (skip reason `rth_spillover`) —
+# the next cycle re-sizes them against a live book.
+_BATCH = {'session': None, 'close_at': None}
+
+
+def _clock_payload() -> dict | None:
+    """`alpaca clock` JSON, or None when the CLI fails (never raises)."""
+    try:
+        proc = subprocess.run([ALPACA_CLI, 'clock'], capture_output=True, text=True,
+                              timeout=10, check=False)
+        if proc.returncode == 0 and proc.stdout:
+            payload = json.loads(proc.stdout)
+            return payload if isinstance(payload, dict) else None
+    except Exception as exc:   # noqa: BLE001
+        log(f'alpaca clock failed ({type(exc).__name__}: {exc}) — spill-over guard uses static 16:00 ET')
+    return None
+
+
+def _static_close_utc(now_utc=None):
+    """Today's 16:00 ET as an aware UTC datetime (fallback when the clock
+    payload has no usable next_close)."""
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo('America/New_York')
+    now_et = (now_utc or datetime.now(timezone.utc)).astimezone(et)
+    return now_et.replace(hour=16, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+
+
+def _begin_batch(session: str, payload: dict | None = None, now_utc=None) -> None:
+    """Stamp the batch's starting session and, for an RTH batch, the close it
+    must not run past. `payload` lets tests inject the clock; main() fetches it."""
+    close_at = None
+    if session == 'rth':
+        if payload is None:
+            payload = _clock_payload()
+        nc = (payload or {}).get('next_close')
+        if nc:
+            try:
+                close_at = datetime.fromisoformat(str(nc).replace('Z', '+00:00')).astimezone(timezone.utc)
+            except (ValueError, TypeError):
+                close_at = None
+        if close_at is None:
+            close_at = _static_close_utc(now_utc)
+    _BATCH.update({'session': session, 'close_at': close_at})
+
+
+def _rth_spillover(now_utc=None) -> str | None:
+    """Reason string when a batch that began in RTH has run past the close
+    (no more submits of any kind), else None. Inert when main() never stamped
+    the batch (tests / ad-hoc execute_single calls)."""
+    if _BATCH.get('session') != 'rth' or _BATCH.get('close_at') is None:
+        return None
+    now = now_utc or datetime.now(timezone.utc)
+    close_at = _BATCH['close_at']
+    if now < close_at:
+        return None
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo('America/New_York')
+    return (f"batch began in RTH, close {close_at.astimezone(et).strftime('%H:%M:%S')} ET passed "
+            f"({now.astimezone(et).strftime('%H:%M:%S')} ET) — not converting to ext-hours; deferred to the next cycle")
+
+
 def _is_session_day(now_et) -> bool:
     """NYSE session day per the trading_calendar master (weekends AND holidays)."""
     from lib.trading_calendar import is_session
@@ -2661,6 +2731,12 @@ def execute_single(sess, equity, order, run_date):
 
     # Orphan-close orders: close the full broker position, no bracket needed.
     if order.get('close_only'):
+        _sp = _rth_spillover()
+        if _sp:
+            log(f'  ✗ {ticker}: rth_spillover (close) — {_sp}')
+            return {'ticker': ticker, 'status': 'SKIP',
+                    'reason': f'rth_spillover: {_sp}',
+                    'client_order_id': coid, 'tif': 'day', 'order_class': 'simple'}
         session_co = _alpaca_session_kind()
         if session_co == 'closed':
             return {'ticker': ticker, 'status': 'SKIP',
@@ -2893,6 +2969,12 @@ def execute_single(sess, equity, order, run_date):
     #   - closed     → refuse (overnight 20:00–04:00 ET, weekends, holidays)
     # OPG was removed: the May-18 OPG paper-fill failure showed it isn't a
     # reliable substitute for live orders.
+    _sp = _rth_spillover()
+    if _sp:
+        log(f'  ✗ {ticker}: rth_spillover (open) — {_sp}')
+        return {'ticker': ticker, 'status': 'SKIP',
+                'reason': f'rth_spillover: {_sp}',
+                'client_order_id': coid, 'tif': 'day', 'order_class': 'simple'}
     session = _alpaca_session_kind()
     limit_price: float | None = None
     if session == 'rth':
@@ -3220,6 +3302,10 @@ def main():
         'closed':     'CLOSED (overnight 20:00–04:00 ET / weekend / holiday) — refusing all submits',
     }
     log(f'Market session: {_session_descriptions.get(session, session)}')
+    _begin_batch(session)
+    if _BATCH.get('close_at') is not None:
+        log(f"[executor] spill-over guard armed: no submits at/after {_BATCH['close_at'].isoformat()} "
+            f"(batch began in RTH)")
 
     # Mark the close-execute phase in-flight so a concurrent intraday-regime
     # redeploy defers (300s TTL is the crash backstop). RTH-only — the legacy

@@ -15,17 +15,19 @@ const EXPECTED_NAMES = [
   'token-budget-reset', 'legacy-daily-cycle-1000', 'closeexec-compute-1510', 'closeexec-execute-1555',
   'closeexec-sod-refresh-0935', 'eod-signal-register-1615', 'premarket-news-0905', 'premarket-gate-0915',
   'open-reconcile-0925', 'opg-sweep-0932', 'eod-into-close-fill-1555', 'tier1-acting-ingest-1430',
-  'sameday-compute-1500', 'sameday-execute-1555', 'sameday-eod-collect-1615', 'sameday-evening-marks-1620',
+  'sameday-compute-1500', 'sameday-execute-1550', 'sameday-eod-collect-1615', 'sameday-evening-marks-1620',
   'sameday-sod-refresh-0935', 'morning-regime-0900', 'intraday-hmm-tick', 'crypto-regime-tick',
   'intraday-hmm-refit-1800', 'options-aggregates-refresh-0605', 'cadence-recompute-2355',
   'circuit-breaker-tick', 'weekly-maintenance-sun0800', 'curator-priors-snapshot-0305',
+  // added after the Task 6 brief: crypto engine ticks (2026-11-06/10), 09:36 open re-arm (2026-11-23)
+  'sameday-open-reattach-0936', 'crypto-flow-tick', 'crypto-breaker-tick',
 ];
 
-test('26 _sched names, all unique, set-equal to the Task 6 brief table', () => {
+test('29 _sched names, all unique, set-equal to the Task 6 brief table (+ later additions)', () => {
   const names = [...text.matchAll(/_sched\('([a-z0-9-]+)'/g)].map((m) => m[1]);
-  assert.strictEqual(names.length, 26);
-  assert.strictEqual(new Set(names).size, 26);
-  assert.strictEqual(EXPECTED_NAMES.length, 26);
+  assert.strictEqual(names.length, 29);
+  assert.strictEqual(new Set(names).size, 29);
+  assert.strictEqual(EXPECTED_NAMES.length, 29);
   assert.deepStrictEqual([...names].sort(), [...EXPECTED_NAMES].sort());
 });
 

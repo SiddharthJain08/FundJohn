@@ -115,7 +115,7 @@ def test_no_rows_warns():
 
 
 def test_warn_lists_at_most_four_names():
-    rows = [_row(n, None, fails=1) for n in ['sameday-compute-1500', 'sameday-execute-1555', 'premarket-gate-0915',
+    rows = [_row(n, None, fails=1) for n in ['sameday-compute-1500', 'sameday-execute-1550', 'premarket-gate-0915',
                                              'opg-sweep-0932', 'open-reconcile-0925', 'morning-regime-0900']]
     st, d = chk.evaluate(rows, chk.CRON_POLICIES, now=MON_1000_ET)
     assert st is Status.WARN and '(+2 more)' in d and 'morning-regime-0900' not in d
@@ -141,7 +141,7 @@ def test_systemd_policies_keys_template_instance(tmp_path):
 
 def test_cron_policy_keys_equal_cron_schedule_names():
     names = set(re.findall(r"_sched\('([a-z0-9-]+)'", (ROOT / 'src/engine/cron-schedule.js').read_text()))
-    assert names == set(chk.CRON_POLICIES) and len(names) == 28
+    assert names == set(chk.CRON_POLICIES) and len(names) == 29   # +sameday-open-reattach-0936 (2026-11-23)
 
 
 def test_installer_never_installs_job_stat_dropin():

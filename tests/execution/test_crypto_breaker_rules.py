@@ -73,6 +73,8 @@ def test_mode_precedence():
 
 def test_exec_window():
     assert cb.in_exec_window(datetime(2026, 11, 10, 20, 58, tzinfo=UTC))
+    assert cb.in_exec_window(datetime(2026, 11, 10, 20, 51, tzinfo=UTC))      # lane moved to 15:50 ET (2026-11-25)
+    assert not cb.in_exec_window(datetime(2026, 11, 10, 20, 49, tzinfo=UTC))
     assert not cb.in_exec_window(datetime(2026, 11, 10, 21, 6, tzinfo=UTC))
     assert not cb.in_exec_window(datetime(2026, 11, 14, 20, 58, tzinfo=UTC))
 
