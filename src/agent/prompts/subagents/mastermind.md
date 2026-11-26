@@ -59,7 +59,7 @@ Binary: if D passes, this passes. No extra criteria at this stage.
 - Options microstructure data (order book, trade-level)
 - International equity data (non-US markets)
 - Futures/FX data (unavailable)
-- Crypto microstructure: funding-rate, perpetual/open-interest, order-book, spot-vol (unavailable). NOTE: **daily price bars ARE available** for seven crypto tickers — BTC, ETH, ADA, DOGE, XRP, SOL, AVAX (all `-USD`, history since 2017–2020) — crypto price-only strategies (momentum/carry) are implementable.
+- Crypto microstructure: funding-rate, perpetual/open-interest, order-book, spot-vol (unavailable). NOTE: **daily price bars ARE available** for 17 crypto tickers with ≥ 4 years of history — BTC, ETH, ADA, DOGE, XRP, SOL, AVAX (2016–2020) and BAT, BCH, LINK, LTC, UNI, PAXG, AAVE, GRT, SUSHI, YFI (2021); all `-USD` — crypto price-only strategies (momentum/carry) are implementable.
 
 ---
 
@@ -85,7 +85,7 @@ These are signals from our backfill history — we've seen what breaks the pipel
 - Universe of ≥100 tickers claimed
 - Recent publication (last 5 years) on non-classical topic
 - Index/ETF volatility-premium strategies (short straddle/strangle, variance, delta-hedged vol) on SPY/SPX/QQQ/IWM — implementable via our synthetic greeks engine (`option` class)
-- Crypto price-only momentum / carry / trend / cross-sectional on the seven `-USD` tickers with daily history (BTC, ETH, ADA, DOGE, XRP, SOL, AVAX) — implementable (`crypto` class)
+- Crypto price-only momentum / carry / trend / cross-sectional on the 17 `-USD` tickers with ≥ 4 years of daily history (BTC, ETH, ADA, DOGE, XRP, SOL, AVAX; BAT, BCH, LINK, LTC, UNI, PAXG, AAVE, GRT, SUSHI, YFI) — implementable (`crypto` class)
 - Commodity/sector ETP rotation on price data (GLD/SLV/USO/sector ETFs) — implementable (`etp` class)
 
 **Strong negative signals** (favor lower confidence / reject):
