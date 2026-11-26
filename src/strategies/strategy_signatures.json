@@ -293,22 +293,6 @@
       "TRANSITIONING"
     ]
   },
-  "S_ast_pairs_trading_with_country_etfs": {
-    "regime_set_hash": "c722b3f150c07554",
-    "direction_hash": "c65c9aa02b36a104",
-    "formula_tokens": [
-      "correlation",
-      "regime",
-      "reversion",
-      "rv",
-      "value"
-    ],
-    "regimes": [
-      "HIGH_VOL",
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
   "S_ast_rd_expenditures_and_stock_returns": {
     "regime_set_hash": "c722b3f150c07554",
     "direction_hash": "ad8944b86def7516",
@@ -494,40 +478,6 @@
       "rv",
       "theta",
       "tilt",
-      "value"
-    ],
-    "regimes": [
-      "HIGH_VOL",
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
-  "S_btc_donchian_breakout_realistic_costs": {
-    "regime_set_hash": "c722b3f150c07554",
-    "direction_hash": "f2a0793adc86d594",
-    "formula_tokens": [
-      "atm",
-      "atr",
-      "breakout",
-      "quality",
-      "regime",
-      "rv"
-    ],
-    "regimes": [
-      "HIGH_VOL",
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
-  "S_btc_donchian_breakout_realistic_costs_tv2": {
-    "regime_set_hash": "c722b3f150c07554",
-    "direction_hash": "a8f3862b96300e62",
-    "formula_tokens": [
-      "atm",
-      "atr",
-      "breakout",
-      "quality",
-      "regime",
       "value"
     ],
     "regimes": [
@@ -769,6 +719,42 @@
       "HIGH_VOL",
       "LOW_VOL",
       "TRANSITIONING"
+    ]
+  },
+  "S_cvar_minvar_etf_diversification": {
+    "regime_set_hash": "97eefdff0b31efe5",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "correlation",
+      "realized_vol",
+      "regime",
+      "reversion",
+      "rv",
+      "tilt",
+      "value",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "RISK_OFF"
+    ]
+  },
+  "S_cvar_minvar_etf_diversification_tv2": {
+    "regime_set_hash": "97eefdff0b31efe5",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "realized_vol",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "RISK_OFF"
     ]
   },
   "S_day_after_big_move_contrarian_fade_tv2": {
@@ -1041,20 +1027,6 @@
       "regime",
       "reversion",
       "rv"
-    ],
-    "regimes": [
-      "HIGH_VOL",
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
-  "S_fade_quarterly_theory_q2": {
-    "regime_set_hash": "c722b3f150c07554",
-    "direction_hash": "ad8944b86def7516",
-    "formula_tokens": [
-      "atr",
-      "regime",
-      "value"
     ],
     "regimes": [
       "HIGH_VOL",
@@ -1367,26 +1339,6 @@
       "rv",
       "value",
       "zscore"
-    ],
-    "regimes": [
-      "HIGH_VOL",
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
-  "S_iv_surface_no_arb_relative_value": {
-    "regime_set_hash": "c722b3f150c07554",
-    "direction_hash": "48cc186c8b1aabe2",
-    "formula_tokens": [
-      "atm",
-      "atr",
-      "delta",
-      "dispersion",
-      "iv_surface",
-      "quality",
-      "regime",
-      "strangle",
-      "value"
     ],
     "regimes": [
       "HIGH_VOL",
@@ -1845,25 +1797,6 @@
       "TRANSITIONING"
     ]
   },
-  "S_rachev_ratio_etf_scenario_opt_tv2": {
-    "regime_set_hash": "c722b3f150c07554",
-    "direction_hash": "a8f3862b96300e62",
-    "formula_tokens": [
-      "beta",
-      "correlation",
-      "dispersion",
-      "realized_vol",
-      "regime",
-      "skew",
-      "value",
-      "weighted"
-    ],
-    "regimes": [
-      "HIGH_VOL",
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
   "S_regime_age_momentum": {
     "regime_set_hash": "c722b3f150c07554",
     "direction_hash": "a8f3862b96300e62",
@@ -1994,20 +1927,6 @@
       "TRANSITIONING"
     ]
   },
-  "S_sector_fund_annual_momentum_rotation": {
-    "regime_set_hash": "10b0b5eb7bebe610",
-    "direction_hash": "a8f3862b96300e62",
-    "formula_tokens": [
-      "atr",
-      "momentum",
-      "regime",
-      "rv"
-    ],
-    "regimes": [
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
   "S_sector_trend_overlay": {
     "regime_set_hash": "c722b3f150c07554",
     "direction_hash": "a8f3862b96300e62",
@@ -2075,21 +1994,6 @@
       "TREND"
     ]
   },
-  "S_short_volume_settlement_predictor": {
-    "regime_set_hash": "c722b3f150c07554",
-    "direction_hash": "ad8944b86def7516",
-    "formula_tokens": [
-      "earnings",
-      "regime",
-      "short_interest",
-      "value"
-    ],
-    "regimes": [
-      "HIGH_VOL",
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
   "S_sparse_basis_pursuit_sdf": {
     "regime_set_hash": "c722b3f150c07554",
     "direction_hash": "a8f3862b96300e62",
@@ -2115,28 +2019,6 @@
       "reversion",
       "rv",
       "value"
-    ],
-    "regimes": [
-      "HIGH_VOL",
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
-  "S_spx_straddle_rl_exit_timing": {
-    "regime_set_hash": "c722b3f150c07554",
-    "direction_hash": "cbbf9f7724c8d435",
-    "formula_tokens": [
-      "atm",
-      "atr",
-      "beta",
-      "gamma",
-      "iv_rank",
-      "regime",
-      "rv",
-      "straddle",
-      "theta",
-      "value",
-      "vrp"
     ],
     "regimes": [
       "HIGH_VOL",
@@ -2321,18 +2203,6 @@
       "TRANSITIONING"
     ]
   },
-  "S_visibility_graph_rsi": {
-    "regime_set_hash": "10b0b5eb7bebe610",
-    "direction_hash": "ad8944b86def7516",
-    "formula_tokens": [
-      "regime",
-      "value"
-    ],
-    "regimes": [
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
   "S_vol_conditional_market_timing": {
     "regime_set_hash": "c722b3f150c07554",
     "direction_hash": "f2a0793adc86d594",
@@ -2391,21 +2261,6 @@
       "weighted"
     ],
     "regimes": [
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
-  "S_weekend_crypto_vol_monday_premium": {
-    "regime_set_hash": "c722b3f150c07554",
-    "direction_hash": "3295eb13efff7c2a",
-    "formula_tokens": [
-      "atm",
-      "atr",
-      "regime",
-      "straddle"
-    ],
-    "regimes": [
-      "HIGH_VOL",
       "LOW_VOL",
       "TRANSITIONING"
     ]
@@ -2512,48 +2367,6 @@
       "TRANSITIONING"
     ]
   },
-  "oxf_bollinger_momentum": {
-    "regime_set_hash": "10b0b5eb7bebe610",
-    "direction_hash": "ad8944b86def7516",
-    "formula_tokens": [
-      "atr",
-      "breakout",
-      "momentum",
-      "regime",
-      "reversion"
-    ],
-    "regimes": [
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
-  "oxf_donchian_breakout": {
-    "regime_set_hash": "10b0b5eb7bebe610",
-    "direction_hash": "ad8944b86def7516",
-    "formula_tokens": [
-      "atr",
-      "breakout",
-      "momentum",
-      "regime"
-    ],
-    "regimes": [
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
-  "oxf_dow_theory": {
-    "regime_set_hash": "10b0b5eb7bebe610",
-    "direction_hash": "ad8944b86def7516",
-    "formula_tokens": [
-      "atr",
-      "breakout",
-      "regime"
-    ],
-    "regimes": [
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
   "oxf_dual_momentum_roc": {
     "regime_set_hash": "10b0b5eb7bebe610",
     "direction_hash": "ad8944b86def7516",
@@ -2629,48 +2442,10 @@
       "TRANSITIONING"
     ]
   },
-  "oxf_livermore": {
-    "regime_set_hash": "10b0b5eb7bebe610",
-    "direction_hash": "ad8944b86def7516",
-    "formula_tokens": [
-      "atr",
-      "breakout",
-      "regime"
-    ],
-    "regimes": [
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
   "oxf_macd_zero": {
     "regime_set_hash": "10b0b5eb7bebe610",
     "direction_hash": "ad8944b86def7516",
     "formula_tokens": [
-      "regime"
-    ],
-    "regimes": [
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
-  "oxf_nr7": {
-    "regime_set_hash": "10b0b5eb7bebe610",
-    "direction_hash": "ad8944b86def7516",
-    "formula_tokens": [
-      "breakout",
-      "regime"
-    ],
-    "regimes": [
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
-  "oxf_orbp_momentum": {
-    "regime_set_hash": "10b0b5eb7bebe610",
-    "direction_hash": "ad8944b86def7516",
-    "formula_tokens": [
-      "breakout",
-      "momentum",
       "regime"
     ],
     "regimes": [
@@ -2756,20 +2531,6 @@
     "regime_set_hash": "10b0b5eb7bebe610",
     "direction_hash": "ad8944b86def7516",
     "formula_tokens": [
-      "regime"
-    ],
-    "regimes": [
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
-  "oxf_welles_wilder_breakout": {
-    "regime_set_hash": "10b0b5eb7bebe610",
-    "direction_hash": "ad8944b86def7516",
-    "formula_tokens": [
-      "atr",
-      "breakout",
-      "momentum",
       "regime"
     ],
     "regimes": [
@@ -4104,7 +3865,55 @@
     "ejected": true,
     "ejected_at": "2026-07-14"
   },
+  "oxf_bollinger_momentum": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "momentum",
+      "regime",
+      "reversion"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
   "oxf_bull_oops": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_donchian_breakout": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "momentum",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_dow_theory": {
     "regime_set_hash": "10b0b5eb7bebe610",
     "direction_hash": "ad8944b86def7516",
     "formula_tokens": [
@@ -4137,6 +3946,51 @@
     "regime_set_hash": "10b0b5eb7bebe610",
     "direction_hash": "ad8944b86def7516",
     "formula_tokens": [
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_livermore": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_nr7": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "breakout",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_welles_wilder_breakout": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "momentum",
       "regime"
     ],
     "regimes": [
@@ -4659,5 +4513,223 @@
     ],
     "ejected": true,
     "ejected_at": "2026-11-14"
+  },
+  "S_ast_pairs_trading_with_country_etfs": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "c65c9aa02b36a104",
+    "formula_tokens": [
+      "correlation",
+      "regime",
+      "reversion",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-21"
+  },
+  "S_btc_donchian_breakout_realistic_costs": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "f2a0793adc86d594",
+    "formula_tokens": [
+      "atm",
+      "atr",
+      "breakout",
+      "quality",
+      "regime",
+      "rv"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-21"
+  },
+  "S_btc_donchian_breakout_realistic_costs_tv2": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atm",
+      "atr",
+      "breakout",
+      "quality",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-21"
+  },
+  "S_fade_quarterly_theory_q2": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-21"
+  },
+  "S_iv_surface_no_arb_relative_value": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "48cc186c8b1aabe2",
+    "formula_tokens": [
+      "atm",
+      "atr",
+      "delta",
+      "dispersion",
+      "iv_surface",
+      "quality",
+      "regime",
+      "strangle",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-21"
+  },
+  "S_rachev_ratio_etf_scenario_opt_tv2": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "beta",
+      "correlation",
+      "dispersion",
+      "realized_vol",
+      "regime",
+      "skew",
+      "value",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-21"
+  },
+  "S_sector_fund_annual_momentum_rotation": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "momentum",
+      "regime",
+      "rv"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-21"
+  },
+  "S_short_volume_settlement_predictor": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "earnings",
+      "regime",
+      "short_interest",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-21"
+  },
+  "S_spx_straddle_rl_exit_timing": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "cbbf9f7724c8d435",
+    "formula_tokens": [
+      "atm",
+      "atr",
+      "beta",
+      "gamma",
+      "iv_rank",
+      "regime",
+      "rv",
+      "straddle",
+      "theta",
+      "value",
+      "vrp"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-21"
+  },
+  "S_visibility_graph_rsi": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-21"
+  },
+  "S_weekend_crypto_vol_monday_premium": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "3295eb13efff7c2a",
+    "formula_tokens": [
+      "atm",
+      "atr",
+      "regime",
+      "straddle"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-21"
+  },
+  "oxf_orbp_momentum": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "breakout",
+      "momentum",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-11-21"
   }
 }
