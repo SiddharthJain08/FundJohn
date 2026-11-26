@@ -38,15 +38,20 @@ def afterhours_tp_on() -> bool:
     return os.environ.get('OPENCLAW_AFTERHOURS_TP') == '1'
 
 
-def desired_tps(positions, bracket_lookup, tp_covered=None):
+def desired_tps(positions, bracket_lookup, tp_covered=None, stop_reserved=None):
     """Pure: map open positions to the ext-hours TP orders to place.
 
     positions: [{'symbol','side','qty'}]
     bracket_lookup(symbol, side) -> {'target': float} | None  (latest placed TP)
     tp_covered: {symbol: qty already resting on a limit} (skip covered qty)
+    stop_reserved: {symbol: qty reserved by resting stop orders} — a position
+      whose whole qty sits behind a (DAY) stop cannot take a second exit order
+      (Alpaca: 'insufficient qty available'; 12 such failures per session on
+      2026-11-25). Fractional longs carry no TP leg by design (11-23 ruling).
     Returns [{'ticker','side','qty','tp'}] — side is the EXIT side.
     """
     tp_covered = tp_covered or {}
+    stop_reserved = stop_reserved or {}
     out = []
     for p in positions:
         sym = p.get('symbol')
@@ -58,6 +63,8 @@ def desired_tps(positions, bracket_lookup, tp_covered=None):
         if not sym or qty <= 0 or side not in ('long', 'short'):
             continue
         if tp_covered.get(sym, 0.0) >= qty - 0.01:
+            continue
+        if stop_reserved.get(sym, 0.0) >= qty - 1e-6:
             continue
         b = bracket_lookup(sym, side)
         tp = (b or {}).get('target')
@@ -920,7 +927,7 @@ def run_exit_fill_reporter(dry_run: bool) -> dict:
 def main(argv=None) -> int:
     import argparse
     from execution.stop_reattach import (fetch_positions, fetch_tp_covered,
-                                         latest_broker_bracket)
+                                         fetch_active_stops, latest_broker_bracket)
     ap = argparse.ArgumentParser()
     ap.add_argument('--reconcile', action='store_true',
                     help='session-boundary reconcile instead of placement')
@@ -954,9 +961,13 @@ def main(argv=None) -> int:
     # and resize any stop a filled TP left oversized), THEN place fresh TPs.
     log(f'reconcile: {reconcile_afterhours(args.dry_run)}')
     positions = fetch_positions() or []
+    reserved = fetch_active_stops()
+    n_reserved = sum(1 for p in positions
+                     if 0 < abs(float(p.get('qty') or 0)) <= reserved.get(p.get('symbol'), 0.0) + 1e-6)
     plan = desired_tps(positions, latest_broker_bracket,
-                       tp_covered=fetch_tp_covered())
-    log(f'placing {len(plan)} ext-hours TP(s)')
+                       tp_covered=fetch_tp_covered(), stop_reserved=reserved)
+    log(f'placing {len(plan)} ext-hours TP(s); skipped {n_reserved} position(s) fully '
+        f'reserved by a resting stop (no TP leg by design)')
     _place_plan(plan, args.dry_run)
     return 0
 

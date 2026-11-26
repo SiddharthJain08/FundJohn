@@ -138,7 +138,13 @@ def test_main_parity_fail_error_and_zero_trade(monkeypatch, tmp_path, capsys):
     assert recs_made == ['S_zero']
     flag_updates = [p for sql, p in pg.log
                     if 'UPDATE universe_shrink_metrics' in sql]
-    assert [p[-1] for p in flag_updates] == ['run-zero']
+    # 2026-11-25 (mig 171): the parity-failed strategy's run has its stale rows
+    # un-chosen (readers fall back to the run of record) BEFORE the zero-trade
+    # strategy's normal chosen-flag update; both verdicts are persisted.
+    assert [p[-1] for p in flag_updates] == ['run-par', 'run-zero']
+    parity_rows = [p for sql, p in pg.log if 'INSERT INTO universe_shrink_parity' in sql]
+    assert [(p[0], p[1], p[2]) for p in parity_rows] == [('S_par', 'run-par', False), ('S_zero', 'run-zero', True)]
+    assert len([sql for sql, p in pg.log if 'SET chosen=FALSE' in sql]) == 1
     assert '[shrink] PARITY FAIL S_par full=0.2 run=1.0 — rows NOT written' in out
     assert 'ERROR S_err' in out
     assert 'parity_fail=1 errors=1' in out

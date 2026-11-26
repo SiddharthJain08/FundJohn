@@ -62,7 +62,7 @@ You MUST do BOTH of the following with that value:
 
 Per-class implementation guidance:
 - **`option`** — emit `Signal.direction` ∈ {`SELL_VOL`, `BUY_VOL`} (never LONG/SHORT for the option legs). Populate `Signal.option_spec` with an `OptionSpec` (imported from `strategies.base`): set `underlying`, `right`, `strike_rule`/`target_delta`, `dte_target`, `structure` (`single|straddle|strangle`), `hedge` (`none|delta`). The underlying MUST be one of SPY/SPX/^GSPC/QQQ/IWM. Universe filter is typically `options_eligible_only` or null.
-- **`crypto`** — emit `Signal.direction` ∈ {`LONG`, `FLAT`} on `BTC-USD`/`ETH-USD`. Do NOT define a `universe_filter` (the 12 predicates are equity universes; leave it out → default applies but is irrelevant for a fixed crypto ticker set).
+- **`crypto`** — emit `Signal.direction` ∈ {`LONG`, `FLAT`} on any of the seven crypto tickers with daily history (`BTC-USD`, `ETH-USD`, `ADA-USD`, `DOGE-USD`, `XRP-USD`, `SOL-USD`, `AVAX-USD`) — the paper's `inferred_universe` or the strategy's own basket. **REQUIRED for crypto: set the manifest `metadata.backtest_tickers` to exactly the tickers the strategy trades** (without it the backtest loads the full 12,900-ticker panel and is OOM-killed — 2026-11-14 incident). Do NOT define a `universe_filter` (the 12 predicates are equity universes; leave it out → default applies but is irrelevant for a fixed crypto ticker set).
 - **`etp`** — standard `LONG`/`FLAT` momentum/rotation on the ETP tickers (e.g. GLD/SLV/USO) using generic `prices`. No universe_filter unless an equity predicate genuinely applies.
 - **`equity`** (default) — unchanged from today.
 
@@ -154,6 +154,10 @@ Add to the `"strategies"` object (inside it, before the closing `}`):
   "instrument_class": "<INFERRED_INSTRUMENT_CLASS, default equity>"
 }
 ```
+
+For `crypto` (and fixed-basket `etp`) strategies add `"backtest_tickers": ["BTC-USD", "ETH-USD", ...]` inside
+`metadata` — exactly the tickers the module trades, nothing else. Equity strategies MUST NOT set it (their
+universe comes from `universe_filter`).
 
 **CRITICAL — filename casing:** `canonical_file` MUST exactly match the strategy_id case + `.py` (i.e. `<strategy_id>.py` verbatim — do NOT lowercase, do NOT transform). The orchestrator's `_resolveImplPath` uses this string to locate the file you wrote; any case drift makes the validator emit `Contract validation failed — File not found` and the strategy is quarantined as `validation_failed` even when the code is correct. The actual `.py` file you write to disk MUST use the same name — `src/strategies/implementations/<strategy_id>.py`. Project convention is uppercase `S_` (85 of 95 files) — match the strategy_id exactly, never invent your own casing.
 

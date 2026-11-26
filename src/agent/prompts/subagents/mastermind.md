@@ -59,7 +59,7 @@ Binary: if D passes, this passes. No extra criteria at this stage.
 - Options microstructure data (order book, trade-level)
 - International equity data (non-US markets)
 - Futures/FX data (unavailable)
-- Crypto microstructure: funding-rate, perpetual/open-interest, order-book, spot-vol (unavailable). NOTE: BTC-USD and ETH-USD **daily price bars ARE available** — crypto price-only strategies (momentum/carry) are implementable.
+- Crypto microstructure: funding-rate, perpetual/open-interest, order-book, spot-vol (unavailable). NOTE: **daily price bars ARE available** for seven crypto tickers — BTC, ETH, ADA, DOGE, XRP, SOL, AVAX (all `-USD`, history since 2017–2020) — crypto price-only strategies (momentum/carry) are implementable.
 
 ---
 
@@ -85,7 +85,7 @@ These are signals from our backfill history — we've seen what breaks the pipel
 - Universe of ≥100 tickers claimed
 - Recent publication (last 5 years) on non-classical topic
 - Index/ETF volatility-premium strategies (short straddle/strangle, variance, delta-hedged vol) on SPY/SPX/QQQ/IWM — implementable via our synthetic greeks engine (`option` class)
-- BTC-USD / ETH-USD price-only momentum or carry — implementable (`crypto` class)
+- Crypto price-only momentum / carry / trend / cross-sectional on the seven `-USD` tickers with daily history (BTC, ETH, ADA, DOGE, XRP, SOL, AVAX) — implementable (`crypto` class)
 - Commodity/sector ETP rotation on price data (GLD/SLV/USO/sector ETFs) — implementable (`etp` class)
 
 **Strong negative signals** (favor lower confidence / reject):

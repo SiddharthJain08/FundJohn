@@ -109,6 +109,38 @@ def grid_summary(result: dict, window, verdict_name: str) -> dict:
             'maintained_regimes': result['verdict'].get('maintained_regimes', [])}
 
 
+def _record_parity(pg, sid: str, run_id: str, ok: bool, full_total, run_total, tol) -> None:
+    """2026-11-25 follow-up (mig 171): persist the parity verdict per (strategy,
+    run) and, on failure, un-choose every shrink row of that run so the readers
+    (activation_assigner, strategy_weights, server.js overlay, promotion_service)
+    fall back to the run of record instead of a stale smear row. 22 long/short
+    books failed parity on 11-24 and kept their 11-05 rows chosen until an
+    operator un-chose them by hand. Best-effort: never sinks the pass."""
+    try:
+        with pg.cursor() as cur:
+            cur.execute("""INSERT INTO universe_shrink_parity
+                             (strategy_id, run_id, parity_ok, full_sharpe, run_sharpe, tol)
+                           VALUES (%s, %s, %s, %s, %s, %s)
+                           ON CONFLICT (strategy_id, run_id) DO UPDATE SET
+                             parity_ok=EXCLUDED.parity_ok, full_sharpe=EXCLUDED.full_sharpe,
+                             run_sharpe=EXCLUDED.run_sharpe, tol=EXCLUDED.tol, checked_at=NOW()""",
+                        (sid, str(run_id), bool(ok), full_total, run_total, tol))
+            if not ok:
+                cur.execute("""UPDATE universe_shrink_metrics SET chosen=FALSE
+                                WHERE run_id=%s AND chosen""", (str(run_id),))
+                n = getattr(cur, 'rowcount', None)
+                if n:
+                    print(f'  [shrink] parity fail {sid}: un-chose {n} stale row(s) '
+                          f'of run {run_id} → readers fall back to the run of record')
+        pg.commit()
+    except Exception as e:  # noqa: BLE001 — the verdict is bookkeeping, the pass must go on
+        print(f'  [shrink] WARN parity verdict not recorded for {sid}: {type(e).__name__}: {e}')
+        try:
+            pg.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--strategy', help='comma-separated strategy ids')
@@ -251,9 +283,13 @@ def main() -> int:
             print(f'[shrink] PARITY FAIL {sid} full={full_total} '
                   f'run={run_total} — rows NOT written')
             parity_fails.append(sid)
+            if not args.dry_run:
+                _record_parity(pg, sid, run['run_id'], False, full_total, run_total, parity_tol)
             continue
         print(f'  [shrink] parity ok {sid} full={full_total} run={run_total} '
               f'marked={n_marked}/{len(trades)}')
+        if not args.dry_run:
+            _record_parity(pg, sid, run['run_id'], True, full_total, run_total, parity_tol)
         verdict = result['verdict']
         current = _current_predicate(entry)
         if verdict['verdict'] == 'no_signal':

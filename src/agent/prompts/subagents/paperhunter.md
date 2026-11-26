@@ -177,7 +177,7 @@ class. Write it as `inferred_instrument_class` in the output JSON.
 |---|---|---|
 | `option` | Strategy trades listed options / volatility (data_requirements include `options_eod`, or direction is `SELL_VOL`/`BUY_VOL`, e.g. straddles, strangles, variance/vol-premium, delta-hedged vol). | Underlying MUST be an index/ETF in our synthetic-greeks envelope: **SPY, SPX, ^GSPC, QQQ, IWM**, and ATM / near-term. Single-name options, OTM-wing/skew, or any other underlying → REJECT with `option_envelope_unsupported`. |
 | `etp` | Strategy rotates/holds exchange-traded products / commodity ETPs (e.g. GLD, SLV, USO, sector ETFs) on price data. | No leverage-decay strategies (we don't model intraday decay). |
-| `crypto` | Strategy trades crypto spot, **BTC-USD or ETH-USD only**, using price-derived signals (momentum, carry, trend). | Anything needing funding-rate, perpetual/OI, or order-book data → REJECT via Gate 2 (capability_gap). |
+| `crypto` | Strategy trades crypto spot on the seven tickers with daily history since 2020 or earlier — **BTC-USD, ETH-USD, ADA-USD, DOGE-USD, XRP-USD, SOL-USD, AVAX-USD** (single names or a basket; cross-sectional within the seven is fine) — using price-derived signals (momentum, carry, trend). | Anything needing funding-rate, perpetual/OI, or order-book data → REJECT via Gate 2 (capability_gap). |
 | `equity` (default) | Everything else (the existing equity-momentum/factor/mean-reversion world), OR when unsure. | — |
 
 Also emit `inferred_option_underlying`: when `inferred_instrument_class` is

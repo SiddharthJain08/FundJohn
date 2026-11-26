@@ -5842,7 +5842,7 @@ function showOverview() {
     { label:'Global Indices',tickers:['^STOXX50E','^N225','^FTSE','^GDAXI','^HSI'] },
     { label:'Major ETFs',   tickers:['SPY','QQQ','IWM','DIA','TLT','GLD'] },
     { label:'Sectors',      tickers:['XLF','XLK','XLE','XLV','XLI','XLY','XLP','XLU'] },
-    { label:'Crypto',       tickers:['BTC-USD','ETH-USD','SOL-USD','BNB-USD','XRP-USD','AVAX-USD'] },
+    { label:'Crypto',       tickers:['BTC-USD','ETH-USD','SOL-USD','XRP-USD','AVAX-USD','ADA-USD','DOGE-USD'] },   // BNB-USD dropped 2026-11-26: not an Alpaca asset, bars stale since 05-21
     { label:'Commodities',  tickers:['GC=F','SI=F','CL=F','NG=F','HG=F'] },
     { label:'Forex',        tickers:['EURUSD=X','GBPUSD=X','USDJPY=X','AUDUSD=X','DX-Y.NYB'] },
   ];

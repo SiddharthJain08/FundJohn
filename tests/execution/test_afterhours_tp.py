@@ -139,6 +139,7 @@ def test_main_placement_path_reconciles_before_placing(monkeypatch):
     import execution.stop_reattach as sr
     monkeypatch.setattr(sr, 'fetch_positions', lambda: [])
     monkeypatch.setattr(sr, 'fetch_tp_covered', lambda: {})
+    monkeypatch.setattr(sr, 'fetch_active_stops', lambda: {})
     monkeypatch.setattr(sr, 'latest_broker_bracket', lambda s, side: None)
     rc = ah.main(['--dry-run'])
     assert rc == 0
@@ -632,3 +633,17 @@ def test_monitor_plan_fractional_qty_preserved():
     positions = [{'symbol': 'FRX', 'side': 'long', 'qty': '0.4', 'current_price': 9.0}]
     out = ah.monitor_plan(positions, {'FRX': {'stop': 10.0, 'tp': None}}, 0.01)
     assert out and out[0]['qty'] == 0.4
+
+
+def test_desired_tps_skips_positions_fully_reserved_by_a_resting_stop():
+    """2026-11-25: a fractional long behind its DAY stop cannot take a TP order
+    (Alpaca 'insufficient qty'); a partially reserved whole-share position still gets one."""
+    positions = [{'symbol': 'FRX', 'side': 'long', 'qty': '2.591755'},
+                 {'symbol': 'WHL', 'side': 'long', 'qty': '10'},
+                 {'symbol': 'PRT', 'side': 'long', 'qty': '10'}]
+    lookup = lambda s, side: {'target': 50.0}
+    out = {d['ticker']: d for d in ah.desired_tps(positions, lookup,
+                                                  stop_reserved={'FRX': 2.591755, 'PRT': 4.0})}
+    assert 'FRX' not in out
+    assert out['WHL']['qty'] == 10
+    assert out['PRT']['qty'] == 10
