@@ -316,7 +316,41 @@ def fetch_broker_tickers() -> set[str] | None:
         return None
     if not isinstance(positions, list):
         return None
-    return {p['symbol'] for p in positions if p.get('symbol')}
+    return broker_tickers_from_positions(positions)
+
+
+def broker_tickers_from_positions(positions: list) -> set[str]:
+    """Broker position rows -> the set of tickers phantom cleanup may spare.
+
+    execution_signals.ticker is the ENGINE spelling ('BTC-USD'); the broker
+    reports 'BTCUSD' (position list) or 'BTC/USD' (orders). Comparing the two
+    raw (the pre-2026-11-27 behaviour) marked every crypto intent row a
+    phantom the day after it was written — the S_beta_btc row was closed by
+    each reconcile, so the Portfolio page lost BTC-USD and the sizer's active
+    window forgot the sleeve. Same symbol-key defect class as the portfolio
+    route (broker_symbols.js) and the stop_reattach orphan sweep (_flat_symbol),
+    both fixed 2026-11-24. The engine spelling comes from the ONE normaliser
+    (ingestion.crypto_flow.universe.internal_symbol); the raw broker symbol is
+    kept too, so a row that stored the broker form is still spared.
+    """
+    try:
+        from ingestion.crypto_flow.universe import internal_symbol
+    except Exception:  # noqa: BLE001 - never let a helper import kill the reconcile
+        internal_symbol = None
+    out: set[str] = set()
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
+        sym = p.get('symbol')
+        if not sym:
+            continue
+        out.add(sym)
+        if internal_symbol is not None:
+            try:
+                out.add(internal_symbol(sym, crypto=(p.get('asset_class') == 'crypto')))
+            except Exception:  # noqa: BLE001
+                pass
+    return out
 
 
 def cleanup_phantom_signals(conn, dry_run: bool, broker_tickers: set[str]) -> int:
