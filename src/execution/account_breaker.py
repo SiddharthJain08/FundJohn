@@ -61,6 +61,20 @@ DEFAULT_NAV_OHLC_PATH = ROOT / 'logs' / 'pnl_daily_ohlc.json'
 
 DD_LIMIT = -0.10        # alpha-P&L drawdown (NAV-denominated) from its high-water mark
 DAILY_LIMIT = -0.03     # total-equity loss vs the session's opening equity
+
+# 2026-11-27 operator ruling: the lifetime (high-water-mark) drawdown rule
+# flattened the whole alpha book at the 09:30 ET open on a -13.9 % drawdown
+# accumulated since the 09-30 alpha epoch (no time window; the 11-25 execute
+# spill-over supplied the last $4.9k). OPENCLAW_ACCOUNT_BREAKER_DD_RULE=0
+# switches that rule OFF — the daily-loss rule keeps running and the ARM flag
+# keeps its process-wide meaning (sizer gate + flatten). Read per call so the
+# cron child picks the .env value up on the johnbot restart like every other
+# flag here; the status line gains ' dd_rule=off' while it is disabled.
+DD_RULE_ENV = 'OPENCLAW_ACCOUNT_BREAKER_DD_RULE'
+
+
+def dd_rule_enabled() -> bool:
+    return (os.environ.get(DD_RULE_ENV) or '1').strip() != '0'
 BENCH_LOOKBACK_DAYS = 30
 
 _ET = ZoneInfo('America/New_York')
@@ -195,13 +209,16 @@ def evaluate(dd, equity: float, opening_equity, skip_drawdown: bool = False) -> 
     (reported as daily=None) rather than inventing a denominator."""
     skip = skip_drawdown or dd is None
     dd = 0.0 if skip else float(dd)
+    # Operator-disabled lifetime rule (2026-11-27): the measure is still
+    # computed and logged, only the breach test is suppressed.
+    dd_rule_off = not dd_rule_enabled()
 
     daily = None
     if opening_equity not in (None, 0) and float(opening_equity) > 0:
         daily = float(equity) / float(opening_equity) - 1.0
 
     rules = []
-    if not skip and dd <= DD_LIMIT + _EPS:
+    if not skip and not dd_rule_off and dd <= DD_LIMIT + _EPS:
         rules.append('drawdown')
     if daily is not None and daily <= DAILY_LIMIT + _EPS:
         rules.append('daily_loss')
@@ -923,6 +940,8 @@ def format_line(mode: str, *, equity, bench_mv, alpha, st, open_equity,
                  f"flatten_fail={int(flatten['fail'])} "
                  f"pending={int(bool(flatten['pending']))} "
                  f"flatten_partial={int(flatten.get('partial', 0))}")
+    if not dd_rule_enabled():
+        line += ' dd_rule=off'
     # C1 amendment 2 — APPENDED (existing tokens above untouched).
     if pnl is not None:
         def _m(v):
